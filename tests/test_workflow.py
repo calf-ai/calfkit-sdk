@@ -77,9 +77,7 @@ async def test_handler_registration(calf_client: Calf, broker: MemoryBroker) -> 
     assert results[0] == {"test": "data"}
 
 
-async def test_message_flow_between_handlers(
-    calf_client: Calf, broker: MemoryBroker
-) -> None:
+async def test_message_flow_between_handlers(calf_client: Calf, broker: MemoryBroker) -> None:
     """Test that messages flow correctly between handlers."""
     final_results: list[dict] = []
 
