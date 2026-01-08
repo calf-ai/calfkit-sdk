@@ -8,7 +8,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint, Format & Type Check
+    name: Ruff, MyPy
     runs-on: ubuntu-latest
 
     steps:
