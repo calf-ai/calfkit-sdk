@@ -41,7 +41,7 @@ jobs:
           path: dist/
 
   verify:
-    name: Verify (${{ matrix.os }})
+    name: Verify ${{ matrix.os }}
     needs: build
     runs-on: ${{ matrix.os }}
 
