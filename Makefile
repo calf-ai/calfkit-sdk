@@ -1,4 +1,4 @@
-.PHONY: help check lint-check lint-fix format-check format-fix type-check test fix
+.PHONY: help check lint-check lint-fix format-check format-fix type-check test fix build build-wheel clean
 
 # Default target
 help:
@@ -15,6 +15,11 @@ help:
 	@echo "    make fix          - Fix all auto-fixable issues (lint + format)"
 	@echo "    make lint-fix     - Fix linting issues (ruff check --fix)"
 	@echo "    make format-fix   - Format code (ruff format)"
+	@echo ""
+	@echo "  Build:"
+	@echo "    make build        - Build sdist and wheel"
+	@echo "    make build-wheel  - Build wheel only"
+	@echo "    make clean        - Remove build artifacts"
 
 # === Checks ===
 
@@ -54,3 +59,20 @@ format-fix:
 	@echo "Formatting code..."
 	@uv run ruff format .
 	@echo "✓ Format fixes applied"
+
+# === Build ===
+
+build: clean
+	@echo "Building sdist and wheel..."
+	@uv build
+	@echo "✓ Build complete (output in dist/)"
+
+build-wheel: clean
+	@echo "Building wheel..."
+	@uv build --wheel
+	@echo "✓ Wheel build complete (output in dist/)"
+
+clean:
+	@echo "Cleaning build artifacts..."
+	@rm -rf dist/ build/ *.egg-info
+	@echo "✓ Clean complete"
