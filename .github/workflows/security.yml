@@ -15,9 +15,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# TODO: Re-enable when repo is public
 jobs:
   codeql:
     name: CodeQL Analysis
+    if: false 
+    # Disabled - repo not yet public
     runs-on: ubuntu-latest
 
     permissions:
@@ -42,8 +45,9 @@ jobs:
 
   dependency-review:
     name: Dependency Review
+    if: false 
+    # Disabled - repo not yet public. restore github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
 
     permissions:
       contents: read
