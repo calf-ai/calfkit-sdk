@@ -52,7 +52,7 @@ jobs:
           # Linux x64
           - ubuntu-latest
           # macOS Intel
-          - macos-13
+          - macos-15-intel
           # macOS Apple Silicon
           - macos-latest
           # Windows x64
@@ -72,6 +72,7 @@ jobs:
 
       - name: Install wheel
         run: pip install dist/*.whl
+        shell: bash
 
       - name: Verify import
         run: python -c "import calf; print(f'calf {calf.__version__} installed successfully')"
