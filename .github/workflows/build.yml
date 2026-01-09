@@ -52,7 +52,7 @@ jobs:
           # Linux x64
           - ubuntu-latest
           # macOS Intel
-          - macos-13
+          - macos-15-intel
           # macOS Apple Silicon
           - macos-latest
           # Windows x64
