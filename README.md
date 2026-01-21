@@ -2,6 +2,10 @@
 
 Python SDK for building event-driven AI agents and workflows.
 
+## Motivation
+
+https://seanfalconer.medium.com/the-future-of-ai-agents-is-event-driven-9e25124060d6
+
 ## Overview
 
 Calf SDK provides a simple, unopinionated interface for building event-driven AI workflows. It wraps Kafka complexity and deployment, and provides an easy-to-use pattern for connecting AI components in a distributed architecture.
