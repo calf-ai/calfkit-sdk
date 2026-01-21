@@ -1,6 +1,6 @@
 # Calf SDK
 
-Python SDK for building high-performance, reliable event-driven AI workflows.
+Python SDK for building event-driven AI agents and workflows.
 
 ## Overview
 
