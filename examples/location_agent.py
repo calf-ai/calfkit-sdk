@@ -13,7 +13,14 @@ Run:
 import asyncio
 from datetime import datetime
 
-from calf import Agent, tool, RunContext, Calf, MemoryStateStore, OpenAIClient
+from calf import (
+    Agent,
+    Calf,
+    MemoryStateStore,
+    OpenAIClient,
+    RunContext,
+    tool,
+)
 
 
 # ============== Calf SETUP ==============

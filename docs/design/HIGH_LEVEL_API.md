@@ -161,7 +161,14 @@ print(result.output.summary)  # IDE autocomplete works!
 The functional API uses `Agent()` with **constructor-based tool attachment** as the primary pattern:
 
 ```python
-from calf import Agent, Calf, tool, RunContext
+from calf import (
+    Agent,
+    Calf,
+    MemoryStateStore,
+    OpenAIClient,
+    RunContext,
+    tool,
+)
 
 # Setup Calf runtime
 calf = Calf()
@@ -309,7 +316,14 @@ The primary abstraction for AI entities. Agents are typed containers that encaps
 - **Output type**: Structured output schema
 
 ```python
-from calf import Agent, Calf, tool, RunContext, MemoryStateStore, OpenAIClient
+from calf import (
+    Agent,
+    Calf,
+    MemoryStateStore,
+    OpenAIClient,
+    RunContext,
+    tool,
+)
 from pydantic import BaseModel
 
 # Setup Calf runtime
@@ -639,18 +653,20 @@ class Agent:
 Handoffs transfer control from one agent to another. They're implemented as a special tool return type:
 
 ```python
-from calf import Agent, handoff, RunContext
+from calf import Agent, Calf, handoff, RunContext
+
+calf = Calf()
 
 triage = Agent(name="triage", ...)
 sales = Agent(name="sales", ...)
 support = Agent(name="support", ...)
 
-@triage.tool
+@calf.tool
 async def transfer_to_sales(ctx: RunContext) -> handoff:
     """Transfer the conversation to the sales team."""
     return handoff(sales)
 
-@triage.tool
+@calf.tool
 async def transfer_to_support(ctx: RunContext, priority: str) -> handoff:
     """Transfer to technical support."""
     return handoff(support, context={"priority": priority})
@@ -683,7 +699,7 @@ await calf.emit(
 GroupChat coordinates multiple agents for complex tasks:
 
 ```python
-from calf import GroupChat, Process, Agent
+from calf import Agent, GroupChat, Process
 
 researcher = Agent(name="researcher", ...)
 writer = Agent(name="writer", ...)

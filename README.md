@@ -193,46 +193,60 @@ uv run mypy calf/
 
 ### Higher-Level API (In Progress)
 
-A higher-level, opinionated API is in development at `calf.agents`. This will provide out-of-the-box abstractions for common AI workflow patterns:
+A higher-level, opinionated API is in development. This will provide out-of-the-box abstractions for common AI agent patterns while maintaining Calf's event-driven architecture.
 
 **Planned Features:**
 
-- **Agents** - Stateful, named entities with capabilities and lifecycle management
-- **Agent Teams** - Coordinated groups of agents working together on complex tasks
-- **Agent Tools** - Reusable tools that agents can invoke, with support for event-driven tool execution (e.g., reusable tools wrapping downstream services that communicate asynchronously)
-- **Adapters** - Optional integrations with popular AI libraries:
-  - LangChain / LangGraph
-  - LlamaIndex
-  - CrewAI
-  - OpenAI / Anthropic clients
+- **Agents** - Stateful, named entities with LLM models, tools, and memory
+- **GroupChat** - Multi-agent coordination with different process patterns (sequential, hierarchical, swarm)
+- **Agent Tools** - Event-driven tools that agents can invoke via `@calf.tool` decorator
+- **State Management** - External state stores (Redis, PostgreSQL) for distributed deployments
+- **Model Providers** - OpenAI-compatible and other LLM providers
 
 **Planned Usage:**
 
 ```python
-from calf.agents import Agent, Team, task
+from calf import Agent, GroupChat, Calf, tool, RunContext
+from calf import MemoryStateStore, OpenAIClient
 
-class ResearcherAgent(Agent):
-    name = "researcher"
+# Setup
+calf = Calf()
+state_store = MemoryStateStore()
+model_client = OpenAIClient()
 
-    @task
-    async def research(self, topic: str) -> dict:
-        # Agent logic here
-        return {"findings": [...]}
+# Define tools
+@calf.tool
+async def search_web(ctx: RunContext, query: str) -> str:
+    """Search the web for information."""
+    return await search_api(query)
 
-class WriterAgent(Agent):
-    name = "writer"
-
-    @task
-    async def write(self, findings: dict) -> str:
-        # Agent logic here
-        return "Article content..."
-
-team = Team(
-    name="content-team",
-    agents=[ResearcherAgent(), WriterAgent()],
+# Create agents
+researcher = Agent(
+    name="researcher",
+    model="gpt-4o",
+    tools=[search_web],
+    system_prompt="You are a research assistant.",
 )
 
-await team.start()
+writer = Agent(
+    name="writer",
+    model="gpt-4o",
+    system_prompt="You are a technical writer.",
+)
+
+# Register agents
+calf.register(researcher, state_store=state_store, model_client=model_client)
+calf.register(writer, state_store=state_store, model_client=model_client)
+
+# Create multi-agent group
+chat = GroupChat(
+    name="content-team",
+    agents=[researcher, writer],
+)
+
+# Run the group chat
+async for msg in chat.run_stream("Write an article about AI agents"):
+    print(f"{msg.agent}: {msg.content}")
 ```
 
 ## Project Structure
@@ -240,16 +254,27 @@ await team.start()
 ```
 calf-sdk/
 ├── calf/
-│   ├── __init__.py        # Public exports (Calf, Message)
+│   ├── __init__.py        # Public exports (Calf, Message, Agent, tool, etc.)
 │   ├── client.py          # Main Calf client
 │   ├── message.py         # Message model
 │   ├── cli.py             # CLI commands
-│   └── broker/
-│       ├── base.py        # Abstract broker interface
-│       ├── memory.py      # In-memory broker (dev)
-│       └── kafka.py       # Kafka broker (production)
+│   ├── broker/            # Broker implementations
+│   │   ├── base.py        # Abstract broker interface
+│   │   ├── memory.py      # In-memory broker (dev)
+│   │   └── kafka.py       # Kafka broker (production)
+│   ├── agents/            # NEW: Agent system (planned)
+│   ├── tools/             # NEW: Tool system (planned)
+│   ├── group_chat/        # NEW: Multi-agent coordination (planned)
+│   ├── state/             # NEW: State stores (planned)
+│   └── providers/         # NEW: LLM providers (planned)
 ├── examples/
-│   └── simple_workflow.py
+│   ├── simple_workflow.py
+│   ├── chat_agent.py      # NEW: Agent examples (planned)
+│   ├── group_chat.py      # NEW: Multi-agent examples (planned)
+│   └── location_agent.py  # NEW: Tool examples (planned)
+├── docs/
+│   └── design/
+│       └── HIGH_LEVEL_API.md  # Design documentation
 ├── tests/
 │   └── test_workflow.py
 └── pyproject.toml
