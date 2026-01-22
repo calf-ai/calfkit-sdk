@@ -1,1 +1,0 @@
-"""OpenAI-compatible schema generation."""

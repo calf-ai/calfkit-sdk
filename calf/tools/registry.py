@@ -1,1 +1,0 @@
-"""Tool registration and lookup."""
