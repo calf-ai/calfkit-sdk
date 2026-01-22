@@ -5,6 +5,7 @@ description = "Event-driven SDK for building AI workflows on Kafka"
 requires-python = ">=3.10"
 dependencies = [
     "aiokafka>=0.13.0",
+    "openai>=2.15.0",
     "pydantic>=2.12.5",
     "typer>=0.21.1",
 ]
