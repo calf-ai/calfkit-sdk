@@ -1,3 +1,4 @@
+from typing import Self
 from calf.calf_atomic_node import CalfAtomicNode, on, post_to
 from calf.runtime import CalfRuntime
 import pytest
@@ -34,10 +35,10 @@ class TestCalfNode(CalfAtomicNode):
         print("Success")        
 
 @pytest.mark.asyncio
-async def test_handle():
+async def test_simple_listen():
     print("\n\n===Start test===")
     node = TestCalfNode()
     async with TestKafkaBroker(node.calf) as br:
-        test_msg = "LeStartTest"
+        test_msg = "hello there"
         print(f"Writing to test_topic_1 with msg={test_msg}")
         await br.publish(test_msg, topic="test_topic_1")
