@@ -1,7 +1,7 @@
 """OpenAI-compatible model client."""
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Awaitable
 
 from openai import AsyncOpenAI, omit
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam, ChatCompletionToolParam
@@ -24,7 +24,7 @@ class OpenAIClient(ModelClient[ChatCompletionMessageParam, ToolInput, OpenAIClie
         self,
         model: str,
         *,
-        api_key: str | None = None,
+        api_key: str | Callable[[], Awaitable[str]] | None = None,
         base_url: str | None = None,
         create_kwargs: dict[str, Any] = {},
         **client_kwargs,
