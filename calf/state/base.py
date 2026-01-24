@@ -1,1 +1,1 @@
-"""Abstract StateStore protocol."""
+"""Abstract StateStore base class."""

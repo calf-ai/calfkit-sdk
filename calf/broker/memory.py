@@ -5,8 +5,7 @@ from collections.abc import AsyncIterator
 from calf.broker.base import Broker
 from calf.message import Message
 
-
-class MemoryBroker(Broker):
+class LocalInMemoryBroker(Broker):
     """In-memory broker for local development and testing."""
 
     def __init__(self) -> None:

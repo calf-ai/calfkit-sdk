@@ -12,22 +12,23 @@ Run:
 
 import asyncio
 
-from calf import Agent, Calf, MemoryStateStore, OpenAIClient, RunContext, tool
+from calf import Agent, Calf, InMemoryStateStore
+from calf.providers.openai.client import OpenAIClient
 
 
 # ============== Calf SETUP ==============
 
 calf = Calf()
-state_store = MemoryStateStore()
-model_client = OpenAIClient()
+state_store = InMemoryStateStore()
+model_client = OpenAIClient('gpt-5-nano', create_kwargs={'reasoning_effort': 'minimal'})
 
 
 # ============== AGENT ==============
 
 agent = Agent(
-    name="chat",
-    model="gpt-4o-mini",
-    system_prompt="You are a helpful, friendly assistant.",
+    name="LeAgent",
+    model="gpt-5-nano",
+    system_prompt="You are a helpful, friendly assistant named LeAgent.",
 )
 
 # Register agent with Calf runtime

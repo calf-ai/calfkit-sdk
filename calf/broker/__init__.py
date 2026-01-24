@@ -1,5 +1,5 @@
 from calf.broker.base import Broker
-from calf.broker.kafka import KafkaBroker
-from calf.broker.memory import MemoryBroker
+from calf.broker.memory import LocalInMemoryBroker
+from calf.broker.broker import Broker
 
-__all__ = ["Broker", "KafkaBroker", "MemoryBroker"]
+__all__ = ["Broker", "LocalInMemoryBroker"]
