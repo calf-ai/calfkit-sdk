@@ -13,7 +13,7 @@ Run:
 import asyncio
 
 from calf import Agent, Calf, InMemoryStateStore
-from calf.providers.openai import OpenAIClient
+from calf.providers.openai.client import OpenAIClient
 
 
 # ============== Calf SETUP ==============

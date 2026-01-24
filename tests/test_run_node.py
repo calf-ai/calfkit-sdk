@@ -2,7 +2,6 @@ from typing import Self
 from calf.calf_atomic_node import CalfAtomicNode, on, post_to
 from calf.runtime import CalfRuntime
 import pytest
-from pydantic import ValidationError
 
 from faststream.kafka import TestKafkaBroker
 
@@ -11,9 +10,10 @@ CalfRuntime.initialize()
 class TestCalfNode(CalfAtomicNode):
 
     @on("test_topic_1")
-    def test_listen(self, msg: str):
+    async def test_listen(self, msg: str):
         print(f"Reacting to test_topic_1, msg recieved: {msg}")
     
+    @on("startflow")
     @post_to("test_topic_2")
     def start_test_flow(self) -> str:
         test_msg = "LeStartTest"
@@ -30,7 +30,7 @@ class TestCalfNode(CalfAtomicNode):
     
     @on("test_topic_3")
     def test_flow_end(self, msg: str):
-        print("Reacting to test_topic_3")
+        print(f"Reacting to test_topic_3, msg recieved: {msg}")
         assert msg.endswith("processed value")
         print("Success")        
 
