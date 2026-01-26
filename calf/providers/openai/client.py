@@ -1,20 +1,29 @@
 """OpenAI-compatible model client."""
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from openai import AsyncOpenAI, omit
-from openai.types.chat import ChatCompletion, ChatCompletionMessageParam, ChatCompletionToolParam
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessageParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionToolParam,
+    ChatCompletionUserMessageParam,
+)
 
-from calf.providers.base import ModelClient
-from calf.providers.openai.tools import func_to_tool
-from calf.providers.openai.types import OpenAIClientResponse
+from calf.providers.base import ProviderClient
+from calf.providers.openai.adaptor import OpenAIClientMessage, OpenAIClientTool
+from calf.providers.openai.types import CreateKeywordArgs, OpenAIClientResponse
 
 # Type alias for tools that can be either a schema dict or a callable
-ToolInput = ChatCompletionToolParam | Callable[..., Any]
 
 
-class OpenAIClient(ModelClient[ChatCompletionMessageParam, ToolInput, OpenAIClientResponse]):
+class OpenAIClient(
+    ProviderClient[ChatCompletionMessageParam, ChatCompletionToolParam, OpenAIClientResponse],
+    OpenAIClientMessage,
+    OpenAIClientTool,
+):
     """OpenAI-compatible model client.
 
     Supports OpenAI API and compatible providers (Azure, Ollama, vLLM, etc.).
@@ -26,7 +35,7 @@ class OpenAIClient(ModelClient[ChatCompletionMessageParam, ToolInput, OpenAIClie
         *,
         api_key: str | Callable[[], Awaitable[str]] | None = None,
         base_url: str | None = None,
-        create_kwargs: dict[str, Any] = {},
+        create_kwargs: CreateKeywordArgs = {},
         **client_kwargs,
     ) -> None:
         """Initialize the OpenAI client.
@@ -41,13 +50,14 @@ class OpenAIClient(ModelClient[ChatCompletionMessageParam, ToolInput, OpenAIClie
         self.base_url = base_url
         self.create_kwargs = create_kwargs
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, **client_kwargs)
+        super().__init__()
 
     async def generate(
         self,
         messages: list[ChatCompletionMessageParam],
         *,
-        tools: list[ToolInput] | None = None,
-        **extra_create_kwargs,
+        tools: list[ChatCompletionToolParam] | None = None,
+        **extra_create_kwargs: CreateKeywordArgs,
     ) -> OpenAIClientResponse:
         """Execute a chat completion request against the LLM.
 
@@ -61,18 +71,15 @@ class OpenAIClient(ModelClient[ChatCompletionMessageParam, ToolInput, OpenAIClie
             OpenAIClientResponse wrapping the ChatCompletion.
         """
         create_kwargs = self.create_kwargs.copy()
-        create_kwargs.update(extra_create_kwargs)
+        create_kwargs.update(cast(CreateKeywordArgs, extra_create_kwargs))
         create_kwargs.pop("stream", None)
 
         # Convert any callable tools to ChatCompletionToolParam schemas
-        tool_params: list[ChatCompletionToolParam] | None = None
-        if tools:
-            tool_params = [func_to_tool(t) if callable(t) else t for t in tools]
 
         response: ChatCompletion = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            tools=tool_params or omit,
+            tools=tools or omit,
             stream=False,
             **create_kwargs,
         )

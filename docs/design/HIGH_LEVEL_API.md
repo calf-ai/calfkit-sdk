@@ -295,8 +295,8 @@ calf/
 │   └── memory.py            # In-memory for testing
 │
 └── providers/               # NEW: LLM providers
-    ├── __init__.py          # ModelClient, OpenAIClient
-    ├── base.py              # Abstract ModelClient protocol
+    ├── __init__.py          # ProviderClient, OpenAIClient
+    ├── base.py              # Abstract ProviderClient protocol
     └── openai.py            # OpenAI-compatible implementation
 ```
 
@@ -959,7 +959,7 @@ from calf.tools import tool, ToolDefinition
 from calf.state import StateStore, MemoryStateStore
 
 # Providers (Initial Iteration)
-from calf.providers import ModelClient, OpenAIClient
+from calf.providers import ProviderClient, OpenAIClient
 ```
 
 ### Future Exports (Deferred)

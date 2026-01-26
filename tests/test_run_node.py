@@ -3,13 +3,13 @@ import itertools
 import pytest
 from faststream.kafka import TestKafkaBroker
 
-from calf.calf_atomic_node import AtomicNode, on, post_to
+from calf.atomic_node import BaseAtomicNode, on, post_to
 from calf.runtime import CalfRuntime
 
 CalfRuntime.initialize()
 
 
-class TestCalfNode(AtomicNode):
+class TestCalfNode(BaseAtomicNode):
     counter = itertools.count()
     received = []
 
@@ -20,20 +20,20 @@ class TestCalfNode(AtomicNode):
 
     @on("startflow")
     @post_to("test_topic_2")
-    def start_test_flow(self, msg: str) -> str:
+    async def start_test_flow(self, msg: str) -> str:
         print(f"Writing to test_topic_2 with msg={msg}")
         return f"{msg}.foo"
 
     @on("test_topic_2")
     @post_to("test_topic_3")
-    def test_flow(self, msg: str) -> str:
+    async def test_flow(self, msg: str) -> str:
         print("Reacting to test_topic_2")
         result = f"{msg}.bar"
         print(f"Publishing '{result}' to test_topic_3")
         return result
 
     @on("test_topic_3")
-    def test_flow_end(self, msg: str):
+    async def test_flow_end(self, msg: str):
         print(f"Reacting to test_topic_3, msg recieved: {msg}")
         self.received.append(f"{msg}.pipe")
 

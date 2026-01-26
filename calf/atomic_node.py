@@ -6,8 +6,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from boltons.typeutils import classproperty
 from faststream import FastStream
 
+from calf.broker.broker import Broker
 from calf.runtime import CalfRuntime
 
 # Sentinel attribute name for handler metadata
@@ -90,7 +92,7 @@ def post_to(topic: str, **publisher_kwargs) -> Callable[[Callable], Callable]:
     return decorator
 
 
-class AtomicNode(ABC):
+class BaseAtomicNode(ABC):
     """Base class for atomic Calf nodes with message handling capabilities.
 
     Subclasses can use @on and @post_to decorators on instance methods
@@ -99,22 +101,22 @@ class AtomicNode(ABC):
 
     _counter = itertools.count()
     _handler_methods: dict[str, Callable]
+    runtime = CalfRuntime
 
     def __init_subclass__(cls, **kwargs) -> None:
         """Collect all decorated handler methods when subclass is defined."""
         super().__init_subclass__(**kwargs)
 
         cls._handler_methods = {}
-        for name, method in inspect.getmembers(cls, predicate=inspect.isfunction):
-            if hasattr(method, _HANDLER_METADATA_ATTR):
-                cls._handler_methods[name] = method
+        for name, value in cls.__dict__.items():
+            if callable(value) and hasattr(value, _HANDLER_METADATA_ATTR):
+                cls._handler_methods[name] = value
 
     def __init__(self, name: str | None = None) -> None:
         if not CalfRuntime.initialized:
             raise RuntimeError("Calf runtime not initialized. Run `initialize()`")
 
         self.name = name if name else f"calf-node-{next(self._counter)}"
-        self.runtime = CalfRuntime
 
         # Register all decorated handlers with FastStream
         self._register_handlers()
@@ -171,7 +173,7 @@ class AtomicNode(ABC):
         """Get the FastStream application instance."""
         return self.runtime.runnable
 
-    @property
-    def calf(self):
+    @classproperty
+    def calf(cls) -> Broker:  # noqa: N805
         """Get the broker instance."""
-        return self.runtime.calf
+        return cls.runtime.calf
