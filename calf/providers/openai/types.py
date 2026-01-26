@@ -1,9 +1,16 @@
 import json
+from typing import Literal, NotRequired, TypedDict
 
-from openai.types.chat import ChatCompletion
+from openai.types.chat import (
+    ChatCompletion,
+)
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
-from calf.providers.base import GenerateResponse, ToolCall
+from calf.providers.base import GenerateResult, ToolCall
+
+
+class CreateKeywordArgs(TypedDict):
+    reasoning_effort: NotRequired[Literal["none", "minimal", "low", "medium", "high", "xhigh"]]
 
 
 class OpenAIToolCall(ToolCall):
@@ -18,9 +25,10 @@ class OpenAIToolCall(ToolCall):
         )
 
 
-class OpenAIClientResponse(GenerateResponse):
+class OpenAIClientResponse(GenerateResult):
     """OpenAI-specific response wrapping ChatCompletion."""
 
+    # TODO: define an interface for the client response for users to extract the client-compliant assistant message-typed objects
     def __init__(self, response: ChatCompletion):
         message = response.choices[0].message
         tool_calls = (
@@ -32,6 +40,7 @@ class OpenAIClientResponse(GenerateResponse):
             if message.tool_calls
             else None
         )
+        self.message = message
         super().__init__(
             text=message.content,
             tool_calls=tool_calls,
