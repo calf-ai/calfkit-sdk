@@ -1,7 +1,7 @@
 import functools
 import inspect
 import itertools
-from abc import ABC
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,10 +10,15 @@ from boltons.typeutils import classproperty
 from faststream import FastStream
 
 from calf.broker.broker import Broker
+from calf.contracts.topics import Topics
 from calf.runtime import CalfRuntime
 
 # Sentinel attribute name for handler metadata
 _HANDLER_METADATA_ATTR = "__calf_handler_metadata__"
+
+# Sentinels for default topic resolution
+_USE_DEFAULT_ON = object()
+_USE_DEFAULT_POST_TO = object()
 
 
 @dataclass
@@ -92,6 +97,49 @@ def post_to(topic: str, **publisher_kwargs) -> Callable[[Callable], Callable]:
     return decorator
 
 
+def on_default(func: Callable) -> Callable:
+    """Decorator to subscribe to the class's default topic ({ClassName}.{Topics.INVOKED}).
+
+    Usage:
+        @on_default
+        async def handler(self, msg):
+            ...
+    """
+    if not hasattr(func, _HANDLER_METADATA_ATTR):
+        setattr(func, _HANDLER_METADATA_ATTR, HandlerMetadata())
+
+    metadata: HandlerMetadata = getattr(func, _HANDLER_METADATA_ATTR)
+    metadata.subscribers.append(
+        {
+            "topics": (_USE_DEFAULT_ON,),
+            "pattern": None,
+            "kwargs": {},
+        }
+    )
+    return func
+
+
+def post_to_default(func: Callable) -> Callable:
+    """Decorator to publish to the class's default topic ({ClassName}.{Topics.NON_USER_RESPONSE}).
+
+    Usage:
+        @post_to_default
+        async def handler(self, msg) -> str:
+            return "response"
+    """
+    if not hasattr(func, _HANDLER_METADATA_ATTR):
+        setattr(func, _HANDLER_METADATA_ATTR, HandlerMetadata())
+
+    metadata: HandlerMetadata = getattr(func, _HANDLER_METADATA_ATTR)
+    metadata.publishers.append(
+        {
+            "topic": _USE_DEFAULT_POST_TO,
+            "kwargs": {},
+        }
+    )
+    return func
+
+
 class BaseAtomicNode(ABC):
     """Base class for atomic Calf nodes with message handling capabilities.
 
@@ -131,6 +179,7 @@ class BaseAtomicNode(ABC):
     def _register_single_handler(self, bound_method: Callable, metadata: HandlerMetadata) -> None:
         """Register a single handler method with FastStream."""
         broker = self.runtime.calf
+        cls = type(self)
 
         # Create wrapper function that FastStream will see (without self in signature)
         handler: Callable = self._create_handler_wrapper(bound_method)
@@ -138,14 +187,21 @@ class BaseAtomicNode(ABC):
         # Apply decorators in reverse order to maintain correct semantics
         # Publishers first (outer), then subscribers (inner)
         for pub_info in reversed(metadata.publishers):
-            handler = broker.publisher(pub_info["topic"], **pub_info["kwargs"])(handler)
+            topic = pub_info["topic"]
+            if topic is _USE_DEFAULT_POST_TO:
+                topic = cls.get_default_post_to_topic()
+            handler = broker.publisher(topic, **pub_info["kwargs"])(handler)
 
         for sub_info in reversed(metadata.subscribers):
+            topics = sub_info["topics"]
+            if len(topics) == 1 and topics[0] is _USE_DEFAULT_ON:
+                topics = (cls.get_default_on_topic(),)
+
             sub_kwargs = sub_info["kwargs"].copy()
             if sub_info["pattern"]:
                 sub_kwargs["pattern"] = sub_info["pattern"]
 
-            handler = broker.subscriber(*sub_info["topics"], **sub_kwargs)(handler)
+            handler = broker.subscriber(*topics, **sub_kwargs)(handler)
 
     def _create_handler_wrapper(self, bound_method: Callable) -> Callable:
         """Create a wrapper function for a bound method."""
@@ -177,3 +233,13 @@ class BaseAtomicNode(ABC):
     def calf(cls) -> Broker:  # noqa: N805
         """Get the broker instance."""
         return cls.runtime.calf
+
+    @classmethod
+    def get_default_on_topic(cls) -> str:
+        """Return the default subscribe topic: {ClassName}.{Topics.INVOKED}."""
+        return f"{Topics.INVOKE}.{cls.__name__}"
+
+    @classmethod
+    def get_default_post_to_topic(cls) -> str:
+        """Return the default publish topic: {ClassName}.{Topics.NON_USER_RESPONSE}."""
+        return f"{Topics.NON_USER_RESPONSE}.{cls.__name__}"

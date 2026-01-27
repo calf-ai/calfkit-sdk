@@ -8,10 +8,7 @@ from calf.providers.openai.adaptor import OpenAIClientMessage
 from calf.types import UNSET, UnsetType
 
 
-class Chat(BaseAtomicNode):
-    CHAT_INVOKED = Topics.INVOKE
-    ASSISTANT_MESSAGE_DONE = Topics.NON_USER_RESPONSE
-
+class Agent(BaseAtomicNode):
     def __init__(self, model_client: ProviderClient, name: str = "default_chat"):
         self.model_client = model_client
         self.name = name
@@ -39,13 +36,3 @@ class Chat(BaseAtomicNode):
         )
 
     # TODO: alternatively, implement a 'runner' object that takes a class of BaseAtomicNode, and when it runs, it pubs to the default topic of the node.
-
-    @classmethod
-    def get_default_on_topic(cls) -> str:
-        """Return the default subscribe topic: {ClassName}.{Topics.INVOKED}."""
-        return f"{Topics.INVOKE}"
-
-    @classmethod
-    def get_default_post_to_topic(cls) -> str:
-        """Return the default publish topic: {ClassName}.{Topics.NON_USER_RESPONSE}."""
-        return f"{Topics.AI_GENERATON_RESPONSE}"

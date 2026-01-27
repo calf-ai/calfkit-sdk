@@ -3,7 +3,7 @@ import itertools
 import pytest
 from faststream.kafka import TestKafkaBroker
 
-from calf.atomic_node import BaseAtomicNode, on, post_to
+from calf.nodes.atomic_node import BaseAtomicNode, on, post_to
 from calf.runtime import CalfRuntime
 
 CalfRuntime.initialize()
