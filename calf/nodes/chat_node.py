@@ -20,7 +20,8 @@ class ChatNode(BaseNode, ABC):
 
     def __init__(
         self,
-        model_client: Model,
+        model_client: Model | None = None,
+        *,
         request_parameters: ModelRequestParameters | None = None,
         **kwargs,
     ):
@@ -29,25 +30,20 @@ class ChatNode(BaseNode, ABC):
         super().__init__(**kwargs)
 
     async def on_enter(self, event_envelope: EventEnvelope):
-        latest_message = event_envelope.latest_message
-        if latest_message is None:
+        if self.model_client is None:
+            raise RuntimeError("Unable to handle incoming request because Model client is None.")
+        if event_envelope.latest_message_in_history is None:
             raise RuntimeError("latest message must not be None")
         request_parameters = event_envelope.patch_model_request_params or self.request_parameters
         patch_model_settings = event_envelope.patch_model_settings
         model_response: ModelResponse = await model_request(
             model=self.model_client,
-            messages=[latest_message],
+            messages=event_envelope.message_history,
             model_settings=cast(ModelSettings | None, patch_model_settings),
             model_request_parameters=request_parameters,
         )
-        return_envelope = event_envelope.model_copy()
-        return_envelope.kind = "ai_response"
-        update_values = EventEnvelope(
-            kind="ai_response",
-            latest_message=model_response,
-        )
         return_envelope = event_envelope.model_copy(
-            update=update_values.model_dump(exclude_unset=True)
+            update={"kind": "ai_response", "node_result_message": model_response}
         )
         return return_envelope
 

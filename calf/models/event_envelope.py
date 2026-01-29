@@ -18,3 +18,13 @@ class EventEnvelope(CompactBaseModel):
     # Optional inference-time patch in settings and parameters
     patch_model_request_params: ModelRequestParameters | None = None
     patch_model_settings: SerializableModelSettings | None = None
+
+    # running message history
+    message_history: list[ModelMessage]
+
+    @property
+    def latest_message_in_history(self):
+        return self.message_history[-1]
+
+    # The result message from a node
+    node_result_message: ModelMessage | None = None

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Sequence
 
 from pydantic_ai import ToolDefinition
 
@@ -17,9 +17,3 @@ class BaseNode(ABC):
     @classmethod
     @abstractmethod
     def get_post_to_topic(cls) -> str: ...
-
-
-class BaseToolNode(BaseNode, ABC):
-    @classmethod
-    @abstractmethod
-    def tool_schema(cls) -> ToolDefinition: ...

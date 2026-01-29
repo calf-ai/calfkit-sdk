@@ -5,7 +5,7 @@ from typing import Literal
 from faststream import FastStream
 from faststream.kafka import KafkaBroker
 
-from calf.broker.base_deployable import Deployable
+from calf.broker.deployable_worker import Deployable
 from calf.broker.middleware import ContextInjectionMiddleware
 
 

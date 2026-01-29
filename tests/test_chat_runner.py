@@ -49,7 +49,7 @@ async def test_simple_chat(deploy_broker: Broker):
             EventEnvelope(
                 kind="user_prompt",
                 trace_id=trace_id,
-                latest_message=ModelRequest.user_text_prompt("Hi, what's your name?"),
+                message_history=[ModelRequest.user_text_prompt("Hi, what's your name?")],
             ),
             topic=ChatNode.get_on_enter_topic(),
             correlation_id=trace_id,
@@ -58,6 +58,6 @@ async def test_simple_chat(deploy_broker: Broker):
         await asyncio.wait_for(condition.wait_for(lambda: trace_id in store), timeout=10.0)
         result_envelope = store[trace_id]
         print("Result received")
-        assert isinstance(result_envelope.latest_message, ModelResponse)
-        print(f"Response: {result_envelope.latest_message.text}")
+        assert isinstance(result_envelope.latest_message_in_history, ModelResponse)
+        print(f"Response: {result_envelope.latest_message_in_history.text}")
         print(f"{'=' * 10}End{'=' * 10}")
