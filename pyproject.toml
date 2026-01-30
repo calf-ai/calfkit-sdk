@@ -31,9 +31,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ryan-yuuu/calf-sdk"
-Repository = "https://github.com/ryan-yuuu/calf-sdk"
-Issues = "https://github.com/ryan-yuuu/calf-sdk/issues"
+Homepage = "https://github.com/calf-ai/calf-sdk"
+Repository = "https://github.com/calf-ai/calf-sdk"
+Issues = "https://github.com/calf-ai/calf-sdk/issues"
 
 [project.optional-dependencies]
 dev = []
