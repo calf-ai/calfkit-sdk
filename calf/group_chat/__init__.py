@@ -1,1 +1,0 @@
-"""Calf GroupChat System."""

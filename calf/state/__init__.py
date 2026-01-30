@@ -1,1 +1,0 @@
-"""Calf State Store System."""

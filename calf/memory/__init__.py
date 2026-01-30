@@ -1,1 +1,0 @@
-"""Calf Memory System."""

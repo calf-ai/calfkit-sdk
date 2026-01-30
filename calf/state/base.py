@@ -1,1 +1,0 @@
-"""Abstract StateStore base class."""
