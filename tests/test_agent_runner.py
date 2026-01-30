@@ -14,6 +14,7 @@ from calf.agents.chat_runner import ChatRunner
 from calf.agents.tool_runner import ToolRunner
 from calf.broker.broker import Broker
 from calf.models.event_envelope import EventEnvelope
+from calf.nodes.agent_router_node import AgentRouterNode
 from calf.nodes.base_tool_node import agent_tool
 from calf.nodes.chat_node import ChatNode
 from calf.providers.pydantic_ai.openai import OpenAIModelClient
@@ -21,7 +22,7 @@ from calf.providers.pydantic_ai.openai import OpenAIModelClient
 load_dotenv()
 
 counter = itertools.count()
-store: dict[str, EventEnvelope] = {}
+store: dict[str, asyncio.Queue[EventEnvelope]] = {}
 condition = asyncio.Condition()
 
 collect_topic = "collect"
@@ -60,16 +61,17 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
     #   await broker.run_app()
 
     # 3. Deploy router node worker
-    router = AgentRouterRunner(
-        chat_node=chat_node, tool_nodes=[get_weather]
-    )
+    router_node = AgentRouterNode(chat_node=ChatNode(), tool_nodes=[get_weather])
+    router = AgentRouterRunner(node=router_node)
     router.register_on(broker)
     # if we're just deploying this router as an isolated deployment:
     #   await broker.run_app()
 
-    @broker.subscriber(collect_topic)
+    @broker.subscriber(router_node.publish_to_topic or "default_collect")
     def gather(event_envelope: EventEnvelope, correlation_id: Annotated[str, Context()]):
-        store[correlation_id] = event_envelope
+        if correlation_id not in store:
+            store[correlation_id] = asyncio.Queue()
+        store[correlation_id].put_nowait(event_envelope)
 
     # await broker.run_app()
     return broker, router
@@ -78,24 +80,25 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
 @pytest.mark.asyncio
 async def test_agent(deploy_broker):
     broker, _ = deploy_broker
-    chat_node = ChatNode()
-    router = AgentRouterRunner(
-        chat_node=chat_node, tool_nodes=[get_weather]
-    )
+    router_node = AgentRouterNode(chat_node=ChatNode(), tool_nodes=[get_weather])
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
 
         trace_id = str(next(counter))
 
-        await router.invoke(
-            "Hey, what's the weather in Tokyo?",
-            broker=broker,
-            correlation_id=trace_id
+        await router_node.invoke(
+            "Hey, what's the weather in Tokyo?", broker=broker, correlation_id=trace_id
         )
 
         await asyncio.wait_for(condition.wait_for(lambda: trace_id in store), timeout=20.0)
-        result_envelope = store[trace_id]
-        print("Result received")
-        assert isinstance(result_envelope.latest_message_in_history, ModelResponse)
-        print(f"Response: {result_envelope.latest_message_in_history.text}")
+        queue = store[trace_id]
+        while True:
+            result_envelope = await queue.get()
+            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
+                print(f"{result_envelope.latest_message_in_history.text}")
+            else:
+                print(f"{result_envelope}")
+            print("|")
+            if result_envelope.kind == "ai_response":
+                break
         print(f"{'=' * 10}End{'=' * 10}")
