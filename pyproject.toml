@@ -2,7 +2,22 @@
 name = "calf-sdk"
 version = "0.1.0"
 description = "Event-driven SDK for building AI workflows on Kafka"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Ryan Yu" }]
+keywords = ["ai", "agents", "kafka", "event-driven", "workflows", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 requires-python = ">=3.10"
+
 dependencies = [
     "aiokafka>=0.10.0,<0.14.0",
     "boltons>=25.0.0",
@@ -14,6 +29,11 @@ dependencies = [
     "typer<0.22",
     "uuid-utils>=0.14.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ryan-yuuu/calf-sdk"
+Repository = "https://github.com/ryan-yuuu/calf-sdk"
+Issues = "https://github.com/ryan-yuuu/calf-sdk/issues"
 
 [project.optional-dependencies]
 dev = []
