@@ -5,7 +5,7 @@ from faststream import Context
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
-from pydantic_ai import ModelRequest, ModelResponse
+from pydantic_ai import ModelRequest, ModelResponse, SystemPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
 from calf.broker.broker import Broker
@@ -24,6 +24,7 @@ class AgentRouterNode(BaseNode):
         self,
         chat_node: BaseNode,
         tool_nodes: list[BaseToolNode],
+        system_prompt: str | None = None,
         handoff_nodes: list[type[BaseNode]] = [],
         *args,
         **kwargs,
@@ -31,6 +32,7 @@ class AgentRouterNode(BaseNode):
         self.chat = chat_node
         self.tools = tool_nodes
         self.handoffs = handoff_nodes
+        self.system_prompt = system_prompt
 
         self.tools_topic_registry: dict[str, str] = {
             tool.tool_schema().name: tool.subscribed_topic
@@ -144,12 +146,16 @@ class AgentRouterNode(BaseNode):
         )
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
+        msg_history = []
+        if self.system_prompt:
+            msg_history.append(ModelRequest(parts=[SystemPromptPart(self.system_prompt)]))
+        msg_history.append(ModelRequest.user_text_prompt(user_prompt))
         await broker.publish(
             EventEnvelope(
                 kind="user_prompt",
                 trace_id=correlation_id,
                 patch_model_request_params=patch_model_request_params,
-                message_history=[ModelRequest.user_text_prompt(user_prompt)],
+                message_history=msg_history,
             ),
             topic=self.chat.subscribed_topic or "",
             correlation_id=correlation_id,

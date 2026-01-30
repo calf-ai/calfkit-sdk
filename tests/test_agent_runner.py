@@ -80,7 +80,11 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
 @pytest.mark.asyncio
 async def test_agent(deploy_broker):
     broker, _ = deploy_broker
-    router_node = AgentRouterNode(chat_node=ChatNode(), tool_nodes=[get_weather])
+    router_node = AgentRouterNode(
+        chat_node=ChatNode(),
+        tool_nodes=[get_weather],
+        system_prompt="Please always greet the user as Conan before every message",
+    )
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
 
