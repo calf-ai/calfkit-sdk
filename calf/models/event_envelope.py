@@ -23,7 +23,7 @@ class EventEnvelope(CompactBaseModel):
     message_history: list[ModelMessage] = []
 
     @property
-    def latest_message_in_history(self):
+    def latest_message_in_history(self) -> ModelMessage | None:
         return self.message_history[-1] if self.message_history else None
 
     # The result message from a node

@@ -10,7 +10,8 @@ from pydantic_ai.models import ModelRequestParameters
 
 from calf.broker.broker import Broker
 from calf.messages import patch_system_prompts
-from calf.models.event_envelope import EventEnvelope, ToolCallRequest
+from calf.models.event_envelope import EventEnvelope
+from calf.models.types import ToolCallRequest
 from calf.nodes.base_node import BaseNode, publish_to, subscribe_to
 from calf.nodes.base_tool_node import BaseToolNode
 from calf.stores.base import MessageHistoryStore
@@ -29,8 +30,8 @@ class AgentRouterNode(BaseNode):
         system_prompt: str | None = None,
         handoff_nodes: list[type[BaseNode]] = [],
         message_history_store: MessageHistoryStore | None = None,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ):
         self.chat = chat_node
         self.tools = tool_nodes
@@ -60,7 +61,7 @@ class AgentRouterNode(BaseNode):
         ctx: EventEnvelope,
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
-    ):
+    ) -> EventEnvelope:
         if not ctx.incoming_node_messages:
             raise RuntimeError("There is no response message to process")
 

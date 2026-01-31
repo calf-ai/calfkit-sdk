@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import cast
+from typing import Any, cast
 
 from pydantic_ai import ModelResponse, ModelSettings
 from pydantic_ai.direct import model_request
@@ -24,7 +24,7 @@ class ChatNode(BaseNode, ABC):
         model_client: Model | None = None,
         *,
         request_parameters: ModelRequestParameters | None = None,
-        **kwargs,
+        **kwargs: Any,
     ):
         self.model_client = model_client
         self.request_parameters = request_parameters
@@ -32,7 +32,7 @@ class ChatNode(BaseNode, ABC):
 
     @subscribe_to(_on_enter_topic_name)
     @publish_to(_post_to_topic_name)
-    async def _call_llm(self, event_envelope: EventEnvelope):
+    async def _call_llm(self, event_envelope: EventEnvelope) -> EventEnvelope:
         if self.model_client is None:
             raise RuntimeError("Unable to handle incoming request because Model client is None.")
         if event_envelope.latest_message_in_history is None:

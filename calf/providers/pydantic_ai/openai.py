@@ -1,3 +1,5 @@
+from typing import Any
+
 from httpx import Timeout
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -23,7 +25,7 @@ class OpenAIModelClient(OpenAIChatModel):
         stop_sequences: list[str] | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_body: object | None = None,
-        **kwargs,
+        **kwargs: Any,
     ):
         settings_kwargs: dict[str, object] = {}
         if reasoning_effort is not None:

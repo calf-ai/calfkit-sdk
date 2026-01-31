@@ -1,7 +1,6 @@
 """In-memory MessageHistoryStore implementation for testing and development."""
 
 from collections import defaultdict
-from typing import cast
 
 from pydantic_ai.messages import ModelMessage
 
@@ -21,7 +20,7 @@ class InMemoryMessageHistoryStore(MessageHistoryStore):
 
     async def get(self, thread_id: str) -> list[ModelMessage]:
         """Load message history for a thread."""
-        return list(cast(list[ModelMessage], self._messages.get(thread_id, [])))
+        return list(self._messages.get(thread_id, []))
 
     async def append(self, thread_id: str, message: ModelMessage) -> None:
         """Append a single message to history."""

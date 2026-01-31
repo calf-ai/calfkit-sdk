@@ -1,6 +1,7 @@
 import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from pydantic_ai import ModelRequest, Tool, ToolDefinition, ToolReturnPart
 
@@ -14,14 +15,14 @@ class BaseToolNode(BaseNode, ABC):
     def tool_schema(cls) -> ToolDefinition: ...
 
 
-def agent_tool(func: Callable | Callable[..., Awaitable]) -> BaseToolNode:
+def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> BaseToolNode:
     """tool decorator"""
     tool = Tool(func)
 
     class ToolNode(BaseToolNode):
         @subscribe_to("tool_node.{func.__name__}.request")
         @publish_to("tool_node.{func.__name__}.result")
-        async def on_enter(self, event_envelope: EventEnvelope):
+        async def on_enter(self, event_envelope: EventEnvelope) -> EventEnvelope:
             if not event_envelope.tool_call_request:
                 raise RuntimeError("No tool call request found")
             tool_cal_req = event_envelope.tool_call_request
@@ -44,7 +45,7 @@ def agent_tool(func: Callable | Callable[..., Awaitable]) -> BaseToolNode:
 
         @classmethod
         def tool_schema(cls) -> ToolDefinition:
-            return tool.tool_def
+            return cast(ToolDefinition, tool.tool_def)
 
     ToolNode.__name__ = func.__name__
     ToolNode.__qualname__ = func.__qualname__
