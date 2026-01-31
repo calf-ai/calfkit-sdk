@@ -1,7 +1,6 @@
-from typing import Literal, Sequence
+from collections.abc import Sequence
+from typing import Literal
 
-import uuid_utils
-from pydantic import BaseModel, Field
 from pydantic_ai import ModelMessage, ModelRequest
 from pydantic_ai.models import ModelRequestParameters
 

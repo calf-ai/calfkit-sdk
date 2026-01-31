@@ -1,18 +1,19 @@
-from abc import ABC, abstractmethod
+from abc import ABC
+from collections.abc import Callable
 from functools import cached_property
-from typing import Callable
+from typing import Any
 
 
-def subscribe_to(topic_name):
-    def decorator(fn):
+def subscribe_to(topic_name: str) -> Callable[[Any], Any]:
+    def decorator(fn: Any) -> Any:
         fn._subscribe_to_topic_name = topic_name
         return fn
 
     return decorator
 
 
-def publish_to(topic_name):
-    def decorator(fn):
+def publish_to(topic_name: str) -> Callable[[Any], Any]:
+    def decorator(fn: Any) -> Any:
         fn._publish_to_topic_name = topic_name
         return fn
 
@@ -20,14 +21,15 @@ def publish_to(topic_name):
 
 
 class BaseNode(ABC):
-    _handler_registry: dict[Callable, dict[str, str]] = {}
+    _handler_registry: dict[Callable[..., Any], dict[str, str]] = {}
 
-    def __init__(self, *args, **kwargs):
-        self.bound_registry = {
-            fn.__get__(self): topics_dict for fn, topics_dict in self._handler_registry.items()
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.bound_registry: dict[Callable[..., Any], dict[str, str]] = {
+            fn.__get__(self, type(self)): topics_dict
+            for fn, topics_dict in self._handler_registry.items()
         }
 
-    def __init_subclass__(cls):
+    def __init_subclass__(cls) -> None:
         super().__init_subclass__()
 
         cls._handler_registry = {}

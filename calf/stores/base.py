@@ -1,7 +1,7 @@
 """Abstract MessageHistoryStore base class."""
 
 from abc import ABC, abstractmethod
-from typing import Sequence
+from collections.abc import Sequence
 
 from pydantic_ai.messages import ModelMessage
 
