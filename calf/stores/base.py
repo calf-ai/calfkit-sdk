@@ -1,6 +1,7 @@
 """Abstract MessageHistoryStore base class."""
 
 from abc import ABC, abstractmethod
+from typing import Sequence
 
 from pydantic_ai.messages import ModelMessage
 
@@ -38,7 +39,7 @@ class MessageHistoryStore(ABC):
         """
         ...
 
-    async def append_many(self, thread_id: str, messages: list[ModelMessage]) -> None:
+    async def append_many(self, thread_id: str, messages: Sequence[ModelMessage]) -> None:
         """Append multiple messages to history.
 
         Default implementation calls append() for each message.

@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from faststream import Context
 from faststream.kafka import TestKafkaBroker
 from pydantic_ai import ModelResponse
-from pydantic_ai.messages import ModelRequest
 
 from calf.agents.agent_router_runner import AgentRouterRunner
 from calf.agents.chat_runner import ChatRunner
@@ -18,14 +17,13 @@ from calf.nodes.agent_router_node import AgentRouterNode
 from calf.nodes.base_tool_node import agent_tool
 from calf.nodes.chat_node import ChatNode
 from calf.providers.pydantic_ai.openai import OpenAIModelClient
+from calf.stores.in_memory import InMemoryMessageHistoryStore
 
 load_dotenv()
 
 counter = itertools.count()
 store: dict[str, asyncio.Queue[EventEnvelope]] = {}
 condition = asyncio.Condition()
-
-collect_topic = "collect"
 
 
 @agent_tool
@@ -61,7 +59,12 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
     #   await broker.run_app()
 
     # 3. Deploy router node worker
-    router_node = AgentRouterNode(chat_node=ChatNode(), tool_nodes=[get_weather])
+    router_node = AgentRouterNode(
+        chat_node=ChatNode(),
+        tool_nodes=[get_weather],
+        message_history_store=InMemoryMessageHistoryStore(),
+        system_prompt="Please always greet the user as Conan before every message",
+    )
     router = AgentRouterRunner(node=router_node)
     router.register_on(broker)
     # if we're just deploying this router as an isolated deployment:
@@ -83,15 +86,47 @@ async def test_agent(deploy_broker):
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
-        system_prompt="Please always greet the user as Conan before every message",
     )
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
 
-        trace_id = str(next(counter))
+        trace_id = await router_node.invoke("Hey, what's the weather in Tokyo?", broker=broker)
 
-        await router_node.invoke(
-            "Hey, what's the weather in Tokyo?", broker=broker, correlation_id=trace_id
+        await asyncio.wait_for(condition.wait_for(lambda: trace_id in store), timeout=20.0)
+        queue = store[trace_id]
+        while True:
+            result_envelope = await queue.get()
+            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
+                print(f"{result_envelope.latest_message_in_history.text}")
+            else:
+                print(f"{result_envelope}")
+            print("|")
+            if result_envelope.kind == "ai_response":
+                assert result_envelope.latest_message_in_history is not None
+                assert result_envelope.latest_message_in_history.text is not None
+                assert "snow" in result_envelope.latest_message_in_history.text.lower()
+                break
+
+        print(f"{'=' * 10}End{'=' * 10}")
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_agent(deploy_broker):
+    broker, _ = deploy_broker
+    router_node = AgentRouterNode(
+        chat_node=ChatNode(),
+        tool_nodes=[get_weather],
+        system_prompt="Please speak like an insufferable gen z teenager in 2026",
+        # override the deployment system prompt
+    )
+    async with TestKafkaBroker(broker) as _:
+        print(f"\n\n{'=' * 10}Start{'=' * 10}")
+        thread_id = str(next(counter))
+
+        trace_id = await router_node.invoke(
+            "Hey, what's your name? My name is LeBron by the way.",
+            broker=broker,
+            thread_id=thread_id,
         )
 
         await asyncio.wait_for(condition.wait_for(lambda: trace_id in store), timeout=20.0)
@@ -104,5 +139,45 @@ async def test_agent(deploy_broker):
                 print(f"{result_envelope}")
             print("|")
             if result_envelope.kind == "ai_response":
+                assert result_envelope.latest_message_in_history is not None
+                assert result_envelope.latest_message_in_history.text is not None
+                assert "gpt" in result_envelope.latest_message_in_history.text.lower()
+                break
+
+        trace_id = await router_node.invoke(
+            "Do you know the weather in Tokyo right now?", broker=broker, thread_id=thread_id
+        )
+
+        await asyncio.wait_for(condition.wait_for(lambda: trace_id in store), timeout=20.0)
+        queue = store[trace_id]
+        while True:
+            result_envelope = await queue.get()
+            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
+                print(f"{result_envelope.latest_message_in_history.text}")
+            else:
+                print(f"{result_envelope}")
+            print("|")
+            if result_envelope.kind == "ai_response":
+                assert result_envelope.latest_message_in_history is not None
+                assert result_envelope.latest_message_in_history.text is not None
+                assert "snow" in result_envelope.latest_message_in_history.text.lower()
+                break
+
+        trace_id = await router_node.invoke(
+            "Do you remember my name?", broker=broker, thread_id=thread_id
+        )
+        await asyncio.wait_for(condition.wait_for(lambda: trace_id in store), timeout=20.0)
+        queue = store[trace_id]
+        while True:
+            result_envelope = await queue.get()
+            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
+                print(f"{result_envelope.latest_message_in_history.text}")
+            else:
+                print(f"{result_envelope}")
+            print("|")
+            if result_envelope.kind == "ai_response":
+                assert result_envelope.latest_message_in_history is not None
+                assert result_envelope.latest_message_in_history.text is not None
+                assert "lebron" in result_envelope.latest_message_in_history.text.lower()
                 break
         print(f"{'=' * 10}End{'=' * 10}")

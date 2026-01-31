@@ -9,9 +9,11 @@ from pydantic_ai import ModelRequest, ModelResponse, SystemPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
 from calf.broker.broker import Broker
+from calf.messages import patch_system_prompts
 from calf.models.event_envelope import EventEnvelope, ToolCallRequest
 from calf.nodes.base_node import BaseNode, publish_to, subscribe_to
 from calf.nodes.base_tool_node import BaseToolNode
+from calf.stores.base import MessageHistoryStore
 
 
 class AgentRouterNode(BaseNode):
@@ -26,6 +28,7 @@ class AgentRouterNode(BaseNode):
         tool_nodes: list[BaseToolNode],
         system_prompt: str | None = None,
         handoff_nodes: list[type[BaseNode]] = [],
+        message_history_store: MessageHistoryStore | None = None,
         *args,
         **kwargs,
     ):
@@ -33,6 +36,12 @@ class AgentRouterNode(BaseNode):
         self.tools = tool_nodes
         self.handoffs = handoff_nodes
         self.system_prompt = system_prompt
+        self.system_message = (
+            ModelRequest(parts=[SystemPromptPart(self.system_prompt)])
+            if self.system_prompt
+            else None
+        )
+        self.message_history_store = message_history_store
 
         self.tools_topic_registry: dict[str, str] = {
             tool.tool_schema().name: tool.subscribed_topic
@@ -52,11 +61,27 @@ class AgentRouterNode(BaseNode):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ):
-        if ctx.node_result_message is None:
+        if not ctx.incoming_node_messages:
             raise RuntimeError("There is no response message to process")
 
-        # One place where message history is modified
-        ctx.message_history.append(ctx.node_result_message)
+        # One central place where message history is updated
+        if self.message_history_store is not None and ctx.thread_id is not None:
+            await self.message_history_store.append_many(
+                thread_id=ctx.thread_id, messages=ctx.incoming_node_messages
+            )
+            ctx.message_history = await self.message_history_store.get(thread_id=ctx.thread_id)
+        else:
+            ctx.message_history.extend(ctx.incoming_node_messages)
+
+        # Apply system prompts with priority: incoming > self.system_message > existing history
+        # First, apply self.system_message as fallback (replaces existing history)
+        if ctx.system_message is not None:
+            ctx.message_history = patch_system_prompts(ctx.message_history, [ctx.system_message])
+        elif self.system_message is not None:
+            ctx.message_history = patch_system_prompts(
+                ctx.message_history,
+                [self.system_message],
+            )
 
         if isinstance(ctx.latest_message_in_history, ModelResponse):
             if (
@@ -69,7 +94,8 @@ class AgentRouterNode(BaseNode):
                 # reply to sender here
                 await self._reply_to_sender(ctx, correlation_id, broker)
         else:
-            # tool call result block
+            # TODO: implement user chat request forwarding to the chat node
+            # so message history can be managed in a central location: the router node
             await self._call_model(ctx, correlation_id, broker)
         return ctx
 
@@ -115,7 +141,7 @@ class AgentRouterNode(BaseNode):
             function_tools=[tool.tool_schema() for tool in self.tools]
         )
         event_envelope = event_envelope.model_copy(
-            update={"kind": "tool_result", "patch_model_request_params": patch_model_request_params}
+            update={"patch_model_request_params": patch_model_request_params}
         )
         await broker.publish(
             event_envelope,
@@ -128,6 +154,7 @@ class AgentRouterNode(BaseNode):
         self,
         user_prompt: str,
         broker: Broker,
+        thread_id: str | None = None,
         correlation_id: str | None = None,
     ) -> str:
         """Invoke the agent
@@ -146,19 +173,17 @@ class AgentRouterNode(BaseNode):
         )
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
-        msg_history = []
-        if self.system_prompt:
-            msg_history.append(ModelRequest(parts=[SystemPromptPart(self.system_prompt)]))
-        msg_history.append(ModelRequest.user_text_prompt(user_prompt))
+        new_node_messages = [ModelRequest.user_text_prompt(user_prompt)]
         await broker.publish(
             EventEnvelope(
                 kind="user_prompt",
                 trace_id=correlation_id,
                 patch_model_request_params=patch_model_request_params,
-                message_history=msg_history,
+                thread_id=thread_id,
+                incoming_node_messages=new_node_messages,
+                system_message=self.system_message,
             ),
-            topic=self.chat.subscribed_topic or "",
+            topic=self.subscribed_topic or "",
             correlation_id=correlation_id,
-            reply_to=self.subscribed_topic or "",
         )
         return correlation_id

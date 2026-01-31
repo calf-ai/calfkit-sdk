@@ -30,9 +30,9 @@ Example:
 """
 
 from calf.stores.base import MessageHistoryStore
-from calf.stores.memory import MemoryMessageHistoryStore
+from calf.stores.in_memory import InMemoryMessageHistoryStore
 
 __all__ = [
     "MessageHistoryStore",
-    "MemoryMessageHistoryStore",
+    "InMemoryMessageHistoryStore",
 ]

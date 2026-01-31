@@ -1,6 +1,8 @@
-from typing import Literal
+from typing import Literal, Sequence
 
-from pydantic_ai import ModelMessage
+import uuid_utils
+from pydantic import BaseModel, Field
+from pydantic_ai import ModelMessage, ModelRequest
 from pydantic_ai.models import ModelRequestParameters
 
 from calf.models.types import CompactBaseModel, SerializableModelSettings, ToolCallRequest
@@ -9,7 +11,6 @@ from calf.models.types import CompactBaseModel, SerializableModelSettings, ToolC
 class EventEnvelope(CompactBaseModel):
     kind: Literal["tool_call_request", "user_prompt", "ai_response", "tool_result"]
     text: str | None = None
-    latest_message: ModelMessage | None = None
     trace_id: str | None = None
 
     # Used to surface the tool call from latest message so tool call workers do not have to dig
@@ -20,11 +21,16 @@ class EventEnvelope(CompactBaseModel):
     patch_model_settings: SerializableModelSettings | None = None
 
     # running message history
-    message_history: list[ModelMessage]
+    message_history: list[ModelMessage] = []
 
     @property
     def latest_message_in_history(self):
-        return self.message_history[-1]
+        return self.message_history[-1] if self.message_history else None
 
     # The result message from a node
-    node_result_message: ModelMessage | None = None
+    incoming_node_messages: Sequence[ModelMessage] = []
+
+    # thread id / conversation identifier
+    thread_id: str | None = None
+
+    system_message: ModelRequest | None = None

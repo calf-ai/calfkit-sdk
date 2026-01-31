@@ -8,7 +8,7 @@ from pydantic_ai.messages import ModelMessage
 from calf.stores.base import MessageHistoryStore
 
 
-class MemoryMessageHistoryStore(MessageHistoryStore):
+class InMemoryMessageHistoryStore(MessageHistoryStore):
     """In-memory message history store.
 
     Useful for testing and development. Not suitable for production

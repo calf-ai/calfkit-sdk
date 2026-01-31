@@ -46,6 +46,6 @@ class ChatNode(BaseNode, ABC):
             model_request_parameters=request_parameters,
         )
         return_envelope = event_envelope.model_copy(
-            update={"kind": "ai_response", "node_result_message": model_response}
+            update={"kind": "ai_response", "incoming_node_messages": [model_response]}
         )
         return return_envelope
