@@ -139,6 +139,9 @@ async def test_multi_turn_agent(deploy_broker):
                 print(f"{result_envelope}")
             print("|")
             if result_envelope.kind == "ai_response":
+                assert result_envelope.latest_message_in_history is not None
+                assert result_envelope.latest_message_in_history.text is not None
+                assert "gpt" in result_envelope.latest_message_in_history.text.lower()
                 break
 
         trace_id = await router_node.invoke(
@@ -155,6 +158,9 @@ async def test_multi_turn_agent(deploy_broker):
                 print(f"{result_envelope}")
             print("|")
             if result_envelope.kind == "ai_response":
+                assert result_envelope.latest_message_in_history is not None
+                assert result_envelope.latest_message_in_history.text is not None
+                assert "snow" in result_envelope.latest_message_in_history.text.lower()
                 break
 
         trace_id = await router_node.invoke(
@@ -170,5 +176,8 @@ async def test_multi_turn_agent(deploy_broker):
                 print(f"{result_envelope}")
             print("|")
             if result_envelope.kind == "ai_response":
+                assert result_envelope.latest_message_in_history is not None
+                assert result_envelope.latest_message_in_history.text is not None
+                assert "lebron" in result_envelope.latest_message_in_history.text.lower()
                 break
         print(f"{'=' * 10}End{'=' * 10}")
