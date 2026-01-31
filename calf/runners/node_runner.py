@@ -6,6 +6,9 @@ from calf.nodes.registrator import Registrator
 
 
 class NodeRunner(Registrator):
+    """The NodeRunner is essentially the control plane,
+    for configuring the flow of work via subscription and publish topics"""
+
     def __init__(self, node: BaseNode, *args: Any, **kwargs: Any):
         self.node = node
         super().__init__(*args, **kwargs)
