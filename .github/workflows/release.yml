@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: release-please
     # Only publish when release-please creates a release
-    if: needs.release-please.outputs.release_created == true
+    if: needs.release-please.outputs.release_created == 'true'
 
     environment:
       name: pypi
