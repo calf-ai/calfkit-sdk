@@ -19,13 +19,10 @@ classifiers = [
 requires-python = ">=3.10"
 
 dependencies = [
-    "aiokafka>=0.10.0,<0.14.0",
-    "boltons>=25.0.0",
     "faststream[cli]>=0.6.0",
     "pydantic>=2.12.5",
     "pydantic-ai>=1.47.0",
     "python-dotenv>=1.2.1",
-    "typer<0.22",
     "uuid-utils>=0.14.0",
 ]
 
