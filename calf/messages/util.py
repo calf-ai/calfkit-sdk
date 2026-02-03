@@ -87,13 +87,13 @@ def validate_tool_call_pairs(messages: list[ModelMessage]) -> bool:
 
     for message in reversed(messages):
         if isinstance(message, ModelRequest):
-            for part in message.parts:
-                if isinstance(part, (ToolReturnPart, RetryPromptPart)):
-                    seen_result_ids.add(part.tool_call_id)
+            for req_part in message.parts:
+                if isinstance(req_part, (ToolReturnPart, RetryPromptPart)):
+                    seen_result_ids.add(req_part.tool_call_id)
         elif isinstance(message, ModelResponse):
-            for part in message.parts:
-                if isinstance(part, ToolCallPart):
-                    if part.tool_call_id not in seen_result_ids:
+            for resp_part in message.parts:
+                if isinstance(resp_part, ToolCallPart):
+                    if resp_part.tool_call_id not in seen_result_ids:
                         return False
 
     return True
