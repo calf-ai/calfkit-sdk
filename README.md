@@ -48,7 +48,7 @@ pip install git+https://github.com/calf-ai/calf-sdk.git
 
 ### Deploy the Tool Node
 
-`tool_service.py` — Define and deploy a tool as an independent service.
+Define and deploy a tool as an independent service.
 
 ```python
 import asyncio
@@ -71,7 +71,7 @@ asyncio.run(main())
 
 ### Deploy the Chat Node
 
-`chat_service.py` — Deploy the LLM chat handler as its own service.
+Deploy the LLM chat handler as its own service.
 
 ```python
 import asyncio
@@ -92,7 +92,7 @@ asyncio.run(main())
 
 ### Deploy the Agent Router Node
 
-`router_service.py` — Deploy the router that orchestrates chat and tools.
+Deploy the router that orchestrates chat and tools.
 
 ```python
 import asyncio
@@ -124,7 +124,7 @@ asyncio.run(main())
 
 ### Invoke the Agent
 
-`client.py` — Send a request and receive the response.
+Send a request and receive the response.
 
 ```python
 import asyncio
