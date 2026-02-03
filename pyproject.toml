@@ -5,7 +5,7 @@ description = "Event-driven SDK for building AI workflows on Kafka"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Ryan Yu" }]
-keywords = ["ai", "agents", "kafka", "event-driven", "workflows", "llm"]
+keywords = ["ai", "agents", "kafka", "event-driven", "workflows", "llm", "distributed", "decoupled"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
