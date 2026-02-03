@@ -1,4 +1,4 @@
-# Calf SDK
+# Calfkit SDK
 
 Event-driven AI agents that scale like microservices. Build loosely-coupled, distributed agent systems where tools, chats, and workflows each run as independent services—communicating through events.
 
