@@ -46,7 +46,7 @@ jobs:
         if: matrix.python-version == '3.10'
         run: |
           uv add --group dev pytest-cov
-          uv run pytest tests/ -v --cov=calf --cov-report=term-missing --cov-report=xml
+          uv run pytest tests/ -v --cov=calfkit --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage report
         if: matrix.python-version == '3.10'

@@ -75,4 +75,4 @@ jobs:
         shell: bash
 
       - name: Verify import
-        run: python -c "import calf; print(f'calf {calf.__version__} installed successfully')"
+        run: python -c "import calfkit; print(f'calfkit {calfkit.__version__} installed successfully')"

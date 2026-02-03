@@ -41,7 +41,7 @@ format-check:
 
 type-check:
 	@echo "Running type checker..."
-	@uv run mypy calf/
+	@uv run mypy calfkit/
 	@echo "✓ Type check passed"
 
 test:
