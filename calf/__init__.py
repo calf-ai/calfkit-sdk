@@ -1,4 +1,4 @@
 from importlib.metadata import version
 
-__version__ = version("calf-sdk")
+__version__ = version("calfkit")
 __all__ = ["__version__"]

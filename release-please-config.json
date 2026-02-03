@@ -3,7 +3,7 @@
   "release-type": "python",
   "packages": {
     ".": {
-      "package-name": "calf-sdk",
+      "package-name": "calfkit",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {

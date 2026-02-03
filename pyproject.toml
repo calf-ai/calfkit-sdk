@@ -1,5 +1,5 @@
 [project]
-name = "calf-sdk"
+name = "calfkit"
 version = "0.1.0"
 description = "Event-driven SDK for building AI workflows on Kafka"
 readme = "README.md"
