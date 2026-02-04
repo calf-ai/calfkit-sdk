@@ -22,11 +22,8 @@ async def wait_for_condition(
         await wait_for_condition(lambda: trace_id in store, timeout=10.0)
     """
     start = time.monotonic()
-    print(f"[wait_for_condition] start={start:.2f}, timeout={timeout}")
     while not predicate():
         elapsed = time.monotonic() - start
         if elapsed > timeout:
-            print(f"[wait_for_condition] TIMEOUT! elapsed={elapsed:.2f}")
             raise asyncio.TimeoutError(f"Condition not met within {timeout}s timeout")
         await asyncio.sleep(poll_interval)
-    print(f"[wait_for_condition] done, elapsed={time.monotonic() - start:.2f}")

@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, overload
 
 import uuid_utils
 from faststream import Context
@@ -23,16 +23,84 @@ class AgentRouterNode(BaseNode):
     _router_sub_topic_name = "agent_router.input"
     _router_pub_topic_name = "agent_router.output"
 
+    @overload
     def __init__(
         self,
         chat_node: BaseNode,
+        *,
+        system_prompt: str,
         tool_nodes: list[BaseToolNode],
+        handoff_nodes: list[type[BaseNode]] = [],
+        message_history_store: MessageHistoryStore,
+        **kwargs: Any,
+    ): ...
+
+    @overload
+    def __init__(
+        self,
+        chat_node: BaseNode,
+        *,
         system_prompt: str | None = None,
+        tool_nodes: list[BaseToolNode] = [],
         handoff_nodes: list[type[BaseNode]] = [],
         message_history_store: MessageHistoryStore | None = None,
-        *args: Any,
+        **kwargs: Any,
+    ): ...
+
+    @overload
+    def __init__(self) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        *,
+        system_prompt: str | None = None,
+        tool_nodes: list[BaseToolNode] = [],
+        handoff_nodes: list[type[BaseNode]] = [],
+    ): ...
+
+    def __init__(
+        self,
+        chat_node: BaseNode | None = None,
+        *,
+        system_prompt: str | None = None,
+        tool_nodes: list[BaseToolNode] = [],
+        handoff_nodes: list[type[BaseNode]] = [],
+        message_history_store: MessageHistoryStore | None = None,
         **kwargs: Any,
     ):
+        """Initialize an AgentRouterNode.
+
+        The AgentRouterNode supports multiple initialization patterns depending on use case:
+
+        1. **Deployable Router Service** (with required parameters):
+           Use when deploying the router as a service with all dependencies explicitly provided.
+           Requires: chat_node, system_prompt (str), tool_nodes, message_history_store
+
+        2. **Deployable Router Service** (with optional parameters):
+           Use when deploying with optional or runtime-configurable dependencies.
+           Requires: chat_node
+           Optional: system_prompt, tool_nodes, handoff_nodes, message_history_store
+
+        3. **Minimal Client**:
+           Use when creating a client to invoke an already-deployed router service.
+           No parameters needed - connects to the deployed service via the broker.
+
+        4. **Client with Runtime Patches**:
+           Use when creating a client that provides its own tools/system prompt at runtime,
+           overriding or supplementing what the deployed router service provides.
+           Optional: system_prompt, tool_nodes, handoff_nodes
+
+        Args:
+            chat_node: The chat node for LLM interactions. Required for deployable services.
+            system_prompt: Optional system prompt to override the default. Must be str for
+                deployable service, optional for client with runtime patches.
+            tool_nodes: List of tool nodes that the agent can call. Optional for all forms.
+            handoff_nodes: List of node types for agent handoff scenarios. Optional.
+            message_history_store: Store for persisting conversation history across requests.
+                Required for deployable service, optional otherwise.
+            **kwargs: Additional keyword arguments passed to BaseNode.
+        """
         self.chat = chat_node
         self.tools = tool_nodes
         self.handoffs = handoff_nodes
@@ -52,7 +120,7 @@ class AgentRouterNode(BaseNode):
 
         self.tool_response_topics = [tool.publish_to_topic for tool in self.tools]
 
-        super().__init__(*args, **kwargs)
+        super().__init__(**kwargs)
 
     @subscribe_to(_router_sub_topic_name)
     @publish_to(_router_pub_topic_name)
@@ -148,7 +216,7 @@ class AgentRouterNode(BaseNode):
         )
         await broker.publish(
             event_envelope,
-            topic=self.chat.subscribed_topic,
+            topic=self.chat.subscribed_topic,  # type: ignore
             correlation_id=correlation_id,
             reply_to=self.subscribed_topic,
         )
@@ -172,12 +240,16 @@ class AgentRouterNode(BaseNode):
         Returns:
             str: The correlation ID for this request
         """
-        patch_model_request_params = ModelRequestParameters(
-            function_tools=[tool.tool_schema() for tool in self.tools]
+
+        patch_model_request_params = (
+            ModelRequestParameters(function_tools=[tool.tool_schema() for tool in self.tools])
+            if self.tools
+            else None
         )
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
         new_node_messages = [ModelRequest.user_text_prompt(user_prompt)]
+        await broker.start()
         await broker.publish(
             EventEnvelope(
                 kind="user_prompt",

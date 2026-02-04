@@ -1,6 +1,6 @@
 # Calfkit SDK
 
-Event-driven AI agents that scale like microservices. Build loosely-coupled, distributed agent systems where tools, chats, and workflows each run as independent services—communicating through events.
+The SDK to build AI agents that scale. Calfkit lets you compose agents from independent services—chat, tools, routing—that communicate through events, not API calls. Add capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream system.
 
 ## Why Event-Driven Agents?
 
@@ -13,18 +13,17 @@ When agents connect through APIs and RPC:
 
 Event-driven architecture provides the solution. Instead of direct API calls between components, agents interact through asynchronous event streams. Each component runs independently, scales horizontally, and outputs can flow anywhere—CRMs, data warehouses, analytics platforms, other agents.
 
-## What Calf Gives You
+## Why use Calfkit?
 
-Calf is a Python SDK that makes event-driven agents simple. You get the benefits of a distributed system—loose coupling, horizontal scalability, durability—without the complexity of managing Kafka infrastructure yourself.
+Calfkit is a Python SDK that makes event-driven agents simple. You get the benefits of a distributed system—loose coupling, horizontal scalability, durability—without the complexity of managing Kafka infrastructure yourself.
 
-| Benefit | What It Means for You |
-|---------|----------------------|
-| **Add tools without touching existing code** | Deploy new capabilities as independent services that other agents discover automatically |
-| **Scale what you need, when you need it** | Chat handling, tool execution, and routing each scale independently based on demand |
-| **Nothing gets lost** | Event persistence ensures reliable message delivery—even during failures or restarts |
-| **Real-time responses** | Low-latency event processing enables agents to react instantly to incoming data |
-| **Team independence** | Different teams can develop and deploy chat, tools, and routing concurrently without coordination overhead |
-| **Universal data flow** | Decoupling enables data to flow freely in both directions. Downstream, agent outputs integrate with any system (CRMs, CDPs, warehouses). Upstream, tools wrap data sources and deploy independently—no coordination needed. |
+- **Distributed agents out of the box** — Build event-driven, multi-service agents without writing orchestration code or managing infrastructure
+- **Add tools without touching existing code** — Deploy new capabilities as independent services that other agents discover automatically
+- **Scale what you need, when you need it** — Chat handling, tool execution, and routing each scale independently based on demand
+- **Nothing gets lost** — Event persistence ensures reliable message delivery—even during failures or restarts
+- **Real-time responses** — Low-latency event processing enables agents to react instantly to incoming data
+- **Team independence** — Different teams can develop and deploy chat, tools, and routing concurrently without coordination overhead
+- **Universal data flow** — Decoupling enables data to flow freely in both directions. Downstream, agent outputs integrate with any system (CRMs, CDPs, warehouses). Upstream, tools wrap data sources and deploy independently—no coordination needed.
 
 ## Quick Start
 
@@ -47,7 +46,53 @@ export OPENAI_API_KEY=sk-...
 pip install git+https://github.com/calf-ai/calf-sdk.git
 ```
 
-### Create and Run an Agent
+### Deploy the Tool Node
+
+Define and deploy a tool as an independent service.
+
+```python
+import asyncio
+from calfkit.nodes import agent_tool
+from calfkit.broker import Broker
+from calfkit.runners import ToolRunner
+
+@agent_tool
+def get_weather(location: str) -> str:
+    """Get the current weather at a location"""
+    return f"It's sunny in {location}"
+
+async def main():
+    broker = Broker(bootstrap_servers="localhost:9092")
+    ToolRunner(get_weather).register_on(broker)
+    await broker.run_app()
+
+asyncio.run(main())
+```
+
+### Deploy the Chat Node
+
+Deploy the LLM chat handler as its own service.
+
+```python
+import asyncio
+from calfkit.nodes import ChatNode
+from calfkit.providers import OpenAIModelClient
+from calfkit.broker import Broker
+from calfkit.runners import ChatRunner
+
+async def main():
+    broker = Broker(bootstrap_servers="localhost:9092")
+    model_client = OpenAIModelClient(model_name="gpt-5-nano")
+    chat_node = ChatNode(model_client)
+    ChatRunner(chat_node).register_on(broker)
+    await broker.run_app()
+
+asyncio.run(main())
+```
+
+### Deploy the Agent Router Node
+
+Deploy the router that orchestrates chat and tools.
 
 ```python
 import asyncio
@@ -55,27 +100,16 @@ from calfkit.nodes import agent_tool, AgentRouterNode, ChatNode
 from calfkit.providers import OpenAIModelClient
 from calfkit.stores import InMemoryMessageHistoryStore
 from calfkit.broker import Broker
-from calfkit.runners import ChatRunner, ToolRunner, AgentRouterRunner
+from calfkit.runners import AgentRouterRunner
 
-# 1. Define a tool
 @agent_tool
 def get_weather(location: str) -> str:
     """Get the current weather at a location"""
     return f"It's sunny in {location}"
 
-# 2. Setup broker and nodes
 async def main():
     broker = Broker(bootstrap_servers="localhost:9092")
     model_client = OpenAIModelClient(model_name="gpt-4o")
-
-    # Deploy chat node
-    chat_node = ChatNode(model_client)
-    ChatRunner(chat_node).register_on(broker)
-
-    # Deploy tool node
-    ToolRunner(get_weather).register_on(broker)
-
-    # Deploy router node
     router_node = AgentRouterNode(
         chat_node=ChatNode(model_client),
         tool_nodes=[get_weather],
@@ -83,9 +117,38 @@ async def main():
         message_history_store=InMemoryMessageHistoryStore(),
     )
     AgentRouterRunner(router_node).register_on(broker)
-
-    # Run broker and invoke
     await broker.run_app()
+
+asyncio.run(main())
+```
+
+### Invoke the Agent
+
+Send a request and receive the response.
+
+```python
+import asyncio
+from calfkit.nodes import agent_tool, AgentRouterNode, ChatNode
+from calfkit.providers import OpenAIModelClient
+from calfkit.stores import InMemoryMessageHistoryStore
+from calfkit.broker import Broker
+
+@agent_tool
+def get_weather(location: str) -> str:
+    """Get the current weather at a location"""
+    return f"It's sunny in {location}"
+
+async def main():
+    broker = Broker(bootstrap_servers="localhost:9092")
+    model_client = OpenAIModelClient(model_name="gpt-5-nano")
+
+    router_node = AgentRouterNode(
+        chat_node=ChatNode(model_client),
+        tool_nodes=[get_weather],
+        system_prompt="You are a helpful assistant",
+        message_history_store=InMemoryMessageHistoryStore(),
+    )
+
     correlation_id = await router_node.invoke(
         user_prompt="What's the weather in Tokyo?",
         broker=broker,

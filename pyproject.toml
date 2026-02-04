@@ -5,7 +5,7 @@ description = "Event-driven SDK for building AI workflows on Kafka"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Ryan Yu" }]
-keywords = ["ai", "agents", "kafka", "event-driven", "workflows", "llm"]
+keywords = ["ai", "agents", "kafka", "event-driven", "workflows", "llm", "distributed", "decoupled"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -19,7 +19,7 @@ classifiers = [
 requires-python = ">=3.10"
 
 dependencies = [
-    "faststream[cli]>=0.6.0",
+    "faststream[kafka]>=0.6.6",
     "pydantic>=2.12.5",
     "pydantic-ai>=1.47.0",
     "python-dotenv>=1.2.1",
