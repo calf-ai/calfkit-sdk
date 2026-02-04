@@ -57,6 +57,7 @@ class CompactBaseModel(BaseModel):
     def model_dump(self, **kwargs: Any) -> dict[str, Any]:
         kwargs.setdefault("exclude_unset", True)
         kwargs.setdefault("exclude_none", True)
+        kwargs.setdefault("mode", "json")  # Converts datetime, etc. to JSON-serializable types
         return super().model_dump(**kwargs)
 
     def model_dump_json(self, **kwargs: Any) -> str:

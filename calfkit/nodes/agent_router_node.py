@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, overload
 
 import uuid_utils
 from faststream import Context
@@ -23,14 +23,60 @@ class AgentRouterNode(BaseNode):
     _router_sub_topic_name = "agent_router.input"
     _router_pub_topic_name = "agent_router.output"
 
+    @overload
     def __init__(
         self,
         chat_node: BaseNode,
+        *,
+        system_prompt: str,
         tool_nodes: list[BaseToolNode],
+        handoff_nodes: list[type[BaseNode]] = [],
+        message_history_store: MessageHistoryStore,
+        **kwargs,
+    ): ...
+
+    """overload for initializing a deployable router service"""
+
+    @overload
+    def __init__(
+        self,
+        chat_node: BaseNode,
+        *,
         system_prompt: str | None = None,
+        tool_nodes: list[BaseToolNode] = [],
         handoff_nodes: list[type[BaseNode]] = [],
         message_history_store: MessageHistoryStore | None = None,
-        *args: Any,
+        **kwargs,
+    ): ...
+
+    """overload for initializing a deployable router service"""
+
+    @overload
+    def __init__(self): ...
+
+    """minimal overload for initializing a client to invoke the deployed router node service"""
+
+    @overload
+    def __init__(
+        self,
+        *,
+        system_prompt: str | None = None,
+        tool_nodes: list[BaseToolNode] = [],
+        handoff_nodes: list[type[BaseNode]] = [],
+    ): ...
+
+    """overload for initializing a client that uses its own patched in
+    tools or system prompts rather than the deployed router node service's.
+    System prompt and tools can be configured dynamically to use runtime values."""
+
+    def __init__(
+        self,
+        chat_node: BaseNode | None = None,
+        *,
+        system_prompt: str | None = None,
+        tool_nodes: list[BaseToolNode] = [],
+        handoff_nodes: list[type[BaseNode]] = [],
+        message_history_store: MessageHistoryStore | None = None,
         **kwargs: Any,
     ):
         self.chat = chat_node
@@ -52,7 +98,7 @@ class AgentRouterNode(BaseNode):
 
         self.tool_response_topics = [tool.publish_to_topic for tool in self.tools]
 
-        super().__init__(*args, **kwargs)
+        super().__init__(**kwargs)
 
     @subscribe_to(_router_sub_topic_name)
     @publish_to(_router_pub_topic_name)
@@ -148,7 +194,7 @@ class AgentRouterNode(BaseNode):
         )
         await broker.publish(
             event_envelope,
-            topic=self.chat.subscribed_topic,
+            topic=self.chat.subscribed_topic,  # type: ignore
             correlation_id=correlation_id,
             reply_to=self.subscribed_topic,
         )
@@ -172,12 +218,16 @@ class AgentRouterNode(BaseNode):
         Returns:
             str: The correlation ID for this request
         """
-        patch_model_request_params = ModelRequestParameters(
-            function_tools=[tool.tool_schema() for tool in self.tools]
+
+        patch_model_request_params = (
+            ModelRequestParameters(function_tools=[tool.tool_schema() for tool in self.tools])
+            if self.tools
+            else None
         )
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
         new_node_messages = [ModelRequest.user_text_prompt(user_prompt)]
+        await broker.start()
         await broker.publish(
             EventEnvelope(
                 kind="user_prompt",
