@@ -1,6 +1,6 @@
 import os
 from collections.abc import Iterable
-from typing import Any, Literal
+from typing import Any
 
 from faststream import FastStream
 from faststream.kafka import KafkaBroker
@@ -9,10 +9,8 @@ from calfkit.broker.deployable import Deployable
 from calfkit.broker.middleware import ContextInjectionMiddleware
 
 
-class Broker(KafkaBroker, Deployable):
-    """Lightweight client wrapper connecting to Calf brokers"""
-
-    mode = Literal["kafka_mode"]
+class BrokerClient(KafkaBroker, Deployable):
+    """Lightweight wrapper over Faststream connecting to brokers"""
 
     def __init__(self, bootstrap_servers: str | Iterable[str] | None = None, **broker_kwargs: Any):
         if not bootstrap_servers:

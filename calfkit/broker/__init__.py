@@ -1,3 +1,3 @@
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 
-__all__ = ["Broker"]
+__all__ = ["BrokerClient"]

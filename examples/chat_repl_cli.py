@@ -6,7 +6,7 @@ from typing import Annotated
 
 from faststream import Context
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from tests.utils import wait_for_condition
@@ -27,7 +27,7 @@ logging.disable(logging.CRITICAL)
 class ChatReplCli:
     """Interactive REPL CLI for chatting with the agent."""
 
-    def __init__(self, broker: Broker, router_node: AgentRouterNode):
+    def __init__(self, broker: BrokerClient, router_node: AgentRouterNode):
         self.broker = broker
         self.router_node = router_node
         self.thread_id = str(uuid.uuid4())
@@ -131,7 +131,7 @@ class ChatReplCli:
 
 async def main():
     # Connect to the real Kafka broker
-    broker = Broker(bootstrap_servers="localhost:9092")
+    broker = BrokerClient(bootstrap_servers="localhost:9092")
 
     # Check if broker is reachable by trying to start it
     print("Checking Kafka broker connection...")
@@ -139,8 +139,8 @@ async def main():
         await broker.start()
         is_alive = await broker.ping(timeout=5.0)
         if not is_alive:
-            raise Exception("Broker ping failed")
-        print("Broker connection successful!")
+            raise Exception("BrokerClient ping failed")
+        print("BrokerClient connection successful!")
     except Exception as e:
         print("Error: Unable to connect to Kafka broker at localhost:9092")
         print(f"Details: {e}")

@@ -4,7 +4,7 @@ from typing import Annotated
 
 from faststream import Context
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
 
@@ -33,7 +33,7 @@ async def main():
 
     # Connect to the real Kafka broker
     print("\nConnecting to Kafka broker at localhost:9092...")
-    broker = Broker(bootstrap_servers="localhost:9092")
+    broker = BrokerClient(bootstrap_servers="localhost:9092")
 
     # Create router node client for invoking.
     # No patch for tools and system prompts

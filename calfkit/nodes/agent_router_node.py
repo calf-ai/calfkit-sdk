@@ -8,7 +8,7 @@ from faststream.kafka.annotations import (
 from pydantic_ai import ModelRequest, ModelResponse, SystemPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.messages import patch_system_prompts, validate_tool_call_pairs
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.types import ToolCallRequest
@@ -224,7 +224,7 @@ class AgentRouterNode(BaseNode):
     async def invoke(
         self,
         user_prompt: str,
-        broker: Broker,
+        broker: BrokerClient,
         final_response_topic: str,
         thread_id: str | None = None,
         correlation_id: str | None = None,
@@ -233,7 +233,7 @@ class AgentRouterNode(BaseNode):
 
         Args:
             user_prompt (str): User prompt to request the model
-            broker (Broker): The broker to connect to
+            broker (BrokerClient): The broker to connect to
             correlation_id (str | None, optional): Optionally provide a correlation ID
             for this request. Defaults to None.
 

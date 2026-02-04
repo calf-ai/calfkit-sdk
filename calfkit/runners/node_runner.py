@@ -1,12 +1,12 @@
 from typing import Any, TypeAlias
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.base_node import BaseNode
 from calfkit.nodes.registrator import Registrator
 
 
 class NodeRunner(Registrator):
-    """The NodeRunner makes node logic deployable after registering on a broker. (Control plane)"""
+    """The NodeRunner deploys a node as a service registered on a broker"""
 
     def __init__(self, node: BaseNode, *args: Any, **kwargs: Any):
         self.node = node
@@ -14,7 +14,7 @@ class NodeRunner(Registrator):
 
     def register_on(
         self,
-        broker: Broker,
+        broker: BrokerClient,
         *,
         max_workers: int | None = None,
         # group_id explicitly set as to avoid duplicated processing for separate deployments
