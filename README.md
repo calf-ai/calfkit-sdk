@@ -43,7 +43,7 @@ export OPENAI_API_KEY=sk-...
 ### Install
 
 ```bash
-pip install git+https://github.com/calf-ai/calf-sdk.git
+pip install calfkit
 ```
 
 ### Deploy the Tool Node
