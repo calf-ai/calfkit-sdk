@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import os
 import time
 from typing import Annotated
 
@@ -20,6 +21,12 @@ from calfkit.stores.in_memory import InMemoryMessageHistoryStore
 from tests.utils import wait_for_condition
 
 load_dotenv()
+
+# Skip integration tests if OpenAI API key is not available
+skip_if_no_openai_key = pytest.mark.skipif(
+    not os.getenv("OPENAI_API_KEY"),
+    reason="Skipping integration test: OPENAI_API_KEY not set in environment",
+)
 
 counter = itertools.count()
 store: dict[str, asyncio.Queue[EventEnvelope]] = {}
@@ -88,7 +95,7 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
         system_prompt="Please always greet the user as Conan before every message",
     )
     router = AgentRouterRunner(node=router_node)
-    router.register_on(broker, max_workers=2)
+    router.register_on(broker)
     # if we're just deploying this router as an isolated deployment:
     #   await broker.run_app()
 
@@ -109,6 +116,7 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
 
 
 @pytest.mark.asyncio
+@skip_if_no_openai_key
 async def test_agent(deploy_broker):
     broker, _ = deploy_broker
     router_node = AgentRouterNode(
@@ -138,6 +146,7 @@ async def test_agent(deploy_broker):
 
 
 @pytest.mark.asyncio
+@skip_if_no_openai_key
 async def test_multi_turn_agent(deploy_broker):
     broker, _ = deploy_broker
     router_node = AgentRouterNode(
@@ -218,6 +227,7 @@ async def test_multi_turn_agent(deploy_broker):
 
 
 @pytest.mark.asyncio
+@skip_if_no_openai_key
 async def test_parallel_tool_calls(deploy_broker):
     broker, _ = deploy_broker
     router_node = AgentRouterNode(
