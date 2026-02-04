@@ -1,4 +1,5 @@
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from faststream import BaseMiddleware, PublishCommand
 from faststream.message import StreamMessage

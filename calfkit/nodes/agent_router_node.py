@@ -32,10 +32,8 @@ class AgentRouterNode(BaseNode):
         tool_nodes: list[BaseToolNode],
         handoff_nodes: list[type[BaseNode]] = [],
         message_history_store: MessageHistoryStore,
-        **kwargs,
+        **kwargs: Any,
     ): ...
-
-    """overload for initializing a deployable router service"""
 
     @overload
     def __init__(
@@ -46,15 +44,11 @@ class AgentRouterNode(BaseNode):
         tool_nodes: list[BaseToolNode] = [],
         handoff_nodes: list[type[BaseNode]] = [],
         message_history_store: MessageHistoryStore | None = None,
-        **kwargs,
+        **kwargs: Any,
     ): ...
 
-    """overload for initializing a deployable router service"""
-
     @overload
-    def __init__(self): ...
-
-    """minimal overload for initializing a client to invoke the deployed router node service"""
+    def __init__(self) -> None: ...
 
     @overload
     def __init__(
@@ -64,10 +58,6 @@ class AgentRouterNode(BaseNode):
         tool_nodes: list[BaseToolNode] = [],
         handoff_nodes: list[type[BaseNode]] = [],
     ): ...
-
-    """overload for initializing a client that uses its own patched in
-    tools or system prompts rather than the deployed router node service's.
-    System prompt and tools can be configured dynamically to use runtime values."""
 
     def __init__(
         self,
@@ -79,6 +69,38 @@ class AgentRouterNode(BaseNode):
         message_history_store: MessageHistoryStore | None = None,
         **kwargs: Any,
     ):
+        """Initialize an AgentRouterNode.
+
+        The AgentRouterNode supports multiple initialization patterns depending on use case:
+
+        1. **Deployable Router Service** (with required parameters):
+           Use when deploying the router as a service with all dependencies explicitly provided.
+           Requires: chat_node, system_prompt (str), tool_nodes, message_history_store
+
+        2. **Deployable Router Service** (with optional parameters):
+           Use when deploying with optional or runtime-configurable dependencies.
+           Requires: chat_node
+           Optional: system_prompt, tool_nodes, handoff_nodes, message_history_store
+
+        3. **Minimal Client**:
+           Use when creating a client to invoke an already-deployed router service.
+           No parameters needed - connects to the deployed service via the broker.
+
+        4. **Client with Runtime Patches**:
+           Use when creating a client that provides its own tools/system prompt at runtime,
+           overriding or supplementing what the deployed router service provides.
+           Optional: system_prompt, tool_nodes, handoff_nodes
+
+        Args:
+            chat_node: The chat node for LLM interactions. Required for deployable services.
+            system_prompt: Optional system prompt to override the default. Must be str for
+                deployable service, optional for client with runtime patches.
+            tool_nodes: List of tool nodes that the agent can call. Optional for all forms.
+            handoff_nodes: List of node types for agent handoff scenarios. Optional.
+            message_history_store: Store for persisting conversation history across requests.
+                Required for deployable service, optional otherwise.
+            **kwargs: Additional keyword arguments passed to BaseNode.
+        """
         self.chat = chat_node
         self.tools = tool_nodes
         self.handoffs = handoff_nodes

@@ -44,7 +44,7 @@ async def get_weather(location: str) -> str:
     weather = mock_weather.get(location_lower)
     if weather:
         return f"Weather for {location.title()}: {weather}"
-    return f"Weather for {location.title()}: Currently 70°F, Partly Cloudy. Humidity: 60%. Wind: 5 mph."
+    return f"Weather for {location.title()}: Currently 70°F, Partly Cloudy. Humidity: 60%. Wind: 5 mph."  # noqa: E501
 
 
 @agent_tool
@@ -96,7 +96,7 @@ def get_stock_price(ticker: str) -> str:
     ticker_upper = ticker.upper().strip()
     stock = mock_stocks.get(ticker.lower())
     if stock:
-        return f"{stock['name']} ({ticker_upper}): ${stock['price']:.2f} | Change: {stock['change']} ({stock['change_pct']})"
+        return f"{stock['name']} ({ticker_upper}): ${stock['price']:.2f} | Change: {stock['change']} ({stock['change_pct']})"  # noqa: E501
     return f"Stock {ticker_upper}: $100.00 | No data available for this ticker."
 
 
