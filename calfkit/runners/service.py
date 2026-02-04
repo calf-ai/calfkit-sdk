@@ -18,7 +18,7 @@ class Service:
         group_id: str = "default",
         extra_publish_kwargs: dict[str, Any] = {},
         extra_subscribe_kwargs: dict[str, Any] = {},
-    ):
+    ) -> None:
         for handler_fn, topics_dict in node.bound_registry.items():
             pub = topics_dict.get("publish_topic")
             sub = topics_dict.get("subscribe_topic")
@@ -29,6 +29,6 @@ class Service:
             if pub is not None:
                 handler_fn = self._broker.publisher(pub, **extra_publish_kwargs)(handler_fn)
 
-    async def run(self):
+    async def run(self) -> None:
         """Blocking function to run registered nodes as services."""
         await self._broker.run_app()

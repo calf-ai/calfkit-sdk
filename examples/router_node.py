@@ -1,13 +1,13 @@
 import asyncio
 
-# Import tools from tool_nodes - router needs schemas for LLM and topic routing
-from examples.tool_nodes import get_exchange_rate, get_stock_price, get_weather
-
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.chat_node import ChatNode
 from calfkit.runners.service import Service
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
+
+# Import tools from tool_nodes - router needs schemas for LLM and topic routing
+from examples.tool_nodes import get_exchange_rate, get_stock_price, get_weather
 
 # Router Node - Deploys the agent router that orchestrates chat and tools.
 
