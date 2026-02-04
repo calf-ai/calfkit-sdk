@@ -7,12 +7,12 @@ from faststream.kafka import TestKafkaBroker
 from pydantic_ai import ModelMessage, ModelResponse, TextPart, ToolCallPart, models
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
-from calfkit.runners.node_runner import AgentRouterRunner, ChatRunner, ToolRunner
+from calfkit.runners.service import Service
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
 from tests.utils import wait_for_condition
 
@@ -107,13 +107,13 @@ async def test_agent_memory_with_function_model():
         else:
             raise AssertionError(f"Unexpected call count: {call_count}")
 
-    broker = Broker()
+    broker = BrokerClient()
+    service = Service(broker)
 
     # Create chat node with FunctionModel
     model_client = FunctionModel(memory_test_model)
     chat_node = ChatNode(model_client)
-    chat_runner = ChatRunner(node=chat_node)
-    chat_runner.register_on(broker)
+    service.register_node(chat_node)
 
     # Create router node with message history store
     memory_store = InMemoryMessageHistoryStore()
@@ -121,8 +121,7 @@ async def test_agent_memory_with_function_model():
         chat_node=ChatNode(model_client),
         message_history_store=memory_store,
     )
-    router = AgentRouterRunner(node=router_node)
-    router.register_on(broker)
+    service.register_node(router_node)
 
     response_store: dict[str, asyncio.Queue[EventEnvelope]] = {}
 
@@ -234,28 +233,24 @@ async def test_tool_visibility_with_function_model():
             # Second call - after tool return
             return ModelResponse(parts=[TextPart("The weather in Tokyo is rainy.")])
 
-    broker = Broker()
+    broker = BrokerClient()
+    service = Service(broker)
 
     # Create chat node with FunctionModel
     model_client = FunctionModel(tool_visibility_model)
     chat_node = ChatNode(model_client)
-    chat_runner = ChatRunner(node=chat_node)
-    chat_runner.register_on(broker)
+    service.register_node(chat_node)
 
     # Create router node with tools
     router_node = AgentRouterNode(
         chat_node=ChatNode(model_client),
         tool_nodes=[get_weather, get_temperature],
     )
-    router = AgentRouterRunner(node=router_node)
-    router.register_on(broker)
+    service.register_node(router_node)
 
-    # Register tool runners
-    tool_runner_weather = ToolRunner(get_weather)
-    tool_runner_weather.register_on(broker)
-
-    tool_runner_temp = ToolRunner(get_temperature)
-    tool_runner_temp.register_on(broker)
+    # Register tool nodes
+    service.register_node(get_weather)
+    service.register_node(get_temperature)
 
     response_store: dict[str, asyncio.Queue[EventEnvelope]] = {}
 

@@ -1,8 +1,8 @@
 import asyncio
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.base_tool_node import agent_tool
-from calfkit.runners.node_runner import ToolRunner
+from calfkit.runners.service import Service
 
 # Tool Nodes - Deploys tool workers that can be called by the agent.
 
@@ -147,29 +147,27 @@ async def main():
 
     # Connect to the real Kafka broker
     print("\nConnecting to Kafka broker at localhost:9092...")
-    broker = Broker(bootstrap_servers="localhost:9092")
+    broker = BrokerClient(bootstrap_servers="localhost:9092")
 
     # Deploy tool nodes
     print("Registering tool nodes...")
+    service = Service(broker)
 
-    tool_runner_weather = ToolRunner(get_weather)
-    tool_runner_weather.register_on(broker, max_workers=2)
+    service.register_node(get_weather, max_workers=2)
     print(f"  - get_weather registered subbed to (topic: {get_weather.publish_to_topic})")
 
-    tool_runner_stock = ToolRunner(get_stock_price)
-    tool_runner_stock.register_on(broker)
+    service.register_node(get_stock_price)
     print(f"  - get_stock_price registered subbed to (topic: {get_stock_price.publish_to_topic})")
 
-    tool_runner_exchange = ToolRunner(get_exchange_rate)
-    tool_runner_exchange.register_on(broker)
+    service.register_node(get_exchange_rate)
     print(
         f"  - get_exchange_rate registered subbed to (topic: {get_exchange_rate.publish_to_topic})"
     )
 
     print("\nTool nodes ready. Waiting for requests...")
 
-    # Run the broker app (blocking)
-    await broker.run_app()
+    # Run the service (blocking)
+    await service.run()
 
 
 if __name__ == "__main__":

@@ -10,13 +10,13 @@ from faststream import Context
 from faststream.kafka import TestKafkaBroker
 from pydantic_ai import ModelResponse
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
-from calfkit.runners.node_runner import AgentRouterRunner, ChatRunner, ToolRunner
+from calfkit.runners.service import Service
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
 from tests.utils import wait_for_condition
 
@@ -63,29 +63,21 @@ async def get_temperature(location: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
+def deploy_broker() -> BrokerClient:
     # simulate the deployment pre-testing
-    broker = Broker()
+    broker = BrokerClient()
+    service = Service(broker)
 
     # 1. Deploy llm model node worker
     model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
     chat_node = ChatNode(model_client)
-    chat_runner = ChatRunner(node=chat_node)
-    chat_runner.register_on(broker)
-    # if we're just deploying chat as an isolated deployment:
-    #   await broker.run_app()
+    service.register_node(chat_node)
 
     # 2a. Deploy tool node worker for get_weather tool
-    tool_runner_weather = ToolRunner(get_weather)
-    tool_runner_weather.register_on(broker)
-    # if we're just deploying this tool as an isolated deployment:
-    #   await broker.run_app()
+    service.register_node(get_weather)
 
     # 2b. Deploy 2 tool node worker for get_temperature tool
-    tool_runner_temp = ToolRunner(get_temperature)
-    tool_runner_temp.register_on(broker, max_workers=2)
-    # if we're just deploying this tool as an isolated deployment:
-    #   await broker.run_app()
+    service.register_node(get_temperature, max_workers=2)
 
     # 3. Deploy router node worker
     router_node = AgentRouterNode(
@@ -94,10 +86,7 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
         message_history_store=InMemoryMessageHistoryStore(),
         system_prompt="Please always greet the user as Conan before every message",
     )
-    router = AgentRouterRunner(node=router_node)
-    router.register_on(broker)
-    # if we're just deploying this router as an isolated deployment:
-    #   await broker.run_app()
+    service.register_node(router_node)
 
     @broker.subscriber(router_node.publish_to_topic or "default_collect")
     def trace(event_envelope: EventEnvelope, correlation_id: Annotated[str, Context()]):
@@ -111,14 +100,13 @@ def deploy_broker() -> tuple[Broker, AgentRouterRunner]:
             final_resp_store[correlation_id] = asyncio.Queue()
         final_resp_store[correlation_id].put_nowait(event_envelope)
 
-    # await broker.run_app()
-    return broker, router
+    return broker
 
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_agent(deploy_broker):
-    broker, _ = deploy_broker
+    broker = deploy_broker
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
@@ -148,7 +136,7 @@ async def test_agent(deploy_broker):
 @pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_multi_turn_agent(deploy_broker):
-    broker, _ = deploy_broker
+    broker = deploy_broker
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
@@ -229,7 +217,7 @@ async def test_multi_turn_agent(deploy_broker):
 @pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_parallel_tool_calls(deploy_broker):
-    broker, _ = deploy_broker
+    broker = deploy_broker
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather, get_temperature],

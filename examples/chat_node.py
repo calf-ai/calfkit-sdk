@@ -4,10 +4,10 @@ import sys
 
 from dotenv import load_dotenv
 
-from calfkit.broker.broker import Broker
+from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.chat_node import ChatNode
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
-from calfkit.runners.node_runner import ChatRunner
+from calfkit.runners.service import Service
 
 load_dotenv()
 
@@ -38,7 +38,7 @@ async def main():
 
     # Connect to the real Kafka broker
     print("\nConnecting to Kafka broker at localhost:9092...")
-    broker = Broker(bootstrap_servers="localhost:9092")
+    broker = BrokerClient(bootstrap_servers="localhost:9092")
 
     # Configure the LLM model
     print("Configuring OpenAI model client...")
@@ -49,16 +49,16 @@ async def main():
     # Deploy the chat node
     print("Registering chat node...")
     chat_node = ChatNode(model_client)
-    chat_runner = ChatRunner(node=chat_node)
-    chat_runner.register_on(broker)
+    service = Service(broker)
+    service.register_node(chat_node)
     print("  - ChatNode registered")
     print(f"    Subscribe topic: {chat_node.subscribed_topic}")
     print(f"    Publish topic: {chat_node.publish_to_topic}")
 
     print("\nChat node ready. Waiting for requests...")
 
-    # Run the broker app (this blocks)
-    await broker.run_app()
+    # Run the service (this blocks)
+    await service.run()
 
 
 if __name__ == "__main__":

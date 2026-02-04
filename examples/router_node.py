@@ -1,13 +1,13 @@
 import asyncio
 
-from calfkit.broker.broker import Broker
+# Import tools from tool_nodes - router needs schemas for LLM and topic routing
+from examples.tool_nodes import get_exchange_rate, get_stock_price, get_weather
+
+from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.chat_node import ChatNode
-from calfkit.runners.node_runner import AgentRouterRunner
+from calfkit.runners.service import Service
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
-
-# Import tools from tool_nodes - router needs schemas for LLM and topic routing
-from examples.real_broker.tool_nodes import get_exchange_rate, get_stock_price, get_weather
 
 # Router Node - Deploys the agent router that orchestrates chat and tools.
 
@@ -27,7 +27,7 @@ async def main():
 
     # Connect to the real Kafka broker
     print("\nConnecting to Kafka broker at localhost:9092...")
-    broker = Broker(bootstrap_servers="localhost:9092")
+    broker = BrokerClient(bootstrap_servers="localhost:9092")
 
     # Deploy the router node
     print("Registering router node...")
@@ -41,8 +41,8 @@ async def main():
         message_history_store=InMemoryMessageHistoryStore(),
         system_prompt="You are a helpful assistant. Use available tools when needed. Be concise.",
     )
-    router_runner = AgentRouterRunner(node=router_node)
-    router_runner.register_on(broker)
+    service = Service(broker)
+    service.register_node(router_node)
 
     print("  - AgentRouterNode registered")
     print(f"    Subscribe topic: {router_node.subscribed_topic}")
@@ -53,8 +53,8 @@ async def main():
 
     print("\nRouter node ready. Waiting for requests...")
 
-    # Run the broker app (this blocks)
-    await broker.run_app()
+    # Run the service (this blocks)
+    await service.run()
 
 
 if __name__ == "__main__":
