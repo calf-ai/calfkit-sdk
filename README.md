@@ -97,7 +97,6 @@ Deploy the router that orchestrates chat and tools.
 ```python
 import asyncio
 from calfkit.nodes import agent_tool, AgentRouterNode, ChatNode
-from calfkit.providers import OpenAIModelClient
 from calfkit.stores import InMemoryMessageHistoryStore
 from calfkit.broker import Broker
 from calfkit.runners import AgentRouterRunner
@@ -109,9 +108,8 @@ def get_weather(location: str) -> str:
 
 async def main():
     broker = Broker(bootstrap_servers="localhost:9092")
-    model_client = OpenAIModelClient(model_name="gpt-4o")
     router_node = AgentRouterNode(
-        chat_node=ChatNode(model_client),
+        chat_node=ChatNode(),
         tool_nodes=[get_weather],
         system_prompt="You are a helpful assistant",
         message_history_store=InMemoryMessageHistoryStore(),
@@ -126,28 +124,18 @@ asyncio.run(main())
 
 Send a request and receive the response.
 
+When invoking an already-deployed agent, you can use a thin client pattern. The node without a runner is just a configuration object—you don't need to redefine the deployment parameters.
+
 ```python
 import asyncio
-from calfkit.nodes import agent_tool, AgentRouterNode, ChatNode
-from calfkit.providers import OpenAIModelClient
-from calfkit.stores import InMemoryMessageHistoryStore
+from calfkit.nodes import AgentRouterNode
 from calfkit.broker import Broker
-
-@agent_tool
-def get_weather(location: str) -> str:
-    """Get the current weather at a location"""
-    return f"It's sunny in {location}"
 
 async def main():
     broker = Broker(bootstrap_servers="localhost:9092")
-    model_client = OpenAIModelClient(model_name="gpt-5-nano")
 
-    router_node = AgentRouterNode(
-        chat_node=ChatNode(model_client),
-        tool_nodes=[get_weather],
-        system_prompt="You are a helpful assistant",
-        message_history_store=InMemoryMessageHistoryStore(),
-    )
+    # Thin client - no deployment parameters needed
+    router_node = AgentRouterNode()
 
     correlation_id = await router_node.invoke(
         user_prompt="What's the weather in Tokyo?",
