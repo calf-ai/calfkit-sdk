@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.1...v0.1.2) (2026-02-04)
+
+
+### Bug Fixes
+
+* invoke function on unstarted broker + doc: readme quickstart examples ([#30](https://github.com/calf-ai/calfkit-sdk/issues/30)) ([bad4216](https://github.com/calf-ai/calfkit-sdk/commit/bad4216a779fe785f76bc627d4c61a98df800922))
+
 ## [0.1.1](https://github.com/calf-ai/calf-sdk/compare/v0.1.0...v0.1.1) (2026-02-03)
 
 

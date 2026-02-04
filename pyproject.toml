@@ -1,6 +1,6 @@
 [project]
 name = "calfkit"
-version = "0.1.1"
+version = "0.1.2"
 description = "Event-driven SDK for building AI workflows on Kafka"
 readme = "README.md"
 license = "Apache-2.0"
