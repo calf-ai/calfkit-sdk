@@ -1,7 +1,7 @@
 [project]
 name = "calfkit"
 version = "0.1.2"
-description = "Event-driven SDK for building AI workflows on Kafka"
+description = "Build loosely coupled, event-driven AI workflows and agents."
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Ryan Yu" }]
