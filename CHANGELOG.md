@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.3...v0.1.4) (2026-02-05)
+
+
+### Documentation
+
+* improve README with quickstart refinements and badges ([#37](https://github.com/calf-ai/calfkit-sdk/issues/37)) ([19e089e](https://github.com/calf-ai/calfkit-sdk/commit/19e089e54f841980c4ccdcff65e9e74579d8db74))
+
 ## [0.1.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.2...v0.1.3) (2026-02-05)
 
 
