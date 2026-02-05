@@ -3,7 +3,7 @@ import asyncio
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.chat_node import ChatNode
-from calfkit.runners.service import Service
+from calfkit.runners.service import NodesService
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
 
 # Import tools from tool_nodes - router needs schemas for LLM and topic routing
@@ -41,7 +41,7 @@ async def main():
         message_history_store=InMemoryMessageHistoryStore(),
         system_prompt="You are a helpful assistant. Use available tools when needed. Be concise.",
     )
-    service = Service(broker)
+    service = NodesService(broker)
     service.register_node(router_node)
 
     print("  - AgentRouterNode registered")

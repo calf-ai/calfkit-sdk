@@ -46,7 +46,7 @@ class InvokeResponse:
                 yield item.latest_message_in_history
 
     async def get_final_response(self) -> ModelMessage:
-        """Blocks until final response is received, then returns it.
+        """Blocks until final response is received and returns it.
 
         Returns:
             ModelMessage: The final response message from the model

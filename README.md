@@ -54,7 +54,7 @@ Define and deploy a tool as an independent service.
 import asyncio
 from calfkit.nodes import agent_tool
 from calfkit.broker import BrokerClient
-from calfkit.runners import Service
+from calfkit.runners import NodesService
 
 @agent_tool
 def get_weather(location: str) -> str:
@@ -63,7 +63,7 @@ def get_weather(location: str) -> str:
 
 async def main():
     broker = BrokerClient(bootstrap_servers="localhost:9092")
-    service = Service(broker)
+    service = NodesService(broker)
     service.register_node(get_weather)
     await service.run()
 
@@ -79,13 +79,13 @@ import asyncio
 from calfkit.nodes import ChatNode
 from calfkit.providers import OpenAIModelClient
 from calfkit.broker import BrokerClient
-from calfkit.runners import Service
+from calfkit.runners import NodesService
 
 async def main():
     broker = BrokerClient(bootstrap_servers="localhost:9092")
     model_client = OpenAIModelClient(model_name="gpt-5-nano")
     chat_node = ChatNode(model_client)
-    service = Service(broker)
+    service = NodesService(broker)
     service.register_node(chat_node)
     await service.run()
 
@@ -101,7 +101,7 @@ import asyncio
 from calfkit.nodes import agent_tool, AgentRouterNode, ChatNode
 from calfkit.stores import InMemoryMessageHistoryStore
 from calfkit.broker import BrokerClient
-from calfkit.runners import Service
+from calfkit.runners import NodesService
 
 @agent_tool
 def get_weather(location: str) -> str:
@@ -116,7 +116,7 @@ async def main():
         system_prompt="You are a helpful assistant",
         message_history_store=InMemoryMessageHistoryStore(),
     )
-    service = Service(broker)
+    service = NodesService(broker)
     service.register_node(router_node)
     await service.run()
 
@@ -127,27 +127,37 @@ asyncio.run(main())
 
 Send a request and receive the response.
 
-When invoking an already-deployed agent, you can use a thin client pattern. The node without a runner is just a configuration object—you don't need to redefine the deployment parameters.
+When invoking an already-deployed agent, use the `RouterServiceClient`. The node is just a configuration object—you don't need to redefine the deployment parameters.
 
 ```python
 import asyncio
 from calfkit.nodes import AgentRouterNode
 from calfkit.broker import BrokerClient
+from calfkit.runners import RouterServiceClient
 
 async def main():
     broker = BrokerClient(bootstrap_servers="localhost:9092")
 
     # Thin client - no deployment parameters needed
     router_node = AgentRouterNode()
+    client = RouterServiceClient(broker, router_node)
 
-    correlation_id = await router_node.invoke(
-        user_prompt="What's the weather in Tokyo?",
-        broker=broker,
-        final_response_topic="final_response",
-    )
-    print(f"Request started: {correlation_id}")
+    # Invoke and wait for response
+    response = await client.invoke(user_prompt="What's the weather in Tokyo?")
+    final_msg = await response.get_final_response()
+    print(f"Assistant: {final_msg.text}")
 
 asyncio.run(main())
+```
+
+The `RouterServiceClient` handles ephemeral Kafka subscriptions and cleanup automatically. You can also stream intermediate messages:
+
+```python
+response = await client.invoke(user_prompt="What's the weather in Tokyo?")
+
+# Stream all messages (tool calls, intermediate responses, etc.)
+async for message in response.messages_stream():
+    print(message)
 ```
 
 ## License

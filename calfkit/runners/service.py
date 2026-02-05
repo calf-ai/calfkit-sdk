@@ -4,7 +4,7 @@ from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.base_node import BaseNode
 
 
-class Service:
+class NodesService:
     def __init__(self, broker: BrokerClient):
         self._broker = broker
         return

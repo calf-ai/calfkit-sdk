@@ -72,11 +72,11 @@ class AgentRouterNode(BaseNode):
 
         The AgentRouterNode supports multiple initialization patterns depending on use case:
 
-        1. **Deployable Router Service** (with required parameters):
+        1. **Deployable Router NodesService** (with required parameters):
            Use when deploying the router as a service with all dependencies explicitly provided.
            Requires: chat_node, system_prompt (str), tool_nodes, message_history_store
 
-        2. **Deployable Router Service** (with optional parameters):
+        2. **Deployable Router NodesService** (with optional parameters):
            Use when deploying with optional or runtime-configurable dependencies.
            Requires: chat_node
            Optional: system_prompt, tool_nodes, handoff_nodes, message_history_store

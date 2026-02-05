@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.chat_node import ChatNode
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
-from calfkit.runners.service import Service
+from calfkit.runners.service import NodesService
 
 load_dotenv()
 
@@ -47,7 +47,7 @@ async def main():
     # Deploy the chat node
     print("Registering chat node...")
     chat_node = ChatNode(model_client)
-    service = Service(broker)
+    service = NodesService(broker)
     service.register_node(chat_node)
     print("  - ChatNode registered")
     print(f"    Subscribe topic: {chat_node.subscribed_topic}")

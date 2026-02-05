@@ -12,12 +12,18 @@ from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
-from calfkit.runners.service import Service
+from calfkit.runners.service import NodesService
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
 from tests.utils import wait_for_condition
 
-# Block actual model requests during testing
-models.ALLOW_MODEL_REQUESTS = False
+
+@pytest.fixture(autouse=True)
+def block_model_requests():
+    """Block actual model requests during unit tests."""
+    original_value = models.ALLOW_MODEL_REQUESTS
+    models.ALLOW_MODEL_REQUESTS = False
+    yield
+    models.ALLOW_MODEL_REQUESTS = original_value
 
 
 # Test fixtures - tools defined just for testing
@@ -108,7 +114,7 @@ async def test_agent_memory_with_function_model():
             raise AssertionError(f"Unexpected call count: {call_count}")
 
     broker = BrokerClient()
-    service = Service(broker)
+    service = NodesService(broker)
 
     # Create chat node with FunctionModel
     model_client = FunctionModel(memory_test_model)
@@ -134,10 +140,11 @@ async def test_agent_memory_with_function_model():
     async with TestKafkaBroker(broker) as _:
         # First invocation
         trace_id_1 = await router_node.invoke(
-            "Hello, my name is Alice",
+            user_prompt="Hello, my name is Alice",
             broker=broker,
             thread_id=expected_thread_id,
             final_response_topic="final_response",
+            correlation_id="test-memory-1",
         )
 
         # Wait for first response
@@ -151,10 +158,11 @@ async def test_agent_memory_with_function_model():
 
         # Second invocation with SAME thread_id - should access memory
         trace_id_2 = await router_node.invoke(
-            "What's my name?",
+            user_prompt="What's my name?",
             broker=broker,
             thread_id=expected_thread_id,
             final_response_topic="final_response",
+            correlation_id="test-memory-2",
         )
 
         # Wait for second response
@@ -234,7 +242,7 @@ async def test_tool_visibility_with_function_model():
             return ModelResponse(parts=[TextPart("The weather in Tokyo is rainy.")])
 
     broker = BrokerClient()
-    service = Service(broker)
+    service = NodesService(broker)
 
     # Create chat node with FunctionModel
     model_client = FunctionModel(tool_visibility_model)
@@ -262,9 +270,10 @@ async def test_tool_visibility_with_function_model():
 
     async with TestKafkaBroker(broker) as _:
         trace_id = await router_node.invoke(
-            "What's the weather in Tokyo?",
+            user_prompt="What's the weather in Tokyo?",
             broker=broker,
             final_response_topic="final_response",
+            correlation_id="test-tool-visibility-1",
         )
 
         # Wait for tool call response

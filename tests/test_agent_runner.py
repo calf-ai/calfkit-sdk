@@ -2,25 +2,25 @@ import asyncio
 import itertools
 import os
 import time
-from typing import Annotated
 
 import pytest
 from dotenv import load_dotenv
-from faststream import Context
 from faststream.kafka import TestKafkaBroker
-from pydantic_ai import ModelResponse
+from pydantic_ai import ModelResponse, models
 
 from calfkit.broker.broker import BrokerClient
-from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
-from calfkit.runners.service import Service
+from calfkit.runners.service import NodesService
+from calfkit.runners.service_client import RouterServiceClient
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
-from tests.utils import wait_for_condition
 
 load_dotenv()
+
+# Ensure model requests are allowed for integration tests
+models.ALLOW_MODEL_REQUESTS = True
 
 # Skip integration tests if OpenAI API key is not available
 skip_if_no_openai_key = pytest.mark.skipif(
@@ -29,8 +29,6 @@ skip_if_no_openai_key = pytest.mark.skipif(
 )
 
 counter = itertools.count()
-store: dict[str, asyncio.Queue[EventEnvelope]] = {}
-final_resp_store: dict[str, asyncio.Queue[EventEnvelope]] = {}
 
 
 @agent_tool
@@ -66,7 +64,7 @@ async def get_temperature(location: str) -> str:
 def deploy_broker() -> BrokerClient:
     # simulate the deployment pre-testing
     broker = BrokerClient()
-    service = Service(broker)
+    service = NodesService(broker)
 
     # 1. Deploy llm model node worker
     model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
@@ -88,18 +86,6 @@ def deploy_broker() -> BrokerClient:
     )
     service.register_node(router_node)
 
-    @broker.subscriber(router_node.publish_to_topic or "default_collect")
-    def trace(event_envelope: EventEnvelope, correlation_id: Annotated[str, Context()]):
-        if correlation_id not in store:
-            store[correlation_id] = asyncio.Queue()
-        store[correlation_id].put_nowait(event_envelope)
-
-    @broker.subscriber("final_response")
-    def gather(event_envelope: EventEnvelope, correlation_id: Annotated[str, Context()]):
-        if correlation_id not in final_resp_store:
-            final_resp_store[correlation_id] = asyncio.Queue()
-        final_resp_store[correlation_id].put_nowait(event_envelope)
-
     return broker
 
 
@@ -114,21 +100,14 @@ async def test_agent(deploy_broker):
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
 
-        trace_id = await router_node.invoke(
-            "Hey, what's the weather in Tokyo?",
-            broker=broker,
-            final_response_topic="final_response",
-        )
+        client = RouterServiceClient(broker, router_node)
+        response = await client.invoke(user_prompt="Hey, what's the weather in Tokyo?")
+        print(f"  Sent with correlation_id: {response.correlation_id[:8]}...")
 
-        queue = store[trace_id]
-        while not queue.empty():
-            result_envelope = queue.get_nowait()
-            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
-                print(f"Text: {result_envelope.latest_message_in_history.text}")
-                print(f"Tool calls: {result_envelope.latest_message_in_history.tool_calls}")
-            else:
-                print(f"{result_envelope}")
-            print("|")
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
+        assert isinstance(final_msg, ModelResponse)
+        print(f"Text: {final_msg.text}")
+        print(f"Tool calls: {final_msg.tool_calls}")
 
         print(f"{'=' * 10}End{'=' * 10}")
 
@@ -147,70 +126,43 @@ async def test_multi_turn_agent(deploy_broker):
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
         thread_id = str(next(counter))
 
-        trace_id = await router_node.invoke(
-            "Hey, what's your name? My name is LeBron by the way.",
-            broker=broker,
+        # First turn
+        client = RouterServiceClient(broker, router_node)
+        response = await client.invoke(
+            user_prompt="Hey, what's your name? My name is LeBron by the way.",
             thread_id=thread_id,
-            final_response_topic="final_response",
         )
 
-        await wait_for_condition(lambda: trace_id in final_resp_store, timeout=20.0)
-        queue = final_resp_store[trace_id]
-        while True:
-            result_envelope = await queue.get()
-            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
-                print(f"{result_envelope.latest_message_in_history.text}")
-            else:
-                print(f"{result_envelope}")
-            print("|")
-            if result_envelope.final_response:
-                assert isinstance(result_envelope.latest_message_in_history, ModelResponse)
-                assert result_envelope.latest_message_in_history.text is not None
-                assert "gpt" in result_envelope.latest_message_in_history.text.lower()
-                break
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
+        assert isinstance(final_msg, ModelResponse)
+        assert final_msg.text is not None
+        print(f"{final_msg.text}")
+        assert "gpt" in final_msg.text.lower()
 
-        trace_id = await router_node.invoke(
-            "Do you know the weather in Tokyo right now?",
-            broker=broker,
+        # Second turn
+        response = await client.invoke(
+            user_prompt="Do you know the weather in Tokyo right now?",
             thread_id=thread_id,
-            final_response_topic="final_response",
         )
 
-        await wait_for_condition(lambda: trace_id in final_resp_store, timeout=20.0)
-        queue = final_resp_store[trace_id]
-        while True:
-            result_envelope = await queue.get()
-            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
-                print(f"{result_envelope.latest_message_in_history.text}")
-            else:
-                print(f"{result_envelope}")
-            print("|")
-            if result_envelope.final_response:
-                assert isinstance(result_envelope.latest_message_in_history, ModelResponse)
-                assert result_envelope.latest_message_in_history.text is not None
-                assert "snow" in result_envelope.latest_message_in_history.text.lower()
-                break
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
+        assert isinstance(final_msg, ModelResponse)
+        assert final_msg.text is not None
+        print(f"{final_msg.text}")
+        assert "rain" in final_msg.text.lower()
 
-        trace_id = await router_node.invoke(
-            "Do you remember my name?",
-            broker=broker,
+        # Third turn
+        response = await client.invoke(
+            user_prompt="Do you remember my name?",
             thread_id=thread_id,
-            final_response_topic="final_response",
         )
-        await wait_for_condition(lambda: trace_id in final_resp_store, timeout=20.0)
-        queue = final_resp_store[trace_id]
-        while True:
-            result_envelope = await queue.get()
-            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
-                print(f"{result_envelope.latest_message_in_history.text}")
-            else:
-                print(f"{result_envelope}")
-            print("|")
-            if result_envelope.final_response:
-                assert isinstance(result_envelope.latest_message_in_history, ModelResponse)
-                assert result_envelope.latest_message_in_history.text is not None
-                assert "lebron" in result_envelope.latest_message_in_history.text.lower()
-                break
+
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
+        assert isinstance(final_msg, ModelResponse)
+        assert final_msg.text is not None
+        print(f"{final_msg.text}")
+        assert "lebron" in final_msg.text.lower()
+
         print(f"{'=' * 10}End{'=' * 10}")
 
 
@@ -226,28 +178,16 @@ async def test_parallel_tool_calls(deploy_broker):
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
         thread_id = str(next(counter))
 
-        trace_id = await asyncio.wait_for(
-            router_node.invoke(
-                "Hey, what's the temperature in Detroit and San Diego right now?",
-                broker=broker,
-                thread_id=thread_id,
-                final_response_topic="final_response",
-            ),
-            timeout=15.0,
+        client = RouterServiceClient(broker, router_node)
+        response = await client.invoke(
+            user_prompt="Hey, what's the temperature in Detroit and San Diego right now?",
+            thread_id=thread_id,
         )
 
-        queue = store[trace_id]
-        while True:
-            result_envelope = await queue.get()
-            if isinstance(result_envelope.latest_message_in_history, ModelResponse):
-                print(f"{result_envelope.latest_message_in_history.text}")
-            else:
-                print(f"{result_envelope}")
-            print("|")
-            if result_envelope.final_response:
-                assert isinstance(result_envelope.latest_message_in_history, ModelResponse)
-                assert result_envelope.latest_message_in_history.text is not None
-                assert "detroit" in result_envelope.latest_message_in_history.text.lower()
-                break
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
+        assert isinstance(final_msg, ModelResponse)
+        assert final_msg.text is not None
+        print(f"{final_msg.text}")
+        assert "detroit" in final_msg.text.lower()
 
         print(f"{'=' * 10}End{'=' * 10}")
