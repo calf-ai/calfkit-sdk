@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.2...v0.1.3) (2026-02-05)
+
+
+### Features
+
+* add RouterServiceClient for invoking agents services ([#36](https://github.com/calf-ai/calfkit-sdk/issues/36)) ([8cd6eca](https://github.com/calf-ai/calfkit-sdk/commit/8cd6ecaec18c4a34e255a2592b097ec69cb53318))
+* new `Service` class to deploy and run nodes as a service ([#33](https://github.com/calf-ai/calfkit-sdk/issues/33)) ([7066bf3](https://github.com/calf-ai/calfkit-sdk/commit/7066bf3329a9dd91a3e4abb8ee1d91a2001f1d53))
+
 ## [0.1.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.1...v0.1.2) (2026-02-04)
 
 
