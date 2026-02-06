@@ -1,6 +1,7 @@
 # 🐮 Calfkit SDK
 
 [![PyPI version](https://img.shields.io/pypi/v/calfkit)](https://pypi.org/project/calfkit/)
+[![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
 The SDK to build event-driven, distributed AI agents.
@@ -57,7 +58,7 @@ pip install calfkit
 
 ### Deploy the Tool Node
 
-Define and deploy a tool as an independent service.
+Define and deploy a tool as an independent service. Tools are not owned by or coupled to any specific agent—once deployed, any agent in your system can discover and invoke the tool. Deploy once, use everywhere.
 
 ```python
 # weather_tool.py
