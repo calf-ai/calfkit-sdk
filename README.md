@@ -9,6 +9,10 @@ The SDK to build event-driven, distributed AI agents.
 
 Calfkit lets you compose agents with independent services—chat, tools, routing—that communicate asynchronously. Add agent capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream system. Build employees that integrate.
 
+```bash
+pip install calfkit
+```
+
 ## Why Event-Driven?
 
 Building agents like traditional web applications, with tight coupling and synchronous API calls, creates the same scalability problems that plagued early microservices. Agents and workflows connected through APIs and RPC are plagued by:
@@ -41,6 +45,12 @@ Calfkit is a Python SDK that builds event-driven agents out-the-box. You get all
 - Docker installed and running (for local testing with a Calfkit broker)
 - OpenAI API key (or another OpenAI API compliant LLM provider)
 
+### Install
+
+```bash
+pip install calfkit
+```
+
 ### Start the Kafka Broker (Requires Docker)
 
 Calfkit uses Kafka as the event broker. Run the following command to clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local Kafka broker container:
@@ -51,13 +61,7 @@ $ git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && ma
 
 Once the broker is ready, open a new terminal tab to continue with the quickstart.
 
-### Install
-
-```bash
-pip install calfkit
-```
-
-### Deploy the Tool Node
+### Define and Deploy the Tool Node
 
 Define and deploy a tool as an independent service. Tools are not owned by or coupled to any specific agent—once deployed, any agent in your system can discover and invoke the tool. Deploy once, use everywhere.
 
@@ -68,6 +72,7 @@ from calfkit.nodes import agent_tool
 from calfkit.broker import BrokerClient
 from calfkit.runners import NodesService
 
+# Example tool definition
 @agent_tool
 def get_weather(location: str) -> str:
     """Get the current weather at a location"""
@@ -238,4 +243,4 @@ If you found this project interesting or useful, please consider:
 
 ## License
 
-Apache-2.0
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
