@@ -212,7 +212,7 @@ from weather_tool import get_weather
 # Client with runtime patches
 router_node = AgentRouterNode(
     system_prompt="You are an assistant with no tools :(",  # Override the deployed system prompt
-    tool_nodes=[],  # Patch in any subset of the deployed agent's tools
+    tool_nodes=[],  # Patch in any subset of the deployed agent's set of tools
 )
 client = RouterServiceClient(broker_client, router_node)
 response = await client.invoke(user_prompt="Weather in Tokyo?")
