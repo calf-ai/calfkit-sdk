@@ -222,7 +222,7 @@ response = await client.invoke(user_prompt="Weather in Tokyo?")
 This lets different clients customize agent behavior per-request. Tool patching is currently limited to subsets of tools configured in the deployed router.
 
 ## Motivation
-To move toward AI employees and AI-run companies, teams of agents must progress beyond brittle, tightly coupled, synchronous coordination. This requires embracing event-driven, asynchronous communication patterns between agents and their dependencies.
+Scalable agent teams must progress beyond brittle, tightly coupled, synchronous coordination. This means embracing event-driven, asynchronous communication patterns between agents and their dependencies. 
 
 ## Contact
 
