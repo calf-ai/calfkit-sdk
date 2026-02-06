@@ -1,8 +1,9 @@
 from typing import Any, TypeAlias
 
 from pydantic import BaseModel
-from pydantic_ai import ToolCallPart
 from typing_extensions import TypedDict
+
+from calfkit._vendor.pydantic_ai import ToolCallPart
 
 ToolCallRequest: TypeAlias = ToolCallPart
 

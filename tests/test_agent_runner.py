@@ -6,8 +6,8 @@ import time
 import pytest
 from dotenv import load_dotenv
 from faststream.kafka import TestKafkaBroker
-from pydantic_ai import ModelResponse, models
 
+from calfkit._vendor.pydantic_ai import ModelResponse, models
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool

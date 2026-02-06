@@ -4,9 +4,9 @@ from typing import Annotated
 import pytest
 from faststream import Context
 from faststream.kafka import TestKafkaBroker
-from pydantic_ai import ModelMessage, ModelResponse, TextPart, ToolCallPart, models
-from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from calfkit._vendor.pydantic_ai import ModelMessage, ModelResponse, TextPart, ToolCallPart, models
+from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode

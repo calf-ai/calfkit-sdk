@@ -4,9 +4,9 @@ from faststream import Context
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
-from pydantic_ai import ModelRequest, ModelResponse, SystemPromptPart
-from pydantic_ai.models import ModelRequestParameters
 
+from calfkit._vendor.pydantic_ai import ModelRequest, ModelResponse, SystemPromptPart
+from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.broker.broker import BrokerClient
 from calfkit.messages import patch_system_prompts, validate_tool_call_pairs
 from calfkit.models.event_envelope import EventEnvelope

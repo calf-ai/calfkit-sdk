@@ -4,7 +4,7 @@ This module provides utilities for working with pydantic_ai ModelMessage types,
 including message history manipulation and transformation.
 """
 
-from pydantic_ai.messages import (
+from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,

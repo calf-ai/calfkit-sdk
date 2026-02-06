@@ -1,7 +1,6 @@
 from collections import defaultdict
 
-from pydantic_ai.messages import ModelMessage
-
+from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.stores.base import MessageHistoryStore
 
 

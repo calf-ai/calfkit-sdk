@@ -1,0 +1,14 @@
+# Vendored dependencies
+# Format: package==version  source_url
+
+pydantic-ai==1.47.0  https://github.com/pydantic/pydantic-ai
+# Full package vendored, excluding:
+#   - agent/, _agent_graph.py, run.py (Agent bloat)
+#   - ui/ (UI adapters - Vercel AI, AG-UI, web app)
+#   - _cli/ (CLI tooling)
+#   - ag_ui.py (AG-UI protocol module)
+#   - __main__.py (CLI entry point)
+#   - common_tools/ (DuckDuckGo, Exa, Tavily integrations)
+# Modifications:
+#   - direct.py: Removed agent import, added set_instrument_default() function
+#   - __init__.py: Removed agent/run exports, hardcoded version

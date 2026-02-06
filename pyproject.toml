@@ -21,9 +21,19 @@ requires-python = ">=3.10"
 dependencies = [
     "faststream[kafka]>=0.6.6",
     "pydantic>=2.12.5",
-    "pydantic-ai>=1.47.0",
     "python-dotenv>=1.2.1",
     "uuid-utils>=0.14.0",
+    # Vendored pydantic-ai dependencies (from pydantic-ai-slim v1.47.0)
+    "httpx>=0.27",
+    "griffe>=1.14.0",
+    "typing-inspection>=0.4.0",
+    "opentelemetry-api>=1.28.0",
+    "genai-prices>=0.0.48",
+    "pydantic-graph>=1.47.0",
+    "exceptiongroup>=1.2.2; python_version < '3.11'",
+    # Provider SDKs
+    "openai>=1.0.0",
+    "anthropic>=0.20.0",
 ]
 
 [project.urls]
@@ -44,6 +54,7 @@ packages = ["calfkit"]
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+exclude = ["calfkit/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
@@ -53,6 +64,7 @@ python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
+exclude = ["calfkit/_vendor"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

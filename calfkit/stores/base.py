@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from pydantic_ai.messages import ModelMessage
+from calfkit._vendor.pydantic_ai.messages import ModelMessage
 
 
 class MessageHistoryStore(ABC):

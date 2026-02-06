@@ -1,8 +1,9 @@
 from typing import Any
 
 from httpx import Timeout
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
-from pydantic_ai.providers.openai import OpenAIProvider
+
+from calfkit._vendor.pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+from calfkit._vendor.pydantic_ai.providers.openai import OpenAIProvider
 
 
 class OpenAIModelClient(OpenAIChatModel):

@@ -1,8 +1,7 @@
 from collections.abc import Sequence
 
-from pydantic_ai import ModelMessage, ModelRequest
-from pydantic_ai.models import ModelRequestParameters
-
+from calfkit._vendor.pydantic_ai import ModelMessage, ModelRequest
+from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.types import CompactBaseModel, SerializableModelSettings, ToolCallRequest
 
 

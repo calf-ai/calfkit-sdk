@@ -6,8 +6,8 @@ from typing import Annotated, Any
 import uuid_utils
 from anyio import create_memory_object_stream
 from faststream import Context
-from pydantic_ai import ModelMessage
 
+from calfkit._vendor.pydantic_ai import ModelMessage
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode

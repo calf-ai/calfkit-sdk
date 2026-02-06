@@ -1,10 +1,9 @@
 from abc import ABC
 from typing import Any, cast
 
-from pydantic_ai import ModelResponse, ModelSettings
-from pydantic_ai.direct import model_request
-from pydantic_ai.models import Model, ModelRequestParameters
-
+from calfkit._vendor.pydantic_ai import ModelResponse, ModelSettings
+from calfkit._vendor.pydantic_ai.direct import model_request
+from calfkit._vendor.pydantic_ai.models import Model, ModelRequestParameters
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 
