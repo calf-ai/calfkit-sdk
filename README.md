@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/calfkit)](https://pypi.org/project/calfkit/)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
-The SDK to build AI employees. 
+The SDK to build asynchronous, distributed AI agents.
 
 Calfkit lets you compose agents with independent services—chat, tools, routing—that communicate asynchronously. Add agent capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream system. Build employees that integrate.
 
