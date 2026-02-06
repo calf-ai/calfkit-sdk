@@ -228,6 +228,13 @@ Scalable agent teams must progress beyond brittle, tightly coupled, synchronous 
 
 [![X](https://img.shields.io/badge/Follow-black?logo=x)](https://x.com/ryanyuhater)
 
+## Support
+
+If you found this project interesting or useful, please consider:
+- ⭐ Starring the repository — it helps others discover it!
+- 🐛 [Reporting issues](https://github.com/calf-ai/calfkit-sdk/issues)
+- 🔀 Submitting PRs
+
 ## License
 
 Apache-2.0
