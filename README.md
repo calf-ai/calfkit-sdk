@@ -202,6 +202,24 @@ async for message in response.messages_stream():
     print(message)
 ```
 
+### Runtime Configuration (Optional)
+
+Clients can override the system prompt and restrict available tools at invocation time without redeploying:
+
+```python
+from weather_tool import get_weather
+
+# Client with runtime patches
+router_node = AgentRouterNode(
+    system_prompt="You are a concise weather assistant",  # Override the deployed system prompt
+    tool_nodes=[get_weather],  # Use only a subset of deployed tools
+)
+client = RouterServiceClient(broker_client, router_node)
+response = await client.invoke(user_prompt="Weather in Tokyo?")
+```
+
+This lets different clients customize agent behavior per-request. Tool patching is currently limited to subsets of tools configured in the deployed router.
+
 ## Motivation
 To move toward AI employees and AI-run companies, teams of agents must progress beyond brittle, tightly coupled, synchronous coordination. This requires embracing event-driven, asynchronous communication patterns between agents and their dependencies.
 

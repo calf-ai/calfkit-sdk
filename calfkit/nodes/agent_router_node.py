@@ -40,7 +40,7 @@ class AgentRouterNode(BaseNode):
         chat_node: BaseNode,
         *,
         system_prompt: str | None = None,
-        tool_nodes: list[BaseToolNode] = [],
+        tool_nodes: list[BaseToolNode] | None = None,
         handoff_nodes: list[type[BaseNode]] = [],
         message_history_store: MessageHistoryStore | None = None,
         **kwargs: Any,
@@ -54,7 +54,7 @@ class AgentRouterNode(BaseNode):
         self,
         *,
         system_prompt: str | None = None,
-        tool_nodes: list[BaseToolNode] = [],
+        tool_nodes: list[BaseToolNode] | None = None,
         handoff_nodes: list[type[BaseNode]] = [],
     ): ...
 
@@ -63,7 +63,7 @@ class AgentRouterNode(BaseNode):
         chat_node: BaseNode | None = None,
         *,
         system_prompt: str | None = None,
-        tool_nodes: list[BaseToolNode] = [],
+        tool_nodes: list[BaseToolNode] | None = None,
         handoff_nodes: list[type[BaseNode]] = [],
         message_history_store: MessageHistoryStore | None = None,
         **kwargs: Any,
@@ -111,13 +111,15 @@ class AgentRouterNode(BaseNode):
         )
         self.message_history_store = message_history_store
 
-        self.tools_topic_registry: dict[str, str] = {
-            tool.tool_schema().name: tool.subscribed_topic
-            for tool in tool_nodes
-            if tool.subscribed_topic is not None
-        }
-
-        self.tool_response_topics = [tool.publish_to_topic for tool in self.tools]
+        self.tools_topic_registry: dict[str, str] | None = (
+            {
+                tool.tool_schema().name: tool.subscribed_topic
+                for tool in tool_nodes
+                if tool.subscribed_topic is not None
+            }
+            if tool_nodes is not None
+            else None
+        )
 
         super().__init__(**kwargs)
 
@@ -185,6 +187,8 @@ class AgentRouterNode(BaseNode):
             correlation_id: The correlation ID for request tracking.
             broker: The message broker for publishing.
         """
+        if self.tools_topic_registry is None:
+            raise RuntimeError("No tools configured on this router node, but tool was still called")
         tool_topic = self.tools_topic_registry.get(generated_tool_call.tool_name)
         if tool_topic is None:
             # TODO: implement a short circuit to respond with an
@@ -274,6 +278,8 @@ class AgentRouterNode(BaseNode):
         if patch_model_request_params is None:
             patch_model_request_params = ModelRequestParameters(
                 function_tools=[tool.tool_schema() for tool in self.tools]
+                if self.tools is not None
+                else []
             )
         event_envelope.patch_model_request_params = patch_model_request_params
         await broker.publish(
@@ -306,7 +312,7 @@ class AgentRouterNode(BaseNode):
 
         patch_model_request_params = (
             ModelRequestParameters(function_tools=[tool.tool_schema() for tool in self.tools])
-            if self.tools
+            if self.tools is not None
             else None
         )
         new_node_messages = [ModelRequest.user_text_prompt(user_prompt)]
