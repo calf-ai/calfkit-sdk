@@ -55,6 +55,12 @@ pip install calfkit
 
 ### Start the Kafka Broker (Requires Docker)
 
+> ☁️ **Calfkit Cloud**: Fully-Managed Kafka Service for AI Agents (Coming Soon)
+> - No infrastructure to self-host or manage
+> - Built-in agent observability & agent-event tracing
+>
+> [Fill out the interest form](https://forms.gle/Rk61GmHyJzequEPm8)
+
 Calfkit uses Kafka as the event broker. Run the following command to clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local Kafka broker container:
 
 ```shell
