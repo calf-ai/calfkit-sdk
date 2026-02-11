@@ -876,8 +876,10 @@ class OpenAIChatModel(Model):
         texts: list[str] = field(default_factory=list)
         thinkings: list[str] = field(default_factory=list)
         tool_calls: list[ChatCompletionMessageFunctionToolCallParam] = field(default_factory=list)
+        name: str | None = None
 
         def map_assistant_message(self, message: ModelResponse) -> chat.ChatCompletionAssistantMessageParam:
+            self.name = message.name
             for item in message.parts:
                 if isinstance(item, TextPart):
                     self._map_response_text_part(item)
@@ -916,6 +918,8 @@ class OpenAIChatModel(Model):
                 message_param['content'] = None
             if self.tool_calls:
                 message_param['tool_calls'] = self.tool_calls
+            if self.name is not None:
+                message_param['name'] = self.name
             return message_param
 
         def _map_response_text_part(self, item: TextPart) -> None:
@@ -1039,11 +1043,20 @@ class OpenAIChatModel(Model):
             if isinstance(part, SystemPromptPart):
                 system_prompt_role = OpenAIModelProfile.from_profile(self.profile).openai_system_prompt_role
                 if system_prompt_role == 'developer':
-                    yield chat.ChatCompletionDeveloperMessageParam(role='developer', content=part.content)
+                    dev_msg = chat.ChatCompletionDeveloperMessageParam(role='developer', content=part.content)
+                    if part.name is not None:
+                        dev_msg['name'] = part.name
+                    yield dev_msg
                 elif system_prompt_role == 'user':
-                    yield chat.ChatCompletionUserMessageParam(role='user', content=part.content)
+                    user_msg = chat.ChatCompletionUserMessageParam(role='user', content=part.content)
+                    if part.name is not None:
+                        user_msg['name'] = part.name
+                    yield user_msg
                 else:
-                    yield chat.ChatCompletionSystemMessageParam(role='system', content=part.content)
+                    sys_msg = chat.ChatCompletionSystemMessageParam(role='system', content=part.content)
+                    if part.name is not None:
+                        sys_msg['name'] = part.name
+                    yield sys_msg
             elif isinstance(part, UserPromptPart):
                 yield await self._map_user_prompt(part)
             elif isinstance(part, ToolReturnPart):
@@ -1165,7 +1178,10 @@ class OpenAIChatModel(Model):
                     pass
                 else:
                     assert_never(item)
-        return chat.ChatCompletionUserMessageParam(role='user', content=content)
+        msg = chat.ChatCompletionUserMessageParam(role='user', content=content)
+        if part.name is not None:
+            msg['name'] = part.name
+        return msg
 
     @staticmethod
     def _is_text_like_media_type(media_type: str) -> bool:

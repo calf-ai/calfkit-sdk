@@ -132,6 +132,12 @@ class SystemPromptPart:
     Only set if system prompt is dynamic, see [`system_prompt`][pydantic_ai.agent.Agent.system_prompt] for more information.
     """
 
+    name: str | None = None
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the same role.
+    """
+
     part_kind: Literal['system-prompt'] = 'system-prompt'
     """Part type identifier, this is available on all parts as a discriminator."""
 
@@ -748,6 +754,12 @@ class UserPromptPart:
     timestamp: datetime = field(default_factory=_now_utc)
     """The timestamp of the prompt."""
 
+    name: str | None = None
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the same role.
+    """
+
     part_kind: Literal['user-prompt'] = 'user-prompt'
     """Part type identifier, this is available on all parts as a discriminator."""
 
@@ -1028,9 +1040,9 @@ class ModelRequest:
     """Additional data that can be accessed programmatically by the application but is not sent to the LLM."""
 
     @classmethod
-    def user_text_prompt(cls, user_prompt: str, *, instructions: str | None = None) -> ModelRequest:
+    def user_text_prompt(cls, user_prompt: str, *, instructions: str | None = None, name: str | None = None) -> ModelRequest:
         """Create a `ModelRequest` with a single user prompt as text."""
-        return cls(parts=[UserPromptPart(user_prompt)], instructions=instructions)
+        return cls(parts=[UserPromptPart(user_prompt, name=name)], instructions=instructions)
 
     __repr__ = _utils.dataclasses_no_defaults_repr
 
@@ -1285,6 +1297,15 @@ class ModelResponse:
 
     model_name: str | None = None
     """The name of the model that generated the response."""
+
+    name: str | None = None
+    """An optional name for the participant in a multi-agent conversation.
+
+    Provides the model information to differentiate between participants of the same role.
+    Distinct from `model_name`, which identifies the LLM, not the conversational participant.
+    Not populated from API responses (OpenAI does not return `name` in completions).
+    Set by application code for attribution in multi-agent scenarios.
+    """
 
     timestamp: datetime = field(default_factory=_now_utc)
     """The timestamp when the response was received locally.
