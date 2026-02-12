@@ -12,7 +12,7 @@ class MessageHistoryStore(ABC):
     """
 
     @abstractmethod
-    async def get(self, thread_id: str) -> list[ModelMessage]:
+    async def get(self, thread_id: str, scope: str | None = None) -> list[ModelMessage]:
         """Load message history for a thread.
 
         Args:
@@ -25,7 +25,7 @@ class MessageHistoryStore(ABC):
         ...
 
     @abstractmethod
-    async def append(self, thread_id: str, message: ModelMessage) -> None:
+    async def append(self, thread_id: str, message: ModelMessage, scope: str | None = None) -> None:
         """Append a single message to history.
 
         This is the primary method for strong consistency - each message
@@ -37,7 +37,9 @@ class MessageHistoryStore(ABC):
         """
         ...
 
-    async def append_many(self, thread_id: str, messages: Sequence[ModelMessage]) -> None:
+    async def append_many(
+        self, thread_id: str, messages: Sequence[ModelMessage], scope: str | None = None
+    ) -> None:
         """Append multiple messages to history.
 
         Default implementation calls append() for each message.
@@ -48,10 +50,10 @@ class MessageHistoryStore(ABC):
             messages: List of messages to append.
         """
         for message in messages:
-            await self.append(thread_id, message)
+            await self.append(thread_id, message, scope)
 
     @abstractmethod
-    async def delete(self, thread_id: str) -> None:
+    async def delete(self, thread_id: str, scope: str | None = None) -> None:
         """Delete all messages for a thread.
 
         Args:

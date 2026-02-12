@@ -5,10 +5,12 @@ from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
 
-from calfkit._vendor.pydantic_ai import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart
+from calfkit._vendor.pydantic_ai import ModelRequest, ModelResponse, SystemPromptPart
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.broker.broker import BrokerClient
+from calfkit.gates.registry import load_gate
 from calfkit.messages import patch_system_prompts, validate_tool_call_pairs
+from calfkit.messages.utils import append_system_prompt
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.types import ToolCallRequest
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
@@ -29,7 +31,7 @@ class AgentRouterNode(BaseNode):
         *,
         system_prompt: str,
         tool_nodes: list[BaseToolNode],
-        handoff_nodes: list[type[BaseNode]] = [],
+        handoff_nodes: list[type[BaseNode]] | None = None,
         message_history_store: MessageHistoryStore,
         **kwargs: Any,
     ): ...
@@ -41,7 +43,7 @@ class AgentRouterNode(BaseNode):
         *,
         system_prompt: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
-        handoff_nodes: list[type[BaseNode]] = [],
+        handoff_nodes: list[type[BaseNode]] | None = None,
         message_history_store: MessageHistoryStore | None = None,
         **kwargs: Any,
     ): ...
@@ -55,7 +57,7 @@ class AgentRouterNode(BaseNode):
         *,
         system_prompt: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
-        handoff_nodes: list[type[BaseNode]] = [],
+        handoff_nodes: list[type[BaseNode]] | None = None,
     ): ...
 
     def __init__(
@@ -65,7 +67,7 @@ class AgentRouterNode(BaseNode):
         system_prompt: str | None = None,
         name: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
-        handoff_nodes: list[type[BaseNode]] = [],
+        handoff_nodes: list[type[BaseNode]] | None = None,
         message_history_store: MessageHistoryStore | None = None,
         **kwargs: Any,
     ):
@@ -103,7 +105,7 @@ class AgentRouterNode(BaseNode):
         """
         self.chat = chat_node
         self.tools = tool_nodes
-        self.handoffs = handoff_nodes
+        self.handoffs = handoff_nodes if handoff_nodes is not None else []
         self.system_prompt = system_prompt
         self.system_message = (
             ModelRequest(parts=[SystemPromptPart(self.system_prompt)])
@@ -132,21 +134,41 @@ class AgentRouterNode(BaseNode):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
-        if not ctx.uncommitted_messages_exist and not ctx.is_groupchat:
+        if not ctx.has_uncommitted_messages:
             raise RuntimeError("There is no response message to process")
 
+        # Strip ephemeral gate prompts injected by _call_model() on the
+        # previous iteration. The LLM has already seen them; keeping them
+        # would pollute history for tool-return cycles and downstream agents.
+        if ctx.groupchat_data is not None:
+            ctx.message_history = [
+                msg
+                for msg in ctx.message_history
+                if not (isinstance(msg, ModelRequest) and (msg.metadata or {}).get("ephemeral"))
+            ]
+
+        if ctx.groupchat_data is not None and not ctx.groupchat_data.is_current_turn_empty:
+            if isinstance(ctx.groupchat_data.uncommitted_turn.messages[-1], ModelResponse):
+                gate = load_gate(ctx.groupchat_data.gate_kind)
+                result = gate.gate(ctx.groupchat_data.uncommitted_turn.messages[-1].text)
+                if result.skip:
+                    ctx.groupchat_data.mark_skip_current_turn()
+                    await self._reply_to_sender(ctx, correlation_id, broker)
+                    return ctx
+
         # One central place where message history is updated
-        if (
-            self.message_history_store is not None
-            and ctx.thread_id is not None
-            and not ctx.is_groupchat
-        ):
+        uncommitted_messages = ctx.pop_all_uncommited_agent_messages()
+        if self.message_history_store is not None and ctx.thread_id is not None:
             await self.message_history_store.append_many(
-                thread_id=ctx.thread_id, messages=ctx.pop_all_uncommited_agent_messages()
+                thread_id=ctx.thread_id,
+                messages=uncommitted_messages,
+                scope=self.name,
             )
-            ctx.message_history = await self.message_history_store.get(thread_id=ctx.thread_id)
+            ctx.message_history = await self.message_history_store.get(
+                thread_id=ctx.thread_id, scope=self.name
+            )
         else:
-            ctx.message_history.extend(ctx.pop_all_uncommited_agent_messages())
+            ctx.message_history.extend(uncommitted_messages)
 
         # Apply system prompts with priority: incoming patch > self.system_message > existing history
         # First, apply self.system_message as fallback (replaces existing history)
@@ -157,6 +179,10 @@ class AgentRouterNode(BaseNode):
                 ctx.message_history,
                 [self.system_message],
             )
+        if ctx.groupchat_data is not None and ctx.groupchat_data.system_prompt_addition is not None:
+            ctx.message_history = append_system_prompt(
+                ctx.message_history, ctx.groupchat_data.system_prompt_addition
+            )
 
         if isinstance(ctx.latest_message_in_history, ModelResponse):
             if (
@@ -166,7 +192,7 @@ class AgentRouterNode(BaseNode):
                 await self._route_tool_calls(
                     ctx, ctx.latest_message_in_history.tool_calls, correlation_id, broker
                 )
-            elif ctx.is_groupchat:
+            elif ctx.groupchat_data is not None and ctx.groupchat_data.is_current_turn_empty:
                 # Groupchat mode first entry: the latest ModelResponse is from
                 # another agent, not this agent's LLM. Call model for this agent's turn.
                 await self._call_model(ctx, correlation_id, broker)
@@ -291,6 +317,20 @@ class AgentRouterNode(BaseNode):
                 else []
             )
         event_envelope.patch_model_request_params = patch_model_request_params
+        if event_envelope.name is None:
+            event_envelope.name = self.name
+
+        # Inject an ephemeral gate prompt only on the first LLM call of
+        # this agent's turn (when the agent decides whether to participate).
+        # Subsequent calls (tool-return cycles) must not re-inject it.
+        if (
+            event_envelope.groupchat_data is not None
+            and event_envelope.groupchat_data.is_current_turn_empty
+        ):
+            gate = load_gate(event_envelope.groupchat_data.gate_kind)
+            gate_msg = ModelRequest.user_text_prompt(gate.prompt())
+            gate_msg.metadata = {"ephemeral": True}
+            event_envelope.message_history.append(gate_msg)
         await broker.publish(
             event_envelope,
             topic=self.chat.subscribed_topic,  # type: ignore
@@ -338,6 +378,8 @@ class AgentRouterNode(BaseNode):
         event_envelope.prepare_uncommitted_agent_messages(
             [ModelRequest.user_text_prompt(user_prompt)]
         )
+        if self.name is not None:
+            event_envelope.name = self.name
         await broker.publish(
             event_envelope,
             topic=self.subscribed_topic or "",

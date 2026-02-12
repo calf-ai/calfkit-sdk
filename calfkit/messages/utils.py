@@ -68,6 +68,41 @@ def patch_system_prompts(
     return [system_msg] + result
 
 
+def append_system_prompt(
+    messages: list[ModelMessage],
+    addition: str,
+) -> list[ModelMessage]:
+    """Append a system prompt part to the message history.
+
+    Iterates the message list in reverse to find the last SystemPromptPart
+    and inserts a new SystemPromptPart immediately after it. This ensures
+    the addition is always the final system prompt part in the history.
+
+    If no SystemPromptPart exists, a new ModelRequest is prepended.
+
+    Args:
+        messages: The message history.
+        addition: The system prompt text to add.
+
+    Returns:
+        A new message list with the system prompt addition applied.
+    """
+    result = list(messages)
+
+    for i in range(len(result) - 1, -1, -1):
+        msg = result[i]
+        if not isinstance(msg, ModelRequest):
+            continue
+        for j in range(len(msg.parts) - 1, -1, -1):
+            if isinstance(msg.parts[j], SystemPromptPart):
+                new_parts = list(msg.parts)
+                new_parts.insert(j + 1, SystemPromptPart(addition))
+                result[i] = ModelRequest(parts=new_parts)
+                return result
+
+    return [ModelRequest(parts=[SystemPromptPart(addition)])] + result
+
+
 def validate_tool_call_pairs(messages: list[ModelMessage]) -> bool:
     """Validate that all tool calls have corresponding tool results.
 

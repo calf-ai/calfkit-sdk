@@ -1,6 +1,3 @@
-from collections.abc import Sequence
-from typing import Literal
-
 from pydantic import Field
 
 from calfkit._vendor.pydantic_ai import ModelMessage, ModelRequest
@@ -27,12 +24,15 @@ class EventEnvelope(CompactBaseModel):
     # Running message history
     message_history: list[ModelMessage] = Field(default_factory=list)
 
+    # Optional name to save LLM generated messages under
+    name: str | None = None
+
     @property
     def latest_message_in_history(self) -> ModelMessage | None:
         return self.message_history[-1] if self.message_history else None
 
     # Uncommitted messages, often coming out from a node and not yet persisted in message history
-    _uncommitted_messages: list[ModelMessage] = Field(default_factory=list)
+    uncommitted_messages: list[ModelMessage] = Field(default_factory=list)
 
     # thread id / conversation identifier
     thread_id: str | None = None
@@ -45,7 +45,7 @@ class EventEnvelope(CompactBaseModel):
     final_response_topic: str | None = None
 
     # Whether the current state of messages is the final response from the AI to the user
-    _final_response: bool = False
+    final_response: bool = False
 
     # For holding groupchat data and config. Only to directly be accessed by the groupchat node.
     groupchat_data: GroupchatDataModel | None = None
@@ -56,26 +56,26 @@ class EventEnvelope(CompactBaseModel):
 
     @property
     def is_end_of_turn(self):
-        return self._final_response
+        return self.final_response
 
     @property
-    def uncommitted_messages_exist(self):
-        """Check if the envelope has an uncommitted, unprocessed message."""
-        return self._uncommitted_messages
+    def has_uncommitted_messages(self) -> bool:
+        """Check if the envelope has uncommitted, unprocessed messages."""
+        return bool(self.uncommitted_messages)
 
     def mark_as_end_of_turn(self):
-        self._final_response = True
+        self.final_response = True
 
     def mark_as_start_of_turn(self):
-        self._final_response = False
+        self.final_response = False
 
     def add_to_uncommitted_messages(self, message: ModelMessage):
-        """Add message to uncommitted list at the agent level and grouchat level, if it exists.
+        """Add message to uncommitted list when returning out of a node, if it exists.
 
         Args:
             message (ModelMessage): new message
         """
-        self._uncommitted_messages.append(message)
+        self.uncommitted_messages.append(message)
         if self.groupchat_data is not None:
             self.groupchat_data.add_uncommitted_message_to_turn(message)
 
@@ -85,10 +85,18 @@ class EventEnvelope(CompactBaseModel):
         Args:
             messages (list[ModelMessage]): list of messages
         """
-        self._uncommitted_messages = messages
+        self.uncommitted_messages = messages
 
     def pop_all_uncommited_agent_messages(self):
         """Clears the list of uncommitted agent-level messages and returns them"""
-        messages = self._uncommitted_messages
-        self._uncommitted_messages = []
+        messages = self.uncommitted_messages
+        self.uncommitted_messages = []
         return messages
+
+    def replace_uncommitted_with_turn_context(self) -> None:
+        """Replace uncommitted messages with conversation context from the groupchat turns queue."""
+        self.uncommitted_messages = (
+            self.groupchat_data.flat_messages_from_turns_queue
+            if self.groupchat_data is not None
+            else []
+        )

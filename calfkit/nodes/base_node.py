@@ -26,7 +26,7 @@ class BaseNode(ABC):
 
     _handler_registry: dict[Callable[..., Any], dict[str, str]] = {}
 
-    def __init__(self, name: str | None, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, name: str | None = None, *args: Any, **kwargs: Any) -> None:
         self.name = name
         self.bound_registry: dict[Callable[..., Any], dict[str, str]] = {
             fn.__get__(self, type(self)): topics_dict

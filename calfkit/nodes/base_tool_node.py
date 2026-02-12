@@ -46,4 +46,4 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
     ToolNode.__doc__ = func.__doc__
     ToolNode.__module__ = func.__module__
 
-    return ToolNode()
+    return ToolNode(name=ToolNode.__name__)

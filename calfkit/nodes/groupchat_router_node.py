@@ -25,13 +25,9 @@ class GroupchatNode(BaseNode, ABC):
         shared_system_prompt_addition: str | None = None,
         **kwargs,
     ):
-        self._agent_nodes = agent_nodes
         self._agent_node_topics = [
             node.subscribed_topic for node in agent_nodes if node.subscribed_topic is not None
         ]
-        self._topic_to_agent_node = {
-            node.subscribed_topic: node for node in agent_nodes if node.subscribed_topic is not None
-        }
         self._shared_system_prompt_addition = shared_system_prompt_addition
         super().__init__(**kwargs)
 
@@ -43,55 +39,41 @@ class GroupchatNode(BaseNode, ABC):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
-        if event_envelope.groupchat_data is None:  # manual None check for type checker
+        if event_envelope.groupchat_data is None:
             raise RuntimeError("No groupchat data/config provided in groupchat node")
 
-        if event_envelope.groupchat_data.groupchat_agent_topics is None:
-            event_envelope.groupchat_data.groupchat_agent_topics = self._agent_node_topics
-
-        if (
-            event_envelope.groupchat_data.system_prompt_addition is None
-            and self._shared_system_prompt_addition is not None
-        ):
-            # fallback system prompt
-            event_envelope.groupchat_data.patch_system_prompt_addition(
-                self._shared_system_prompt_addition
-            )
+        event_envelope.groupchat_data.ensure_defaults(
+            self._agent_node_topics, self._shared_system_prompt_addition
+        )
 
         event_envelope.groupchat_data.commit_turn()
+        # Snapshot taken after the completed turn is committed but before
+        # forward-looking routing mutations (turn index, skip counter, context swap).
+        # This is the semantically correct observation state: the turn index
+        # still identifies the agent that just finished, and uncommitted_messages
+        # still contain that agent's response.
+        observer_snapshot = event_envelope.model_copy(deep=True)
 
-        original_event_envelope = event_envelope.model_copy(deep=True)
+        event_envelope.replace_uncommitted_with_turn_context()
+        all_skipped = event_envelope.groupchat_data.advance_to_next_turn()
 
-        event_envelope.pop_all_uncommited_agent_messages()
-        flat_msgs = event_envelope.groupchat_data.flat_messages_from_turns_queue
-
-        event_envelope.prepare_uncommitted_agent_messages(flat_msgs)
-        event_envelope.groupchat_data.increment_turn_index()
-        event_envelope.groupchat_data.increment_skip(
-            reset=not event_envelope.groupchat_data.just_skipped
-        )
-        if event_envelope.groupchat_data.is_all_skipped():
+        if all_skipped:
             event_envelope.mark_as_end_of_turn()
             return event_envelope
-        await self._call_agent(event_envelope, correlation_id=correlation_id, broker=broker)
 
-        return original_event_envelope
+        await self._call_agent(event_envelope, correlation_id=correlation_id, broker=broker)
+        return observer_snapshot
 
     async def _call_agent(
         self, event_envelope: EventEnvelope, correlation_id: str, broker: BrokerAnnotation
     ):
         if event_envelope.groupchat_data is None:
             raise RuntimeError("Groupchat data is None for a call to a groupchat")
-        if event_envelope.groupchat_data.groupchat_agent_topics is None:
-            event_envelope.groupchat_data.groupchat_agent_topics = self._agent_node_topics
 
-        agents_group_size = len(event_envelope.groupchat_data.groupchat_agent_topics)
-        agent_input_topic = event_envelope.groupchat_data.groupchat_agent_topics[
-            event_envelope.groupchat_data.turn_index % agents_group_size
-        ]
         event_envelope.final_response_topic = self.subscribed_topic
+        event_envelope.mark_as_start_of_turn()
         await broker.publish(
             event_envelope,
-            topic=agent_input_topic,
+            topic=event_envelope.groupchat_data.current_agent_topic,
             correlation_id=correlation_id,
         )
