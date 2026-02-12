@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import Annotated
+from typing import Annotated, Any
 
 from faststream import Context
 from faststream.kafka.annotations import (
@@ -23,7 +23,7 @@ class GroupchatNode(BaseNode, ABC):
         agent_nodes: list[AgentRouterNode],
         *,
         shared_system_prompt_addition: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ):
         self._agent_node_topics = [
             node.subscribed_topic for node in agent_nodes if node.subscribed_topic is not None
@@ -66,7 +66,7 @@ class GroupchatNode(BaseNode, ABC):
 
     async def _call_agent(
         self, event_envelope: EventEnvelope, correlation_id: str, broker: BrokerAnnotation
-    ):
+    ) -> None:
         if event_envelope.groupchat_data is None:
             raise RuntimeError("Groupchat data is None for a call to a groupchat")
 

@@ -22,8 +22,7 @@ class GroupchatGate(DecisionGate):
             "If you do not want to send a message, reply with the exact text"
             f" '{self._ignore} ' followed by a concise reason why you chose"
             " not to send a message.",
-            "Otherwise, if you would like to send a message,"
-            " just respond as usual.",
+            "Otherwise, if you would like to send a message, just respond as usual.",
             "</system_reminder>",
         ]
         return "\n".join(lines) + "\n"

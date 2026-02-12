@@ -65,7 +65,7 @@ class BaseNode(ABC):
     async def invoke(self, *args: Any, **kwargs: Any) -> str:
         raise NotImplementedError()
 
-    async def _invoke_from_node(self, *args, **kwargs):
+    async def _invoke_from_node(self, *args: Any, **kwargs: Any) -> None:
         """Internal use method for other nodes to use and communicate with this node
 
         Args:

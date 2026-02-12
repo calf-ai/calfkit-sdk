@@ -170,7 +170,7 @@ class AgentRouterNode(BaseNode):
         else:
             ctx.message_history.extend(uncommitted_messages)
 
-        # Apply system prompts with priority: incoming patch > self.system_message > existing history
+        # Apply system prompts w/ priority: incoming patch > self.system_message > existing history
         # First, apply self.system_message as fallback (replaces existing history)
         if ctx.system_message is not None:
             ctx.message_history = patch_system_prompts(ctx.message_history, [ctx.system_message])

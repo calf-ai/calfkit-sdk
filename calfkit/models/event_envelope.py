@@ -51,11 +51,11 @@ class EventEnvelope(CompactBaseModel):
     groupchat_data: GroupchatDataModel | None = None
 
     @property
-    def is_groupchat(self):
+    def is_groupchat(self) -> bool:
         return self.groupchat_data is not None
 
     @property
-    def is_end_of_turn(self):
+    def is_end_of_turn(self) -> bool:
         return self.final_response
 
     @property
@@ -63,13 +63,13 @@ class EventEnvelope(CompactBaseModel):
         """Check if the envelope has uncommitted, unprocessed messages."""
         return bool(self.uncommitted_messages)
 
-    def mark_as_end_of_turn(self):
+    def mark_as_end_of_turn(self) -> None:
         self.final_response = True
 
-    def mark_as_start_of_turn(self):
+    def mark_as_start_of_turn(self) -> None:
         self.final_response = False
 
-    def add_to_uncommitted_messages(self, message: ModelMessage):
+    def add_to_uncommitted_messages(self, message: ModelMessage) -> None:
         """Add message to uncommitted list when returning out of a node, if it exists.
 
         Args:
@@ -79,7 +79,7 @@ class EventEnvelope(CompactBaseModel):
         if self.groupchat_data is not None:
             self.groupchat_data.add_uncommitted_message_to_turn(message)
 
-    def prepare_uncommitted_agent_messages(self, messages: list[ModelMessage]):
+    def prepare_uncommitted_agent_messages(self, messages: list[ModelMessage]) -> None:
         """Prepare and set the agent-level uncommitted messages with provided messages.
 
         Args:
@@ -87,7 +87,7 @@ class EventEnvelope(CompactBaseModel):
         """
         self.uncommitted_messages = messages
 
-    def pop_all_uncommited_agent_messages(self):
+    def pop_all_uncommited_agent_messages(self) -> list[ModelMessage]:
         """Clears the list of uncommitted agent-level messages and returns them"""
         messages = self.uncommitted_messages
         self.uncommitted_messages = []

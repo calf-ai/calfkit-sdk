@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Sequence
+from collections.abc import Sequence
 
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.stores.base import MessageHistoryStore
