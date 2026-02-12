@@ -30,7 +30,7 @@ class InvokeResponse:
         if self.finished:
             return
         await self.send.send(item)
-        if item.final_response:
+        if item.is_end_of_turn:
             self._final_response = item.latest_message_in_history
             await self.send.aclose()
             self._done.set()

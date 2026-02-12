@@ -26,7 +26,8 @@ class BaseNode(ABC):
 
     _handler_registry: dict[Callable[..., Any], dict[str, str]] = {}
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, name: str | None = None, *args: Any, **kwargs: Any) -> None:
+        self.name = name
         self.bound_registry: dict[Callable[..., Any], dict[str, str]] = {
             fn.__get__(self, type(self)): topics_dict
             for fn, topics_dict in self._handler_registry.items()
@@ -62,4 +63,15 @@ class BaseNode(ABC):
         return None
 
     async def invoke(self, *args: Any, **kwargs: Any) -> str:
+        raise NotImplementedError()
+
+    async def _invoke_from_node(self, *args: Any, **kwargs: Any) -> None:
+        """Internal use method for other nodes to use and communicate with this node
+
+        Args:
+            TBD
+
+        Returns:
+            TBD
+        """
         raise NotImplementedError()

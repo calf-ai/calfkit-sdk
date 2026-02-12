@@ -34,11 +34,7 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
                 content=result,
                 tool_call_id=tool_cal_req.tool_call_id,
             )
-            event_envelope = event_envelope.model_copy(
-                update={
-                    "uncommitted_messages": [ModelRequest(parts=[tool_result])],
-                }
-            )
+            event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
             return event_envelope
 
         @classmethod
@@ -50,4 +46,4 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
     ToolNode.__doc__ = func.__doc__
     ToolNode.__module__ = func.__module__
 
-    return ToolNode()
+    return ToolNode(name=ToolNode.__name__)

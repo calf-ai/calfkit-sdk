@@ -4,6 +4,7 @@ import time
 import uuid
 from typing import Annotated
 
+import uuid_utils
 from faststream import Context
 
 from calfkit.broker.broker import BrokerClient
@@ -56,11 +57,13 @@ class ChatReplCli:
             Tuple of (response_text, elapsed_time_seconds)
         """
         start_time = time.monotonic()
+        correlation_id = uuid_utils.uuid7().hex
         correlation_id = await self.router_node.invoke(
             user_prompt=user_message,
             broker=self.broker,
             final_response_topic="final_response",
             thread_id=self.thread_id,
+            correlation_id=correlation_id,
         )
 
         # Wait for response
@@ -73,7 +76,7 @@ class ChatReplCli:
             response = await asyncio.wait_for(response_queue.get(), timeout=5.0)
 
             elapsed = time.monotonic() - start_time
-            if response.final_response and response.latest_message_in_history:
+            if response.is_end_of_turn and response.latest_message_in_history:
                 text = getattr(response.latest_message_in_history, "text", None)
                 if text:
                     return text, elapsed
