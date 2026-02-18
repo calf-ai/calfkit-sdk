@@ -13,11 +13,9 @@ from calfkit.messages import patch_system_prompts, validate_tool_call_pairs
 from calfkit.messages.utils import append_system_prompt
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.types import ToolCallRequest
-from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
+from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_private, subscribe_to
 from calfkit.nodes.base_tool_node import BaseToolNode
 from calfkit.stores.base import MessageHistoryStore
-
-# TODO: implement better engineered design for how private reply topics are set
 
 
 # TODO: consider a pattern where public input
@@ -133,27 +131,8 @@ class AgentRouterNode(BaseNode):
 
         super().__init__(name=name, **kwargs)
 
-        # TODO: figure out a less hacky or messy way to do private reply topic registration
-        # When named, create a private reply topic so that return traffic
-        # (ChatNode responses, tool results) is routed only to this instance
-        # instead of fan-out to all routers on the shared subscription topic.
-        if name is not None:
-            self._reply_topic: str | None = f"agent_router.{name}.replies"
-            for handler, topics in self.bound_registry.items():
-                if topics.get("subscribe_topic") == self._router_sub_topic_name:
-                    # Copy to avoid mutating the class-level _handler_registry
-                    self.bound_registry[handler] = {
-                        **topics,
-                        "subscribe_topics": [
-                            self._router_sub_topic_name,  # shared data stream
-                            self._reply_topic,  # private return address
-                        ],
-                    }
-                    break
-        else:
-            self._reply_topic = None
-
     @subscribe_to(_router_sub_topic_name)
+    @subscribe_private("agent_router.private.{name}")
     @publish_to(_router_pub_topic_name)
     async def _router(
         self,
@@ -261,7 +240,7 @@ class AgentRouterNode(BaseNode):
             event_envelope,
             topic=tool_topic,
             correlation_id=correlation_id,
-            reply_to=self._reply_topic or self.subscribed_topic,
+            reply_to=self.private_subscribed_topic or self.subscribed_topic,
         )
 
     def _requires_sequential_tool_calls(self, ctx: EventEnvelope) -> bool:
@@ -362,7 +341,7 @@ class AgentRouterNode(BaseNode):
             event_envelope,
             topic=self.chat.subscribed_topic,  # type: ignore
             correlation_id=correlation_id,
-            reply_to=self._reply_topic or self.subscribed_topic,
+            reply_to=self.private_subscribed_topic or self.subscribed_topic,
         )
 
     async def invoke(

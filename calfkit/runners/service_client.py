@@ -82,7 +82,7 @@ class RouterServiceClient:
 
         return _handle_responses, response_pipe
 
-    async def invoke(
+    async def request(
         self,
         user_prompt: str,
         *,
@@ -91,7 +91,8 @@ class RouterServiceClient:
         correlation_id: str | None = None,
         **kwargs: Any,
     ) -> InvokeResponse:
-        """Invoke the service
+        """Invoke the service via a request and wait for a response.
+        Synchronous request->response communication model.
 
         Args:
             user_prompt (str): User prompt to request the model
