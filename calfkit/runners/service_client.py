@@ -133,3 +133,37 @@ class RouterServiceClient:
         response_pipe._cleanup_task = asyncio.create_task(cleanup_when_done())
 
         return response_pipe
+
+    async def invoke(
+        self,
+        user_prompt: str,
+        *,
+        final_response_topic: str | None = None,
+        thread_id: str | None = None,
+        correlation_id: str | None = None,
+        **kwargs: Any,
+    ):
+        """Invoke method to asynchronously publish message to the node,
+        following fire-and-forget pattern.
+
+        Args:
+            user_prompt (str): User prompt to request the model
+            final_response_topic (str | None, optional): The final topic to respond to when
+            the agent node is done. Defaults to None.
+            thread_id (str | None, optional): The conversation ID. Defaults to None.
+            correlation_id (str | None, optional): Optionally provide a correlation ID
+            for this request. Defaults to None.
+        """
+        if correlation_id is None:
+            correlation_id = uuid_utils.uuid7().hex
+        # Only start broker if not already connected, otherwise just start the new subscriber
+        if not self._broker._connection:
+            await self._broker.start()
+        await self._node.invoke(
+            user_prompt=user_prompt,
+            broker=self._broker,
+            final_response_topic=final_response_topic,
+            thread_id=thread_id,
+            correlation_id=correlation_id,
+            **kwargs,
+        )
