@@ -56,7 +56,7 @@ async def main():
             try:
                 # Invoke the agent
                 router_client = RouterServiceClient(broker, router_node)
-                resp = await router_client.invoke(user_prompt=query)
+                resp = await router_client.request(user_prompt=query)
                 print(f"  Sent with correlation_id: {resp.correlation_id[:8]}...")
 
                 # Wait for the response

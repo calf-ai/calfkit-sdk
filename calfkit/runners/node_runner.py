@@ -24,8 +24,8 @@ class NodeRunner(Registrator):
     ) -> None:
         for handler_fn, topics_dict in self.node.bound_registry.items():
             pub: str | None = topics_dict.get("publish_topic")
-            sub: str | None = topics_dict.get("subscribe_topic")
-            if sub is not None:
+            subs: list[str] = topics_dict.get("subscribe_topics", [])
+            for sub in subs:
                 handler_fn = broker.subscriber(
                     sub, max_workers=max_workers, group_id=group_id, **extra_subscribe_kwargs
                 )(handler_fn)

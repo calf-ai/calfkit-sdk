@@ -127,7 +127,7 @@ async def main():
         service.register_node(router, group_id=agent_name)
         tool_names = ", ".join(t.tool_schema().name for t in agent_config["tools"])
         print(f"  - Router {agent_name} registered (topic: {router.subscribed_topic})")
-        print(f"    Reply topic: {router._reply_topic}")
+        print(f"    Reply topic: {router.private_subscribed_topic}")
         print(f"    Tools: {tool_names}")
 
     print("\nRouter nodes ready. Waiting for requests...")

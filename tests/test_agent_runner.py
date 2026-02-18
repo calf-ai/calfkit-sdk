@@ -101,7 +101,7 @@ async def test_agent(deploy_broker):
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
 
         client = RouterServiceClient(broker, router_node)
-        response = await client.invoke(user_prompt="Hey, what's the weather in Tokyo?")
+        response = await client.request(user_prompt="Hey, what's the weather in Tokyo?")
         print(f"  Sent with correlation_id: {response.correlation_id[:8]}...")
 
         final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
@@ -128,7 +128,7 @@ async def test_multi_turn_agent(deploy_broker):
 
         # First turn
         client = RouterServiceClient(broker, router_node)
-        response = await client.invoke(
+        response = await client.request(
             user_prompt="Hey, what's your name? My name is LeBron by the way.",
             thread_id=thread_id,
         )
@@ -140,7 +140,7 @@ async def test_multi_turn_agent(deploy_broker):
         assert "gpt" in final_msg.text.lower()
 
         # Second turn
-        response = await client.invoke(
+        response = await client.request(
             user_prompt="Do you know the weather in Tokyo right now?",
             thread_id=thread_id,
         )
@@ -152,7 +152,7 @@ async def test_multi_turn_agent(deploy_broker):
         assert "rain" in final_msg.text.lower()
 
         # Third turn
-        response = await client.invoke(
+        response = await client.request(
             user_prompt="Do you remember my name?",
             thread_id=thread_id,
         )
@@ -179,7 +179,7 @@ async def test_parallel_tool_calls(deploy_broker):
         thread_id = str(next(counter))
 
         client = RouterServiceClient(broker, router_node)
-        response = await client.invoke(
+        response = await client.request(
             user_prompt="Hey, what's the temperature in Detroit and San Diego right now?",
             thread_id=thread_id,
         )

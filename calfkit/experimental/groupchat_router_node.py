@@ -11,7 +11,7 @@ from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 
 
-class GroupchatNode(BaseNode, ABC):
+class RoundRobinGroupchatNode(BaseNode, ABC):
     """Node defining the llm chat node internal wiring.
     Separate from any logic for LLM persona or behaviour."""
 
@@ -26,7 +26,9 @@ class GroupchatNode(BaseNode, ABC):
         **kwargs: Any,
     ):
         self._agent_node_topics = [
-            node.subscribed_topic for node in agent_nodes if node.subscribed_topic is not None
+            node.private_subscribed_topic
+            for node in agent_nodes
+            if node.private_subscribed_topic is not None
         ]
         self._shared_system_prompt_addition = shared_system_prompt_addition
         super().__init__(**kwargs)
