@@ -121,7 +121,8 @@ class BaseNode(ABC):
         return None
 
     @cached_property
-    def input_message_schema(self) -> type[BaseModel]: ...
+    def input_message_schema(self) -> type[BaseModel]:
+        raise NotImplementedError("input_message_schema is not implemented")
 
     async def invoke(self, *args: Any, **kwargs: Any) -> str:
         raise NotImplementedError()

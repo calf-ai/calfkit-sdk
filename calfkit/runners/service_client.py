@@ -142,7 +142,7 @@ class RouterServiceClient:
         thread_id: str | None = None,
         correlation_id: str | None = None,
         **kwargs: Any,
-    ):
+    ) -> str:
         """Invoke method to asynchronously publish message to the node,
         following fire-and-forget pattern.
 
@@ -159,7 +159,7 @@ class RouterServiceClient:
         # Only start broker if not already connected, otherwise just start the new subscriber
         if not self._broker._connection:
             await self._broker.start()
-        await self._node.invoke(
+        return await self._node.invoke(
             user_prompt=user_prompt,
             broker=self._broker,
             final_response_topic=final_response_topic,
