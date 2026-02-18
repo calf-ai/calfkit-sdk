@@ -15,10 +15,12 @@ class NodesService:
         *,
         max_workers: int = 1,
         # group_id explicitly set as to avoid duplicated processing for separate deployments
-        group_id: str = "default",
+        group_id: str | None = None,  # Don't touch unless you know what you're doing
         extra_publish_kwargs: dict[str, Any] = {},
         extra_subscribe_kwargs: dict[str, Any] = {},
     ) -> None:
+        if group_id is None and node.name is not None:
+            group_id = node.name
         for handler_fn, topics_dict in node.bound_registry.items():
             pub: str | None = topics_dict.get("publish_topic")
             if pub is not None:

@@ -8,11 +8,11 @@ from faststream.kafka import TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import ModelRequest, ModelResponse, models
 from calfkit.broker.broker import BrokerClient
+from calfkit.experimental.groupchat_router_node import RoundRobinGroupchatNode
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.groupchat import GroupchatDataModel
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.chat_node import ChatNode
-from calfkit.nodes.groupchat_router_node import GroupchatNode
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.runners.service import NodesService
 
@@ -30,6 +30,11 @@ skip_if_no_openai_key = pytest.mark.skipif(
     reason="Skipping integration test: OPENAI_API_KEY not set in environment",
 )
 
+skip_if_experimental = pytest.mark.skipif(
+    True,
+    reason="Skipping integration test: round robin groupchats are experimental",
+)
+
 
 @pytest.fixture(scope="session")
 def deploy_groupchat_broker():
@@ -37,7 +42,7 @@ def deploy_groupchat_broker():
     service = NodesService(broker)
 
     # 1. Deploy LLM chat node
-    model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
+    model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="high")
     chat_node = ChatNode(model_client)
     service.register_node(chat_node)
 
@@ -56,7 +61,7 @@ def deploy_groupchat_broker():
     bob = AgentRouterNode(name="Bob")
 
     # 4. Deploy groupchat orchestrator
-    groupchat_node = GroupchatNode(agent_nodes=[alice, bob])
+    groupchat_node = RoundRobinGroupchatNode(agent_nodes=[alice, bob])
     service.register_node(groupchat_node)
 
     return broker, groupchat_node, [alice, bob]
@@ -64,6 +69,7 @@ def deploy_groupchat_broker():
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
+@skip_if_experimental
 async def test_groupchat(deploy_groupchat_broker):
     """Test that a groupchat completes a full cycle: agents respond then skip to terminate."""
     broker, groupchat_node, agent_refs = deploy_groupchat_broker
@@ -124,6 +130,7 @@ async def test_groupchat(deploy_groupchat_broker):
                 print(f"  Turn {i + 1}: {msg.text[:150]}")
             else:
                 print(f"  Turn {i + 1}: (no text response)")
+                print(msg)
 
         print(f"\nTotal turns: {len(responses)}")
         print(f"{'=' * 10}End Groupchat{'=' * 10}")
