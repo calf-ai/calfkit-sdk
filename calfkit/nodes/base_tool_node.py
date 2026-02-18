@@ -8,6 +8,9 @@ from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 
 
+# TODO: implement a way to dynamically inject runtime variables into the tool input,
+# which the agent should not be aware about.
+# Think pythonic ways to do this, does it relate to Contexts?
 class BaseToolNode(BaseNode, ABC):
     @classmethod
     @abstractmethod

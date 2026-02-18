@@ -1,7 +1,7 @@
 from abc import ABC
 from collections.abc import Callable
 from functools import cached_property
-from typing import Any
+from typing import Any, TypedDict
 
 
 def subscribe_to(topic_name: str) -> Callable[[Any], Any]:
@@ -20,15 +20,23 @@ def publish_to(topic_name: str) -> Callable[[Any], Any]:
     return decorator
 
 
+class TopicsDict(TypedDict, total=False):
+    """Describes the pub/sub wiring for a single handler method."""
+
+    publish_topic: str
+    subscribe_topic: str
+    subscribe_topics: list[str]
+
+
 class BaseNode(ABC):
     """Effectively a node is the data plane, defining the internal wiring and logic.
     When provided to a NodeRunner, node logic can be deployed."""
 
-    _handler_registry: dict[Callable[..., Any], dict[str, str]] = {}
+    _handler_registry: dict[Callable[..., Any], TopicsDict] = {}
 
     def __init__(self, name: str | None = None, *args: Any, **kwargs: Any) -> None:
         self.name = name
-        self.bound_registry: dict[Callable[..., Any], dict[str, str]] = {
+        self.bound_registry: dict[Callable[..., Any], TopicsDict] = {
             fn.__get__(self, type(self)): topics_dict
             for fn, topics_dict in self._handler_registry.items()
         }
