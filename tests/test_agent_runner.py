@@ -119,7 +119,7 @@ async def test_multi_turn_agent(deploy_broker):
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
-        system_prompt="Please speak like an insufferable gen z teenager in 2026",
+        system_prompt="Please speak like an insufferable gen z teenager in 2026. Your name is Jeff",
         # override the deployment system prompt
     )
     async with TestKafkaBroker(broker) as _:
@@ -137,7 +137,7 @@ async def test_multi_turn_agent(deploy_broker):
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
         print(f"{final_msg.text}")
-        assert "gpt" in final_msg.text.lower()
+        assert "jeff" in final_msg.text.lower()
 
         # Second turn
         response = await client.request(

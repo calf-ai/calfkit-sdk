@@ -49,7 +49,7 @@ async def main():
     print(f"    Publish topic: {router_node.publish_to_topic}")
     print("    Tools registered:")
     for tool in [get_exchange_rate, get_stock_price, get_weather]:
-        print(f"      - {tool.tool_schema().name} -> {tool.subscribed_topic}")
+        print(f"      - {tool.tool_schema.name} -> {tool.subscribed_topic}")
 
     print("\nRouter node ready. Waiting for requests...")
 

@@ -12,16 +12,19 @@ from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 # which the agent should not be aware about.
 # Think pythonic ways to do this, does it relate to Contexts?
 class BaseToolNode(BaseNode, ABC):
-    @classmethod
+    @property
     @abstractmethod
-    def tool_schema(cls) -> ToolDefinition: ...
+    def tool_schema(self) -> ToolDefinition: ...
 
 
 def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> BaseToolNode:
     """Agent tool decorator to turn a function into a deployable node"""
-    tool = Tool(func)
 
     class ToolNode(BaseToolNode):
+        def __init__(self, *args: Any, **kwargs: Any):
+            self.tool = Tool(func)
+            super().__init__(*args, **kwargs)
+
         @subscribe_to(f"tool_node.{func.__name__}.request")
         @publish_to(f"tool_node.{func.__name__}.result")
         async def on_enter(self, event_envelope: EventEnvelope) -> EventEnvelope:
@@ -40,9 +43,9 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
             event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
             return event_envelope
 
-        @classmethod
-        def tool_schema(cls) -> ToolDefinition:
-            return cast(ToolDefinition, tool.tool_def)
+        @property
+        def tool_schema(self) -> ToolDefinition:
+            return cast(ToolDefinition, self.tool.tool_def)
 
     ToolNode.__name__ = func.__name__
     ToolNode.__qualname__ = func.__qualname__

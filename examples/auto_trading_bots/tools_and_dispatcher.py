@@ -79,7 +79,7 @@ async def main():
     print("\nRegistering trading tool nodes...")
     for tool in ALL_TOOLS:
         service.register_node(tool)
-        print(f"  - {tool.tool_schema().name} (topic: {tool.subscribed_topic})")
+        print(f"  - {tool.tool_schema.name} (topic: {tool.subscribed_topic})")
 
     # ── Agent dispatcher ─────────────────────────────────────────
     print("\nRegistering agent dispatcher...")
