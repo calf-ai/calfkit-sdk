@@ -16,9 +16,7 @@ from calfkit.nodes.base_tool_node import BaseToolNode
 class HandoffTool(BaseToolNode):
     tool_name = "handoff_tool"
 
-    def __init__(
-        self, nodes: list[BaseNode], *, name: str, caller_private_topic: str, **kwargs: Any
-    ):
+    def __init__(self, nodes: list[BaseNode], **kwargs: Any):
         description = f"""Use this tool to handoff the task or conversation to another agent.
 The names of the agents that you can handoff to are as listed:
 {", ".join(node.name for node in nodes if node.name)}
@@ -32,7 +30,6 @@ Args:
             for handoff in nodes
             if handoff.private_subscribed_topic is not None and handoff.name is not None
         }
-        self.caller_private_topic = caller_private_topic
 
         def handoff_tool(name: str, message: str):
             """Use this tool to handoff the task or conversation to another agent.
@@ -48,9 +45,11 @@ Args:
             name=self.tool_name,
             description=description,
         )
-        super().__init__(name=name, **kwargs)
+        node_names = sorted(n.name for n in nodes if n.name)
+        resolved_name = f"handoff_{'_'.join(node_names)}"
+        super().__init__(name=resolved_name, **kwargs)
         # Resolved topic for Phase 2 — must match the @subscribe_private template below
-        self._delegation_response_topic = f"tool_node.handoff.response.{name}"
+        self._delegation_response_topic = f"tool_node.handoff.response.{resolved_name}"
 
     # --- Phase 1: Delegation entry point ---
     # IMPORTANT: on_enter must be defined before on_delegation_response so that
@@ -61,6 +60,7 @@ Args:
         self,
         event_envelope: EventEnvelope,
         correlation_id: Annotated[str, Context()],
+        reply_to: Annotated[str, Context("message.reply_to")],
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
         if not event_envelope.tool_call_request:
@@ -83,6 +83,17 @@ Args:
             event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
             return event_envelope
 
+        # Validate reply_to — caller must publish with reply_to set
+        if not reply_to:
+            tool_result = ToolReturnPart(
+                tool_name=tool_call_req.tool_name,
+                content="Error: handoff requires reply_to (caller must publish with reply_to set).",
+                tool_call_id=tool_call_req.tool_call_id,
+            )
+            event_envelope.tool_call_request = None
+            event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
+            return event_envelope
+
         # Validate thread_id — error case returns normally via reply_to
         if event_envelope.thread_id is None:
             tool_result = ToolReturnPart(
@@ -98,7 +109,7 @@ Args:
 
         # Build the handoff frame capturing the caller's return address
         frame = HandoffFrame(
-            caller_private_topic=self.caller_private_topic,
+            caller_private_topic=reply_to,
             caller_final_response_topic=event_envelope.final_response_topic,
             tool_call_id=tool_call_req.tool_call_id,
             tool_name=tool_call_req.tool_name,

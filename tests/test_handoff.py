@@ -65,17 +65,13 @@ def deploy_handoff_broker() -> tuple[BrokerClient, AgentRouterNode, AgentRouterN
         message_history_store=InMemoryMessageHistoryStore(),
         system_prompt=(
             "You are a weather specialist. When asked about weather, "
-            "use the get_weather tool and report the results. Be concise."
+            "you can use your tool and report the results. Be concise."
         ),
     )
     service.register_node(agent_b_router, group_id="agent_b")
 
     # 4. Deploy HandoffTool scoped to Agent A
-    handoff = HandoffTool(
-        nodes=[agent_b_router],
-        name="agent_a",
-        caller_private_topic="agent_router.private.agent_a",
-    )
+    handoff = HandoffTool(nodes=[agent_b_router])
     service.register_node(handoff)
 
     # 5. Deploy Agent A (the dispatcher that delegates)
@@ -86,8 +82,8 @@ def deploy_handoff_broker() -> tuple[BrokerClient, AgentRouterNode, AgentRouterN
         message_history_store=InMemoryMessageHistoryStore(),
         system_prompt=(
             "You are a dispatcher agent. You do NOT answer questions yourself. "
-            "You MUST use the handoff_tool to delegate all weather questions to agent_b. "
-            "After receiving the delegation result, summarize the response for the user."
+            "You can use the handoff_tool to delegate questions or tasks to another AI agent. "
+            "After receiving the delegation result, you should summarize the response for the user."
         ),
     )
     service.register_node(agent_a_router, group_id="agent_a")
