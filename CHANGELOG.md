@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.7](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.6...v0.1.7) (2026-02-20)
+
+
+### Features
+
+* agent-to-agent communication and groupchat support  ([#56](https://github.com/calf-ai/calfkit-sdk/issues/56)) ([8d7fd4d](https://github.com/calf-ai/calfkit-sdk/commit/8d7fd4d17e91d1f31a8ac70355bbbaab452f5ed6))
+* declarative private topic subscriptions and caller pattern updates ([#61](https://github.com/calf-ai/calfkit-sdk/issues/61)) ([b37c423](https://github.com/calf-ai/calfkit-sdk/commit/b37c4238fc4db7d2ef993efe6945ed45e68f5668))
+* private reply-topic routing for multi-agent deployments and trading bots example  ([#58](https://github.com/calf-ai/calfkit-sdk/issues/58)) ([3f13c80](https://github.com/calf-ai/calfkit-sdk/commit/3f13c807fe746a511d5f2295de5c8a067a407b92))
+* stack-based agent handoff with @entrypoint/[@returnpoint](https://github.com/returnpoint) decorators ([#63](https://github.com/calf-ai/calfkit-sdk/issues/63)) ([2418fd6](https://github.com/calf-ai/calfkit-sdk/commit/2418fd6bf173f2b979c4a48654c86a0058866c6e))
+
+
+### Documentation
+
+* add support to documentation and improve readability ([#50](https://github.com/calf-ai/calfkit-sdk/issues/50)) ([e333239](https://github.com/calf-ai/calfkit-sdk/commit/e333239f28e85a6db3181c37cfbec1997b67fb18))
+* calfkit cloud interest form ([#53](https://github.com/calf-ai/calfkit-sdk/issues/53)) ([5206020](https://github.com/calf-ai/calfkit-sdk/commit/5206020c44a5951fcee99770968aa60dc3a15943))
+* update calfkit cloud docs and add linkedin contact ([#55](https://github.com/calf-ai/calfkit-sdk/issues/55)) ([bcf9fb5](https://github.com/calf-ai/calfkit-sdk/commit/bcf9fb5f2b6d44c7911be7139715c351f88e00d8))
+* update readme ([#57](https://github.com/calf-ai/calfkit-sdk/issues/57)) ([bd22061](https://github.com/calf-ai/calfkit-sdk/commit/bd2206197113db7f5753b36b6f49614df72e3276))
+* use TIP syntax for Calfkit Cloud callout ([#54](https://github.com/calf-ai/calfkit-sdk/issues/54)) ([5c6fa4e](https://github.com/calf-ai/calfkit-sdk/commit/5c6fa4e6b3a0e6cc6bbf05df74ef3d03cfadc27f))
+
 ## [0.1.6](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.5...v0.1.6) (2026-02-06)
 
 ### Refactor
