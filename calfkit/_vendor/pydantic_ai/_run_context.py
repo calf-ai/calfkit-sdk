@@ -14,9 +14,10 @@ from . import _utils
 from . import messages as _messages
 from ._instrumentation import DEFAULT_INSTRUMENTATION_VERSION
 
+from .usage import RunUsage
+
 if TYPE_CHECKING:
     from .models import Model
-    from .result import RunUsage
 
 # TODO (v2): Change the default for all typevars like this from `None` to `object`
 AgentDepsT = TypeVar('AgentDepsT', default=None, contravariant=True)
@@ -32,9 +33,9 @@ class RunContext(Generic[RunContextAgentDepsT]):
 
     deps: RunContextAgentDepsT
     """Dependencies for the agent."""
-    model: Model
+    model: Model | None = None
     """The model used in this run."""
-    usage: RunUsage
+    usage: RunUsage = field(default_factory=RunUsage)
     """LLM usage associated with the run."""
     prompt: str | Sequence[_messages.UserContent] | None = None
     """The original user prompt passed to the run."""

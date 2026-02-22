@@ -1,3 +1,4 @@
+from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_node import BaseNode, entrypoint, publish_to, returnpoint, subscribe_to
 from calfkit.nodes.base_tool_node import BaseToolNode, agent_tool
@@ -10,6 +11,7 @@ __all__ = [
     "BaseToolNode",
     "ChatNode",
     "Registrator",
+    "ToolContext",
     "agent_tool",
     "entrypoint",
     "publish_to",

@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from typing import Annotated
 
 import pytest
@@ -9,6 +10,7 @@ from calfkit._vendor.pydantic_ai import ModelMessage, ModelResponse, TextPart, T
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
@@ -285,3 +287,157 @@ async def test_tool_visibility_with_function_model():
         # The model should have received the tool return and made a final response
         # Verify our assertions in the FunctionModel passed
         assert tool_call_made  # The tool was called
+
+
+# Test: ToolContext schema exclusion
+
+
+def test_tool_context_excluded_from_schema():
+    """Verify that ToolContext is excluded from the tool's JSON schema.
+
+    When a tool function declares ToolContext as its first parameter,
+    the generated schema should NOT include ToolContext — it's an
+    internal runtime injection, invisible to the LLM.
+    """
+
+    @agent_tool
+    def my_tool(ctx: ToolContext, query: str) -> str:
+        """Search for something.
+
+        Args:
+            query: The search query.
+        """
+        return f"result for {query}"
+
+    schema = my_tool.tool_schema
+    properties = schema.parameters_json_schema.get("properties", {})
+    assert "ctx" not in properties, f"ToolContext leaked into schema: {properties}"
+    assert "query" in properties, f"Expected 'query' in schema: {properties}"
+
+
+# Test: ToolContext backward compatibility
+
+
+def test_tools_without_context_still_work():
+    """Existing tools without ToolContext must keep working identically."""
+    schema = get_weather.tool_schema
+    properties = schema.parameters_json_schema.get("properties", {})
+    assert "location" in properties
+    assert "ctx" not in properties
+
+
+# Test: ToolContext runtime injection
+
+
+@agent_tool
+def ctx_echo_tool(ctx: ToolContext, message: str) -> str:
+    """Echo back the agent name and deps from context.
+
+    Args:
+        message: A message to echo.
+    """
+    return f"agent={ctx.agent_name} deps={ctx.deps} msg={message}"
+
+
+@pytest.mark.asyncio
+async def test_tool_context_runtime_injection():
+    """Test that ToolContext is injected at runtime with agent_name and deps.
+
+    Uses FunctionModel to trigger a tool call, then verifies the tool
+    receives a populated ToolContext with the correct agent_name and deps.
+    """
+    tool_call_made = False
+
+    @dataclass
+    class MyDeps:
+        api_key: str
+
+    def ctx_injection_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal tool_call_made
+        if not tool_call_made:
+            tool_call_made = True
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="ctx_echo_tool",
+                        args={"message": "hello"},
+                        tool_call_id="ctx-test-call-1",
+                    )
+                ]
+            )
+        else:
+            return ModelResponse(parts=[TextPart("done")])
+
+    broker = BrokerClient()
+    service = NodesService(broker)
+
+    model_client = FunctionModel(ctx_injection_model)
+    chat_node = ChatNode(model_client)
+    service.register_node(chat_node)
+
+    my_deps = MyDeps(api_key="sk-test-123")
+    router_node = AgentRouterNode(
+        chat_node=ChatNode(model_client),
+        tool_nodes=[ctx_echo_tool],
+        name="test_agent",
+        deps_type=MyDeps,
+    )
+    service.register_node(router_node)
+    service.register_node(ctx_echo_tool)
+
+    response_store: dict[str, asyncio.Queue[EventEnvelope]] = {}
+
+    @broker.subscriber(router_node.publish_to_topic or "default_collect")
+    def collect_response(event_envelope: EventEnvelope, correlation_id: Annotated[str, Context()]):
+        if correlation_id not in response_store:
+            response_store[correlation_id] = asyncio.Queue()
+        response_store[correlation_id].put_nowait(event_envelope)
+
+    async with TestKafkaBroker(broker) as _:
+        trace_id = await router_node.invoke(
+            user_prompt="Call the tool",
+            broker=broker,
+            final_response_topic="final_response",
+            correlation_id="test-ctx-inject-1",
+            deps=my_deps,
+        )
+
+        await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
+        queue = response_store[trace_id]
+        result = await queue.get()
+        assert isinstance(result.latest_message_in_history, ModelResponse)
+
+        # Verify the tool was called and received correct context
+        assert tool_call_made
+
+        # Find the tool return in message history to verify context injection
+        tool_returns = [
+            part
+            for msg in result.message_history
+            for part in msg.parts
+            if hasattr(part, "content") and hasattr(part, "tool_name") and part.tool_name == "ctx_echo_tool"
+        ]
+        assert len(tool_returns) == 1, f"Expected 1 tool return, got {len(tool_returns)}"
+        content = tool_returns[0].content
+        assert "agent=test_agent" in content, f"agent_name not injected: {content}"
+        assert "sk-test-123" in content, f"deps not injected: {content}"
+        assert "msg=hello" in content, f"message arg missing: {content}"
+
+
+# Test: deps round-trip through EventEnvelope
+
+
+def test_deps_round_trip_on_envelope():
+    """Verify that deps set on EventEnvelope survives serialization."""
+
+    @dataclass
+    class Config:
+        url: str
+
+    envelope = EventEnvelope(
+        trace_id="test",
+        deps=Config(url="https://example.com"),
+        agent_name="my_agent",
+    )
+    assert envelope.deps.url == "https://example.com"
+    assert envelope.agent_name == "my_agent"

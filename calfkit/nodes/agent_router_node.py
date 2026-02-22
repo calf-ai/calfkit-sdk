@@ -68,6 +68,7 @@ class AgentRouterNode(BaseNode):
         name: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
         message_history_store: MessageHistoryStore | None = None,
+        deps_type: type | None = None,
         **kwargs: Any,
     ):
         """Initialize an AgentRouterNode.
@@ -111,6 +112,7 @@ class AgentRouterNode(BaseNode):
             else None
         )
         self.message_history_store = message_history_store
+        self.deps_type = deps_type
 
         self.tools_topic_registry: dict[str, str] | None = (
             {
@@ -135,6 +137,8 @@ class AgentRouterNode(BaseNode):
     ) -> EventEnvelope:
         if not ctx.has_uncommitted_messages:
             return ctx
+
+        ctx.agent_name = self.name
 
         # One central place where message history is updated
         uncommitted_messages = ctx.pop_all_uncommited_agent_messages()
@@ -301,6 +305,7 @@ class AgentRouterNode(BaseNode):
         final_response_topic: str | None = None,
         correlation_id: str,
         thread_id: str | None = None,
+        deps: Any = None,
     ) -> str:
         """Invoke the agent
 
@@ -328,6 +333,7 @@ class AgentRouterNode(BaseNode):
             thread_id=thread_id,
             system_message=self.system_message,
             final_response_topic=final_response_topic,
+            deps=deps,
         )
         event_envelope.mark_as_start_of_turn()
         event_envelope.prepare_uncommitted_agent_messages(

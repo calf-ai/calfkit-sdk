@@ -1,16 +1,15 @@
-import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Annotated, Any, cast
+
+from faststream import Context
 
 from calfkit._vendor.pydantic_ai import ModelRequest, Tool, ToolDefinition, ToolReturnPart
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 
 
-# TODO: implement a way to dynamically inject runtime variables into the tool input,
-# which the agent should not be aware about.
-# Think pythonic ways to do this, does it relate to Contexts?
 class BaseToolNode(BaseNode, ABC):
     @property
     @abstractmethod
@@ -27,14 +26,26 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
 
         @subscribe_to(f"tool_node.{func.__name__}.request")
         @publish_to(f"tool_node.{func.__name__}.result")
-        async def on_enter(self, event_envelope: EventEnvelope) -> EventEnvelope:
+        async def on_enter(
+            self,
+            event_envelope: EventEnvelope,
+            correlation_id: Annotated[str, Context()],
+        ) -> EventEnvelope:
             if not event_envelope.tool_call_request:
                 raise RuntimeError("No tool call request found")
             tool_cal_req = event_envelope.tool_call_request
             kw_args = tool_cal_req.args_as_dict()
-            result = func(**kw_args)
-            if inspect.isawaitable(result):
-                result = await result
+
+            ctx = ToolContext(
+                deps=event_envelope.deps,
+                agent_name=event_envelope.agent_name,
+                tool_call_id=tool_cal_req.tool_call_id,
+                tool_name=tool_cal_req.tool_name,
+                messages=list(event_envelope.message_history),
+                run_id=correlation_id,
+            )
+            result = await self.tool.function_schema.call(kw_args, ctx)
+
             tool_result = ToolReturnPart(
                 tool_name=tool_cal_req.tool_name,
                 content=result,
