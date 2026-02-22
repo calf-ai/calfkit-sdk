@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.7...v0.1.8) (2026-02-22)
+
+
+### Features
+
+* ToolContext injection for [@agent](https://github.com/agent)_tool via RunContext subclass ([#65](https://github.com/calf-ai/calfkit-sdk/issues/65)) ([c51c7f2](https://github.com/calf-ai/calfkit-sdk/commit/c51c7f231d51dc3a55687d8a3965ac14487b6495))
+
 ## [0.1.7](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.6...v0.1.7) (2026-02-20)
 
 
