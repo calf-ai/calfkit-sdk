@@ -1,7 +1,7 @@
 # 🐮 Calfkit SDK
 
 [![PyPI version](https://img.shields.io/pypi/v/calfkit)](https://pypi.org/project/calfkit/)
-[![PyPI - Downloads](https://img.shields.io/pepy/dt/calfkit)](https://pepy.tech/projects/calfkit)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/calfkit?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/calfkit)
 [![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
@@ -192,8 +192,8 @@ async def main():
     router_node = AgentRouterNode()
     client = RouterServiceClient(broker_client, router_node)
 
-    # Invoke and wait for response
-    response = await client.invoke(user_prompt="What's the weather in Tokyo?")
+    # Request and wait for response
+    response = await client.request(user_prompt="What's the weather in Tokyo?")
     final_msg = await response.get_final_response()
     print(f"Assistant: {final_msg.text}")
 
@@ -210,7 +210,7 @@ python client.py
 The `RouterServiceClient` handles ephemeral Kafka communication and cleanup automatically. You can also stream intermediate messages:
 
 ```python
-response = await client.invoke(user_prompt="What's the weather in Tokyo?")
+response = await client.request(user_prompt="What's the weather in Tokyo?")
 
 # Stream all messages (tool calls, intermediate responses, etc.)
 async for message in response.messages_stream():
@@ -230,13 +230,17 @@ router_node = AgentRouterNode(
     tool_nodes=[],  # Patch in any subset of the deployed agent's set of tools
 )
 client = RouterServiceClient(broker_client, router_node)
-response = await client.invoke(user_prompt="Weather in Tokyo?")
+response = await client.request(user_prompt="Weather in Tokyo?")
 ```
 
 This lets different clients customize agent behavior per-request. Tool patching is currently limited to subsets of tools configured in the deployed router.
 
 ## Motivation
 Scalable agent teams must progress beyond brittle, tightly coupled, synchronous coordination. This means embracing event-driven, asynchronous communication patterns between agents and their dependencies. 
+
+## Documentation
+
+Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.
 
 ## Contact
 
