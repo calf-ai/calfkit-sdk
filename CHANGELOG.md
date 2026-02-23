@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.8...v0.1.9) (2026-02-23)
+
+
+### Documentation
+
+* update readme ([#71](https://github.com/calf-ai/calfkit-sdk/issues/71)) ([5b5afba](https://github.com/calf-ai/calfkit-sdk/commit/5b5afbaad8dfeebdd052d1697fac2ab216ed1256))
+
 ## [0.1.8](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.7...v0.1.8) (2026-02-22)
 
 
