@@ -71,7 +71,7 @@ class TradeResult:
 @dataclass
 class AgentAccount:
     cash: float = INITIAL_CASH
-    positions: dict[str, int] = field(default_factory=dict)
+    positions: dict[str, float] = field(default_factory=dict)
     cost_basis: dict[str, float] = field(default_factory=dict)
     # Weighted-average entry timestamp (Unix epoch) per position
     avg_entry_ts: dict[str, float] = field(default_factory=dict)
@@ -102,7 +102,7 @@ class AccountStore:
 
     def __init__(self, price_book: PriceBook) -> None:
         self._accounts: dict[str, AgentAccount] = {}
-        self._trade_log: list[tuple[str, str, str, str, int, float, float | None]] = []
+        self._trade_log: list[tuple[str, str, str, str, float, float, float | None]] = []
         self._price_book = price_book
 
     def get_or_create(self, agent_id: str) -> AgentAccount:
@@ -119,14 +119,14 @@ class AccountStore:
         return self._price_book
 
     @property
-    def trade_log(self) -> list[tuple[str, str, str, str, int, float, float | None]]:
+    def trade_log(self) -> list[tuple[str, str, str, str, float, float, float | None]]:
         return self._trade_log
 
     def execute_trade(
         self,
         agent_id: str,
         product_id: str,
-        quantity: int,
+        quantity: float,
         action: str,
         latency: float | None = None,
     ) -> TradeResult:
@@ -146,7 +146,14 @@ class AccountStore:
             )
 
         if quantity <= 0:
-            return TradeResult(False, "Quantity must be a positive integer.")
+            return TradeResult(False, "Quantity must be positive.")
+
+        rounded = round(quantity, 1)
+        if abs(quantity - rounded) > 1e-9:
+            return TradeResult(
+                False, "Quantity must have at most 1 decimal place (e.g., 0.5, 1.2)."
+            )
+        quantity = rounded
 
         account = self.get_or_create(agent_id)
 
@@ -191,15 +198,15 @@ class AccountStore:
         account.cost_basis[product_id] = account.cost_basis.get(product_id, 0.0) - (
             avg_cost * quantity
         )
-        new_qty = held - quantity
-        if new_qty == 0:
+        new_qty = round(held - quantity, 1)
+        if new_qty <= 0:
             del account.positions[product_id]
             del account.cost_basis[product_id]
             account.avg_entry_ts.pop(product_id, None)
         else:
             account.positions[product_id] = new_qty
         account.trade_count += 1
-        self._record_trade(agent_id, action, product_id, quantity, price)
+        self._record_trade(agent_id, action, product_id, quantity, price, latency)
         return TradeResult(
             True,
             f"Sold {quantity} {product_id} @ ${price:,.2f} for ${proceeds:,.2f}. "
@@ -348,8 +355,7 @@ class PortfolioView:
             value = account.portfolio_value(price_book)
             card = Panel(
                 Text.from_markup(
-                    f"[green]Cash:[/] ${account.cash:,.2f}\n"
-                    f"[magenta]Value:[/] ${value:,.2f}\n"
+                    f"[magenta]Total Value:[/] ${value:,.2f}\n"
                     f"[yellow]Positions:[/] {len(account.positions)}  "
                     f"[cyan]Trades:[/] {account.trade_count}"
                 ),
@@ -419,7 +425,7 @@ class PortfolioView:
                             "",
                             "",
                             pid,
-                            str(qty),
+                            f"{qty:g}",
                             f"${cost_basis:,.2f}",
                             f"${mkt_val:,.2f}",
                             "",
@@ -458,7 +464,7 @@ class PortfolioView:
                 table.add_row(
                     ts,
                     f"[{action_style}]{action.upper()}[/]",
-                    str(qty),
+                    f"{qty:g}",
                     product_id,
                     f"${price:,.2f}",
                     agent_id,
@@ -479,7 +485,7 @@ view = PortfolioView(store)
 
 
 def _execute_trade(
-    agent_id: str, product_id: str, quantity: int, action: str, latency: float | None = None
+    agent_id: str, product_id: str, quantity: float, action: str, latency: float | None = None
 ) -> str:
     result = store.execute_trade(agent_id, product_id, quantity, action, latency=latency)
     view.rerender()
@@ -529,13 +535,13 @@ def _get_portfolio(agent_id: str) -> str:
                 pnl = mkt_value - total_cost
                 pnl_sign = "+" if pnl >= 0 else ""
                 lines.append(
-                    f"| {pid} | {qty} | ${avg_cost:,.2f} | ${total_cost:,.2f} "
+                    f"| {pid} | {qty:g} | ${avg_cost:,.2f} | ${total_cost:,.2f} "
                     f"| ${current_price:,.2f} | ${mkt_value:,.2f} "
                     f"| {pnl_sign}${pnl:,.2f} | {hold_str} |"
                 )
             else:
                 lines.append(
-                    f"| {pid} | {qty} | ${avg_cost:,.2f} | ${total_cost:,.2f} "
+                    f"| {pid} | {qty:g} | ${avg_cost:,.2f} | ${total_cost:,.2f} "
                     f"| N/A | N/A | N/A | {hold_str} |"
                 )
 
@@ -549,12 +555,13 @@ def _get_portfolio(agent_id: str) -> str:
 
 
 @agent_tool
-def execute_trade(ctx: ToolContext, product_id: str, quantity: int, action: str) -> str:
+def execute_trade(ctx: ToolContext, product_id: str, quantity: float, action: str) -> str:
     """Execute a buy or sell trade. Buys execute at the best ask price, sells at the best bid.
+    Fractional share trading is allowed, but only to one decimal place (e.g., 0.5, 1.2).
 
     Args:
         product_id: Trading pair (e.g., BTC-USD, FARTCOIN-USD, SOL-USD)
-        quantity: Number of units to trade (positive integer)
+        quantity: Number of units to trade (positive, up to 1 decimal place)
         action: 'buy' or 'sell'
 
     Returns:
