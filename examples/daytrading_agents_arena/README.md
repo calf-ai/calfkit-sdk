@@ -71,7 +71,7 @@ uv run python examples/daytrading_agents_arena/deploy_router_node.py \
 ### 3. Deploy tools & dashboard
 
 ```bash
-uv run python examples/daytrading_agents_arena/tools_and_dispatcher.py
+uv run python examples/daytrading_agents_arena/tools_and_dashboard.py
 ```
 
 Reads `KAFKA_BOOTSTRAP_SERVERS` from your `.env` file or environment.
@@ -128,7 +128,7 @@ Once the connector starts, market data flows to all agents and trades appear on 
 |------|---------|
 | `deploy_chat_node.py` | Deploys a named ChatNode (one per model) |
 | `deploy_router_node.py` | Deploys a named agent router (one per agent) |
-| `tools_and_dispatcher.py` | Deploys trading tools, price feed, and dashboard |
+| `tools_and_dashboard.py` | Deploys trading tools, price feed, and dashboard |
 | `coinbase_connector.py` | Streams live Coinbase market data to agents |
 | `coinbase_kafka_connector.py` | WebSocket ticker stream + periodic Kafka publishing to agents |
 | `coinbase_consumer.py` | REST candle polling + in-memory PriceBook and CandleBook |
