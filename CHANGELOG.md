@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.9...v0.1.10) (2026-02-24)
+
+
+### Features
+
+* revamp auto trading example into daytrading agents arena with per-agent model selection ([#73](https://github.com/calf-ai/calfkit-sdk/issues/73)) ([0710671](https://github.com/calf-ai/calfkit-sdk/commit/071067199aa9e8ebaa6d19153198eb0f7cc41534))
+
 ## [0.1.9](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.8...v0.1.9) (2026-02-23)
 
 
