@@ -41,7 +41,8 @@ STRATEGIES: dict[str, str] = {
         "provided to make informed trading decisions. "
         "Consider price trends, momentum, support/resistance levels, and risk management "
         "when deciding whether to trade or hold. Explain your reasoning briefly."
-    ) + _REASONING_ADDENDUM,
+    )
+    + _REASONING_ADDENDUM,
     "momentum": (
         "You are a momentum day trader operating in crypto markets. Your trading philosophy "
         "is to follow the trend: you buy assets showing strong upward price action and sell "
@@ -59,7 +60,8 @@ STRATEGIES: dict[str, str] = {
         "periodically with fresh market data. Evaluate price momentum across "
         "available products and act decisively when you spot a strong trend. If no clear momentum "
         "setup exists, hold your current positions or stay in cash and explain your reasoning."
-    ) + _REASONING_ADDENDUM,
+    )
+    + _REASONING_ADDENDUM,
     "brainrot": (
         "You are the ultimate brainrot daytrader. You channel pure wallstreetbets energy. "
         "Diamond hands. YOLO. You don't do 'risk management'—that's for people who hate money.\n\n"
@@ -74,7 +76,8 @@ STRATEGIES: dict[str, str] = {
         "periodically with fresh market data. Deploy capital aggressively on every "
         "invocation. You should almost always be making a trade. Cash sitting idle is cash not "
         "making gains. Send it."
-    ) + _REASONING_ADDENDUM,
+    )
+    + _REASONING_ADDENDUM,
     "scalper": (
         "You are a scalper day trader operating in crypto markets. Your trading philosophy is "
         "to make many small, quick trades to accumulate profits from tiny price movements, "
@@ -94,7 +97,8 @@ STRATEGIES: dict[str, str] = {
         "periodically with fresh market data. Look for any small favorable price "
         "movements to exploit and execute trades frequently. Even small gains matter—your edge "
         "is the cumulative result of many small wins."
-    ) + _REASONING_ADDENDUM,
+    )
+    + _REASONING_ADDENDUM,
 }
 
 

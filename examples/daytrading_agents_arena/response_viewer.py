@@ -36,7 +36,6 @@ from calfkit._vendor.pydantic_ai.messages import (
     TextPart,
     ToolCallPart,
     ToolReturnPart,
-    UserPromptPart,
 )
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
@@ -94,7 +93,9 @@ class ActivityView:
                 return
             self._seen.add(key)
         ts = datetime.now().strftime("%H:%M:%S")
-        self._log.append(ActivityEntry(timestamp=ts, agent_name=agent_name, kind=kind, details=details))
+        self._log.append(
+            ActivityEntry(timestamp=ts, agent_name=agent_name, kind=kind, details=details)
+        )
         self._rerender()
 
     def _rerender(self) -> None:
@@ -241,7 +242,10 @@ async def main() -> None:
         elif isinstance(last_msg, ModelRequest):
             tool_returns = [p for p in last_msg.parts if isinstance(p, ToolReturnPart)]
             if tool_returns:
-                lines = [f"{tr.tool_name} → {_truncate(tr.model_response_str(), 200)}" for tr in tool_returns]
+                lines = [
+                    f"{tr.tool_name} → {_truncate(tr.model_response_str(), 200)}"
+                    for tr in tool_returns
+                ]
                 view.record(
                     agent_name=agent_name,
                     kind="TOOL RESULT",
