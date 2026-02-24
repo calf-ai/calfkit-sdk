@@ -2,9 +2,12 @@ import asyncio
 import logging
 import os
 
+from dotenv import load_dotenv
+
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.agent_router_node import AgentRouterNode
-from examples.auto_trading_bots.coinbase_kafka_connector import (
+from examples.daytrading_agents_arena.coinbase_consumer import CandleBook
+from examples.daytrading_agents_arena.coinbase_kafka_connector import (
     DEFAULT_PRODUCTS,
     CoinbaseKafkaConnector,
 )
@@ -14,24 +17,18 @@ from examples.auto_trading_bots.coinbase_kafka_connector import (
 # RouterServiceClient on each price tick.
 #
 # Usage:
-#     uv run python examples/auto_trading_bots/coinbase_connector.py
+#     uv run python examples/daytrading_agents_arena/coinbase_connector.py
 #
 # Prerequisites:
 #     - Kafka broker running (set KAFKA_BOOTSTRAP_SERVERS env var, default: localhost:9092)
-#     - Router nodes deployed (router_nodes.py)
-#     - Chat node deployed (chat_node.py)
+#     - Router nodes deployed (deploy_router_node.py)
+#     - Chat node deployed (deploy_chat_node.py)
 #     - Tools deployed (tools_and_dispatcher.py)
 
-SYSTEM_PROMPT = (
-    "You are a high volume crypto day trader. Your goal is to maximize your account value. "
-    "You have access to tools that allow you to view your portfolio, and make trades. "
-    "You will be invoked roughly every 5-10 seconds--at which time you can use your "
-    "tools to view your portfolio and make trades, or if you decide not to, you can "
-    "simply respond with a message explaining why not."
-)
+load_dotenv()
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-MIN_PUBLISH_INTERVAL = 15.0
+MIN_PUBLISH_INTERVAL = 60.0
 
 
 async def main():
@@ -56,11 +53,14 @@ async def main():
     print(f"  Products: {', '.join(DEFAULT_PRODUCTS)}")
     print(f"  Min publish interval: {MIN_PUBLISH_INTERVAL}s")
 
+    candle_book = CandleBook()
+
     connector = CoinbaseKafkaConnector(
         broker=broker,
         router_node=router_node,
         products=DEFAULT_PRODUCTS,
         min_publish_interval=MIN_PUBLISH_INTERVAL,
+        candle_book=candle_book,
     )
 
     print("\nStarting Coinbase connector...")

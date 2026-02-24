@@ -80,5 +80,7 @@ dev = [
     "ruff>=0.14.11",
 ]
 examples = [
+    "plotext>=5.3.2",
+    "sympy>=1.13",
     "websockets>=16.0",
 ]

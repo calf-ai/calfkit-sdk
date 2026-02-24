@@ -3,7 +3,7 @@ import asyncio
 from calfkit.broker.broker import BrokerClient
 from calfkit.experimental.agent_dispatcher import AgentDispatcher
 from calfkit.runners.service import NodesService
-from examples.auto_trading_bots.trading_tools import make_trading_tools
+from examples.daytrading_agents_arena.trading_tools import make_trading_tools
 
 # Agent Dispatcher - Deploys the dispatcher that dynamically spawns agent routers.
 
