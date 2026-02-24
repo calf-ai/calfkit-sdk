@@ -292,7 +292,7 @@ class AgentRouterNode(BaseNode):
 
         await broker.publish(
             event_envelope,
-            topic=self.chat.subscribed_topic,  # type: ignore
+            topic=self.chat.entrypoint_topic or self.chat.subscribed_topic,  # type: ignore
             correlation_id=correlation_id,
             reply_to=self.entrypoint_topic or self.subscribed_topic,
         )

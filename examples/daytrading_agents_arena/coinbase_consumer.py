@@ -120,7 +120,7 @@ class Timeframe:
 
 
 TIMEFRAMES = [
-    Timeframe(900, 240, 90, "15-min candles (4h ago -> 90min ago)"),
+    Timeframe(900, 180, 90, "15-min candles (3h ago -> 90min ago)"),
     Timeframe(300, 90, 20, "5-min candles (90min ago -> 20min ago)"),
     Timeframe(60, 20, 0, "1-min candles (last 20 minutes)"),
 ]

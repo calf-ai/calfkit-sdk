@@ -307,11 +307,11 @@ class PortfolioView:
                     table.add_section()
                 first = False
                 total_value = account.portfolio_value(price_book)
-                # Agent header row
+                # Agent header row with cash
                 table.add_row(
                     agent_id,
                     str(account.trade_count),
-                    "",
+                    f"[green]${account.cash:,.2f}[/]",
                     "",
                     "",
                     "",
@@ -346,11 +346,11 @@ class PortfolioView:
                             f"${mkt_val:,.2f}",
                             "",
                         )
-                # Total value row with cash
+                # Total value row
                 table.add_row(
                     "",
                     "",
-                    f"[green]${account.cash:,.2f}[/]",
+                    "",
                     "",
                     "",
                     "",

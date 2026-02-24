@@ -148,6 +148,7 @@ class CoinbaseKafkaConnector:
             "open_24h",
             "high_24h",
             "low_24h",
+            "volume_24h",
             "volume_30d",
             "time",
         }

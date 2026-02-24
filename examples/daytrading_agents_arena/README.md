@@ -30,13 +30,17 @@ CoinbaseKafkaConnector ── publishes every 60s ──▶ Kafka
         └─ consumer group: "scalper"             ──▶ Agent C (Scalper)
                                                           │
                                                           ▼
-                                                       ChatNode (LLM)
+                                                    ChatNode(s) (LLM)
                                                           │
                                                           ▼
                                                     Trading Tools ──▶ AccountStore ──▶ Dashboard
 ```
 
-Each agent has its own system prompt and conversation history. They share the ChatNode for LLM inference, a single set of trading tools (which resolve the calling agent via ToolContext), and the AccountStore for trade execution.
+Each agent has its own system prompt and conversation history. They share a single set of trading tools (which resolve the calling agent via ToolContext) and the AccountStore for trade execution.
+
+The arena supports two deployment modes:
+- **Single-model** (quickstart): All agents share one ChatNode and the same LLM.
+- **Multi-model**: Each agent targets a named ChatNode backed by a different model (e.g. GPT-5-nano vs DeepSeek). See [Multi-Model Arena](#multi-model-arena) below.
 
 Every box in this diagram is an independent process. They don't import each other or share memory — they only communicate through Kafka topics. This means each component can live on a completely different machine.
 
@@ -127,6 +131,72 @@ uv run python examples/daytrading_agents_arena/coinbase_connector.py
 
 Once the connector starts, market data flows to all three agents and trades begin appearing on the dashboard.
 
+## Multi-Model Arena
+
+The per-agent deployment scripts let you run each agent against a different LLM. Each ChatNode is deployed with a `--name` that creates a private Kafka topic (`ai_prompted.<name>`), and each router targets a specific ChatNode by name.
+
+### 1. Deploy ChatNodes (one per model)
+
+```bash
+# Terminal 1: ChatNode for gpt-5-nano
+uv run python examples/daytrading_agents_arena/deploy_chat_node.py \
+    --name gpt5-nano --model-id gpt-5-nano --reasoning-effort low
+
+# Terminal 2: ChatNode for DeepSeek
+uv run python examples/daytrading_agents_arena/deploy_chat_node.py \
+    --name deepseek --model-id deepseek-chat \
+    --base-url https://api.deepseek.com/v1 --api-key $DEEPSEEK_API_KEY
+```
+
+### 2. Deploy router nodes (one per agent)
+
+```bash
+# Terminal 3: Momentum agent → gpt5-nano
+uv run python examples/daytrading_agents_arena/deploy_router_node.py \
+    --name momentum --chat-node-name gpt5-nano --strategy momentum
+
+# Terminal 4: Brainrot agent → deepseek
+uv run python examples/daytrading_agents_arena/deploy_router_node.py \
+    --name brainrot-daytrader --chat-node-name deepseek --strategy brainrot
+
+# Terminal 5: Scalper agent → gpt5-nano
+uv run python examples/daytrading_agents_arena/deploy_router_node.py \
+    --name scalper --chat-node-name gpt5-nano --strategy scalper
+```
+
+### 3. Deploy tools, dashboard, and connector
+
+These are the same as the single-model quickstart:
+
+```bash
+# Terminal 6: Tools & dashboard
+uv run python examples/daytrading_agents_arena/tools_and_dispatcher.py
+
+# Terminal 7: Coinbase connector
+uv run python examples/daytrading_agents_arena/coinbase_connector.py
+```
+
+### deploy_chat_node.py CLI reference
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--name` | Yes | — | ChatNode name (becomes topic `ai_prompted.<name>`) |
+| `--model-id` | Yes | — | Model ID passed to `OpenAIModelClient` |
+| `--base-url` | No | `None` (OpenAI default) | Base URL for OpenAI-compatible providers |
+| `--api-key` | No | `$OPENAI_API_KEY` | API key for the provider |
+| `--bootstrap-servers` | No | `$KAFKA_BOOTSTRAP_SERVERS` / `localhost:9092` | Kafka broker address |
+| `--max-workers` | No | `10` | Concurrent inference workers |
+| `--reasoning-effort` | No | `None` | Reasoning effort for reasoning models (e.g. `"low"`) |
+
+### deploy_router_node.py CLI reference
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--name` | Yes | — | Agent name (consumer group + identity) |
+| `--chat-node-name` | Yes | — | Name of the deployed ChatNode to target |
+| `--strategy` | Yes | — | Trading strategy: `momentum`, `brainrot`, or `scalper` |
+| `--bootstrap-servers` | No | `$KAFKA_BOOTSTRAP_SERVERS` / `localhost:9092` | Kafka broker address |
+
 ## Configuration
 
 ### Environment Variables
@@ -166,8 +236,10 @@ These values can be adjusted directly in source:
 
 | File | Purpose |
 |------|---------|
-| `chat_node.py` | Deploys the LLM inference service (ChatNode) |
-| `router_nodes.py` | Deploys three agent routers with distinct trading strategies |
+| `chat_node.py` | Deploys a single shared ChatNode (all agents use one model) |
+| `router_nodes.py` | Deploys all three agent routers in one process (single-model mode) |
+| `deploy_chat_node.py` | Deploys a single **named** ChatNode via CLI (multi-model mode) |
+| `deploy_router_node.py` | Deploys a single **named** agent router via CLI (multi-model mode) |
 | `coinbase_connector.py` | Entry point that streams Coinbase data to the deployed agents |
 | `coinbase_kafka_connector.py` | Core connector class bridging Coinbase WebSocket + REST to Kafka |
 | `coinbase_consumer.py` | Coinbase WebSocket/REST consumer with multi-timeframe CandleBook |

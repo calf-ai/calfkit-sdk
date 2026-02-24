@@ -448,3 +448,109 @@ def test_deps_round_trip_on_envelope():
     )
     assert envelope.deps.url == "https://example.com"
     assert envelope.agent_name == "my_agent"
+
+
+# Test: Named ChatNode topic resolution
+
+
+def test_named_chat_node_entrypoint_topic():
+    """Named ChatNode should resolve an entrypoint topic like 'ai_prompted.<name>'."""
+    chat = ChatNode(name="gpt4o")
+    assert chat.entrypoint_topic == "ai_prompted.gpt4o"
+
+
+def test_named_chat_node_removes_shared_subscribe_topic():
+    """A named ChatNode should NOT subscribe to the shared 'ai_prompted' topic."""
+    chat = ChatNode(name="gpt4o")
+    for topics in chat.bound_registry.values():
+        subscribe_topics = topics.get("subscribe_topics", [])
+        assert "ai_prompted" not in subscribe_topics, (
+            f"Shared topic 'ai_prompted' should be removed for named ChatNode, got {subscribe_topics}"
+        )
+
+
+def test_unnamed_chat_node_backwards_compat():
+    """Unnamed ChatNode should behave exactly as before — shared topic, no entrypoint."""
+    chat = ChatNode()
+    assert chat.subscribed_topic == "ai_prompted"
+    assert chat.entrypoint_topic is None
+
+
+@pytest.mark.asyncio
+async def test_router_targets_named_chat_node():
+    """Two routers with different named ChatNodes should route to the correct model.
+
+    Uses FunctionModel instances that return distinct responses so we can verify
+    each router's messages reach the right ChatNode.
+
+    Messages are published directly to each router's private entrypoint topic
+    (not the shared "agent_router.input") because TestKafkaBroker doesn't
+    support consumer-group routing on a shared topic.
+    """
+    from calfkit._vendor.pydantic_ai import ModelRequest
+
+    def model_alpha(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("alpha-response")])
+
+    def model_beta(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("beta-response")])
+
+    broker = BrokerClient()
+    service = NodesService(broker)
+
+    chat_alpha = ChatNode(FunctionModel(model_alpha), name="alpha")
+    chat_beta = ChatNode(FunctionModel(model_beta), name="beta")
+    service.register_node(chat_alpha)
+    service.register_node(chat_beta)
+
+    router_alpha = AgentRouterNode(chat_node=chat_alpha, name="agent_alpha")
+    router_beta = AgentRouterNode(chat_node=chat_beta, name="agent_beta")
+    service.register_node(router_alpha)
+    service.register_node(router_beta)
+
+    response_store: dict[str, asyncio.Queue[EventEnvelope]] = {}
+
+    @broker.subscriber(router_alpha.publish_to_topic or "default_collect")
+    def collect_response(event_envelope: EventEnvelope, correlation_id: Annotated[str, Context()]):
+        if correlation_id not in response_store:
+            response_store[correlation_id] = asyncio.Queue()
+        response_store[correlation_id].put_nowait(event_envelope)
+
+    async with TestKafkaBroker(broker) as _:
+        # Publish directly to router_alpha's private entrypoint
+        env_a = EventEnvelope(
+            trace_id="alpha-1",
+            final_response_topic="final_response",
+        )
+        env_a.mark_as_start_of_turn()
+        env_a.prepare_uncommitted_agent_messages(
+            [ModelRequest.user_text_prompt("hello")]
+        )
+        await broker.publish(
+            env_a,
+            topic=router_alpha.entrypoint_topic,
+            correlation_id="alpha-1",
+        )
+        await wait_for_condition(lambda: "alpha-1" in response_store, timeout=5.0)
+        result_a = await response_store["alpha-1"].get()
+        assert isinstance(result_a.latest_message_in_history, ModelResponse)
+        assert "alpha-response" in str(result_a.latest_message_in_history.parts[0])
+
+        # Publish directly to router_beta's private entrypoint
+        env_b = EventEnvelope(
+            trace_id="beta-1",
+            final_response_topic="final_response",
+        )
+        env_b.mark_as_start_of_turn()
+        env_b.prepare_uncommitted_agent_messages(
+            [ModelRequest.user_text_prompt("hello")]
+        )
+        await broker.publish(
+            env_b,
+            topic=router_beta.entrypoint_topic,
+            correlation_id="beta-1",
+        )
+        await wait_for_condition(lambda: "beta-1" in response_store, timeout=5.0)
+        result_b = await response_store["beta-1"].get()
+        assert isinstance(result_b.latest_message_in_history, ModelResponse)
+        assert "beta-response" in str(result_b.latest_message_in_history.parts[0])
