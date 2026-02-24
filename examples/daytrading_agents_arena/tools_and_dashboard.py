@@ -26,7 +26,7 @@ from examples.daytrading_agents_arena.trading_tools import (
 # tools read from when executing trades.
 #
 # Usage:
-#     uv run python examples/daytrading_agents_arena/tools_and_dispatcher.py
+#     uv run python examples/daytrading_agents_arena/tools_and_dashboard.py
 #
 # Prerequisites:
 #     - Kafka broker running at localhost:9092
