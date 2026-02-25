@@ -5,7 +5,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
-The SDK to build event-driven, distributed AI agents.
+The SDK to build event-stream, distributed AI agents.
 
 Calfkit lets you compose agents with independent services—chat, tools, routing—that communicate asynchronously. Add agent capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream system. 
 
@@ -15,29 +15,30 @@ Agents should work like real teams, with independent, distinct roles, async comm
 pip install calfkit
 ```
 
-## Why Event-Driven?
+<br>
 
-Building agents like traditional web applications, with tight coupling and synchronous API calls, creates the same scalability problems that plagued early microservices:
-- Tight coupling: Changing one tool or agent breaks dependent agents and tools
-- Scaling bottlenecks: Since all agents and tools live on one runtime, everything must scale together
-- Siloed outputs: Agent and tool outputs stay trapped in your AI layer, streaming outputs to external dependencies is not as natural as distributed, event-driven designs
+## Why Calfkit?
 
-Event-driven architectures provide the solution. Instead of direct API calls between components, agents and tools asynchronously communicate. Each component runs independently, scales horizontally, and outputs can flow anywhere: CRMs, data warehouses, analytics platforms, other agents, or even more tools.
+### The problem
 
-## Why Use Calfkit?
+Building agents like traditional web applications—tight coupling and synchronous API calls—creates the same scalability problems that plagued early microservices:
 
-Calfkit is a Python SDK that builds event-driven agents out-the-box. You get all the benefits of a asynchronous, distributed system (loose coupling, horizontal scalability, durability) without the complexity of managing event-driven infrastructure and orchestration yourself.
+- **Tight coupling:** Changing one tool or agent breaks dependent agents and tools
+- **Scaling bottlenecks:** All agents and tools live on one runtime, so everything must scale together
+- **Siloed:** Agent communication models are difficult to wire into existing upstream and downstream systems
+- **Non-streaming:** Agents do not naturally follow a livestreaming pattern, making data stream consumption difficult to manage
 
-- Distributed agents out-the-box: Build event-driven, multi-service agents without writing orchestration code or managing infrastructure
-- Add agent capabilities without touching existing code: Deploy new tool capabilities as independent services that agents can dynamically discover, no need to touch your agent code
-- Scale what you need, when you need it: Chat handling, tool execution, and routing each scale independently based on demand
-- Nothing gets lost: Event persistence ensures reliable message delivery and traceability, even during service failures or restarts
-- High throughput under pressure: Asynchronous communication decouples requests from processing, so Calfkit agents work through bursty traffic reliably, maximizing throughput
-- Real-time responses: Low-latency event processing enables agents to react instantly to incoming data
-- Development team independence: Because of the decoupled design, dev teams can develop and deploy chat, tools, routing, and upstream or downstream dependencies in parallel without cross-team collaboration overhead
-- Universal data flow: Decoupling enables data to flow freely in both directions. 
-    - Downstream, agent outputs can be streamed to any system (CRMs, customer data platforms, warehouses, or even another AI workflow).
-    - Upstream, tools can wrap any data sources and deploy independently, no coordination needed.
+### What Calfkit gives you
+
+Calfkit is a Python SDK that builds event-stream agents out-the-box. You get the benefits of an asynchronous, distributed system without managing the infrastructure yourself.
+
+- **Distributed to the core:** Agents aren't monoliths that just sit on top of the transportation layer. Agents are decomposed into independent services — the agent itself is a deeply distributed system.
+- **Independent scaling:** Each service can scale on its own based on demand.
+- **Livestream agents by default:** Agents already listen on event streams, so consuming data streams — realtime market feeds, IoT sensors, user activity event streams — is the native pattern, not a bolted-on integration.
+- **Compose agents without coupling:** Compose multi-agent teams and workflows by deploying agents on communication channels that are already tapped into the messaging stream. No extra wiring, and no editing existing code — agents don't even need to know about each other.
+- **Universal data flow:** Agents plug into any stream — integrate and consume from any upstream data sources and publish to downstream systems like CRMs, warehouses, or even other agents.
+
+<br>
 
 ## Quick Start
 
@@ -235,17 +236,20 @@ response = await client.request(user_prompt="Weather in Tokyo?")
 
 This lets different clients customize agent behavior per-request. Tool patching is currently limited to subsets of tools configured in the deployed router.
 
-## Motivation
-Scalable agent teams must progress beyond brittle, tightly coupled, synchronous coordination. This means embracing event-driven, asynchronous communication patterns between agents and their dependencies. 
+<br>
 
 ## Documentation
 
 Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.
 
+<br>
+
 ## Contact
 
 [![X](https://img.shields.io/badge/Follow-black?logo=x)](https://x.com/ryanyuhater)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-blue?logo=linkedin)](https://www.linkedin.com/company/calfkit)
+
+<br>
 
 ## Support
 
