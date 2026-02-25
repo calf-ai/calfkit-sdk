@@ -25,16 +25,17 @@ Building agents like traditional web applications—tight coupling and synchrono
 
 - **Tight coupling:** Changing one tool or agent breaks dependent agents and tools
 - **Scaling bottlenecks:** All agents and tools live on one runtime, so everything must scale together
-- **Siloed outputs:** Agent outputs stay trapped in your AI layer instead of flowing to downstream systems
+- **Siloed:** Agent communication models are difficult to wire into existing upstream and downstream systems
+- **Non-streaming:** Agents do not naturally follow a livestreaming pattern, making data stream consumption difficult to manage
 
 ### What Calfkit gives you
 
 Calfkit is a Python SDK that builds event-stream agents out-the-box. You get the benefits of an asynchronous, distributed system without managing the infrastructure yourself.
 
-- **Distributed to the core:** Agents aren't monoliths that just sit on top of the transportation layer. Chat, tools, and routing are independent services — the agent itself is a distributed system.
+- **Distributed to the core:** Agents aren't monoliths that just sit on top of the transportation layer. Chat, tools, and routing are independent services — the agent itself is a deeply distributed system.
 - **Independent scaling:** Each service scales on its own based on demand.
-- **Livestreams agents by default:** Agents already listen on event streams, so consuming data streams — realtime market feeds, IoT sensors, user activity — is the native pattern, not a bolted-on integration.
-- **Compose agents without coupling:** Compose multi-agent teams and workflows by deploying new agents on communication channels. No wiring, no editing existing code — agents don't even need to know about each other. It's like if agents had pagers.
+- **Livestream agents by default:** Agents already listen on event streams, so consuming data streams — realtime market feeds, IoT sensors, user activity event streams — is the native pattern, not a bolted-on integration.
+- **Compose agents without coupling:** Compose multi-agent teams and workflows by deploying agents on communication channels that are already tapped into the messaging stream. No extra wiring, and no editing existing code — agents don't even need to know about each other.
 - **Universal data flow:** Agents plug into any stream — integrate and consume from any upstream data sources and publish to downstream systems like CRMs, warehouses, or even other agents.
 
 <br>
