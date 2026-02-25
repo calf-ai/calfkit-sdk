@@ -5,7 +5,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
-The SDK to build event-driven, distributed AI agents.
+The SDK to build event-stream, distributed AI agents.
 
 Calfkit lets you compose agents with independent services—chat, tools, routing—that communicate asynchronously. Add agent capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream system. 
 
@@ -29,7 +29,7 @@ Building agents like traditional web applications—tight coupling and synchrono
 
 ### What Calfkit gives you
 
-Calfkit is a Python SDK that builds event-driven agents out-the-box. You get the benefits of an asynchronous, distributed system without managing the infrastructure yourself.
+Calfkit is a Python SDK that builds event-stream agents out-the-box. You get the benefits of an asynchronous, distributed system without managing the infrastructure yourself.
 
 - **Distributed to the core:** Agents aren't monoliths that just sit on top of the transportation layer. Chat, tools, and routing are independent services — the agent itself is a distributed system.
 - **Independent scaling:** Each service scales on its own based on demand.
