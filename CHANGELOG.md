@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.11...v0.1.12) (2026-02-26)
+
+
+### Features
+
+* add top-level re-exports to calfkit package ([#81](https://github.com/calf-ai/calfkit-sdk/issues/81)) ([50bf628](https://github.com/calf-ai/calfkit-sdk/commit/50bf628d1fb3466a486b6172d816f588a5fcf4ff))
+
 ## [0.1.11](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.10...v0.1.11) (2026-02-25)
 
 
