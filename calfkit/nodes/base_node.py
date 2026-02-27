@@ -66,7 +66,14 @@ class BaseNode(ABC):
 
     _handler_registry: dict[Callable[..., Any], TopicsDict] = {}
 
-    def __init__(self, name: str | None = None, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        name: str | None = None,
+        *args: Any,
+        input_topic: str | list[str] | None = None,
+        output_topic: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         self.name = name
         self.bound_registry: dict[Callable[..., Any], TopicsDict] = {
             fn.__get__(self, type(self)): topics_dict
@@ -74,6 +81,8 @@ class BaseNode(ABC):
         }
         if name is not None:
             self._resolve_private_topics()
+        if input_topic is not None or output_topic is not None:
+            self._apply_topic_overrides(input_topic, output_topic)
 
     def __init_subclass__(cls) -> None:
         super().__init_subclass__()
@@ -117,6 +126,40 @@ class BaseNode(ABC):
                     updated["subscribe_topics"] = subscribe_topics
                     updated[key] = resolved
             self.bound_registry[handler] = updated
+
+    def _apply_topic_overrides(
+        self,
+        input_topic: str | list[str] | None,
+        output_topic: str | None,
+    ) -> None:
+        input_topics: list[str] | None = None
+        if isinstance(input_topic, str):
+            input_topics = [input_topic]
+        elif isinstance(input_topic, list):
+            input_topics = input_topic
+
+        for handler, topics in list(self.bound_registry.items()):
+            if (input_topics is not None and "shared_subscribe_topic" in topics) or (
+                output_topic is not None and "publish_topic" in topics
+            ):
+                # Copy to avoid mutating class-level _handler_registry dicts
+                # (bound_registry shares references for unnamed nodes)
+                updated: TopicsDict = {**topics}
+                if input_topics is not None and "shared_subscribe_topic" in updated:
+                    old_shared = updated["shared_subscribe_topic"]
+                    updated["shared_subscribe_topic"] = input_topics[0]
+                    # Replace old shared topic with all new input topics
+                    updated["subscribe_topics"] = [
+                        t for t in updated.get("subscribe_topics", []) if t != old_shared
+                    ] + input_topics
+                if output_topic is not None and "publish_topic" in updated:
+                    updated["publish_topic"] = output_topic
+                self.bound_registry[handler] = updated
+
+        if input_topics is not None:
+            self.__dict__["subscribed_topic"] = input_topics[0]
+        if output_topic is not None:
+            self.__dict__["publish_to_topic"] = output_topic
 
     @cached_property
     def subscribed_topic(self) -> str | None:

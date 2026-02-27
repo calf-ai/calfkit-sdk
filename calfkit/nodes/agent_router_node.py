@@ -16,8 +16,6 @@ from calfkit.nodes.base_tool_node import BaseToolNode
 from calfkit.stores.base import MessageHistoryStore
 
 
-# TODO: consider a pattern where public input
-# and output topics are configured via init as runtime passed dynamic variable.
 class AgentRouterNode(BaseNode):
     """Logic for the internal routing to operate agents"""
 
@@ -30,6 +28,8 @@ class AgentRouterNode(BaseNode):
         chat_node: BaseNode,
         *,
         name: str | None = None,
+        input_topic: str | list[str] | None = None,
+        output_topic: str | None = None,
         system_prompt: str,
         tool_nodes: list[BaseToolNode],
         message_history_store: MessageHistoryStore,
@@ -42,6 +42,8 @@ class AgentRouterNode(BaseNode):
         chat_node: BaseNode,
         *,
         name: str | None = None,
+        input_topic: str | list[str] | None = None,
+        output_topic: str | None = None,
         system_prompt: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
         message_history_store: MessageHistoryStore | None = None,
@@ -49,13 +51,21 @@ class AgentRouterNode(BaseNode):
     ): ...
 
     @overload
-    def __init__(self, *, name: str | None = None) -> None: ...
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        input_topic: str | list[str] | None = None,
+        output_topic: str | None = None,
+    ) -> None: ...
 
     @overload
     def __init__(
         self,
         *,
         name: str | None = None,
+        input_topic: str | list[str] | None = None,
+        output_topic: str | None = None,
         system_prompt: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
     ): ...
@@ -66,6 +76,8 @@ class AgentRouterNode(BaseNode):
         *,
         system_prompt: str | None = None,
         name: str | None = None,
+        input_topic: str | list[str] | None = None,
+        output_topic: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
         message_history_store: MessageHistoryStore | None = None,
         deps_type: type | None = None,
@@ -97,6 +109,9 @@ class AgentRouterNode(BaseNode):
             chat_node: The chat node for LLM interactions. Required for deployable services.
             system_prompt: Optional system prompt to override the default. Must be str for
                 deployable service, optional for client with runtime patches.
+            input_topic: Override the default input topic(s). Accepts a single topic string
+                or a list of topics for fan-in from multiple upstream sources.
+            output_topic: Override the default output topic.
             tool_nodes: List of tool nodes that the agent can call. Includes any HandoffTool
                 instances — the router treats them like any other tool. Optional for all forms.
             message_history_store: Store for persisting conversation history across requests.
@@ -124,7 +139,7 @@ class AgentRouterNode(BaseNode):
             else None
         )
 
-        super().__init__(name=name, **kwargs)
+        super().__init__(name=name, input_topic=input_topic, output_topic=output_topic, **kwargs)
 
     @subscribe_to(_router_sub_topic_name)
     @entrypoint("agent_router.private.{name}")

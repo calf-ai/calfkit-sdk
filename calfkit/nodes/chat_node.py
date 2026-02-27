@@ -5,7 +5,7 @@ from calfkit._vendor.pydantic_ai import ModelResponse, ModelSettings
 from calfkit._vendor.pydantic_ai.direct import model_request
 from calfkit._vendor.pydantic_ai.models import Model, ModelRequestParameters
 from calfkit.models.event_envelope import EventEnvelope
-from calfkit.nodes.base_node import BaseNode, entrypoint, publish_to, subscribe_to
+from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 
 
 class ChatNode(BaseNode, ABC):
@@ -20,25 +20,21 @@ class ChatNode(BaseNode, ABC):
         model_client: Model | None = None,
         *,
         name: str | None = None,
+        input_topic: str | list[str] | None = None,
+        output_topic: str | None = None,
         request_parameters: ModelRequestParameters | None = None,
         **kwargs: Any,
     ):
         self.model_client = model_client
         self.request_parameters = request_parameters
-        super().__init__(name=name, **kwargs)
-        if self.name is not None:
-            self._remove_shared_subscribe_topic()
-
-    def _remove_shared_subscribe_topic(self) -> None:
-        """Remove the shared subscribe topic so a named ChatNode only
-        listens on its private topic."""
-        for topics in self.bound_registry.values():
-            shared = topics.get("shared_subscribe_topic")
-            if shared and "subscribe_topics" in topics:
-                topics["subscribe_topics"] = [t for t in topics["subscribe_topics"] if t != shared]
+        if name is not None:
+            if input_topic is None:
+                input_topic = f"ai_prompted.{name}"
+            if output_topic is None:
+                output_topic = f"ai_generated.{name}"
+        super().__init__(name=name, input_topic=input_topic, output_topic=output_topic, **kwargs)
 
     @subscribe_to(_on_enter_topic_name)
-    @entrypoint("ai_prompted.{name}")
     @publish_to(_post_to_topic_name)
     async def _call_llm(self, event_envelope: EventEnvelope) -> EventEnvelope:
         if self.model_client is None:
