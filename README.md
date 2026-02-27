@@ -79,12 +79,14 @@ Once the broker is ready, open a new terminal tab to continue with the quickstar
 </details>
 
 <details>
-<summary><b>Option B: ☁️ Calfkit Cloud (Coming Soon)</b></summary>
+<summary><b>Option B: ☁️ Calfkit Cloud (In Beta)</b></summary>
 <br>
 
-Skip the infrastructure. Calfkit Cloud is a fully-managed Kafka service built for Calfkit AI agents and multi-agent teams. No server infrastructure to self-host or maintain, with built-in observability and agent-event tracing.
+Skip the infrastructure. Calfkit Cloud is a fully-managed broker service built for Calfkit AI agents and multi-agent teams. No server infrastructure to self-host or maintain, with built-in observability and agent-event tracing. 
 
-Coming soon. [Fill out the interest form →](https://forms.gle/Rk61GmHyJzequEPm8)
+You will be provided a Calfkit broker API to deploy your agents instead of setting up and maintaining a broker locally.
+
+[Sign up for access →](https://forms.gle/Rk61GmHyJzequEPm8)
 
 </details>
 
