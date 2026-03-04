@@ -128,6 +128,7 @@ Args:
         delegation.tool_call_request = None
         delegation.patch_model_request_params = None
         delegation.system_message = None
+        delegation.instructions = None
         delegation.name = None
 
         # Prepare the user prompt for the sub-agent, attributed to the caller
