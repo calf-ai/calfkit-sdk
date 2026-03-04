@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.14...v0.1.15) (2026-03-04)
+
+
+### Features
+
+* replace thin model_request() wrapper with more feature heavy agent in chat node ([#88](https://github.com/calf-ai/calfkit-sdk/issues/88)) ([916102a](https://github.com/calf-ai/calfkit-sdk/commit/916102ae8841bb3c454e091d8bd876429b56e31d))
+
 ## [0.1.14](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.13...v0.1.14) (2026-03-01)
 
 
