@@ -490,7 +490,6 @@ async def test_router_targets_named_chat_node():
     (not the shared "agent_router.input") because TestKafkaBroker doesn't
     support consumer-group routing on a shared topic.
     """
-    from calfkit._vendor.pydantic_ai import ModelRequest
 
     def model_alpha(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("alpha-response")])
@@ -523,10 +522,10 @@ async def test_router_targets_named_chat_node():
         # Publish directly to router_alpha's private entrypoint
         env_a = EventEnvelope(
             trace_id="alpha-1",
+            user_prompt="hello",
             final_response_topic="final_response",
         )
         env_a.mark_as_start_of_turn()
-        env_a.prepare_uncommitted_agent_messages([ModelRequest.user_text_prompt("hello")])
         await broker.publish(
             env_a,
             topic=router_alpha.entrypoint_topic,
@@ -540,10 +539,10 @@ async def test_router_targets_named_chat_node():
         # Publish directly to router_beta's private entrypoint
         env_b = EventEnvelope(
             trace_id="beta-1",
+            user_prompt="hello",
             final_response_topic="final_response",
         )
         env_b.mark_as_start_of_turn()
-        env_b.prepare_uncommitted_agent_messages([ModelRequest.user_text_prompt("hello")])
         await broker.publish(
             env_b,
             topic=router_beta.entrypoint_topic,

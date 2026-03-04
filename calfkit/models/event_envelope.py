@@ -12,6 +12,12 @@ from calfkit.models.types import CompactBaseModel, SerializableModelSettings, To
 class EventEnvelope(CompactBaseModel):
     trace_id: str | None = None
 
+    # Raw user prompt string — Agent handles wrapping in ModelRequest
+    user_prompt: str | None = None
+
+    # Instructions string for the Agent (replaces SystemPromptPart patching)
+    instructions: str | None = None
+
     # Runtime deps from router.invoke(), forwarded to tool nodes via ToolContext.
     # Must be JSON-serializable (e.g. dict, str, int, list) since the envelope
     # travels over the Kafka wire as JSON.

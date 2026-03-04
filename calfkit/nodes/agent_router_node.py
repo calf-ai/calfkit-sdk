@@ -8,7 +8,7 @@ from faststream.kafka.annotations import (
 from calfkit._vendor.pydantic_ai import ModelRequest, ModelResponse, SystemPromptPart
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.broker.broker import BrokerClient
-from calfkit.messages import patch_system_prompts, validate_tool_call_pairs
+from calfkit.messages import validate_tool_call_pairs
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.types import ToolCallRequest
 from calfkit.nodes.base_node import BaseNode, entrypoint, publish_to, subscribe_to
@@ -150,47 +150,51 @@ class AgentRouterNode(BaseNode):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
-        if not ctx.has_uncommitted_messages:
+        # Guard: nothing to process
+        if not ctx.has_uncommitted_messages and ctx.user_prompt is None:
             return ctx
 
         ctx.agent_name = self.name
 
-        # One central place where message history is updated
-        uncommitted_messages = ctx.pop_all_uncommited_agent_messages()
-        if self.message_history_store is not None and ctx.thread_id is not None:
-            await self.message_history_store.append_many(
-                thread_id=ctx.thread_id,
-                messages=uncommitted_messages,
-                scope=self.name,
-            )
-            ctx.message_history = await self.message_history_store.get(
-                thread_id=ctx.thread_id, scope=self.name
-            )
-        else:
-            ctx.message_history.extend(uncommitted_messages)
-
-        # Apply system prompts w/ priority: incoming patch > self.system_message > existing history
-        if ctx.system_message is not None:
-            ctx.message_history = patch_system_prompts(ctx.message_history, [ctx.system_message])
-        elif self.system_message is not None:
-            ctx.message_history = patch_system_prompts(
-                ctx.message_history,
-                [self.system_message],
-            )
-
-        if isinstance(ctx.latest_message_in_history, ModelResponse):
-            if (
-                ctx.latest_message_in_history.finish_reason == "tool_call"
-                or ctx.latest_message_in_history.tool_calls
-            ):
-                await self._route_tool_calls(
-                    ctx, ctx.latest_message_in_history.tool_calls, correlation_id, broker
+        if ctx.has_uncommitted_messages:
+            # --- Return path (from ChatNode or ToolNode) ---
+            uncommitted_messages = ctx.pop_all_uncommited_agent_messages()
+            if self.message_history_store is not None and ctx.thread_id is not None:
+                await self.message_history_store.append_many(
+                    thread_id=ctx.thread_id,
+                    messages=uncommitted_messages,
+                    scope=self.name,
+                )
+                ctx.message_history = await self.message_history_store.get(
+                    thread_id=ctx.thread_id, scope=self.name
                 )
             else:
-                await self._reply_to_sender(ctx, correlation_id, broker)
-        elif ctx.pending_tool_calls:
-            await self._route_tool_calls(ctx, ctx.pending_tool_calls, correlation_id, broker)
-        elif validate_tool_call_pairs(ctx.message_history):
+                ctx.message_history.extend(uncommitted_messages)
+
+            # Route based on latest message
+            if isinstance(ctx.latest_message_in_history, ModelResponse):
+                if (
+                    ctx.latest_message_in_history.finish_reason == "tool_call"
+                    or ctx.latest_message_in_history.tool_calls
+                ):
+                    await self._route_tool_calls(
+                        ctx, ctx.latest_message_in_history.tool_calls, correlation_id, broker
+                    )
+                else:
+                    await self._reply_to_sender(ctx, correlation_id, broker)
+            elif ctx.pending_tool_calls:
+                await self._route_tool_calls(ctx, ctx.pending_tool_calls, correlation_id, broker)
+            elif validate_tool_call_pairs(ctx.message_history):
+                await self._call_model(ctx, correlation_id, broker)
+
+        elif ctx.user_prompt is not None:
+            # --- Initial request path ---
+            # Load existing history from store (for multi-turn conversations)
+            if self.message_history_store is not None and ctx.thread_id is not None:
+                ctx.message_history = await self.message_history_store.get(
+                    thread_id=ctx.thread_id, scope=self.name
+                )
+            # Send to ChatNode — agent.run() will create the ModelRequest
             await self._call_model(ctx, correlation_id, broker)
 
         return ctx
@@ -302,6 +306,8 @@ class AgentRouterNode(BaseNode):
                 else []
             )
         event_envelope.patch_model_request_params = patch_model_request_params
+        if event_envelope.instructions is None and self.system_prompt is not None:
+            event_envelope.instructions = self.system_prompt
         if event_envelope.name is None:
             event_envelope.name = self.name
 
@@ -344,6 +350,8 @@ class AgentRouterNode(BaseNode):
 
         event_envelope = EventEnvelope(
             trace_id=correlation_id,
+            user_prompt=user_prompt,
+            instructions=self.system_prompt,
             patch_model_request_params=patch_model_request_params,
             thread_id=thread_id,
             system_message=self.system_message,
@@ -351,9 +359,6 @@ class AgentRouterNode(BaseNode):
             deps=deps,
         )
         event_envelope.mark_as_start_of_turn()
-        event_envelope.prepare_uncommitted_agent_messages(
-            [ModelRequest.user_text_prompt(user_prompt)]
-        )
         if self.name is not None:
             event_envelope.name = self.name
         await broker.publish(
