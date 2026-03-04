@@ -27,7 +27,7 @@ class ChatNode(BaseNode, ABC):
         if model_client is not None:
             self.agent: Agent[None, str | DeferredToolRequests] = Agent(
                 model_client,
-                output_type=[str, DeferredToolRequests],  # type: ignore[arg-type]
+                output_type=[str, DeferredToolRequests],
                 defer_model_check=True,
             )
         if name is not None:

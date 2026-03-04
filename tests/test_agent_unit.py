@@ -490,6 +490,7 @@ async def test_router_targets_named_chat_node():
     (not the shared "agent_router.input") because TestKafkaBroker doesn't
     support consumer-group routing on a shared topic.
     """
+
     def model_alpha(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("alpha-response")])
 
