@@ -29,7 +29,7 @@ def block_model_requests():
 
 def test_default_topics_unchanged():
     """Default AgentRouterNode (no overrides) keeps hardcoded topics."""
-    node = AgentRouterNode()
+    node = AgentRouterNode(name="default_router")
     assert node.subscribed_topic == "agent_router.input"
     assert node.publish_to_topic == "agent_router.output"
 
@@ -57,7 +57,7 @@ def test_default_topics_unchanged_named():
 
 def test_single_input_topic_override():
     """Single string input_topic overrides subscribed_topic and bound_registry."""
-    node = AgentRouterNode(input_topic="custom.input")
+    node = AgentRouterNode(name="override_router", input_topic="custom.input")
     assert node.subscribed_topic == "custom.input"
     assert node.publish_to_topic == "agent_router.output"  # unchanged
 
@@ -70,7 +70,7 @@ def test_single_input_topic_override():
 
 def test_multiple_input_topics_override():
     """List input_topic: subscribed_topic returns first; subscribe_topics has all."""
-    node = AgentRouterNode(input_topic=["upstream.a", "upstream.b", "upstream.c"])
+    node = AgentRouterNode(name="multi_input_router", input_topic=["upstream.a", "upstream.b", "upstream.c"])
     assert node.subscribed_topic == "upstream.a"
 
     for topics in node.bound_registry.values():
@@ -84,7 +84,7 @@ def test_multiple_input_topics_override():
 
 def test_output_topic_override():
     """output_topic overrides publish_to_topic and bound_registry."""
-    node = AgentRouterNode(output_topic="custom.output")
+    node = AgentRouterNode(name="output_router", output_topic="custom.output")
     assert node.publish_to_topic == "custom.output"
     assert node.subscribed_topic == "agent_router.input"  # unchanged
 
@@ -121,7 +121,7 @@ def test_named_with_multiple_input_topics_preserves_entrypoint():
 
 def test_both_overrides():
     """Both input_topic and output_topic work simultaneously."""
-    node = AgentRouterNode(input_topic="in.custom", output_topic="out.custom")
+    node = AgentRouterNode(name="both_router", input_topic="in.custom", output_topic="out.custom")
     assert node.subscribed_topic == "in.custom"
     assert node.publish_to_topic == "out.custom"
 
@@ -136,8 +136,8 @@ def test_both_overrides():
 
 def test_class_registry_isolation():
     """Overriding one instance doesn't affect another or the class-level registry."""
-    custom = AgentRouterNode(input_topic="custom.in", output_topic="custom.out")
-    default = AgentRouterNode()
+    custom = AgentRouterNode(name="custom_iso", input_topic="custom.in", output_topic="custom.out")
+    default = AgentRouterNode(name="default_iso")
 
     # Custom instance has overrides
     assert custom.subscribed_topic == "custom.in"

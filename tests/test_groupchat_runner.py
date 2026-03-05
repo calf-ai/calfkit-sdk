@@ -50,6 +50,7 @@ def deploy_groupchat_broker():
     router = AgentRouterNode(
         chat_node=ChatNode(),
         system_prompt="You are a helpful, concise assistant. Keep responses to 1-2 sentences.",
+        name="groupchat_router",
     )
     service.register_node(router)
 

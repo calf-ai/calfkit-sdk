@@ -135,6 +135,7 @@ async def test_agent_memory_with_function_model():
     router_node = AgentRouterNode(
         chat_node=ChatNode(model_client),
         message_history_store=memory_store,
+        name="memory_agent",
     )
     service.register_node(router_node)
 
@@ -262,6 +263,7 @@ async def test_tool_visibility_with_function_model():
     router_node = AgentRouterNode(
         chat_node=ChatNode(model_client),
         tool_nodes=[get_weather, get_temperature],
+        name="tool_agent",
     )
     service.register_node(router_node)
 

@@ -1,9 +1,13 @@
 from abc import ABC
 from collections.abc import Callable
 from functools import cached_property
-from typing import Any, TypedDict, cast
+from typing import Any, Generic, TypedDict, cast
 
 from pydantic import BaseModel
+from typing_extensions import TypeVar
+
+InputT = TypeVar("InputT", default=Any)
+OutputT = TypeVar("OutputT", default=str)
 
 
 def subscribe_to(topic_name: str) -> Callable[[Any], Any]:
@@ -60,11 +64,14 @@ class TopicsDict(TypedDict, total=False):
     returnpoint_topic_template: str
 
 
-class BaseNode(ABC):
+class BaseNode(ABC, Generic[InputT, OutputT]):
     """Effectively a node is the data plane, defining the internal wiring and logic.
     When provided to a NodeRunner, node logic can be deployed."""
 
     _handler_registry: dict[Callable[..., Any], TopicsDict] = {}
+
+    input_type: type[InputT] | None = None
+    output_type: type[OutputT] | None = None
 
     def __init__(
         self,

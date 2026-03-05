@@ -21,13 +21,16 @@ class ChatNode(BaseNode, ABC):
         name: str | None = None,
         input_topic: str | list[str] | None = None,
         output_topic: str | None = None,
+        output_type: type | None = None,
         **kwargs: Any,
     ):
         self.model_client = model_client
+        self._structured_output_type = output_type
         if model_client is not None:
-            self.agent: Agent[None, str | DeferredToolRequests] = Agent(
+            agent_output_types: list[type] = [output_type, DeferredToolRequests] if output_type else [str, DeferredToolRequests]
+            self.agent: Agent[Any, Any] = Agent(
                 model_client,
-                output_type=[str, DeferredToolRequests],
+                output_type=agent_output_types,
                 defer_model_check=True,
             )
         if name is not None:
@@ -44,18 +47,19 @@ class ChatNode(BaseNode, ABC):
             raise RuntimeError("Unable to handle incoming request because Model client is None.")
 
         # Build ExternalToolset from envelope's tool definitions
-        toolsets: list[ExternalToolset[None]] = []
+        toolsets: list[ExternalToolset[Any]] = []
         request_params = event_envelope.patch_model_request_params
         if request_params and request_params.function_tools:
             toolsets.append(ExternalToolset(request_params.function_tools))
 
-        # Call the Agent
+        # Call the Agent — pass deps so pydantic-ai dynamic instructions can access structured input
         result = await self.agent.run(
             user_prompt=event_envelope.user_prompt,
             message_history=list(event_envelope.message_history),
             instructions=event_envelope.instructions,
             model_settings=cast(ModelSettings | None, event_envelope.patch_model_settings),
             toolsets=toolsets or None,
+            deps=event_envelope.deps,
         )
 
         # Clear user_prompt to prevent re-use on subsequent passes
@@ -64,6 +68,15 @@ class ChatNode(BaseNode, ABC):
         # Stamp agent name on the model response
         if event_envelope.name is not None:
             result.response.name = event_envelope.name
+
+        # Detect structured output — if the result is not str or DeferredToolRequests,
+        # it's a structured output type → serialize to payload
+        if not isinstance(result.output, (str, DeferredToolRequests)):
+            event_envelope.payload = (
+                result.output.model_dump(mode="json")
+                if hasattr(result.output, "model_dump")
+                else result.output
+            )
 
         # Add new messages to uncommitted
         for msg in result.new_messages():

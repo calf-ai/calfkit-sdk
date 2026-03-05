@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Generic
 
 from pydantic import Field
 
@@ -6,10 +6,10 @@ from calfkit._vendor.pydantic_ai import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.delegation import DelegationFrame
 from calfkit.models.groupchat import GroupchatDataModel
-from calfkit.models.types import CompactBaseModel, SerializableModelSettings, ToolCallRequest
+from calfkit.models.types import CompactBaseModel, PayloadT, SerializableModelSettings, ToolCallRequest
 
 
-class EventEnvelope(CompactBaseModel):
+class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
     trace_id: str | None = None
 
     # Raw user prompt string — Agent handles wrapping in ModelRequest
@@ -22,6 +22,10 @@ class EventEnvelope(CompactBaseModel):
     # Must be JSON-serializable (e.g. dict, str, int, list) since the envelope
     # travels over the Kafka wire as JSON.
     deps: Any = None
+
+    # Polymorphic structured data field — carries typed input (client→agent)
+    # or typed output (agent→client) depending on direction.
+    payload: PayloadT | None = None
 
     # Agent name set by AgentRouterNode's handler, forwarded to tool nodes via ToolContext
     agent_name: str | None = None
