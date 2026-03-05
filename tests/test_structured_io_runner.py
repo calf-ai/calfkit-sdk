@@ -12,11 +12,6 @@ import os
 import sys
 
 import pytest
-
-# TestKafkaBroker dispatches synchronously (recursive call stack), so the
-# tool-routing round-trips in structured-output-with-tools can exceed the
-# default limit. Same workaround as test_groupchat_runner.py.
-sys.setrecursionlimit(10000)
 from dotenv import load_dotenv
 from faststream.kafka import TestKafkaBroker
 from pydantic import BaseModel
@@ -30,6 +25,11 @@ from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.runners.service import NodesService
 from calfkit.runners.service_client import RouterServiceClient
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
+
+# TestKafkaBroker dispatches synchronously (recursive call stack), so the
+# tool-routing round-trips in structured-output-with-tools can exceed the
+# default limit. Same workaround as test_groupchat_runner.py.
+sys.setrecursionlimit(10000)
 
 load_dotenv()
 
