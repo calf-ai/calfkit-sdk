@@ -415,7 +415,7 @@ def test_envelope_generic_serialization():
     """EventEnvelope[OrderResult] roundtrip serialization works."""
     envelope: EventEnvelope[OrderResult] = EventEnvelope(
         trace_id="test-123",
-        payload={"item": "widget", "quantity": 5},
+        payload=OrderResult(item="widget", quantity=5),
     )
 
     # Serialize
@@ -472,6 +472,7 @@ async def test_on_request_handler():
             final_response_topic="final_response",
         )
         env.mark_as_start_of_turn()
+        assert router_node.entrypoint_topic is not None
         await broker.publish(
             env,
             topic=router_node.entrypoint_topic,
@@ -526,6 +527,7 @@ async def test_on_return_handler():
             final_response_topic="final_response",
         )
         env.mark_as_start_of_turn()
+        assert router_node.entrypoint_topic is not None
         await broker.publish(
             env,
             topic=router_node.entrypoint_topic,
