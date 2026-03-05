@@ -296,7 +296,8 @@ async def test_payload_consumed_as_input_not_forwarded():
 
 @pytest.mark.asyncio
 async def test_backward_compat_text_output():
-    """Agent without output_type works exactly as before — text response, no structured output payload."""
+    """Agent without output_type works exactly as before:
+    text response, no structured output payload."""
 
     def text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("Hello, world!")])

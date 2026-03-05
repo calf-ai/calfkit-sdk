@@ -1,9 +1,11 @@
+import logging
 from typing import Annotated, Any, cast, overload
 
 from faststream import Context
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
+from pydantic import BaseModel
 
 from calfkit._vendor.pydantic_ai import ModelResponse
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
@@ -138,8 +140,15 @@ class AgentRouterNode(BaseNode):
         # Structured input: validate payload, pass as deps, clear payload
         if ctx.payload is not None:
             if self.deps_type is not None:
-                validated = self.deps_type.model_validate(ctx.payload)
-                ctx.deps = validated
+                if issubclass(self.deps_type, BaseModel):
+                    ctx.deps = self.deps_type.model_validate(ctx.payload)
+                else:
+                    ctx.deps = ctx.payload if isinstance(ctx.payload, self.deps_type) else None
+                    if not isinstance(ctx.payload, self.deps_type):
+                        logging.error(
+                            "incoming payload does not match defined deps_type: \n"
+                            + f"payload={ctx.payload}\n\ndeps_type={self.deps_type}"
+                        )
             else:
                 ctx.deps = ctx.payload
             ctx.payload = None
@@ -337,7 +346,8 @@ class AgentRouterNode(BaseNode):
         # Determine instructions — use existing ChatPayload instructions or system_prompt
         instructions = (
             event_envelope.payload.instructions
-            if isinstance(event_envelope.payload, ChatPayload) and event_envelope.payload.instructions
+            if isinstance(event_envelope.payload, ChatPayload)
+            and event_envelope.payload.instructions
             else self.system_prompt
         )
 

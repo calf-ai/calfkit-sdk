@@ -2,7 +2,7 @@ from typing import Any, Generic
 
 from pydantic import Field
 
-from calfkit._vendor.pydantic_ai import ModelMessage, ModelRequest
+from calfkit._vendor.pydantic_ai import ModelMessage
 from calfkit.models.delegation import DelegationFrame
 from calfkit.models.groupchat import GroupchatDataModel
 from calfkit.models.types import (
