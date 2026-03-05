@@ -6,7 +6,12 @@ from calfkit._vendor.pydantic_ai import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.delegation import DelegationFrame
 from calfkit.models.groupchat import GroupchatDataModel
-from calfkit.models.types import CompactBaseModel, PayloadT, SerializableModelSettings, ToolCallRequest
+from calfkit.models.types import (
+    CompactBaseModel,
+    PayloadT,
+    SerializableModelSettings,
+    ToolCallRequest,
+)
 
 
 class EventEnvelope(CompactBaseModel, Generic[PayloadT]):

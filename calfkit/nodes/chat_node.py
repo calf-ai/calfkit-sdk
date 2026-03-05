@@ -27,7 +27,9 @@ class ChatNode(BaseNode, ABC):
         self.model_client = model_client
         self._structured_output_type = output_type
         if model_client is not None:
-            agent_output_types: list[type] = [output_type, DeferredToolRequests] if output_type else [str, DeferredToolRequests]
+            agent_output_types: list[type] = (
+                [output_type, DeferredToolRequests] if output_type else [str, DeferredToolRequests]
+            )
             self.agent: Agent[Any, Any] = Agent(
                 model_client,
                 output_type=agent_output_types,

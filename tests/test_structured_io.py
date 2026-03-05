@@ -18,7 +18,6 @@ from calfkit._vendor.pydantic_ai import (
     ModelResponse,
     TextPart,
     ToolCallPart,
-    ToolReturnPart,
     models,
 )
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -28,7 +27,7 @@ from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
 from calfkit.runners.service import NodesService
-from calfkit.runners.service_client import InvokeResponse, RouterServiceClient
+from calfkit.runners.service_client import RouterServiceClient
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
 from tests.utils import wait_for_condition
 
@@ -200,7 +199,6 @@ async def test_structured_output_with_function_tools():
 @pytest.mark.asyncio
 async def test_structured_input_validation():
     """Payload is validated against input_type and passed as deps."""
-    received_deps = None
 
     def input_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("Processed order")])
@@ -250,8 +248,6 @@ async def test_payload_consumed_as_input_not_forwarded():
     """When payload is sent as structured input, it is consumed by on_request
     (set as deps, cleared) and does NOT appear as payload in the final response.
     This verifies the input payload is not mistaken for structured output."""
-
-    received_deps = None
 
     def deps_capture_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         # Model just returns text — no structured output

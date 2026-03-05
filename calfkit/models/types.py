@@ -1,7 +1,7 @@
 from typing import Any, TypeAlias
 
 from pydantic import BaseModel
-from typing_extensions import TypeVar, TypedDict
+from typing_extensions import TypedDict, TypeVar
 
 from calfkit._vendor.pydantic_ai import ToolCallPart
 
