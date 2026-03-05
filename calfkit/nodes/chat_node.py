@@ -4,6 +4,7 @@ from typing import Any, cast
 from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests, ExternalToolset, ModelSettings
 from calfkit._vendor.pydantic_ai.models import Model
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.payloads import ChatPayload
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 
 
@@ -48,40 +49,48 @@ class ChatNode(BaseNode, ABC):
         if self.model_client is None:
             raise RuntimeError("Unable to handle incoming request because Model client is None.")
 
-        # Build ExternalToolset from envelope's tool definitions
+        # Read from ChatPayload
+        payload = (
+            ChatPayload.model_validate(event_envelope.payload)
+            if event_envelope.payload is not None
+            else ChatPayload()
+        )
+
+        # Build ExternalToolset from payload's tool definitions
         toolsets: list[ExternalToolset[Any]] = []
-        request_params = event_envelope.patch_model_request_params
-        if request_params and request_params.function_tools:
-            toolsets.append(ExternalToolset(request_params.function_tools))
+        if payload.patch_model_request_params and payload.patch_model_request_params.function_tools:
+            toolsets.append(ExternalToolset(payload.patch_model_request_params.function_tools))
 
         # Call the Agent — pass deps so pydantic-ai dynamic instructions can access structured input
         result = await self.agent.run(
-            user_prompt=event_envelope.user_prompt,
-            message_history=list(event_envelope.message_history),
-            instructions=event_envelope.instructions,
-            model_settings=cast(ModelSettings | None, event_envelope.patch_model_settings),
+            user_prompt=payload.user_prompt,
+            message_history=list(event_envelope.state.message_history),
+            instructions=payload.instructions,
+            model_settings=cast(ModelSettings | None, payload.patch_model_settings),
             toolsets=toolsets or None,
             deps=event_envelope.deps,
         )
 
         # Clear user_prompt to prevent re-use on subsequent passes
-        event_envelope.user_prompt = None
+        payload.user_prompt = None
 
         # Stamp agent name on the model response
-        if event_envelope.name is not None:
-            result.response.name = event_envelope.name
+        if payload.name is not None:
+            result.response.name = payload.name
 
-        # Detect structured output — if the result is not str or DeferredToolRequests,
-        # it's a structured output type → serialize to payload
-        if not isinstance(result.output, (str, DeferredToolRequests)):
+        # Set output on payload — every output type (str, BaseModel, etc.) is a payload.
+        # Only DeferredToolRequests (tool calls pending) clears payload.
+        if isinstance(result.output, DeferredToolRequests):
+            event_envelope.payload = None
+        else:
             event_envelope.payload = (
                 result.output.model_dump(mode="json")
                 if hasattr(result.output, "model_dump")
                 else result.output
             )
 
-        # Add new messages to uncommitted
+        # Add new messages to state's uncommitted
         for msg in result.new_messages():
-            event_envelope.add_to_uncommitted_messages(msg)
+            event_envelope.state.add_to_uncommitted_messages(msg)
 
         return event_envelope

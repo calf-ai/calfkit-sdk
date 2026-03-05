@@ -39,14 +39,14 @@ class RoundRobinGroupchatNode(BaseNode, ABC):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
-        if event_envelope.groupchat_data is None:
+        if event_envelope.state.groupchat_data is None:
             raise RuntimeError("No groupchat data/config provided in groupchat node")
 
-        event_envelope.groupchat_data.ensure_defaults(
+        event_envelope.state.groupchat_data.ensure_defaults(
             self._agent_node_topics, self._shared_system_prompt_addition
         )
 
-        event_envelope.groupchat_data.commit_turn()
+        event_envelope.state.groupchat_data.commit_turn()
         # Snapshot taken after the completed turn is committed but before
         # forward-looking routing mutations (turn index, skip counter, context swap).
         # This is the semantically correct observation state: the turn index
@@ -54,11 +54,11 @@ class RoundRobinGroupchatNode(BaseNode, ABC):
         # still contain that agent's response.
         observer_snapshot = event_envelope.model_copy(deep=True)
 
-        event_envelope.replace_uncommitted_with_turn_context()
-        all_skipped = event_envelope.groupchat_data.advance_to_next_turn()
+        event_envelope.state.replace_uncommitted_with_turn_context()
+        all_skipped = event_envelope.state.groupchat_data.advance_to_next_turn()
 
         if all_skipped:
-            event_envelope.mark_as_end_of_turn()
+            event_envelope.state.mark_as_end_of_turn()
             return event_envelope
 
         await self._call_agent(event_envelope, correlation_id=correlation_id, broker=broker)
@@ -67,13 +67,13 @@ class RoundRobinGroupchatNode(BaseNode, ABC):
     async def _call_agent(
         self, event_envelope: EventEnvelope, correlation_id: str, broker: BrokerAnnotation
     ) -> None:
-        if event_envelope.groupchat_data is None:
+        if event_envelope.state.groupchat_data is None:
             raise RuntimeError("Groupchat data is None for a call to a groupchat")
 
         event_envelope.final_response_topic = self.subscribed_topic
-        event_envelope.mark_as_start_of_turn()
+        event_envelope.state.mark_as_start_of_turn()
         await broker.publish(
             event_envelope,
-            topic=event_envelope.groupchat_data.current_agent_topic,
+            topic=event_envelope.state.groupchat_data.current_agent_topic,
             correlation_id=correlation_id,
         )
