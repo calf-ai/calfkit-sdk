@@ -9,7 +9,8 @@ from faststream.kafka.annotations import (
 from calfkit._vendor.pydantic_ai import ModelRequest, ModelResponse, ToolReturnPart
 from calfkit._vendor.pydantic_ai.tools import Tool, ToolDefinition
 from calfkit.models.delegation import DelegationFrame
-from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.event_envelope import EnvelopeState, EventEnvelope
+from calfkit.models.payloads import ToolPayload
 from calfkit.nodes.base_node import BaseNode, entrypoint, returnpoint
 from calfkit.nodes.base_tool_node import BaseToolNode
 
@@ -60,10 +61,9 @@ Args:
         reply_to: Annotated[str, Context("message.reply_to")],
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
-        if not event_envelope.tool_call_request:
-            raise RuntimeError("No tool call request found")
-
-        tool_call_req = event_envelope.tool_call_request
+        # Read from ToolPayload
+        payload = ToolPayload.model_validate(event_envelope.payload)
+        tool_call_req = payload.tool_call_request
         kw_args = tool_call_req.args_as_dict()
         target_name = kw_args.get("name", "")
         message = kw_args.get("message", "")
@@ -79,8 +79,8 @@ Args:
                 ),
                 tool_call_id=tool_call_req.tool_call_id,
             )
-            event_envelope.tool_call_request = None
-            event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
+            event_envelope.payload = None
+            event_envelope.state.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
             return event_envelope
 
         # Validate reply_to — caller must publish with reply_to set
@@ -92,8 +92,8 @@ Args:
                 ),
                 tool_call_id=tool_call_req.tool_call_id,
             )
-            event_envelope.tool_call_request = None
-            event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
+            event_envelope.payload = None
+            event_envelope.state.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
             return event_envelope
 
         # Validate thread_id — error case returns normally via reply_to
@@ -106,8 +106,8 @@ Args:
                 ),
                 tool_call_id=tool_call_req.tool_call_id,
             )
-            event_envelope.tool_call_request = None
-            event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
+            event_envelope.payload = None
+            event_envelope.state.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
             return event_envelope
 
         # --- Success path: delegate to sub-agent ---
@@ -122,20 +122,15 @@ Args:
 
         # Create delegation envelope (deep copy, clean slate for sub-agent)
         delegation = event_envelope.model_copy(deep=True)
-        delegation.push_delegation_frame(frame)
-        delegation.message_history = []
+        delegation.state.push_delegation_frame(frame)
+        delegation.state.message_history = []
+        delegation.state.pending_tool_calls = []
         delegation.final_response_topic = self.returnpoint_topic
-        delegation.pending_tool_calls = []
-        delegation.tool_call_request = None
-        delegation.patch_model_request_params = None
-        delegation.system_message = None
-        delegation.instructions = None
-        delegation.name = None
         delegation.payload = None
 
         # Prepare the user prompt for the sub-agent, attributed to the caller
-        delegation.prepare_uncommitted_agent_messages(
-            [ModelRequest.user_text_prompt(message, name=event_envelope.name)]
+        delegation.state.prepare_uncommitted_agent_messages(
+            [ModelRequest.user_text_prompt(message, name=payload.agent_name)]
         )
 
         await broker.publish(
@@ -159,7 +154,7 @@ Args:
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> None:
-        frame = event_envelope.pop_delegation_frame()
+        frame = event_envelope.state.pop_delegation_frame()
 
         # Extract sub-agent's response — check payload first, then text
         if event_envelope.payload is not None:
@@ -169,7 +164,7 @@ Args:
                 else str(event_envelope.payload)
             )
         else:
-            last_msg = event_envelope.latest_message_in_history
+            last_msg = event_envelope.state.latest_message_in_history
             response_text = (
                 last_msg.text if isinstance(last_msg, ModelResponse) and last_msg.text else ""
             )
@@ -186,9 +181,11 @@ Args:
             trace_id=event_envelope.trace_id,
             thread_id=event_envelope.thread_id,
             final_response_topic=frame.caller_final_response_topic,
-            delegation_stack=event_envelope.delegation_stack,
+            state=EnvelopeState(
+                delegation_stack=event_envelope.state.delegation_stack,
+            ),
         )
-        response.prepare_uncommitted_agent_messages([ModelRequest(parts=[tool_result])])
+        response.state.prepare_uncommitted_agent_messages([ModelRequest(parts=[tool_result])])
 
         await broker.publish(
             response,

@@ -34,8 +34,8 @@ class InvokeResponse:
         if self.finished:
             return
         await self.send.send(item)
-        if item.is_end_of_turn:
-            self._final_response = item.latest_message_in_history
+        if item.state.is_end_of_turn:
+            self._final_response = item.state.latest_message_in_history
             self._final_envelope = item
             await self.send.aclose()
             self._done.set()
@@ -47,8 +47,8 @@ class InvokeResponse:
             ModelMessage: request/response object from the model client
         """
         async for item in self.receive:
-            if item.latest_message_in_history:
-                yield item.latest_message_in_history
+            if item.state.latest_message_in_history:
+                yield item.state.latest_message_in_history
 
     async def get_final_response(self) -> ModelMessage:
         """Blocks until final response is received and returns it.

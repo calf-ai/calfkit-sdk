@@ -207,13 +207,13 @@ async def main() -> None:
 
     @broker.subscriber("agent_router.output", group_id="activity-viewer")
     async def handle_agent_activity(envelope: EventEnvelope) -> None:
-        last_msg = envelope.latest_message_in_history
+        last_msg = envelope.state.latest_message_in_history
         if last_msg is None:
             return
 
-        agent_name = envelope.agent_name or "unknown"
+        agent_name = envelope.trace_id or "unknown"
         trace_id = envelope.trace_id
-        history_len = len(envelope.message_history)
+        history_len = len(envelope.state.message_history)
 
         if isinstance(last_msg, ModelResponse):
             tool_calls = [p for p in last_msg.parts if isinstance(p, ToolCallPart)]
