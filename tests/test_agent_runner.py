@@ -83,6 +83,7 @@ def deploy_broker() -> BrokerClient:
         tool_nodes=[get_weather, get_temperature],
         message_history_store=InMemoryMessageHistoryStore(),
         system_prompt="Please always greet the user as Conan before every message",
+        name="main_agent",
     )
     service.register_node(router_node)
 
@@ -96,6 +97,7 @@ async def test_agent(deploy_broker):
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
+        name="test_agent",
     )
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
@@ -120,6 +122,7 @@ async def test_multi_turn_agent(deploy_broker):
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
         system_prompt="Please speak like an insufferable gen z teenager in 2026. Your name is Jeff",
+        name="jeff_agent",
         # override the deployment system prompt
     )
     async with TestKafkaBroker(broker) as _:
@@ -173,6 +176,7 @@ async def test_parallel_tool_calls(deploy_broker):
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather, get_temperature],
+        name="parallel_agent",
     )
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")

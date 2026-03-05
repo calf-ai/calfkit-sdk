@@ -1,3 +1,4 @@
+import json
 from typing import Annotated, Any, cast
 
 from faststream import Context
@@ -130,6 +131,7 @@ Args:
         delegation.system_message = None
         delegation.instructions = None
         delegation.name = None
+        delegation.payload = None
 
         # Prepare the user prompt for the sub-agent, attributed to the caller
         delegation.prepare_uncommitted_agent_messages(
@@ -159,11 +161,18 @@ Args:
     ) -> None:
         frame = event_envelope.pop_delegation_frame()
 
-        # Extract the sub-agent's final response text
-        last_msg = event_envelope.latest_message_in_history
-        response_text = (
-            last_msg.text if isinstance(last_msg, ModelResponse) and last_msg.text else ""
-        )
+        # Extract sub-agent's response — check payload first, then text
+        if event_envelope.payload is not None:
+            response_text = (
+                json.dumps(event_envelope.payload)
+                if isinstance(event_envelope.payload, dict)
+                else str(event_envelope.payload)
+            )
+        else:
+            last_msg = event_envelope.latest_message_in_history
+            response_text = (
+                last_msg.text if isinstance(last_msg, ModelResponse) and last_msg.text else ""
+            )
 
         # Wrap the sub-agent's response as a ToolReturnPart for the caller's LLM
         tool_result = ToolReturnPart(

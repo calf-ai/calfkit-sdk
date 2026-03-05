@@ -26,6 +26,7 @@ class InvokeResponse:
         )
         self._done = asyncio.Event()
         self._final_response: ModelMessage | None = None
+        self._final_envelope: EventEnvelope | None = None
         self.correlation_id = correlation_id
         self._cleanup_task: asyncio.Task[None] | None = None
 
@@ -35,6 +36,7 @@ class InvokeResponse:
         await self.send.send(item)
         if item.is_end_of_turn:
             self._final_response = item.latest_message_in_history
+            self._final_envelope = item
             await self.send.aclose()
             self._done.set()
 
@@ -59,6 +61,20 @@ class InvokeResponse:
         if self._final_response is None:
             raise RuntimeError("Final response not available")
         return self._final_response
+
+    async def get_output(self) -> Any:
+        """Blocks until the final response is received and returns the structured payload.
+
+        Returns the payload from the final envelope if present, otherwise None.
+
+        Returns:
+            The structured output payload, or None if no structured output was produced.
+        """
+        if not self.finished:
+            await self._done.wait()
+        if self._final_envelope is None:
+            raise RuntimeError("Final envelope not available")
+        return self._final_envelope.payload
 
     @property
     def finished(self) -> bool:
@@ -128,9 +144,10 @@ class RouterServiceClient(Generic[AgentDepsT]):
 
     async def request(
         self,
-        user_prompt: str,
+        user_prompt: str | None = None,
         *,
         deps: AgentDepsT | None = None,
+        payload: Any = None,
         final_response_topic: str | None = None,
         thread_id: str | None = None,
         correlation_id: str | None = None,
@@ -142,6 +159,8 @@ class RouterServiceClient(Generic[AgentDepsT]):
             user_prompt: User prompt to request the model.
             deps: Optional runtime dependencies forwarded to tool functions
                 via ``ToolContext``.
+            payload: Optional structured input payload. When provided, the router
+                validates it against input_type (if configured) and passes it as deps.
             final_response_topic: The topic to publish the final response to.
             thread_id: The conversation ID for multi-turn memory.
             correlation_id: Optionally provide a correlation ID for this request.
@@ -170,6 +189,7 @@ class RouterServiceClient(Generic[AgentDepsT]):
             thread_id=thread_id,
             correlation_id=correlation_id,
             deps=deps,
+            payload=payload,
         )
 
         async def cleanup_when_done() -> None:
@@ -183,9 +203,10 @@ class RouterServiceClient(Generic[AgentDepsT]):
 
     async def invoke(
         self,
-        user_prompt: str,
+        user_prompt: str | None = None,
         *,
         deps: AgentDepsT | None = None,
+        payload: Any = None,
         final_response_topic: str | None = None,
         thread_id: str | None = None,
         correlation_id: str | None = None,
@@ -196,6 +217,8 @@ class RouterServiceClient(Generic[AgentDepsT]):
             user_prompt: User prompt to request the model.
             deps: Optional runtime dependencies forwarded to tool functions
                 via ``ToolContext``.
+            payload: Optional structured input payload. When provided, the router
+                validates it against input_type (if configured) and passes it as deps.
             final_response_topic: The final topic to respond to when
                 the agent node is done.
             thread_id: The conversation ID for multi-turn memory.
@@ -216,4 +239,5 @@ class RouterServiceClient(Generic[AgentDepsT]):
             thread_id=thread_id,
             correlation_id=correlation_id,
             deps=deps,
+            payload=payload,
         )

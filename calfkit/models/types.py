@@ -1,11 +1,13 @@
 from typing import Any, TypeAlias
 
 from pydantic import BaseModel
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict, TypeVar
 
 from calfkit._vendor.pydantic_ai import ToolCallPart
 
 ToolCallRequest: TypeAlias = ToolCallPart
+
+PayloadT = TypeVar("PayloadT", default=Any)
 
 
 class SerializableModelSettings(TypedDict, total=False):

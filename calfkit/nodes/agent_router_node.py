@@ -11,7 +11,7 @@ from calfkit.broker.broker import BrokerClient
 from calfkit.messages import validate_tool_call_pairs
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.types import ToolCallRequest
-from calfkit.nodes.base_node import BaseNode, entrypoint, publish_to, subscribe_to
+from calfkit.nodes.base_node import BaseNode, entrypoint, publish_to, returnpoint, subscribe_to
 from calfkit.nodes.base_tool_node import BaseToolNode
 from calfkit.stores.base import MessageHistoryStore
 
@@ -27,7 +27,7 @@ class AgentRouterNode(BaseNode):
         self,
         chat_node: BaseNode,
         *,
-        name: str | None = None,
+        name: str,
         input_topic: str | list[str] | None = None,
         output_topic: str | None = None,
         system_prompt: str,
@@ -41,7 +41,7 @@ class AgentRouterNode(BaseNode):
         self,
         chat_node: BaseNode,
         *,
-        name: str | None = None,
+        name: str,
         input_topic: str | list[str] | None = None,
         output_topic: str | None = None,
         system_prompt: str | None = None,
@@ -54,7 +54,7 @@ class AgentRouterNode(BaseNode):
     def __init__(
         self,
         *,
-        name: str | None = None,
+        name: str,
         input_topic: str | list[str] | None = None,
         output_topic: str | None = None,
     ) -> None: ...
@@ -63,7 +63,7 @@ class AgentRouterNode(BaseNode):
     def __init__(
         self,
         *,
-        name: str | None = None,
+        name: str,
         input_topic: str | list[str] | None = None,
         output_topic: str | None = None,
         system_prompt: str | None = None,
@@ -75,12 +75,13 @@ class AgentRouterNode(BaseNode):
         chat_node: BaseNode | None = None,
         *,
         system_prompt: str | None = None,
-        name: str | None = None,
+        name: str,
         input_topic: str | list[str] | None = None,
         output_topic: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
         message_history_store: MessageHistoryStore | None = None,
         deps_type: type | None = None,
+        input_type: type | None = None,
         **kwargs: Any,
     ):
         """Initialize an AgentRouterNode.
@@ -89,24 +90,26 @@ class AgentRouterNode(BaseNode):
 
         1. **Deployable Router NodesService** (with required parameters):
            Use when deploying the router as a service with all dependencies explicitly provided.
-           Requires: chat_node, system_prompt (str), tool_nodes, message_history_store
+           Requires: chat_node, name, system_prompt (str), tool_nodes, message_history_store
 
         2. **Deployable Router NodesService** (with optional parameters):
            Use when deploying with optional or runtime-configurable dependencies.
-           Requires: chat_node
+           Requires: chat_node, name
            Optional: system_prompt, tool_nodes, message_history_store
 
         3. **Minimal Client**:
            Use when creating a client to invoke an already-deployed router service.
-           No parameters needed - connects to the deployed service via the broker.
+           Requires: name
 
         4. **Client with Runtime Patches**:
            Use when creating a client that provides its own tools/system prompt at runtime,
            overriding or supplementing what the deployed router service provides.
+           Requires: name
            Optional: system_prompt, tool_nodes
 
         Args:
             chat_node: The chat node for LLM interactions. Required for deployable services.
+            name: Required name for the router. Used for topic resolution and scoped history.
             system_prompt: Optional system prompt to override the default. Must be str for
                 deployable service, optional for client with runtime patches.
             input_topic: Override the default input topic(s). Accepts a single topic string
@@ -116,6 +119,7 @@ class AgentRouterNode(BaseNode):
                 instances — the router treats them like any other tool. Optional for all forms.
             message_history_store: Store for persisting conversation history across requests.
                 Required for deployable service, optional otherwise.
+            input_type: Optional type for validating structured input payloads.
             **kwargs: Additional keyword arguments passed to BaseNode.
         """
         self.chat = chat_node
@@ -128,6 +132,7 @@ class AgentRouterNode(BaseNode):
         )
         self.message_history_store = message_history_store
         self.deps_type = deps_type
+        self.input_type = input_type
 
         self.tools_topic_registry: dict[str, str] | None = (
             {
@@ -143,21 +148,40 @@ class AgentRouterNode(BaseNode):
 
     @subscribe_to(_router_sub_topic_name)
     @entrypoint("agent_router.private.{name}")
-    @publish_to(_router_pub_topic_name)
-    async def _router(
+    async def on_request(
         self,
         ctx: EventEnvelope,
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
-        # Guard: nothing to process
-        if not ctx.has_uncommitted_messages and ctx.user_prompt is None:
-            return ctx
+        """Handle initial requests from clients or delegating agents.
+
+        Receives messages with user_prompt (normal invocation), payload
+        (structured input), or uncommitted messages (delegation handoff).
+        """
+        if ctx.user_prompt is None and ctx.payload is None and not ctx.has_uncommitted_messages:
+            return ctx  # Guard
 
         ctx.agent_name = self.name
 
+        # Structured input: validate payload, pass as deps, clear payload
+        if ctx.payload is not None:
+            if self.input_type is not None:
+                validated = self.input_type.model_validate(ctx.payload)
+                ctx.deps = validated
+            else:
+                ctx.deps = ctx.payload
+            ctx.payload = None
+
+        # Load existing history from store (for multi-turn conversations)
+        if self.message_history_store is not None and ctx.thread_id is not None:
+            ctx.message_history = await self.message_history_store.get(
+                thread_id=ctx.thread_id, scope=self.name
+            )
+
+        # Commit any pre-existing uncommitted messages (e.g., from delegation handoff
+        # where the DelegationTool prepares a user prompt as an uncommitted message)
         if ctx.has_uncommitted_messages:
-            # --- Return path (from ChatNode or ToolNode) ---
             uncommitted_messages = ctx.pop_all_uncommited_agent_messages()
             if self.message_history_store is not None and ctx.thread_id is not None:
                 await self.message_history_store.append_many(
@@ -171,30 +195,57 @@ class AgentRouterNode(BaseNode):
             else:
                 ctx.message_history.extend(uncommitted_messages)
 
-            # Route based on latest message
-            if isinstance(ctx.latest_message_in_history, ModelResponse):
-                if (
-                    ctx.latest_message_in_history.finish_reason == "tool_call"
-                    or ctx.latest_message_in_history.tool_calls
-                ):
-                    await self._route_tool_calls(
-                        ctx, ctx.latest_message_in_history.tool_calls, correlation_id, broker
-                    )
-                else:
-                    await self._reply_to_sender(ctx, correlation_id, broker)
-            elif ctx.pending_tool_calls:
-                await self._route_tool_calls(ctx, ctx.pending_tool_calls, correlation_id, broker)
-            elif validate_tool_call_pairs(ctx.message_history):
-                await self._call_model(ctx, correlation_id, broker)
+        # Send to ChatNode
+        await self._call_model(ctx, correlation_id, broker)
+        return ctx
 
-        elif ctx.user_prompt is not None:
-            # --- Initial request path ---
-            # Load existing history from store (for multi-turn conversations)
-            if self.message_history_store is not None and ctx.thread_id is not None:
-                ctx.message_history = await self.message_history_store.get(
-                    thread_id=ctx.thread_id, scope=self.name
+    @returnpoint("agent_router.return.{name}")
+    @publish_to(_router_pub_topic_name)
+    async def on_return(
+        self,
+        ctx: EventEnvelope,
+        correlation_id: Annotated[str, Context()],
+        broker: BrokerAnnotation,
+    ) -> EventEnvelope:
+        """Handle responses from ChatNode and ToolNodes."""
+        if not ctx.has_uncommitted_messages:
+            return ctx  # Guard
+
+        ctx.agent_name = self.name
+
+        # Commit messages
+        uncommitted_messages = ctx.pop_all_uncommited_agent_messages()
+        if self.message_history_store is not None and ctx.thread_id is not None:
+            await self.message_history_store.append_many(
+                thread_id=ctx.thread_id,
+                messages=uncommitted_messages,
+                scope=self.name,
+            )
+            ctx.message_history = await self.message_history_store.get(
+                thread_id=ctx.thread_id, scope=self.name
+            )
+        else:
+            ctx.message_history.extend(uncommitted_messages)
+
+        # Structured output: ChatNode set payload — reply immediately
+        if ctx.payload is not None:
+            await self._reply_to_sender(ctx, correlation_id, broker)
+            return ctx
+
+        # Route based on latest message
+        if isinstance(ctx.latest_message_in_history, ModelResponse):
+            if (
+                ctx.latest_message_in_history.finish_reason == "tool_call"
+                or ctx.latest_message_in_history.tool_calls
+            ):
+                await self._route_tool_calls(
+                    ctx, ctx.latest_message_in_history.tool_calls, correlation_id, broker
                 )
-            # Send to ChatNode — agent.run() will create the ModelRequest
+            else:
+                await self._reply_to_sender(ctx, correlation_id, broker)
+        elif ctx.pending_tool_calls:
+            await self._route_tool_calls(ctx, ctx.pending_tool_calls, correlation_id, broker)
+        elif validate_tool_call_pairs(ctx.message_history):
             await self._call_model(ctx, correlation_id, broker)
 
         return ctx
@@ -226,7 +277,7 @@ class AgentRouterNode(BaseNode):
             event_envelope,
             topic=tool_topic,
             correlation_id=correlation_id,
-            reply_to=self.entrypoint_topic or self.subscribed_topic,
+            reply_to=self.returnpoint_topic or self.entrypoint_topic or self.subscribed_topic,
         )
 
     def _requires_sequential_tool_calls(self, ctx: EventEnvelope) -> bool:
@@ -315,26 +366,31 @@ class AgentRouterNode(BaseNode):
             event_envelope,
             topic=self.chat.entrypoint_topic or self.chat.subscribed_topic,  # type: ignore
             correlation_id=correlation_id,
-            reply_to=self.entrypoint_topic or self.subscribed_topic,
+            reply_to=self.returnpoint_topic or self.entrypoint_topic or self.subscribed_topic,
         )
 
     async def invoke(
         self,
         *,
-        user_prompt: str,
+        user_prompt: str | None = None,
         broker: BrokerClient,
         final_response_topic: str | None = None,
         correlation_id: str,
         thread_id: str | None = None,
         deps: Any = None,
+        payload: Any = None,
     ) -> str:
         """Invoke the agent
 
         Args:
-            user_prompt (str): User prompt to request the model
-            broker (BrokerClient): The broker to connect to
-            correlation_id (str | None, optional): Optionally provide a correlation ID
-            for this request. Defaults to None.
+            user_prompt: User prompt to request the model.
+            broker: The broker to connect to.
+            final_response_topic: Topic to publish the final response to.
+            correlation_id: Correlation ID for this request.
+            thread_id: Conversation ID for multi-turn memory.
+            deps: Optional runtime dependencies forwarded to tool functions.
+            payload: Optional structured input payload. When provided, the router
+                validates it against input_type (if configured) and passes it as deps.
 
         Returns:
             str: The correlation ID for this request
@@ -357,6 +413,7 @@ class AgentRouterNode(BaseNode):
             system_message=self.system_message,
             final_response_topic=final_response_topic,
             deps=deps,
+            payload=payload,
         )
         event_envelope.mark_as_start_of_turn()
         if self.name is not None:
