@@ -114,7 +114,9 @@ def deploy_structured_broker() -> BrokerClient:
     broker = BrokerClient()
     service = NodesService(broker)
 
-    model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
+    model_client = OpenAIModelClient(
+        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
+    )
 
     # Deploy shared chat nodes (one plain, one with each output_type)
     service.register_node(ChatNode(model_client))

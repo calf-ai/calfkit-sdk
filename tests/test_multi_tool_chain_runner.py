@@ -72,7 +72,9 @@ def deploy_chain_broker() -> BrokerClient:
     broker = BrokerClient()
     service = NodesService(broker)
 
-    model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
+    model_client = OpenAIModelClient(
+        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
+    )
     service.register_node(ChatNode(model_client))
 
     service.register_node(lookup_employee_id)

@@ -50,7 +50,9 @@ def deploy_delegation_broker() -> tuple[BrokerClient, AgentRouterNode, AgentRout
     service = NodesService(broker)
 
     # 1. Deploy LLM model node worker
-    model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
+    model_client = OpenAIModelClient(
+        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
+    )
     chat_node = ChatNode(model_client)
     service.register_node(chat_node)
 
