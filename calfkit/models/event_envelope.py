@@ -37,7 +37,7 @@ class EnvelopeState(CompactBaseModel):
     # For holding groupchat data and config. Only to directly be accessed by the groupchat node.
     groupchat_data: GroupchatDataModel | None = None
 
-    # Per-request session config (set by router from RouterPayload, persists across tool-call cycles)
+    # Per-request session config; set by router from RouterPayload, persists across tool-call cycles
     instructions: str | None = None
     agent_name: str | None = None
     model_request_params: ModelRequestParameters | None = None
