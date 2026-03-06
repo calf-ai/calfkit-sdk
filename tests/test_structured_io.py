@@ -23,6 +23,7 @@ from calfkit._vendor.pydantic_ai import (
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.payloads import RouterPayload
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
@@ -110,7 +111,7 @@ async def test_structured_output_basic():
         assert result.payload is not None
         assert result.payload["item"] == "widget"
         assert result.payload["quantity"] == 5
-        assert result.is_end_of_turn
+        assert result.state.is_end_of_turn
 
 
 @pytest.mark.asyncio
@@ -198,7 +199,7 @@ async def test_structured_output_with_function_tools():
 
 @pytest.mark.asyncio
 async def test_structured_input_validation():
-    """Payload is validated against input_type and passed as deps."""
+    """Payload is validated against deps_type and passed as deps."""
 
     def input_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("Processed order")])
@@ -213,7 +214,7 @@ async def test_structured_input_validation():
     router_node = AgentRouterNode(
         chat_node=ChatNode(model_client),
         name="input_agent",
-        input_type=OrderInput,
+        deps_type=OrderInput,
     )
     service.register_node(router_node)
 
@@ -231,16 +232,16 @@ async def test_structured_input_validation():
             broker=broker,
             final_response_topic="final_response",
             correlation_id="test-input-1",
-            payload={"customer_name": "Alice", "order_id": "ORD-123"},
+            deps={"customer_name": "Alice", "order_id": "ORD-123"},
         )
 
         await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
         queue = response_store[trace_id]
         result = await queue.get()
 
-        assert isinstance(result.latest_message_in_history, ModelResponse)
-        # Payload should be cleared after on_request (it was consumed as input)
-        assert result.payload is None
+        assert isinstance(result.state.latest_message_in_history, ModelResponse)
+        # Input payload was consumed as deps — output payload is the text response
+        assert isinstance(result.payload, str)
 
 
 @pytest.mark.asyncio
@@ -263,7 +264,7 @@ async def test_payload_consumed_as_input_not_forwarded():
     router_node = AgentRouterNode(
         chat_node=ChatNode(model_client),
         name="payload_consume_agent",
-        input_type=OrderInput,
+        deps_type=OrderInput,
     )
     service.register_node(router_node)
 
@@ -281,23 +282,23 @@ async def test_payload_consumed_as_input_not_forwarded():
             broker=broker,
             final_response_topic="final_response",
             correlation_id="test-payload-consume-1",
-            payload={"customer_name": "Bob", "order_id": "ORD-456"},
+            deps={"customer_name": "Bob", "order_id": "ORD-456"},
         )
 
         await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
         queue = response_store[trace_id]
         result = await queue.get()
 
-        # Input payload was consumed — should NOT appear as output payload
-        assert result.payload is None
-        # Should still have a normal text response
-        assert isinstance(result.latest_message_in_history, ModelResponse)
-        assert "Processed" in str(result.latest_message_in_history.parts[0])
+        # Input payload was consumed as deps — output payload is the text response
+        assert isinstance(result.payload, str)
+        assert "Processed" in result.payload
+        assert isinstance(result.state.latest_message_in_history, ModelResponse)
 
 
 @pytest.mark.asyncio
 async def test_backward_compat_text_output():
-    """Agent without output_type works exactly as before — text response, no payload."""
+    """Agent without output_type works exactly as before:
+    text response, no structured output payload."""
 
     def text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("Hello, world!")])
@@ -335,15 +336,15 @@ async def test_backward_compat_text_output():
         queue = response_store[trace_id]
         result = await queue.get()
 
-        assert isinstance(result.latest_message_in_history, ModelResponse)
-        assert "Hello, world!" in str(result.latest_message_in_history.parts[0])
-        # No structured payload
-        assert result.payload is None
+        assert isinstance(result.state.latest_message_in_history, ModelResponse)
+        # Text output goes on payload — str is an output type
+        assert isinstance(result.payload, str)
+        assert "Hello, world!" in result.payload
 
 
 @pytest.mark.asyncio
 async def test_service_client_payload():
-    """RouterServiceClient.request(payload=...) flows correctly."""
+    """RouterServiceClient.request(deps=...) flows correctly."""
 
     def payload_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("Processed")])
@@ -358,7 +359,7 @@ async def test_service_client_payload():
     router_node = AgentRouterNode(
         chat_node=ChatNode(model_client),
         name="client_payload_agent",
-        input_type=OrderInput,
+        deps_type=OrderInput,
     )
     service.register_node(router_node)
 
@@ -366,7 +367,7 @@ async def test_service_client_payload():
         client = RouterServiceClient(broker, router_node)
         response = await client.request(
             user_prompt="Process order",
-            payload={"customer_name": "Charlie", "order_id": "ORD-789"},
+            deps={"customer_name": "Charlie", "order_id": "ORD-789"},
         )
 
         final_msg = await asyncio.wait_for(response.get_final_response(), timeout=5.0)
@@ -436,6 +437,13 @@ def test_envelope_payload_none_excluded():
     assert "payload" not in dumped
 
 
+def test_envelope_state_always_serialized():
+    """State is always included in serialization even when created via default_factory."""
+    envelope = EventEnvelope(trace_id="test-789")
+    dumped = envelope.model_dump()
+    assert "state" in dumped
+
+
 @pytest.mark.asyncio
 async def test_on_request_handler():
     """Verify on_request handles initial requests correctly."""
@@ -468,10 +476,10 @@ async def test_on_request_handler():
         # Publish directly to the entrypoint topic
         env = EventEnvelope(
             trace_id="on-request-1",
-            user_prompt="hello",
+            payload=RouterPayload(user_prompt="hello"),
             final_response_topic="final_response",
         )
-        env.mark_as_start_of_turn()
+        env.state.mark_as_start_of_turn()
         assert router_node.entrypoint_topic is not None
         await broker.publish(
             env,
@@ -480,8 +488,8 @@ async def test_on_request_handler():
         )
         await wait_for_condition(lambda: "on-request-1" in response_store, timeout=5.0)
         result = await response_store["on-request-1"].get()
-        assert isinstance(result.latest_message_in_history, ModelResponse)
-        assert "echo" in str(result.latest_message_in_history.parts[0])
+        assert isinstance(result.state.latest_message_in_history, ModelResponse)
+        assert "echo" in str(result.state.latest_message_in_history.parts[0])
 
 
 @pytest.mark.asyncio
@@ -523,10 +531,10 @@ async def test_on_return_handler():
     async with TestKafkaBroker(broker) as _:
         env = EventEnvelope(
             trace_id="on-return-1",
-            user_prompt="order bolts",
+            payload=RouterPayload(user_prompt="order bolts"),
             final_response_topic="final_response",
         )
-        env.mark_as_start_of_turn()
+        env.state.mark_as_start_of_turn()
         assert router_node.entrypoint_topic is not None
         await broker.publish(
             env,
@@ -540,7 +548,7 @@ async def test_on_return_handler():
         assert result.payload is not None
         assert result.payload["item"] == "bolt"
         assert result.payload["quantity"] == 100
-        assert result.is_end_of_turn
+        assert result.state.is_end_of_turn
 
 
 @pytest.mark.asyncio

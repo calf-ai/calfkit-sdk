@@ -17,6 +17,7 @@ from calfkit._vendor.pydantic_ai import (
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.payloads import RouterPayload
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
@@ -162,8 +163,8 @@ async def test_agent_memory_with_function_model():
         queue_1 = response_store[trace_id_1]
         result_1 = await queue_1.get()
         assert result_1.trace_id == trace_id_1
-        assert isinstance(result_1.latest_message_in_history, ModelResponse)
-        result_content = str(result_1.latest_message_in_history.parts[0])
+        assert isinstance(result_1.state.latest_message_in_history, ModelResponse)
+        result_content = str(result_1.state.latest_message_in_history.parts[0])
         assert "Alice" in result_content
 
         # Second invocation with SAME thread_id - should access memory
@@ -180,8 +181,8 @@ async def test_agent_memory_with_function_model():
         queue_2 = response_store[trace_id_2]
         result_2 = await queue_2.get()
         assert result_2.trace_id == trace_id_2
-        assert isinstance(result_2.latest_message_in_history, ModelResponse)
-        result_content = str(result_2.latest_message_in_history.parts[0])
+        assert isinstance(result_2.state.latest_message_in_history, ModelResponse)
+        result_content = str(result_2.state.latest_message_in_history.parts[0])
         assert "Alice" in result_content
 
     # Verify the memory store has the messages
@@ -291,7 +292,7 @@ async def test_tool_visibility_with_function_model():
         await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
         queue = response_store[trace_id]
         result = await queue.get()
-        assert isinstance(result.latest_message_in_history, ModelResponse)
+        assert isinstance(result.state.latest_message_in_history, ModelResponse)
 
         # The model should have received the tool return and made a final response
         # Verify our assertions in the FunctionModel passed
@@ -414,7 +415,7 @@ async def test_tool_context_runtime_injection():
         await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
         queue = response_store[trace_id]
         result = await queue.get()
-        assert isinstance(result.latest_message_in_history, ModelResponse)
+        assert isinstance(result.state.latest_message_in_history, ModelResponse)
 
         # Verify the tool was called and received correct context
         assert tool_call_made
@@ -422,7 +423,7 @@ async def test_tool_context_runtime_injection():
         # Find the tool return in message history to verify context injection
         tool_returns = [
             part
-            for msg in result.message_history
+            for msg in result.state.message_history
             for part in msg.parts
             if isinstance(part, ToolReturnPart) and part.tool_name == "ctx_echo_tool"
         ]
@@ -446,10 +447,8 @@ def test_deps_round_trip_on_envelope():
     envelope = EventEnvelope(
         trace_id="test",
         deps=Config(url="https://example.com"),
-        agent_name="my_agent",
     )
     assert envelope.deps.url == "https://example.com"
-    assert envelope.agent_name == "my_agent"
 
 
 # Test: Named ChatNode topic resolution
@@ -524,10 +523,10 @@ async def test_router_targets_named_chat_node():
         # Publish directly to router_alpha's private entrypoint
         env_a = EventEnvelope(
             trace_id="alpha-1",
-            user_prompt="hello",
+            payload=RouterPayload(user_prompt="hello"),
             final_response_topic="final_response",
         )
-        env_a.mark_as_start_of_turn()
+        env_a.state.mark_as_start_of_turn()
         await broker.publish(
             env_a,
             topic=router_alpha.entrypoint_topic,
@@ -535,16 +534,16 @@ async def test_router_targets_named_chat_node():
         )
         await wait_for_condition(lambda: "alpha-1" in response_store, timeout=5.0)
         result_a = await response_store["alpha-1"].get()
-        assert isinstance(result_a.latest_message_in_history, ModelResponse)
-        assert "alpha-response" in str(result_a.latest_message_in_history.parts[0])
+        assert isinstance(result_a.state.latest_message_in_history, ModelResponse)
+        assert "alpha-response" in str(result_a.state.latest_message_in_history.parts[0])
 
         # Publish directly to router_beta's private entrypoint
         env_b = EventEnvelope(
             trace_id="beta-1",
-            user_prompt="hello",
+            payload=RouterPayload(user_prompt="hello"),
             final_response_topic="final_response",
         )
-        env_b.mark_as_start_of_turn()
+        env_b.state.mark_as_start_of_turn()
         await broker.publish(
             env_b,
             topic=router_beta.entrypoint_topic,
@@ -552,5 +551,5 @@ async def test_router_targets_named_chat_node():
         )
         await wait_for_condition(lambda: "beta-1" in response_store, timeout=5.0)
         result_b = await response_store["beta-1"].get()
-        assert isinstance(result_b.latest_message_in_history, ModelResponse)
-        assert "beta-response" in str(result_b.latest_message_in_history.parts[0])
+        assert isinstance(result_b.state.latest_message_in_history, ModelResponse)
+        assert "beta-response" in str(result_b.state.latest_message_in_history.parts[0])

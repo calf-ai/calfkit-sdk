@@ -259,6 +259,6 @@ async def test_integration_custom_topics_with_test_broker():
         await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
         queue = response_store[trace_id]
         result = await queue.get()
-        assert isinstance(result.latest_message_in_history, ModelResponse)
-        content = str(result.latest_message_in_history.parts[0])
+        assert isinstance(result.state.latest_message_in_history, ModelResponse)
+        content = str(result.state.latest_message_in_history.parts[0])
         assert "echo:" in content

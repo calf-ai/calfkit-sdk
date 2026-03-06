@@ -6,6 +6,7 @@ from faststream import Context
 
 from calfkit._vendor.pydantic_ai import ModelRequest, Tool, ToolDefinition, ToolReturnPart
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.payloads import ToolPayload
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
 
@@ -31,17 +32,17 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
             event_envelope: EventEnvelope,
             correlation_id: Annotated[str, Context()],
         ) -> EventEnvelope:
-            if not event_envelope.tool_call_request:
-                raise RuntimeError("No tool call request found")
-            tool_cal_req = event_envelope.tool_call_request
+            # Read from ToolPayload
+            payload = ToolPayload.model_validate(event_envelope.payload)
+            tool_cal_req = payload.tool_call_request
             kw_args = tool_cal_req.args_as_dict()
 
             ctx = ToolContext(
                 deps=event_envelope.deps,
-                agent_name=event_envelope.agent_name,
+                agent_name=payload.agent_name,
                 tool_call_id=tool_cal_req.tool_call_id,
                 tool_name=tool_cal_req.tool_name,
-                messages=list(event_envelope.message_history),
+                messages=list(event_envelope.state.message_history),
                 run_id=correlation_id,
             )
             result = await self.tool.function_schema.call(kw_args, ctx)
@@ -51,7 +52,8 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
                 content=result,
                 tool_call_id=tool_cal_req.tool_call_id,
             )
-            event_envelope.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
+            event_envelope.state.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
+            event_envelope.payload = None  # consumed
             return event_envelope
 
         @property

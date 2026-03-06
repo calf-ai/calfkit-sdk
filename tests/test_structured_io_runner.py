@@ -114,7 +114,9 @@ def deploy_structured_broker() -> BrokerClient:
     broker = BrokerClient()
     service = NodesService(broker)
 
-    model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
+    model_client = OpenAIModelClient(
+        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
+    )
 
     # Deploy shared chat nodes (one plain, one with each output_type)
     service.register_node(ChatNode(model_client))
@@ -160,7 +162,7 @@ def deploy_structured_broker() -> BrokerClient:
             chat_node=ChatNode(name="review_chat", output_type=ReviewResult),
             name="review_agent",
             input_topic="structured.review.input",
-            input_type=ReviewRequest,
+            deps_type=ReviewRequest,
             system_prompt=(
                 "You are a product reviewer. You receive a product name and category as structured "
                 "input via the deps/context. Write a brief, single-sentence review and give a "
@@ -176,7 +178,7 @@ def deploy_structured_broker() -> BrokerClient:
             chat_node=ChatNode(),
             name="input_only_agent",
             input_topic="structured.inputonly.input",
-            input_type=ReviewRequest,
+            deps_type=ReviewRequest,
             system_prompt=(
                 "You receive structured product data as context. "
                 "Respond with a plain text summary mentioning the product name."
@@ -265,7 +267,7 @@ async def test_structured_input_and_output(deploy_structured_broker):
         chat_node=ChatNode(name="review_chat", output_type=ReviewResult),
         name="review_agent",
         input_topic="structured.review.input",
-        input_type=ReviewRequest,
+        deps_type=ReviewRequest,
     )
 
     async with TestKafkaBroker(broker) as _:
@@ -275,7 +277,7 @@ async def test_structured_input_and_output(deploy_structured_broker):
                 "Review the following product. "
                 "Product name: Thunderbolt Cable. Category: Electronics."
             ),
-            payload={"product_name": "Thunderbolt Cable", "category": "Electronics"},
+            deps={"product_name": "Thunderbolt Cable", "category": "Electronics"},
         )
 
         output = await asyncio.wait_for(response.get_output(), timeout=30.0)
@@ -298,25 +300,26 @@ async def test_structured_input_text_output(deploy_structured_broker):
         chat_node=ChatNode(),
         name="input_only_agent",
         input_topic="structured.inputonly.input",
-        input_type=ReviewRequest,
+        deps_type=ReviewRequest,
     )
 
     async with TestKafkaBroker(broker) as _:
         client = RouterServiceClient(broker, router_node)
         response = await client.request(
             user_prompt="Summarize this product: Wireless Mouse, category Peripherals.",
-            payload={"product_name": "Wireless Mouse", "category": "Peripherals"},
+            deps={"product_name": "Wireless Mouse", "category": "Peripherals"},
         )
 
         final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
 
-        # Payload should not appear on output (consumed as input, text-only agent)
+        # Text output goes on payload — str is an output type
         output = await response.get_output()
-        assert output is None
+        assert isinstance(output, str)
+        assert len(output) > 0
 
-        print(f"Text response: {final_msg.text}")
+        print(f"Text response: {output}")
 
 
 @pytest.mark.asyncio
@@ -342,8 +345,9 @@ async def test_backward_compat_no_structured_io(deploy_structured_broker):
         assert final_msg.text is not None
         assert len(final_msg.text) > 0
 
-        # No structured payload
+        # Text output goes on payload — str is an output type
         output = await response.get_output()
-        assert output is None
+        assert isinstance(output, str)
+        assert len(output) > 0
 
-        print(f"Plain text: {final_msg.text}")
+        print(f"Plain text: {output}")

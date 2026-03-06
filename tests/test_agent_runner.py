@@ -67,7 +67,9 @@ def deploy_broker() -> BrokerClient:
     service = NodesService(broker)
 
     # 1. Deploy llm model node worker
-    model_client = OpenAIModelClient("gpt-5-nano", reasoning_effort="low")
+    model_client = OpenAIModelClient(
+        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
+    )
     chat_node = ChatNode(model_client)
     service.register_node(chat_node)
 
@@ -97,7 +99,7 @@ async def test_agent(deploy_broker):
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
-        name="test_agent",
+        name="main_agent",
     )
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
@@ -106,7 +108,7 @@ async def test_agent(deploy_broker):
         response = await client.request(user_prompt="Hey, what's the weather in Tokyo?")
         print(f"  Sent with correlation_id: {response.correlation_id[:8]}...")
 
-        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
         assert isinstance(final_msg, ModelResponse)
         print(f"Text: {final_msg.text}")
         print(f"Tool calls: {final_msg.tool_calls}")
@@ -122,7 +124,7 @@ async def test_multi_turn_agent(deploy_broker):
         chat_node=ChatNode(),
         tool_nodes=[get_weather],
         system_prompt="Please speak like an insufferable gen z teenager in 2026. Your name is Jeff",
-        name="jeff_agent",
+        name="main_agent",
         # override the deployment system prompt
     )
     async with TestKafkaBroker(broker) as _:
@@ -176,7 +178,7 @@ async def test_parallel_tool_calls(deploy_broker):
     router_node = AgentRouterNode(
         chat_node=ChatNode(),
         tool_nodes=[get_weather, get_temperature],
-        name="parallel_agent",
+        name="main_agent",
     )
     async with TestKafkaBroker(broker) as _:
         print(f"\n\n{'=' * 10}Start{'=' * 10}")
@@ -188,7 +190,7 @@ async def test_parallel_tool_calls(deploy_broker):
             thread_id=thread_id,
         )
 
-        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
         print(f"{final_msg.text}")

@@ -70,9 +70,6 @@ class BaseNode(ABC, Generic[InputT, OutputT]):
 
     _handler_registry: dict[Callable[..., Any], TopicsDict] = {}
 
-    input_type: type[InputT] | None = None
-    output_type: type[OutputT] | None = None
-
     def __init__(
         self,
         name: str | None = None,

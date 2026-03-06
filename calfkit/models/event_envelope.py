@@ -1,85 +1,51 @@
+import json as _json
 from typing import Any, Generic
 
 from pydantic import Field
 
-from calfkit._vendor.pydantic_ai import ModelMessage, ModelRequest
+from calfkit._vendor.pydantic_ai import ModelMessage
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.delegation import DelegationFrame
 from calfkit.models.groupchat import GroupchatDataModel
 from calfkit.models.types import (
     CompactBaseModel,
     PayloadT,
-    SerializableModelSettings,
     ToolCallRequest,
 )
 
 
-class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
-    trace_id: str | None = None
+class EnvelopeState(CompactBaseModel):
+    """Shared mutable runtime state that persists across hops."""
 
-    # Raw user prompt string — Agent handles wrapping in ModelRequest
-    user_prompt: str | None = None
+    # Running message history
+    message_history: list[ModelMessage] = Field(default_factory=list)
 
-    # Instructions string for the Agent (replaces SystemPromptPart patching)
-    instructions: str | None = None
-
-    # Runtime deps from router.invoke(), forwarded to tool nodes via ToolContext.
-    # Must be JSON-serializable (e.g. dict, str, int, list) since the envelope
-    # travels over the Kafka wire as JSON.
-    deps: Any = None
-
-    # Polymorphic structured data field — carries typed input (client→agent)
-    # or typed output (agent→client) depending on direction.
-    payload: PayloadT | None = None
-
-    # Agent name set by AgentRouterNode's handler, forwarded to tool nodes via ToolContext
-    agent_name: str | None = None
-
-    # Used to surface the tool call from latest message so tool call workers do not have to dig
-    # For tool node eyes only
-    tool_call_request: ToolCallRequest | None = None
+    # Uncommitted messages, often coming out from a node and not yet persisted in message history
+    uncommitted_messages: list[ModelMessage] = Field(default_factory=list)
 
     # Pending tool calls to enforce sequential tool calling when thread_id
     # is not provided or when there is no memory history store configured
     pending_tool_calls: list[ToolCallRequest] = Field(default_factory=list)
 
-    # Optional inference-time patch in settings and parameters
-    patch_model_request_params: ModelRequestParameters | None = None
-    patch_model_settings: SerializableModelSettings | None = None
-
-    # Running message history
-    message_history: list[ModelMessage] = Field(default_factory=list)
-
-    # Optional name to save LLM generated messages under
-    name: str | None = None
-
-    @property
-    def latest_message_in_history(self) -> ModelMessage | None:
-        return self.message_history[-1] if self.message_history else None
-
-    # Uncommitted messages, often coming out from a node and not yet persisted in message history
-    uncommitted_messages: list[ModelMessage] = Field(default_factory=list)
-
-    # thread id / conversation identifier
-    thread_id: str | None = None
-
-    # Allow client to dynamically patch system message at runtime
-    # Intentionally kept separate from message_history in order to simplify patch logic
-    system_message: ModelRequest | None = None
-
-    # Where the final response from AI should be published to
-    final_response_topic: str | None = None
-
     # Whether the current state of messages is the final response from the AI to the user
     final_response: bool = False
-
-    # For holding groupchat data and config. Only to directly be accessed by the groupchat node.
-    groupchat_data: GroupchatDataModel | None = None
 
     # Stack of DelegationFrames tracking nested agent-to-agent delegations.
     # Each frame records the return address and tool-call metadata so that
     # the response can be routed back to the correct caller.
     delegation_stack: list[DelegationFrame] = Field(default_factory=list)
+
+    # For holding groupchat data and config. Only to directly be accessed by the groupchat node.
+    groupchat_data: GroupchatDataModel | None = None
+
+    # Per-request session config; set by router from RouterPayload, persists across tool-call cycles
+    instructions: str | None = None
+    agent_name: str | None = None
+    model_request_params: ModelRequestParameters | None = None
+
+    @property
+    def latest_message_in_history(self) -> ModelMessage | None:
+        return self.message_history[-1] if self.message_history else None
 
     @property
     def is_groupchat(self) -> bool:
@@ -91,7 +57,7 @@ class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
 
     @property
     def has_uncommitted_messages(self) -> bool:
-        """Check if the envelope has uncommitted, unprocessed messages."""
+        """Check if there are uncommitted, unprocessed messages."""
         return bool(self.uncommitted_messages)
 
     def mark_as_end_of_turn(self) -> None:
@@ -154,3 +120,41 @@ class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
         *rest, frame = self.delegation_stack
         self.delegation_stack = rest
         return frame
+
+
+class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
+    # Routing
+    trace_id: str | None = None
+    thread_id: str | None = None
+    final_response_topic: str | None = None
+
+    # Node-specific data (direction-agnostic, typed handler interprets)
+    payload: PayloadT | None = None
+
+    # User context — persists across payload transformations.
+    # Must be JSON-serializable (e.g. dict, str, int, list) since the envelope
+    # travels over the Kafka wire as JSON.
+    deps: Any = None
+
+    # Shared mutable runtime state
+    state: EnvelopeState = Field(default_factory=EnvelopeState)
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Override to always include ``state`` even when created via default_factory.
+
+        Pydantic v2's ``exclude_unset=True`` drops fields populated by
+        ``default_factory`` because they were never explicitly set.  Since
+        ``state`` is critical for wire serialization we force-include it.
+        """
+        data = super().model_dump(**kwargs)
+        if "state" not in data:
+            data["state"] = self.state.model_dump(**kwargs)
+        return data
+
+    def model_dump_json(self, **kwargs: Any) -> str:
+        """Override to ensure ``state`` is always present in JSON output.
+
+        Converts via ``model_dump`` (which force-includes ``state``) then
+        serializes to JSON so the field is never dropped.
+        """
+        return _json.dumps(self.model_dump(**kwargs))
