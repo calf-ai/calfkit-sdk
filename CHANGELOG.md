@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.16](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.15...v0.1.16) (2026-03-06)
+
+
+### Features
+
+* split EventEnvelope into routing, state, and typed payload layers ([#93](https://github.com/calf-ai/calfkit-sdk/issues/93)) ([2fb313c](https://github.com/calf-ai/calfkit-sdk/commit/2fb313c5764f9fd48ca1e1717f5ca4de9bab4b81))
+* structured input/output support and request/return handler split ([#90](https://github.com/calf-ai/calfkit-sdk/issues/90)) ([41fc8d6](https://github.com/calf-ai/calfkit-sdk/commit/41fc8d6d74f33a75e9a2e94b50ea395831f4e8b6))
+
 ## [0.1.15](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.14...v0.1.15) (2026-03-04)
 
 
