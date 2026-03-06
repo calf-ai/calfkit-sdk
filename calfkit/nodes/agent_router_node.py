@@ -131,9 +131,7 @@ class AgentRouterNode(BaseNode):
         uncommitted messages (delegation handoff / tool-call re-entry).
         """
         # Consume RouterPayload if present
-        router_payload = (
-            RouterPayload.model_validate(ctx.payload) if ctx.payload else None
-        )
+        router_payload = RouterPayload.model_validate(ctx.payload) if ctx.payload else None
 
         if router_payload is None and not ctx.state.has_uncommitted_messages:
             return ctx  # Guard
@@ -257,6 +255,14 @@ class AgentRouterNode(BaseNode):
             raise RuntimeError("No tools configured on this router node, but tool was still called")
         tool_topic = self.tools_topic_registry.get(generated_tool_call.tool_name)
         if tool_topic is None:
+            # TODO: verify if this is possible.
+            # i.e. does pydantic_ai already internally do tool validation/checking?
+            logging.error(
+                f"[{self.name}] Tool '{generated_tool_call.tool_name}' not found in "
+                f"tools_topic_registry. Available tools: "
+                f"{list(self.tools_topic_registry.keys())}. "
+                f"tool_call_id={generated_tool_call.tool_call_id}"
+            )
             return
         event_envelope.payload = ToolPayload(
             tool_call_request=generated_tool_call,
@@ -398,9 +404,7 @@ class AgentRouterNode(BaseNode):
             instructions=self.system_prompt,
             name=self.name,
             patch_model_request_params=(
-                ModelRequestParameters(
-                    function_tools=[t.tool_schema for t in self.tools]
-                )
+                ModelRequestParameters(function_tools=[t.tool_schema for t in self.tools])
                 if self.tools
                 else None
             ),
@@ -415,7 +419,7 @@ class AgentRouterNode(BaseNode):
         event_envelope.state.mark_as_start_of_turn()
         await broker.publish(
             event_envelope,
-            topic=self.subscribed_topic or "",
+            topic=self.entrypoint_topic or self.subscribed_topic or "",
             correlation_id=correlation_id,
         )
         return correlation_id
