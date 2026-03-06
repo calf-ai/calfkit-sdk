@@ -17,6 +17,7 @@ from calfkit._vendor.pydantic_ai import (
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.payloads import RouterPayload
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
@@ -522,7 +523,7 @@ async def test_router_targets_named_chat_node():
         # Publish directly to router_alpha's private entrypoint
         env_a = EventEnvelope(
             trace_id="alpha-1",
-            user_prompt="hello",
+            payload=RouterPayload(user_prompt="hello"),
             final_response_topic="final_response",
         )
         env_a.state.mark_as_start_of_turn()
@@ -539,7 +540,7 @@ async def test_router_targets_named_chat_node():
         # Publish directly to router_beta's private entrypoint
         env_b = EventEnvelope(
             trace_id="beta-1",
-            user_prompt="hello",
+            payload=RouterPayload(user_prompt="hello"),
             final_response_topic="final_response",
         )
         env_b.state.mark_as_start_of_turn()

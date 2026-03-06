@@ -76,8 +76,8 @@ class ChatReplCli:
             response = await asyncio.wait_for(response_queue.get(), timeout=5.0)
 
             elapsed = time.monotonic() - start_time
-            if response.is_end_of_turn and response.latest_message_in_history:
-                text = getattr(response.latest_message_in_history, "text", None)
+            if response.state.is_end_of_turn and response.state.latest_message_in_history:
+                text = getattr(response.state.latest_message_in_history, "text", None)
                 if text:
                     return text, elapsed
             return None, elapsed

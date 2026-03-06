@@ -275,7 +275,7 @@ async def test_structured_input_and_output(deploy_structured_broker):
                 "Review the following product. "
                 "Product name: Thunderbolt Cable. Category: Electronics."
             ),
-            payload={"product_name": "Thunderbolt Cable", "category": "Electronics"},
+            deps={"product_name": "Thunderbolt Cable", "category": "Electronics"},
         )
 
         output = await asyncio.wait_for(response.get_output(), timeout=30.0)
@@ -305,7 +305,7 @@ async def test_structured_input_text_output(deploy_structured_broker):
         client = RouterServiceClient(broker, router_node)
         response = await client.request(
             user_prompt="Summarize this product: Wireless Mouse, category Peripherals.",
-            payload={"product_name": "Wireless Mouse", "category": "Peripherals"},
+            deps={"product_name": "Wireless Mouse", "category": "Peripherals"},
         )
 
         final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)

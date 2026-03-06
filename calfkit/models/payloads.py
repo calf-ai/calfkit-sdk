@@ -2,6 +2,15 @@ from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.types import CompactBaseModel, SerializableModelSettings, ToolCallRequest
 
 
+class RouterPayload(CompactBaseModel):
+    """What AgentRouterNode needs to process a request."""
+
+    user_prompt: str | None = None
+    instructions: str | None = None
+    name: str | None = None
+    patch_model_request_params: ModelRequestParameters | None = None
+
+
 class ChatPayload(CompactBaseModel):
     """What ChatNode needs to call the LLM."""
 

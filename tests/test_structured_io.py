@@ -23,6 +23,7 @@ from calfkit._vendor.pydantic_ai import (
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.payloads import RouterPayload
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.nodes.chat_node import ChatNode
@@ -231,7 +232,7 @@ async def test_structured_input_validation():
             broker=broker,
             final_response_topic="final_response",
             correlation_id="test-input-1",
-            payload={"customer_name": "Alice", "order_id": "ORD-123"},
+            deps={"customer_name": "Alice", "order_id": "ORD-123"},
         )
 
         await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
@@ -281,7 +282,7 @@ async def test_payload_consumed_as_input_not_forwarded():
             broker=broker,
             final_response_topic="final_response",
             correlation_id="test-payload-consume-1",
-            payload={"customer_name": "Bob", "order_id": "ORD-456"},
+            deps={"customer_name": "Bob", "order_id": "ORD-456"},
         )
 
         await wait_for_condition(lambda: trace_id in response_store, timeout=5.0)
@@ -343,7 +344,7 @@ async def test_backward_compat_text_output():
 
 @pytest.mark.asyncio
 async def test_service_client_payload():
-    """RouterServiceClient.request(payload=...) flows correctly."""
+    """RouterServiceClient.request(deps=...) flows correctly."""
 
     def payload_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("Processed")])
@@ -366,7 +367,7 @@ async def test_service_client_payload():
         client = RouterServiceClient(broker, router_node)
         response = await client.request(
             user_prompt="Process order",
-            payload={"customer_name": "Charlie", "order_id": "ORD-789"},
+            deps={"customer_name": "Charlie", "order_id": "ORD-789"},
         )
 
         final_msg = await asyncio.wait_for(response.get_final_response(), timeout=5.0)
@@ -475,7 +476,7 @@ async def test_on_request_handler():
         # Publish directly to the entrypoint topic
         env = EventEnvelope(
             trace_id="on-request-1",
-            user_prompt="hello",
+            payload=RouterPayload(user_prompt="hello"),
             final_response_topic="final_response",
         )
         env.state.mark_as_start_of_turn()
@@ -530,7 +531,7 @@ async def test_on_return_handler():
     async with TestKafkaBroker(broker) as _:
         env = EventEnvelope(
             trace_id="on-return-1",
-            user_prompt="order bolts",
+            payload=RouterPayload(user_prompt="order bolts"),
             final_response_topic="final_response",
         )
         env.state.mark_as_start_of_turn()

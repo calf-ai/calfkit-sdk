@@ -3,6 +3,7 @@ from typing import Any, Generic
 from pydantic import Field
 
 from calfkit._vendor.pydantic_ai import ModelMessage
+from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.delegation import DelegationFrame
 from calfkit.models.groupchat import GroupchatDataModel
 from calfkit.models.types import (
@@ -35,6 +36,11 @@ class EnvelopeState(CompactBaseModel):
 
     # For holding groupchat data and config. Only to directly be accessed by the groupchat node.
     groupchat_data: GroupchatDataModel | None = None
+
+    # Per-request session config (set by router from RouterPayload, persists across tool-call cycles)
+    instructions: str | None = None
+    agent_name: str | None = None
+    model_request_params: ModelRequestParameters | None = None
 
     @property
     def latest_message_in_history(self) -> ModelMessage | None:
@@ -120,9 +126,6 @@ class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
     trace_id: str | None = None
     thread_id: str | None = None
     final_response_topic: str | None = None
-
-    # Initial stimulus — consumed by router when building ChatPayload
-    user_prompt: str | None = None
 
     # Node-specific data (direction-agnostic, handler interprets)
     payload: PayloadT | None = None

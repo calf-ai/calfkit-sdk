@@ -147,7 +147,6 @@ class RouterServiceClient(Generic[AgentDepsT]):
         user_prompt: str | None = None,
         *,
         deps: AgentDepsT | None = None,
-        payload: Any = None,
         final_response_topic: str | None = None,
         thread_id: str | None = None,
         correlation_id: str | None = None,
@@ -159,8 +158,6 @@ class RouterServiceClient(Generic[AgentDepsT]):
             user_prompt: User prompt to request the model.
             deps: Optional runtime dependencies forwarded to tool functions
                 via ``ToolContext``.
-            payload: Optional structured input payload. When provided, the router
-                validates it against input_type (if configured) and passes it as deps.
             final_response_topic: The topic to publish the final response to.
             thread_id: The conversation ID for multi-turn memory.
             correlation_id: Optionally provide a correlation ID for this request.
@@ -189,7 +186,6 @@ class RouterServiceClient(Generic[AgentDepsT]):
             thread_id=thread_id,
             correlation_id=correlation_id,
             deps=deps,
-            payload=payload,
         )
 
         async def cleanup_when_done() -> None:
@@ -206,7 +202,6 @@ class RouterServiceClient(Generic[AgentDepsT]):
         user_prompt: str | None = None,
         *,
         deps: AgentDepsT | None = None,
-        payload: Any = None,
         final_response_topic: str | None = None,
         thread_id: str | None = None,
         correlation_id: str | None = None,
@@ -217,8 +212,6 @@ class RouterServiceClient(Generic[AgentDepsT]):
             user_prompt: User prompt to request the model.
             deps: Optional runtime dependencies forwarded to tool functions
                 via ``ToolContext``.
-            payload: Optional structured input payload. When provided, the router
-                validates it against input_type (if configured) and passes it as deps.
             final_response_topic: The final topic to respond to when
                 the agent node is done.
             thread_id: The conversation ID for multi-turn memory.
@@ -239,5 +232,4 @@ class RouterServiceClient(Generic[AgentDepsT]):
             thread_id=thread_id,
             correlation_id=correlation_id,
             deps=deps,
-            payload=payload,
         )

@@ -125,6 +125,10 @@ Args:
         delegation.state.push_delegation_frame(frame)
         delegation.state.message_history = []
         delegation.state.pending_tool_calls = []
+        # Clear caller's session config so sub-agent uses its own
+        delegation.state.instructions = None
+        delegation.state.agent_name = None
+        delegation.state.model_request_params = None
         delegation.final_response_topic = self.returnpoint_topic
         delegation.payload = None
 

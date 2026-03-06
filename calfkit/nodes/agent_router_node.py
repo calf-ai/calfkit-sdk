@@ -12,7 +12,7 @@ from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.broker.broker import BrokerClient
 from calfkit.messages import validate_tool_call_pairs
 from calfkit.models.event_envelope import EventEnvelope
-from calfkit.models.payloads import ChatPayload, ToolPayload
+from calfkit.models.payloads import ChatPayload, RouterPayload, ToolPayload
 from calfkit.models.types import ToolCallRequest
 from calfkit.nodes.base_node import BaseNode, entrypoint, publish_to, returnpoint, subscribe_to
 from calfkit.nodes.base_tool_node import BaseToolNode
@@ -127,31 +127,34 @@ class AgentRouterNode(BaseNode):
     ) -> EventEnvelope:
         """Handle initial requests from clients or delegating agents.
 
-        Receives messages with user_prompt (normal invocation), payload
-        (structured input), or uncommitted messages (delegation handoff).
+        Receives messages with RouterPayload (normal invocation) or
+        uncommitted messages (delegation handoff / tool-call re-entry).
         """
-        if (
-            ctx.user_prompt is None
-            and ctx.payload is None
-            and not ctx.state.has_uncommitted_messages
-        ):
+        # Consume RouterPayload if present
+        router_payload = (
+            RouterPayload.model_validate(ctx.payload) if ctx.payload else None
+        )
+
+        if router_payload is None and not ctx.state.has_uncommitted_messages:
             return ctx  # Guard
 
-        # Structured input: validate payload, pass as deps, clear payload
-        if ctx.payload is not None:
-            if self.deps_type is not None:
-                if issubclass(self.deps_type, BaseModel):
-                    ctx.deps = self.deps_type.model_validate(ctx.payload)
-                else:
-                    ctx.deps = ctx.payload if isinstance(ctx.payload, self.deps_type) else None
-                    if not isinstance(ctx.payload, self.deps_type):
-                        logging.error(
-                            "incoming payload does not match defined deps_type: \n"
-                            + f"payload={ctx.payload}\n\ndeps_type={self.deps_type}"
-                        )
+        # Store session config from RouterPayload onto state (persists across tool-call cycles)
+        if router_payload is not None:
+            ctx.state.instructions = router_payload.instructions
+            ctx.state.agent_name = router_payload.name
+            ctx.state.model_request_params = router_payload.patch_model_request_params
+            ctx.payload = None  # consumed
+
+        # Validate deps against deps_type if configured
+        if ctx.deps is not None and self.deps_type is not None:
+            if issubclass(self.deps_type, BaseModel):
+                ctx.deps = self.deps_type.model_validate(ctx.deps)
             else:
-                ctx.deps = ctx.payload
-            ctx.payload = None
+                if not isinstance(ctx.deps, self.deps_type):
+                    logging.error(
+                        "incoming deps does not match defined deps_type: \n"
+                        + f"deps={ctx.deps}\n\ndeps_type={self.deps_type}"
+                    )
 
         # Load existing history from store (for multi-turn conversations)
         if self.message_history_store is not None and ctx.thread_id is not None:
@@ -176,7 +179,12 @@ class AgentRouterNode(BaseNode):
                 ctx.state.message_history.extend(uncommitted_messages)
 
         # Send to ChatNode
-        await self._call_model(ctx, correlation_id, broker)
+        await self._call_model(
+            ctx,
+            correlation_id,
+            broker,
+            user_prompt=router_payload.user_prompt if router_payload else None,
+        )
         return ctx
 
     @returnpoint("agent_router.return.{name}")
@@ -252,7 +260,7 @@ class AgentRouterNode(BaseNode):
             return
         event_envelope.payload = ToolPayload(
             tool_call_request=generated_tool_call,
-            agent_name=self.name,
+            agent_name=event_envelope.state.agent_name or self.name,
         )
         await broker.publish(
             event_envelope,
@@ -320,45 +328,36 @@ class AgentRouterNode(BaseNode):
         event_envelope: EventEnvelope,
         correlation_id: str,
         broker: Any,
+        user_prompt: str | None = None,
     ) -> None:
         """Send the message history to the chat node for LLM inference.
 
-        Builds a ChatPayload if one isn't already present on the envelope.
+        Reads session config from state (set by on_request from RouterPayload)
+        with fallbacks to self attributes.
 
         Args:
             event_envelope: The event envelope to send. Modified in place.
             correlation_id: The correlation ID for request tracking.
             broker: The message broker for publishing.
+            user_prompt: Optional user prompt for the initial request.
         """
-        # Build ChatPayload for the ChatNode
-        patch_model_request_params = (
-            event_envelope.payload.patch_model_request_params
-            if isinstance(event_envelope.payload, ChatPayload)
-            else None
-        )
-        if patch_model_request_params is None:
-            patch_model_request_params = ModelRequestParameters(
+        # Read config from state (persisted across tool-call cycles), fall back to self
+        instructions = event_envelope.state.instructions or self.system_prompt
+        name = event_envelope.state.agent_name or self.name
+        params = event_envelope.state.model_request_params
+        if params is None:
+            params = ModelRequestParameters(
                 function_tools=[tool.tool_schema for tool in self.tools]
                 if self.tools is not None
                 else []
             )
 
-        # Determine instructions — use existing ChatPayload instructions or system_prompt
-        instructions = (
-            event_envelope.payload.instructions
-            if isinstance(event_envelope.payload, ChatPayload)
-            and event_envelope.payload.instructions
-            else self.system_prompt
-        )
-
         event_envelope.payload = ChatPayload(
-            user_prompt=event_envelope.user_prompt,
+            user_prompt=user_prompt,
             instructions=instructions,
-            name=self.name,
-            patch_model_request_params=patch_model_request_params,
+            name=name,
+            patch_model_request_params=params,
         )
-        # Consume user_prompt — it's now in the ChatPayload
-        event_envelope.user_prompt = None
 
         await broker.publish(
             event_envelope,
@@ -376,7 +375,6 @@ class AgentRouterNode(BaseNode):
         correlation_id: str,
         thread_id: str | None = None,
         deps: Any = None,
-        payload: Any = None,
     ) -> str:
         """Invoke the agent
 
@@ -387,8 +385,6 @@ class AgentRouterNode(BaseNode):
             correlation_id: Correlation ID for this request.
             thread_id: Conversation ID for multi-turn memory.
             deps: Optional runtime dependencies forwarded to tool functions.
-            payload: Optional structured input payload. When provided, the router
-                validates it against deps_type (if configured) and passes it as deps.
 
         Returns:
             str: The correlation ID for this request
@@ -397,13 +393,24 @@ class AgentRouterNode(BaseNode):
         if not broker._connection:
             await broker.start()
 
+        router_payload = RouterPayload(
+            user_prompt=user_prompt,
+            instructions=self.system_prompt,
+            name=self.name,
+            patch_model_request_params=(
+                ModelRequestParameters(
+                    function_tools=[t.tool_schema for t in self.tools]
+                )
+                if self.tools
+                else None
+            ),
+        )
         event_envelope = EventEnvelope(
             trace_id=correlation_id,
-            user_prompt=user_prompt,
             thread_id=thread_id,
             final_response_topic=final_response_topic,
             deps=deps,
-            payload=payload,
+            payload=router_payload,
         )
         event_envelope.state.mark_as_start_of_turn()
         await broker.publish(
