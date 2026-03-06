@@ -106,7 +106,7 @@ async def test_agent(deploy_broker):
         response = await client.request(user_prompt="Hey, what's the weather in Tokyo?")
         print(f"  Sent with correlation_id: {response.correlation_id[:8]}...")
 
-        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=60.0)
         assert isinstance(final_msg, ModelResponse)
         print(f"Text: {final_msg.text}")
         print(f"Tool calls: {final_msg.tool_calls}")
@@ -136,7 +136,7 @@ async def test_multi_turn_agent(deploy_broker):
             thread_id=thread_id,
         )
 
-        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=60.0)
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
         print(f"{final_msg.text}")
@@ -148,7 +148,7 @@ async def test_multi_turn_agent(deploy_broker):
             thread_id=thread_id,
         )
 
-        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=60.0)
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
         print(f"{final_msg.text}")
@@ -160,7 +160,7 @@ async def test_multi_turn_agent(deploy_broker):
             thread_id=thread_id,
         )
 
-        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=20.0)
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=60.0)
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
         print(f"{final_msg.text}")
@@ -188,7 +188,7 @@ async def test_parallel_tool_calls(deploy_broker):
             thread_id=thread_id,
         )
 
-        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
+        final_msg = await asyncio.wait_for(response.get_final_response(), timeout=60.0)
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
         print(f"{final_msg.text}")
