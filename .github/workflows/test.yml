@@ -53,6 +53,8 @@ jobs:
              contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'),
                       github.event.pull_request.author_association))
             && secrets.OPENAI_API_KEY || '' }}
+          TEST_LLM_MODEL_NAME: ${{ vars.TEST_LLM_MODEL_NAME }}
+          TEST_REASONING_EFFORT: ${{ vars.TEST_REASONING_EFFORT }}
 
       - name: Upload coverage report
         if: matrix.python-version == '3.10'
