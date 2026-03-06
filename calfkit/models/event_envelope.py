@@ -127,7 +127,7 @@ class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
     thread_id: str | None = None
     final_response_topic: str | None = None
 
-    # Node-specific data (direction-agnostic, handler interprets)
+    # Node-specific data (direction-agnostic, typed handler interprets)
     payload: PayloadT | None = None
 
     # User context — persists across payload transformations.
