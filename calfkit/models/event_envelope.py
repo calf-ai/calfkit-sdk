@@ -1,3 +1,4 @@
+import json as _json
 from typing import Any, Generic
 
 from pydantic import Field
@@ -156,6 +157,4 @@ class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
         Converts via ``model_dump`` (which force-includes ``state``) then
         serializes to JSON so the field is never dropped.
         """
-        import json as _json
-
         return _json.dumps(self.model_dump(**kwargs))
