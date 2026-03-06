@@ -40,13 +40,19 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
-        run: uv run pytest tests/ -v --tb=short
-
-      - name: Run tests with coverage
-        if: matrix.python-version == '3.10'
         run: |
-          uv add --group dev pytest-cov
-          uv run pytest tests/ -v --cov=calfkit --cov-report=term-missing --cov-report=xml
+          if [ "${{ matrix.python-version }}" = "3.10" ]; then
+            uv add --group dev pytest-cov
+            uv run pytest tests/ -v --tb=short --cov=calfkit --cov-report=term-missing --cov-report=xml
+          else
+            uv run pytest tests/ -v --tb=short
+          fi
+        env:
+          OPENAI_API_KEY: ${{
+            (github.event_name == 'push' ||
+             contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'),
+                      github.event.pull_request.author_association))
+            && secrets.OPENAI_API_KEY || '' }}
 
       - name: Upload coverage report
         if: matrix.python-version == '3.10'
