@@ -1,7 +1,38 @@
+import json
+from collections.abc import Callable
 from typing import Any
 
 from calfkit.broker.broker import BrokerClient
+from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.base_node import BaseNode
+
+
+def _adapt_filter(filter_fn: Callable[..., bool]) -> Callable[..., bool]:
+    """Adapt a user's EventEnvelope-level filter to FastStream's raw message filter.
+
+    FastStream filters receive a ``StreamMessage`` with ``.body`` as raw bytes,
+    not the deserialized application object.  This adapter deserializes the body
+    and calls the user's filter with a proper ``EventEnvelope``.
+    """
+
+    async def raw_filter(msg: Any) -> bool:
+        try:
+            body = json.loads(msg.body)
+            envelope = EventEnvelope.model_validate(body)
+            return filter_fn(envelope)
+        except Exception:
+            return False
+
+    return raw_filter
+
+
+async def _noop_handler(msg: EventEnvelope) -> EventEnvelope:
+    """Default handler for subscribers with filters.
+
+    Silently discards messages that don't match any filter,
+    preventing FastStream's ``HandlerNotFoundError``.
+    """
+    return EventEnvelope()
 
 
 class NodesService:
@@ -26,6 +57,7 @@ class NodesService:
             if pub is not None:
                 handler_fn = self._broker.publisher(pub, **extra_publish_kwargs)(handler_fn)
             subscribe_topics: list[str] = topics_dict.get("subscribe_topics", [])
+            filter_fn = topics_dict.get("filter")
             for sub_topic in subscribe_topics:
                 subscriber = self._broker.subscriber(
                     sub_topic,
@@ -33,7 +65,11 @@ class NodesService:
                     group_id=group_id,
                     **extra_subscribe_kwargs,
                 )
-                handler_fn = subscriber(handler_fn)
+                if filter_fn is not None:
+                    handler_fn = subscriber(handler_fn, filter=_adapt_filter(filter_fn))
+                    subscriber(_noop_handler)
+                else:
+                    handler_fn = subscriber(handler_fn)
                 self._subscribers.append(subscriber)
 
     async def start_subscribers(self) -> None:

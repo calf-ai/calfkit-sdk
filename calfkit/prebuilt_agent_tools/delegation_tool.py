@@ -9,7 +9,7 @@ from faststream.kafka.annotations import (
 from calfkit._vendor.pydantic_ai import ModelRequest, ModelResponse, ToolReturnPart
 from calfkit._vendor.pydantic_ai.tools import Tool, ToolDefinition
 from calfkit.models.delegation import DelegationFrame
-from calfkit.models.event_envelope import EnvelopeState, EventEnvelope
+from calfkit.models.event_envelope import AgentState, EventEnvelope, RunState
 from calfkit.models.payloads import ToolPayload
 from calfkit.nodes.base_node import BaseNode, entrypoint, returnpoint
 from calfkit.nodes.base_tool_node import BaseToolNode
@@ -122,13 +122,8 @@ Args:
 
         # Create delegation envelope (deep copy, clean slate for sub-agent)
         delegation = event_envelope.model_copy(deep=True)
-        delegation.state.push_delegation_frame(frame)
-        delegation.state.message_history = []
-        delegation.state.pending_tool_calls = []
-        # Clear caller's session config so sub-agent uses its own
-        delegation.state.instructions = None
-        delegation.state.agent_name = None
-        delegation.state.model_request_params = None
+        delegation.state = AgentState()
+        delegation.run_state.push_delegation_frame(frame)
         delegation.final_response_topic = self.returnpoint_topic
         delegation.payload = None
 
@@ -158,7 +153,7 @@ Args:
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> None:
-        frame = event_envelope.state.pop_delegation_frame()
+        frame = event_envelope.run_state.pop_delegation_frame()
 
         # Extract sub-agent's response — check payload first, then text
         if event_envelope.payload is not None:
@@ -185,8 +180,8 @@ Args:
             trace_id=event_envelope.trace_id,
             thread_id=event_envelope.thread_id,
             final_response_topic=frame.caller_final_response_topic,
-            state=EnvelopeState(
-                delegation_stack=event_envelope.state.delegation_stack,
+            run_state=RunState(
+                delegation_stack=event_envelope.run_state.delegation_stack,
             ),
         )
         response.state.prepare_uncommitted_agent_messages([ModelRequest(parts=[tool_result])])

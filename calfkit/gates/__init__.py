@@ -1,6 +1,6 @@
 """Calf Decision Gate System.
 
-Gates control agent participation in groupchat conversations. Each gate
+Gates control agent participation in conversations. Each gate
 evaluates a model's response and decides whether the agent should contribute
 or skip its turn.
 
