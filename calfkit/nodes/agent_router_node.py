@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 from typing import Annotated, Any, cast, overload
 
 from faststream import Context
@@ -11,7 +12,7 @@ from calfkit._vendor.pydantic_ai import ModelResponse
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.broker.broker import BrokerClient
 from calfkit.messages import validate_tool_call_pairs
-from calfkit.models.event_envelope import EventEnvelope
+from calfkit.models.event_envelope import AgentSnapshot, AgentState, EventEnvelope
 from calfkit.models.payloads import ChatPayload, RouterPayload, ToolPayload
 from calfkit.models.types import ToolCallRequest
 from calfkit.nodes.base_node import BaseNode, entrypoint, publish_to, returnpoint, subscribe_to
@@ -36,6 +37,7 @@ class AgentRouterNode(BaseNode):
         system_prompt: str,
         tool_nodes: list[BaseToolNode],
         message_history_store: MessageHistoryStore,
+        input_fn: Callable[[Any], str] | None = None,
         **kwargs: Any,
     ): ...
 
@@ -50,6 +52,7 @@ class AgentRouterNode(BaseNode):
         system_prompt: str | None = None,
         tool_nodes: list[BaseToolNode] | None = None,
         message_history_store: MessageHistoryStore | None = None,
+        input_fn: Callable[[Any], str] | None = None,
         **kwargs: Any,
     ): ...
 
@@ -84,6 +87,7 @@ class AgentRouterNode(BaseNode):
         tool_nodes: list[BaseToolNode] | None = None,
         message_history_store: MessageHistoryStore | None = None,
         deps_type: type | None = None,
+        input_fn: Callable[[Any], str] | None = None,
         **kwargs: Any,
     ):
         """Initialize an AgentRouterNode.
@@ -97,6 +101,9 @@ class AgentRouterNode(BaseNode):
             tool_nodes: List of tool nodes that the agent can call.
             message_history_store: Store for persisting conversation history across requests.
             deps_type: Optional type for validating structured deps payloads.
+            input_fn: Optional callable that transforms an upstream agent's structured output
+                payload into a user_prompt string for this agent. Enables choreography-based
+                agent-to-agent wiring where one agent's output feeds another's input.
             **kwargs: Additional keyword arguments passed to BaseNode.
         """
         self.chat = chat_node
@@ -104,6 +111,7 @@ class AgentRouterNode(BaseNode):
         self.system_prompt = system_prompt
         self.message_history_store = message_history_store
         self.deps_type = deps_type
+        self.input_fn = input_fn
 
         self.tools_topic_registry: dict[str, str] | None = (
             {
@@ -129,7 +137,36 @@ class AgentRouterNode(BaseNode):
 
         Receives messages with RouterPayload (normal invocation) or
         uncommitted messages (delegation handoff / tool-call re-entry).
+        Also handles choreography envelopes from upstream agents.
         """
+        logging.debug(
+            f"[{self.name}] on_request | final_response={ctx.state.final_response} | "
+            f"has_uncommitted={ctx.state.has_uncommitted_messages} | "
+            f"payload_type={type(ctx.payload).__name__} | "
+            f"final_response_topic={ctx.final_response_topic}"
+        )
+        # Choreography detection: envelope from a completed upstream agent
+        # has final_response=True and a payload (the upstream's structured output).
+        # Capture the upstream payload before resetting state.
+        upstream_payload = None
+        if ctx.state.final_response:
+            upstream_payload = ctx.payload
+            ctx.state = AgentState()
+
+        # Choreography: derive user_prompt from upstream's structured output
+        if self.input_fn is not None and upstream_payload is not None:
+            user_prompt = self.input_fn(upstream_payload)
+            ctx.payload = None
+
+            # Load own history from store
+            if self.message_history_store and ctx.thread_id:
+                ctx.state.message_history = await self.message_history_store.get(
+                    thread_id=ctx.thread_id, scope=self.name
+                )
+
+            await self._call_model(ctx, correlation_id, broker, user_prompt=user_prompt)
+            return ctx
+
         # Consume RouterPayload if present
         router_payload = RouterPayload.model_validate(ctx.payload) if ctx.payload else None
 
@@ -194,7 +231,13 @@ class AgentRouterNode(BaseNode):
         broker: BrokerAnnotation,
     ) -> EventEnvelope:
         """Handle responses from ChatNode and ToolNodes."""
+        logging.debug(
+            f"[{self.name}] on_return | has_uncommitted={ctx.state.has_uncommitted_messages} | "
+            f"payload={type(ctx.payload).__name__} | "
+            f"final_response_topic={ctx.final_response_topic}"
+        )
         if not ctx.state.has_uncommitted_messages:
+            logging.debug(f"[{self.name}] on_return | GUARD: no uncommitted messages, returning")
             return ctx  # Guard
 
         # Commit messages
@@ -213,6 +256,7 @@ class AgentRouterNode(BaseNode):
 
         # Structured output: ChatNode set payload — reply immediately
         if ctx.payload is not None:
+            logging.debug(f"[{self.name}] on_return | STRUCTURED OUTPUT → _reply_to_sender")
             await self._reply_to_sender(ctx, correlation_id, broker)
             return ctx
 
@@ -222,14 +266,18 @@ class AgentRouterNode(BaseNode):
                 ctx.state.latest_message_in_history.finish_reason == "tool_call"
                 or ctx.state.latest_message_in_history.tool_calls
             ):
+                logging.debug(f"[{self.name}] on_return | TOOL_CALL → _route_tool_calls")
                 await self._route_tool_calls(
                     ctx, ctx.state.latest_message_in_history.tool_calls, correlation_id, broker
                 )
             else:
+                logging.debug(f"[{self.name}] on_return | TEXT_RESPONSE → _reply_to_sender")
                 await self._reply_to_sender(ctx, correlation_id, broker)
         elif ctx.state.pending_tool_calls:
+            logging.debug(f"[{self.name}] on_return | PENDING_TOOL_CALLS → _route_tool_calls")
             await self._route_tool_calls(ctx, ctx.state.pending_tool_calls, correlation_id, broker)
         elif validate_tool_call_pairs(ctx.state.message_history):
+            logging.debug(f"[{self.name}] on_return | TOOL_PAIRS_COMPLETE → _call_model")
             await self._call_model(ctx, correlation_id, broker)
 
         return ctx
@@ -317,15 +365,37 @@ class AgentRouterNode(BaseNode):
     ) -> None:
         """Send the final response back to the client.
 
+        Pushes an AgentSnapshot onto run_state.agent_history before marking
+        end-of-turn, so downstream choreography consumers can inspect the
+        agent's completed state.
+
         Args:
             event_envelope: The event envelope containing the final response. Modified in place.
             correlation_id: The correlation ID for request tracking.
             broker: The message broker for publishing.
         """
+        # Snapshot current agent state before marking end-of-turn
+        snapshot = AgentSnapshot(
+            agent_name=self.name,
+            agent_state=event_envelope.state.model_copy(deep=True),
+        )
+        event_envelope.run_state.agent_history = [
+            *event_envelope.run_state.agent_history,
+            snapshot,
+        ]
+
         event_envelope.state.mark_as_end_of_turn()
+        target_topic = event_envelope.final_response_topic or self.publish_to_topic
+        logging.debug(
+            f"[{self.name}] _reply_to_sender | "
+            f"final_response_topic={event_envelope.final_response_topic} | "
+            f"publish_to_topic={self.publish_to_topic} | "
+            f"target_topic={target_topic} | "
+            f"payload={event_envelope.payload}"
+        )
         await broker.publish(
             event_envelope,
-            topic=event_envelope.final_response_topic or self.publish_to_topic,
+            topic=target_topic,
             correlation_id=correlation_id,
         )
 

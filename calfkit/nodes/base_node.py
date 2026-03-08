@@ -10,9 +10,13 @@ InputT = TypeVar("InputT", default=Any)
 OutputT = TypeVar("OutputT", default=str)
 
 
-def subscribe_to(topic_name: str) -> Callable[[Any], Any]:
+def subscribe_to(
+    topic_name: str, *, filter: Callable[..., bool] | None = None
+) -> Callable[[Any], Any]:
     def decorator(fn: Any) -> Any:
         fn._subscribe_to_topic_name = topic_name
+        if filter is not None:
+            fn._subscribe_to_filter = filter
         return fn
 
     return decorator
@@ -62,6 +66,7 @@ class TopicsDict(TypedDict, total=False):
     shared_subscribe_topic: str
     entrypoint_topic_template: str
     returnpoint_topic_template: str
+    filter: Any
 
 
 class BaseNode(ABC, Generic[InputT, OutputT]):
@@ -98,12 +103,16 @@ class BaseNode(ABC, Generic[InputT, OutputT]):
             subscribe_to_topic_name = getattr(attr, "_subscribe_to_topic_name", None)
             entrypoint_template = getattr(attr, "_entrypoint_topic_template", None)
             returnpoint_template = getattr(attr, "_returnpoint_topic_template", None)
+            subscribe_filter = getattr(attr, "_subscribe_to_filter", None)
             if publish_to_topic_name:
                 cls._handler_registry[attr] = {"publish_topic": publish_to_topic_name}
             if subscribe_to_topic_name:
                 cls._handler_registry[attr] = cls._handler_registry.get(attr, {})
                 cls._handler_registry[attr]["shared_subscribe_topic"] = subscribe_to_topic_name
                 cls._handler_registry[attr]["subscribe_topics"] = [subscribe_to_topic_name]
+            if subscribe_filter is not None:
+                cls._handler_registry[attr] = cls._handler_registry.get(attr, {})
+                cls._handler_registry[attr]["filter"] = subscribe_filter
             if entrypoint_template:
                 cls._handler_registry[attr] = cls._handler_registry.get(attr, {})
                 cls._handler_registry[attr]["entrypoint_topic_template"] = entrypoint_template

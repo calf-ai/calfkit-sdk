@@ -6,7 +6,6 @@ from pydantic import Field
 from calfkit._vendor.pydantic_ai import ModelMessage
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.delegation import DelegationFrame
-from calfkit.models.groupchat import GroupchatDataModel
 from calfkit.models.types import (
     CompactBaseModel,
     PayloadT,
@@ -14,8 +13,8 @@ from calfkit.models.types import (
 )
 
 
-class EnvelopeState(CompactBaseModel):
-    """Shared mutable runtime state that persists across hops."""
+class AgentState(CompactBaseModel):
+    """Per-agent mutable runtime state that persists across hops within a single agent."""
 
     # Running message history
     message_history: list[ModelMessage] = Field(default_factory=list)
@@ -30,14 +29,6 @@ class EnvelopeState(CompactBaseModel):
     # Whether the current state of messages is the final response from the AI to the user
     final_response: bool = False
 
-    # Stack of DelegationFrames tracking nested agent-to-agent delegations.
-    # Each frame records the return address and tool-call metadata so that
-    # the response can be routed back to the correct caller.
-    delegation_stack: list[DelegationFrame] = Field(default_factory=list)
-
-    # For holding groupchat data and config. Only to directly be accessed by the groupchat node.
-    groupchat_data: GroupchatDataModel | None = None
-
     # Per-request session config; set by router from RouterPayload, persists across tool-call cycles
     instructions: str | None = None
     agent_name: str | None = None
@@ -46,10 +37,6 @@ class EnvelopeState(CompactBaseModel):
     @property
     def latest_message_in_history(self) -> ModelMessage | None:
         return self.message_history[-1] if self.message_history else None
-
-    @property
-    def is_groupchat(self) -> bool:
-        return self.groupchat_data is not None
 
     @property
     def is_end_of_turn(self) -> bool:
@@ -73,8 +60,6 @@ class EnvelopeState(CompactBaseModel):
             message (ModelMessage): new message
         """
         self.uncommitted_messages.append(message)
-        if self.groupchat_data is not None:
-            self.groupchat_data.add_uncommitted_message_to_turn(message)
 
     def prepare_uncommitted_agent_messages(self, messages: list[ModelMessage]) -> None:
         """Prepare and set the agent-level uncommitted messages with provided messages.
@@ -90,13 +75,24 @@ class EnvelopeState(CompactBaseModel):
         self.uncommitted_messages = []
         return messages
 
-    def replace_uncommitted_with_turn_context(self) -> None:
-        """Replace uncommitted messages with conversation context from the groupchat turns queue."""
-        self.uncommitted_messages = (
-            self.groupchat_data.flat_messages_from_turns_queue
-            if self.groupchat_data is not None
-            else []
-        )
+
+class AgentSnapshot(CompactBaseModel):
+    """Snapshot of an agent's state at the time it completed processing."""
+
+    agent_name: str | None = None
+    agent_state: AgentState = Field(default_factory=AgentState)
+
+
+class RunState(CompactBaseModel):
+    """Cross-agent runtime state that persists across the entire workflow run."""
+
+    # Stack of DelegationFrames tracking nested agent-to-agent delegations.
+    # Each frame records the return address and tool-call metadata so that
+    # the response can be routed back to the correct caller.
+    delegation_stack: list[DelegationFrame] = Field(default_factory=list)
+
+    # Ordered history of agent snapshots taken as each agent completes.
+    agent_history: list[AgentSnapshot] = Field(default_factory=list)
 
     def push_delegation_frame(self, frame: DelegationFrame) -> None:
         """Push a delegation frame onto the stack.
@@ -122,6 +118,10 @@ class EnvelopeState(CompactBaseModel):
         return frame
 
 
+# Backward-compatible alias
+EnvelopeState = AgentState
+
+
 class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
     # Routing
     trace_id: str | None = None
@@ -136,25 +136,30 @@ class EventEnvelope(CompactBaseModel, Generic[PayloadT]):
     # travels over the Kafka wire as JSON.
     deps: Any = None
 
-    # Shared mutable runtime state
-    state: EnvelopeState = Field(default_factory=EnvelopeState)
+    # Per-agent mutable runtime state
+    state: AgentState = Field(default_factory=AgentState)
+
+    # Cross-agent runtime state (delegation stack, agent history)
+    run_state: RunState = Field(default_factory=RunState)
 
     def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        """Override to always include ``state`` even when created via default_factory.
+        """Override to always include ``state`` and ``run_state`` even when created via default_factory.
 
         Pydantic v2's ``exclude_unset=True`` drops fields populated by
         ``default_factory`` because they were never explicitly set.  Since
-        ``state`` is critical for wire serialization we force-include it.
+        ``state`` and ``run_state`` are critical for wire serialization we force-include them.
         """
         data = super().model_dump(**kwargs)
         if "state" not in data:
             data["state"] = self.state.model_dump(**kwargs)
+        if "run_state" not in data:
+            data["run_state"] = self.run_state.model_dump(**kwargs)
         return data
 
     def model_dump_json(self, **kwargs: Any) -> str:
-        """Override to ensure ``state`` is always present in JSON output.
+        """Override to ensure ``state`` and ``run_state`` are always present in JSON output.
 
-        Converts via ``model_dump`` (which force-includes ``state``) then
-        serializes to JSON so the field is never dropped.
+        Converts via ``model_dump`` (which force-includes both) then
+        serializes to JSON so the fields are never dropped.
         """
         return _json.dumps(self.model_dump(**kwargs))

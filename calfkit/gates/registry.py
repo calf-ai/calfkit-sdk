@@ -1,7 +1,6 @@
 from calfkit.gates.base import DecisionGate
-from calfkit.gates.groupchat import GroupchatGate
 
-_GATES: dict[str, DecisionGate] = {GroupchatGate.kind: GroupchatGate()}
+_GATES: dict[str, DecisionGate] = {}
 
 # TODO: eventually the registry should move off local,
 # this requires every runtime to have the latest copy of the code
