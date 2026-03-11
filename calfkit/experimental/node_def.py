@@ -1,4 +1,5 @@
 import logging
+import warnings
 from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -99,8 +100,10 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
     ):
         self._node_id = node_id
         if subscribe_topics is None:
-            raise RuntimeWarning(
-                f"node {node_id} is not subscribed to any topics. It is unreachable."
+            warnings.warn(
+                f"node {node_id} is not subscribed to any topics. It is unreachable.",
+                RuntimeWarning,
+                stacklevel=2,
             )
         self.subscribe_topics = (
             [subscribe_topics] if isinstance(subscribe_topics, str) else subscribe_topics
