@@ -4,7 +4,7 @@ from functools import cached_property
 from typing import Any, Generic, TypedDict, cast
 
 from pydantic import BaseModel
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 InputT = TypeVar("InputT", default=Any)
 OutputT = TypeVar("OutputT", default=str)
@@ -64,6 +64,7 @@ class TopicsDict(TypedDict, total=False):
     returnpoint_topic_template: str
 
 
+@deprecated("Use new experimental BaseNodeDef instead")
 class BaseNode(ABC, Generic[InputT, OutputT]):
     """Effectively a node is the data plane, defining the internal wiring and logic.
     When provided to a NodeRunner, node logic can be deployed."""
