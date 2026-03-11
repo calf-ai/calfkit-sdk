@@ -212,8 +212,11 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
                 correlation_id=correlation_id,
             )
 
-    # TODO: move to baseagent subclass. The concept of structured input to prompt string is agent-level concept
-    def input_to_prompt(self, func: Callable[[SessionRunContext[StateT, DepsT]], str]):
+    # TODO: move to baseagent subclass.
+    # The concept of structured input to prompt string is agent-level concept
+    def input_to_prompt(
+        self, func: Callable[[SessionRunContext[StateT, DepsT]], str]
+    ) -> Callable[[SessionRunContext[StateT, DepsT]], str]:
         """decorator to define function to parse structured input to string"""
         self._input_to_prompt_func = func
         return func
