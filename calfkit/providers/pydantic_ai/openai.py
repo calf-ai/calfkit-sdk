@@ -4,9 +4,10 @@ from httpx import Timeout
 
 from calfkit._vendor.pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from calfkit._vendor.pydantic_ai.providers.openai import OpenAIProvider
+from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
-class OpenAIModelClient(OpenAIChatModel):
+class OpenAIModelClient(OpenAIChatModel, PydanticModelClient):
     def __init__(
         self,
         model_name: str,

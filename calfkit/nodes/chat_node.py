@@ -6,6 +6,7 @@ from calfkit._vendor.pydantic_ai.models import Model
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.payloads import ChatPayload
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to
+from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
 class ChatNode(BaseNode, ABC):
@@ -17,7 +18,7 @@ class ChatNode(BaseNode, ABC):
 
     def __init__(
         self,
-        model_client: Model | None = None,
+        model_client: PydanticModelClient | None = None,
         *,
         name: str | None = None,
         input_topic: str | list[str] | None = None,

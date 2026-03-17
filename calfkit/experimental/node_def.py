@@ -1,17 +1,21 @@
+import json
 import logging
 import warnings
 from abc import abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, Generic
+from typing import Annotated, Any, Generic, Literal
 
 from faststream import Context
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
 from faststream.types import SendableMessage
-from pydantic import BaseModel, Field
-from typing_extensions import TypeVar
+from pydantic import BaseModel, Discriminator, Field
+from typing_extensions import TypeAliasType, TypeVar
+
+from calfkit.experimental.context_models import BaseAgentSessionRunContext, BaseSessionRunContext
+from calfkit.experimental.payload_model import Payload
+from calfkit.experimental.utils import generate_payload_id
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +27,6 @@ OutputT = TypeVar("OutputT", bound=SendableMessage, default=Any)
 # ---------------------------------------------------------------------------
 # Developer-facing context
 # ---------------------------------------------------------------------------
-
-
-class SessionRunContext(BaseModel, Generic[StateT, DepsT]):
-    """Developer-facing context for a session — just state + deps."""
-
-    state: StateT
-    """The state of the graph. Mutable."""
-    deps: DepsT
-    """Dependencies for the graph. Immutable."""
 
 
 # ---------------------------------------------------------------------------
@@ -50,15 +45,15 @@ class Reply(Generic[OutputT]):
 class Delegate(Generic[OutputT]):
     """Terminal: forward to another node, expect result back (pushes reply_stack)."""
 
-    value: OutputT
     topic: str
+    value: OutputT | None = None
 
 
 @dataclass
 class Emit(Generic[OutputT]):
     """Terminal: fire-and-forget publish to a topic. No reply expected."""
 
-    payload: OutputT
+    value: OutputT
     topic: str
 
 
@@ -69,9 +64,25 @@ class Parallel(Generic[OutputT]):
     delegates: list[Delegate[OutputT]]
 
 
+_T = TypeVar("_T", bound=SendableMessage)
+
+NodeResult = TypeAliasType(
+    "NodeResult",
+    Reply[_T] | Emit[_T] | Delegate[_T] | list[Emit[_T]] | list[Delegate[_T]] | Parallel[_T],
+    type_params=(_T,),
+)
+"""All possible return types from a node's ``run`` method."""
+
+
 # ---------------------------------------------------------------------------
 # Wire format (framework-internal)
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class Hop:
+    input_payload: Payload  # payload to pass into node as input
+    result_topic: str  # publish result of node execution to this topic
 
 
 class Envelope(BaseModel, Generic[StateT, DepsT]):
@@ -81,7 +92,7 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
     serialized — no exclude_unset gotchas with reply_stack.
     """
 
-    context: SessionRunContext[StateT, DepsT]
+    context: BaseSessionRunContext[StateT, DepsT]
     reply_stack: list[str] = Field(default_factory=list)
 
 
@@ -96,7 +107,7 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
         node_id: str,
         *,
         subscribe_topics: str | list[str] | None = None,
-        input_to_prompt_func: Callable[[SessionRunContext[StateT, DepsT]], str] | None = None,
+        publish_topic: str | None = None,
     ):
         self._node_id = node_id
         if subscribe_topics is None:
@@ -108,21 +119,16 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
         self.subscribe_topics = (
             [subscribe_topics] if isinstance(subscribe_topics, str) else subscribe_topics
         )
+        self.publish_topic = publish_topic
         self._return_topic = f"{node_id}.private.return"
-        self._input_to_prompt_func = input_to_prompt_func
 
     @abstractmethod
-    async def run(
-        self, ctx: SessionRunContext[StateT, DepsT]
-    ) -> (
-        Reply[OutputT]
-        | Emit[OutputT]
-        | Delegate[OutputT]
-        | list[Emit[OutputT]]
-        | list[Delegate[OutputT]]
-        | Parallel[OutputT]
-    ):
+    async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[OutputT]:
         raise NotImplementedError()
+
+    async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> BaseSessionRunContext:
+        ctx = envelope.context
+        return ctx
 
     async def handler(
         self,
@@ -130,7 +136,8 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> None:
-        output = await self.run(envelope.context)
+        ctx = await self.prepare_context(envelope)
+        output = await self.run(ctx)
 
         if isinstance(output, Reply):
             if not envelope.reply_stack:
@@ -143,7 +150,7 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
             remaining_stack = envelope.reply_stack[:-1]
             await broker.publish(
                 Envelope(
-                    context=envelope.context,
+                    context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
                     reply_stack=remaining_stack,
                 ),
                 topic=topic,
@@ -154,7 +161,7 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
             new_stack = [*envelope.reply_stack, self._return_topic]
             await broker.publish(
                 Envelope(
-                    context=SessionRunContext(state=output.value, deps=envelope.context.deps),
+                    context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
                 ),
                 topic=output.topic,
@@ -163,7 +170,7 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
 
         elif isinstance(output, Emit):
             await broker.publish(
-                output.payload,
+                BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
                 topic=output.topic,
                 correlation_id=correlation_id,
             )
@@ -173,7 +180,9 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
             for delegate in output.delegates:
                 await broker.publish(
                     Envelope(
-                        context=SessionRunContext(state=delegate.value, deps=envelope.context.deps),
+                        context=BaseSessionRunContext(
+                            state=delegate.value, deps=envelope.context.deps
+                        ),
                         reply_stack=new_stack,
                     ),
                     topic=delegate.topic,
@@ -185,7 +194,7 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
             emits: list[Emit[Any]] = output  # type: ignore[assignment]
             for emit in emits:
                 await broker.publish(
-                    emit.payload,
+                    BaseSessionRunContext(state=emit.value, deps=envelope.context.deps),
                     topic=emit.topic,
                     correlation_id=correlation_id,
                 )
@@ -205,18 +214,17 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
             first = delegates[0]
             await broker.publish(
                 Envelope(
-                    context=SessionRunContext(state=first.value, deps=envelope.context.deps),
+                    context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
                 ),
                 topic=first.topic,
                 correlation_id=correlation_id,
             )
 
-    # TODO: move to baseagent subclass.
-    # The concept of structured input to prompt string is agent-level concept
-    def input_to_prompt(
-        self, func: Callable[[SessionRunContext[StateT, DepsT]], str]
-    ) -> Callable[[SessionRunContext[StateT, DepsT]], str]:
-        """decorator to define function to parse structured input to string"""
-        self._input_to_prompt_func = func
-        return func
+    @property
+    def id(self):
+        return self._node_id
+
+    @property
+    def name(self):
+        return self._node_id
