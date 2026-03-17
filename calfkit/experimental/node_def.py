@@ -1,27 +1,21 @@
-import json
 import logging
 import warnings
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Annotated, Any, Generic, Literal
+from typing import Annotated, Any, Generic
 
 from faststream import Context
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
-from faststream.types import SendableMessage
-from pydantic import BaseModel, Discriminator, Field
+from pydantic import BaseModel, Field
 from typing_extensions import TypeAliasType, TypeVar
 
-from calfkit.experimental.context_models import BaseAgentSessionRunContext, BaseSessionRunContext
+from calfkit.experimental._types import DepsT, StateT
+from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.payload_model import Payload
-from calfkit.experimental.utils import generate_payload_id
 
 logger = logging.getLogger(__name__)
-
-StateT = TypeVar("StateT", default=Any)
-DepsT = TypeVar("DepsT", default=Any)
-OutputT = TypeVar("OutputT", bound=SendableMessage, default=Any)
 
 
 # ---------------------------------------------------------------------------
@@ -35,36 +29,36 @@ OutputT = TypeVar("OutputT", bound=SendableMessage, default=Any)
 
 
 @dataclass
-class Reply(Generic[OutputT]):
+class Reply(Generic[StateT]):
     """Terminal: send value back to whoever called this node (pops reply_stack)."""
 
-    value: OutputT
+    value: StateT
 
 
 @dataclass
-class Delegate(Generic[OutputT]):
+class Delegate(Generic[StateT]):
     """Terminal: forward to another node, expect result back (pushes reply_stack)."""
 
     topic: str
-    value: OutputT | None = None
+    value: StateT | None = None
 
 
 @dataclass
-class Emit(Generic[OutputT]):
+class Emit(Generic[StateT]):
     """Terminal: fire-and-forget publish to a topic. No reply expected."""
 
-    value: OutputT
+    value: StateT
     topic: str
 
 
 @dataclass
-class Parallel(Generic[OutputT]):
+class Parallel(Generic[StateT]):
     """Parallel fan-out of delegates. Developer manages result aggregation via store."""
 
-    delegates: list[Delegate[OutputT]]
+    delegates: list[Delegate[StateT]]
 
 
-_T = TypeVar("_T", bound=SendableMessage)
+_T = TypeVar("_T")
 
 NodeResult = TypeAliasType(
     "NodeResult",
@@ -101,7 +95,7 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
+class BaseNodeDef(Generic[StateT, DepsT]):
     def __init__(
         self,
         node_id: str,
@@ -123,7 +117,7 @@ class BaseNodeDef(Generic[StateT, DepsT, OutputT]):
         self._return_topic = f"{node_id}.private.return"
 
     @abstractmethod
-    async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[OutputT]:
+    async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[StateT]:
         raise NotImplementedError()
 
     async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> BaseSessionRunContext:
