@@ -1,5 +1,3 @@
-
-
 import json
 from typing import Annotated, Any, Literal
 
@@ -41,7 +39,9 @@ ContentPart = Annotated[TextPart | FilePart | DataPart | ToolCallPart, Discrimin
 
 
 class Payload(BaseModel):
-    """a single direction-agnostic payload type for inter-agent and intra-agent communication"""
+    """a single direction-agnostic payload type for inter-agent and intra-agent communication.
+    Generally, one payload per node execution. One node run() should only handle one payload at a time.
+    In addition, the a payload can generally only have one node author. All parts stored within a payload are all created by one node--the node that created the payload."""  # noqa: E501
 
     id: str = Field(default_factory=generate_payload_id)  # unique ID (UUID)
     correlation_id: str

@@ -29,7 +29,7 @@ from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 class BaseAgentNodeDef(
     Generic[AgentDepsT, AgentOutputT],
-    BaseNodeDef[State, Deps[AgentDepsT], State],
+    BaseNodeDef[State, Deps[AgentDepsT]],
 ):
     def __init__(
         self,
@@ -97,7 +97,7 @@ class BaseAgentNodeDef(
             for tool_call in result.output.calls:
                 # TODO: fix multiple calls to same tool.
                 # Multiple publishes to same topic, there may be duplication of work.
-                tool_call_state.todo_stack.append(
+                tool_call_state.todo_stack.append(  # one payload per tool call
                     Payload[AgentOutputT](
                         correlation_id=ctx.deps.correlation_id,
                         source_node_id=self.id,
@@ -111,7 +111,9 @@ class BaseAgentNodeDef(
                         ],
                     )
                 )
-
+                # TODO: figure out some graceful way to define a delegation pattern that
+                # feeds a mutable state from node to node in sequential scenarios.
+                # Potentially a Sequential class that defines one state and any number of nodes, so the state is passed in order to all defined nodes.
                 tool_state_delegations.append(
                     Delegate[State](
                         topic="test",

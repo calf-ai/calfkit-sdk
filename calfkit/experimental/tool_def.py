@@ -1,66 +1,81 @@
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, cast
-
-from faststream import Context
+from typing import Any, cast
 
 from calfkit._vendor.pydantic_ai import ModelRequest, Tool, ToolDefinition, ToolReturnPart
-from calfkit.experimental.node_def import BaseNodeDef, SessionRunContext
-from calfkit.models.event_envelope import EventEnvelope
-from calfkit.models.payloads import ToolPayload
+from calfkit.experimental.context_models import BaseSessionRunContext
+from calfkit.experimental.node_def import BaseNodeDef, Reply, Silent
+from calfkit.experimental.payload_model import Payload
+from calfkit.experimental.state_and_deps_models import Deps, State
+from calfkit.experimental.utils import find_first_tool_call_part
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes.base_node import publish_to, subscribe_to
 
 
-class ToolNodeDef(BaseNodeDef, ABC):
+class BaseToolNodeDef(BaseNodeDef, ABC):
     @property
     @abstractmethod
     def tool_schema(self) -> ToolDefinition: ...
 
 
-def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> ToolNodeDef:
+class ToolNodeDef(BaseToolNodeDef):
+    def __init__(self, func: Callable, subscribe_topics: str | list[str], publish_topic: str):
+        self._tool = Tool(func)
+        super().__init__(
+            node_id=f"tool_{func.__name__}",
+            subscribe_topics=subscribe_topics,
+            publish_topic=publish_topic,
+        )
+
+    async def run(self, ctx: BaseSessionRunContext[State, Deps[Any]]):
+        # TODO: consider a more sophistcated or target way to store and retrieve payloads from state.  # noqa: E501
+        # A targetted way would allow reciever nodes to know exactly what payload to run and process.  # noqa: E501
+        payload = Payload.model_validate(ctx.state.todo_stack[-1])
+        tool_call_part = find_first_tool_call_part(payload)
+        if tool_call_part is None:
+            logging.warning("tool node ran but no matching tool call found in payload.")
+            return Silent()
+
+        tool_call_ctx = ToolContext(
+            deps=ctx.deps.agent_deps,
+            agent_name=payload.source_node_id,
+            tool_call_id=tool_call_part.tool_call_id,
+            tool_name=tool_call_part.tool_name,
+            messages=ctx.state.message_history,
+            run_id=ctx.deps.correlation_id,
+        )
+
+        # TODO: add some retry mechanism and max_retry logic here.
+        # Note, retry logic should be configurable via client side
+        result = await self._tool.function_schema.call(tool_call_part.kwargs, tool_call_ctx)
+
+        tool_result = ToolReturnPart(
+            tool_name=tool_call_part.tool_name,
+            content=result,
+            tool_call_id=tool_call_part.tool_call_id,
+        )
+        # TODO: decide between adding to message history in intermediate node runs (here)
+        # or do it in agent node, at one central_location.
+        # Doing so in intermediate nodes means more dependencies on the external store.
+        ctx.state.message_history.append(ModelRequest(parts=[tool_result]))
+        return Reply[State](value=ctx.state)
+
+    @property
+    def tool_schema(self) -> ToolDefinition:
+        return cast(ToolDefinition, self._tool.tool_def)
+
+
+def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> BaseToolNodeDef:
     """Tool decorator to turn a function into a deployable node that agents can call"""
+    subscribe_topic = f"tool.{func.__name__}.input"
+    publish_topic = f"tool.{func.__name__}.output"
+    tool_node = ToolNodeDef(
+        func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic
+    )
 
-    class ToolNode(ToolNodeDef):
-        def __init__(self, *args: Any, **kwargs: Any):
-            self.tool = Tool(func)
-            super().__init__(*args, **kwargs)
+    tool_node.__name__ = func.__name__
+    tool_node.__qualname__ = func.__qualname__
+    tool_node.__doc__ = func.__doc__
+    tool_node.__module__ = func.__module__
 
-        async def run(
-            self,
-            ctx: SessionRunContext[StateT, DepsT]
-        ) -> EventEnvelope:
-            # Read from ToolPayload
-            payload = ToolPayload.model_validate(event_envelope.payload)
-            tool_cal_req = payload.tool_call_request
-            kw_args = tool_cal_req.args_as_dict()
-
-            ctx = ToolContext(
-                deps=event_envelope.deps,
-                agent_name=payload.agent_name,
-                tool_call_id=tool_cal_req.tool_call_id,
-                tool_name=tool_cal_req.tool_name,
-                messages=list(event_envelope.state.message_history),
-                run_id=correlation_id,
-            )
-            result = await self.tool.function_schema.call(kw_args, ctx)
-
-            tool_result = ToolReturnPart(
-                tool_name=tool_cal_req.tool_name,
-                content=result,
-                tool_call_id=tool_cal_req.tool_call_id,
-            )
-            event_envelope.state.add_to_uncommitted_messages(ModelRequest(parts=[tool_result]))
-            event_envelope.payload = None  # consumed
-            return event_envelope
-
-        @property
-        def tool_schema(self) -> ToolDefinition:
-            return cast(ToolDefinition, self.tool.tool_def)
-
-    ToolNode.__name__ = func.__name__
-    ToolNode.__qualname__ = func.__qualname__
-    ToolNode.__doc__ = func.__doc__
-    ToolNode.__module__ = func.__module__
-
-    return ToolNode(name=ToolNode.__name__)
+    return tool_node

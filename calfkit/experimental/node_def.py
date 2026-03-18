@@ -18,19 +18,11 @@ from calfkit.experimental.payload_model import Payload
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Developer-facing context
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Return types
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class Reply(Generic[StateT]):
-    """Terminal: send value back to whoever called this node (pops reply_stack)."""
+    """Terminal: send value back to whoever called this node (pops reply_stack).
+    Does not require a topic address to reply to, it is handled by the framework.
+    Similar mental model to completing an async Promise or Future with a result."""
 
     value: StateT
 
@@ -58,11 +50,22 @@ class Parallel(Generic[StateT]):
     delegates: list[Delegate[StateT]]
 
 
+@dataclass
+class Silent:
+    """Silent end of node execution, no explicit publish. End of event stream."""
+
+
 _T = TypeVar("_T")
 
 NodeResult = TypeAliasType(
     "NodeResult",
-    Reply[_T] | Emit[_T] | Delegate[_T] | list[Emit[_T]] | list[Delegate[_T]] | Parallel[_T],
+    Reply[_T]
+    | Emit[_T]
+    | Delegate[_T]
+    | list[Emit[_T]]
+    | list[Delegate[_T]]
+    | Parallel[_T]
+    | Silent,
     type_params=(_T,),
 )
 """All possible return types from a node's ``run`` method."""
@@ -116,12 +119,27 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         self.publish_topic = publish_topic
         self._return_topic = f"{node_id}.private.return"
 
+    # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
+    # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
     async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[StateT]:
+        """Runs the node's logicusing provided context
+
+        Args:
+            ctx (BaseSessionRunContext[StateT, DepsT]):
+            Session context containing mutable state and immutable dependencies. Nodes act on states.
+
+        Raises:
+            NotImplementedError: If node subclass does not implement the run() method.
+
+        Returns:
+            NodeResult[StateT]: Execution results are persisted via modified state wrapped in the NodeResult type.
+            Different NodeResult types define how results should be communicated.
+        """  # noqa: E501
         raise NotImplementedError()
 
     async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> BaseSessionRunContext:
-        ctx = envelope.context
+        ctx = envelope.context.model_copy(deep=True)
         return ctx
 
     async def handler(
@@ -132,6 +150,12 @@ class BaseNodeDef(Generic[StateT, DepsT]):
     ) -> None:
         ctx = await self.prepare_context(envelope)
         output = await self.run(ctx)
+
+        if isinstance(output, Silent):
+            logging.warning(
+                f"node ({self.name}) ran and was silent with no explicit publish. This is the end of this event-stream, any state modifications will not be carried downstream."  # noqa: E501
+            )
+            return
 
         if isinstance(output, Reply):
             if not envelope.reply_stack:
@@ -185,8 +209,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
 
         elif isinstance(output, list) and output and all(isinstance(e, Emit) for e in output):
             # mypy can't narrow list element types from all(isinstance(...))
-            emits: list[Emit[Any]] = output  # type: ignore[assignment]
-            for emit in emits:
+            for emit in output:
                 await broker.publish(
                     BaseSessionRunContext(state=emit.value, deps=envelope.context.deps),
                     topic=emit.topic,
@@ -198,14 +221,13 @@ class BaseNodeDef(Generic[StateT, DepsT]):
             # Push self._return_topic (bottom), then remaining delegate
             # topics in reverse, so popping goes:
             #   first.topic → output[1].topic → ... → self._return_topic
-            delegates: list[Delegate[Any]] = output  # type: ignore[assignment]
-            remaining_topics = [d.topic for d in reversed(delegates[1:])]
+            remaining_topics = [d.topic for d in reversed(output[1:])]
             new_stack = [
                 *envelope.reply_stack,
                 self._return_topic,
                 *remaining_topics,
             ]
-            first = delegates[0]
+            first = output[0]
             await broker.publish(
                 Envelope(
                     context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
