@@ -21,3 +21,4 @@ def find_first_tool_call_part(payload: Payload) -> ToolCallPart | None:
     for part in parts:
         if isinstance(part, ToolCallPart):
             return part
+    return None

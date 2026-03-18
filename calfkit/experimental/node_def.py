@@ -2,7 +2,7 @@ import logging
 import warnings
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Annotated, Any, Generic
+from typing import Annotated, Generic
 
 from faststream import Context
 from faststream.kafka.annotations import (
@@ -221,7 +221,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
             # Push self._return_topic (bottom), then remaining delegate
             # topics in reverse, so popping goes:
             #   first.topic → output[1].topic → ... → self._return_topic
-            remaining_topics = [d.topic for d in reversed(output[1:])]
+            remaining_topics = [d.topic for d in reversed(output[1:])]  # type: ignore[attr-defined]
             new_stack = [
                 *envelope.reply_stack,
                 self._return_topic,
@@ -238,9 +238,9 @@ class BaseNodeDef(Generic[StateT, DepsT]):
             )
 
     @property
-    def id(self):
+    def id(self) -> str:
         return self._node_id
 
     @property
-    def name(self):
+    def name(self) -> str:
         return self._node_id

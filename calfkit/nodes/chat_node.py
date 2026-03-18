@@ -2,7 +2,6 @@ from abc import ABC
 from typing import Any, cast
 
 from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests, ExternalToolset, ModelSettings
-from calfkit._vendor.pydantic_ai.models import Model
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.payloads import ChatPayload
 from calfkit.nodes.base_node import BaseNode, publish_to, subscribe_to

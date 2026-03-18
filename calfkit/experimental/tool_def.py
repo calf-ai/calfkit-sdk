@@ -3,10 +3,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from calfkit._vendor.pydantic_ai import ModelRequest, Tool, ToolDefinition, ToolReturnPart
+from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.node_def import BaseNodeDef, Reply, Silent
+from calfkit.experimental.node_def import BaseNodeDef, NodeResult, Reply, Silent
 from calfkit.experimental.payload_model import Payload
 from calfkit.experimental.state_and_deps_models import Deps, State
 from calfkit.experimental.utils import find_first_tool_call_part
@@ -20,7 +20,9 @@ class BaseToolNodeDef(BaseNodeDef, ABC):
 
 
 class ToolNodeDef(BaseToolNodeDef):
-    def __init__(self, func: Callable, subscribe_topics: str | list[str], publish_topic: str):
+    def __init__(
+        self, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str
+    ):
         self._tool = Tool(func)
         super().__init__(
             node_id=f"tool_{func.__name__}",
@@ -28,7 +30,7 @@ class ToolNodeDef(BaseToolNodeDef):
             publish_topic=publish_topic,
         )
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps[Any]]):
+    async def run(self, ctx: BaseSessionRunContext[State, Deps[Any]]) -> NodeResult[State]:
         # TODO: consider a more sophistcated or target way to store and retrieve payloads from state.  # noqa: E501
         # A targetted way would allow reciever nodes to know exactly what payload to run and process.  # noqa: E501
         payload = Payload.model_validate(ctx.state.todo_stack[-1])
@@ -85,10 +87,5 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Base
     tool_node = ToolNodeDef(
         func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic
     )
-
-    tool_node.__name__ = func.__name__
-    tool_node.__qualname__ = func.__qualname__
-    tool_node.__doc__ = func.__doc__
-    tool_node.__module__ = func.__module__
 
     return tool_node

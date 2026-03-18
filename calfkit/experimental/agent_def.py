@@ -12,16 +12,14 @@ from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.node_def import (
     BaseNodeDef,
     Delegate,
-    Envelope,
     NodeResult,
     Reply,
 )
-from calfkit.experimental.payload_model import ToolCallPart
+from calfkit.experimental.payload_model import Payload, ToolCallPart
 from calfkit.experimental.state_and_deps_models import (
     AgentDepsT,
     AgentOutputT,
     Deps,
-    Payload,
     State,
 )
 from calfkit.experimental.tool_def import ToolNodeDef
@@ -40,14 +38,13 @@ class BaseAgentNodeDef(
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
         deps_type: type[AgentDepsT] | None = None,
-        final_output_type: type[AgentOutputT] | type[str] = type[str],
+        final_output_type: type[AgentOutputT] | type[str] = str,
         input_to_prompt_func: Callable[[BaseSessionRunContext[State, Deps[AgentDepsT]]], str]
         | None = None,
     ):
-        if input_to_prompt_func is None:
-            self._input_to_prompt_func = self._prepare_prompt
-        else:
-            self._input_to_prompt_func = input_to_prompt_func
+        self._input_to_prompt_func: Callable[
+            [BaseSessionRunContext[State, Deps[AgentDepsT]]], str
+        ] = self._prepare_prompt if input_to_prompt_func is None else input_to_prompt_func
         self.deps_type = deps_type
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
@@ -107,7 +104,7 @@ class BaseAgentNodeDef(
                 # TODO: fix multiple calls to same tool.
                 # Multiple publishes to same topic, there may be duplication of work.
                 tool_call_state.todo_stack.append(  # one payload per tool call
-                    Payload[AgentOutputT](
+                    Payload(
                         correlation_id=ctx.deps.correlation_id,
                         source_node_id=self.id,
                         timestamp=time.time(),
@@ -122,7 +119,8 @@ class BaseAgentNodeDef(
                 )
                 # TODO: figure out some graceful way to define a delegation pattern that
                 # feeds a mutable state from node to node in sequential scenarios.
-                # Potentially a Sequential class that defines one state and any number of nodes, so the state is passed in order to all defined nodes.
+                # Potentially a Sequential class that defines one state and any number of nodes,
+                # so the state is passed in order to all defined nodes.
                 tool_state_delegations.append(
                     Delegate[State](
                         topic="test",

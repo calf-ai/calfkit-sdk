@@ -1,14 +1,10 @@
-import json
-from statistics import correlation
-from typing import Annotated, Any, Generic, Literal
+from typing import Any, Generic
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypeVar
 
-from calfkit._vendor.pydantic_ai.messages import ModelMessage, ToolReturn
-from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.experimental.payload_model import Payload
-from calfkit.experimental.utils import generate_payload_id
 
 DataT = TypeVar("DataT", default=dict[str, Any])
 
@@ -36,7 +32,7 @@ class State(BaseModel):
     )
 
     # Map of tool call IDs to tool return results
-    uncommited_tool_results: dict[str, ToolReturn | str | dict] | None = None
+    uncommited_tool_results: dict[str, Any] | None = None
 
 
 class Deps(BaseModel, Generic[AgentDepsT]):
