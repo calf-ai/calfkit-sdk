@@ -5,7 +5,7 @@ from typing import Annotated, Any, Generic, Literal
 from pydantic import BaseModel, ConfigDict, Discriminator, Field
 from typing_extensions import TypeVar
 
-from calfkit._vendor.pydantic_ai.messages import ModelMessage
+from calfkit._vendor.pydantic_ai.messages import ModelMessage, ToolReturn
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.experimental.payload_model import Payload
 from calfkit.experimental.utils import generate_payload_id
@@ -17,8 +17,6 @@ AgentOutputT = TypeVar("AgentOutputT", default=Any)
 AgentInputT = TypeVar("AgentInputT", default=Any)
 
 AgentDepsT = TypeVar("AgentDepsT", default=Any)
-
-
 
 
 class State(BaseModel):
@@ -36,6 +34,9 @@ class State(BaseModel):
     message_history: list[ModelMessage] = Field(
         default_factory=list, description="Append-only message history list"
     )
+
+    # Map of tool call IDs to tool return results
+    uncommited_tool_results: dict[str, ToolReturn | str | dict] | None = None
 
 
 class Deps(BaseModel, Generic[AgentDepsT]):

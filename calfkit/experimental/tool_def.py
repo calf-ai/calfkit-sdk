@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from calfkit._vendor.pydantic_ai import ModelRequest, Tool, ToolDefinition, ToolReturnPart
+from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.node_def import BaseNodeDef, Reply, Silent
 from calfkit.experimental.payload_model import Payload
@@ -49,15 +50,27 @@ class ToolNodeDef(BaseToolNodeDef):
         # Note, retry logic should be configurable via client side
         result = await self._tool.function_schema.call(tool_call_part.kwargs, tool_call_ctx)
 
-        tool_result = ToolReturnPart(
-            tool_name=tool_call_part.tool_name,
-            content=result,
-            tool_call_id=tool_call_part.tool_call_id,
+        # tool_result = ToolReturnPart(
+        #     tool_name=tool_call_part.tool_name,
+        #     content=result,
+        #     tool_call_id=tool_call_part.tool_call_id,
+        # )
+
+        # multimodal support is possible via `content`, for example:
+        # ToolReturn(
+        #       return_value="Screenshot captured successfully for https://example.com",
+        #       content=[
+        #           "Here is the screenshot:",
+        #           BinaryContent(data=png_bytes, media_type="image/png"),
+        #       ],
+        #   )
+
+        if ctx.state.uncommited_tool_results is None:
+            ctx.state.uncommited_tool_results = {}
+        ctx.state.uncommited_tool_results[tool_call_part.tool_call_id] = ToolReturn(
+            return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}
         )
-        # TODO: decide between adding to message history in intermediate node runs (here)
-        # or do it in agent node, at one central_location.
-        # Doing so in intermediate nodes means more dependencies on the external store.
-        ctx.state.message_history.append(ModelRequest(parts=[tool_result]))
+
         return Reply[State](value=ctx.state)
 
     @property

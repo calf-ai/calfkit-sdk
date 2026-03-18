@@ -6,6 +6,7 @@ from typing import Any, Generic
 from pydantic import BaseModel
 
 from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests
+from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.node_def import (
@@ -69,6 +70,9 @@ class BaseAgentNodeDef(
     def _prepare_prompt(self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]]) -> str:
         return ctx.state.todo_stack[-1].text()
 
+    # TODO: consider the agent node to operate as a router as well.
+    # For example, sequential multi-tool calls: each tool result is routed back to the agent
+    # before firing the next, instead of a fully choreographed approach using reply_stack.
     async def run(self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]]) -> NodeResult[State]:
         prompt = self._input_to_prompt_func(ctx)
         if ctx.deps.agent_deps is not None and self.deps_type is not None:
@@ -80,12 +84,17 @@ class BaseAgentNodeDef(
                         "incoming deps does not match defined deps_type: \n"
                         + f"deps={ctx.deps.agent_deps}\n\ndeps_type={self.deps_type}"
                     )
+        # TODO: add check that all requested tool calls IDs have a result
+        tool_results = None
+        if ctx.state.uncommited_tool_results is not None:
+            tool_results = DeferredToolResults(calls=ctx.state.uncommited_tool_results)
         result = await self._agent_loop.run(
             user_prompt=prompt,
             message_history=ctx.state.message_history,
             instructions=self.system_prompt,
             toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools])],
             deps=ctx.deps.agent_deps,
+            deferred_tool_results=tool_results,
         )
         if isinstance(result.output, DeferredToolRequests):
             # The LLM called one or more tools
