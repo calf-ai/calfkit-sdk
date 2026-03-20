@@ -1,8 +1,9 @@
+import inspect
 import logging
 import warnings
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Annotated, Generic
+from typing import Annotated, Any, Generic
 
 from faststream import Context
 from faststream.kafka.annotations import (
@@ -11,9 +12,8 @@ from faststream.kafka.annotations import (
 from pydantic import BaseModel, Field
 from typing_extensions import TypeAliasType, TypeVar
 
-from calfkit.experimental._types import DepsT, StateT
+from calfkit.experimental._types import DepsT, InputT, StateT
 from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.payload_model import Payload
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,16 @@ class Delegate(Generic[StateT]):
     """Terminal: forward to another node, expect result back (pushes reply_stack)."""
 
     topic: str
+    value: StateT | None = None
+    input: Any | None = None
+
+
+@dataclass
+class Sequential(Generic[StateT]):
+    """Sequentially forward a shared state from node to node,
+    where the final state is returned to caller."""
+
+    topics: list[str]  # passed to topics in this list in order index 0 -> n
     value: StateT | None = None
 
 
@@ -65,7 +75,8 @@ NodeResult = TypeAliasType(
     | list[Emit[_T]]
     | list[Delegate[_T]]
     | Parallel[_T]
-    | Silent,
+    | Silent
+    | Sequential[_T],
     type_params=(_T,),
 )
 """All possible return types from a node's ``run`` method."""
@@ -74,12 +85,6 @@ NodeResult = TypeAliasType(
 # ---------------------------------------------------------------------------
 # Wire format (framework-internal)
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class Hop:
-    input_payload: Payload  # payload to pass into node as input
-    result_topic: str  # publish result of node execution to this topic
 
 
 class Envelope(BaseModel, Generic[StateT, DepsT]):
@@ -91,6 +96,7 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
 
     context: BaseSessionRunContext[StateT, DepsT]
     reply_stack: list[str] = Field(default_factory=list)
+    input: Any | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +104,16 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(Generic[StateT, DepsT]):
+class BaseNodeDef(Generic[StateT, DepsT, InputT]):
+    _run_accepts_input: bool
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        sig = inspect.signature(cls.run)
+        # Unbound method signature includes self, so self + ctx = 2 params.
+        # If > 2, the subclass declared an input parameter (any name).
+        cls._run_accepts_input = len(sig.parameters) > 2
+
     def __init__(
         self,
         node_id: str,
@@ -123,19 +138,23 @@ class BaseNodeDef(Generic[StateT, DepsT]):
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
     async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[StateT]:
-        """Runs the node's logicusing provided context
+        """Runs the node's logic using provided context.
+
+        Subclasses that need per-invocation input can add an optional parameter
+        (any name). The framework inspects the signature at class definition time
+        and will pass ``envelope.input`` automatically if the parameter is declared.
 
         Args:
-            ctx (BaseSessionRunContext[StateT, DepsT]):
-            Session context containing mutable state and immutable dependencies. Nodes act on states.
+            ctx: Session context containing mutable state and immutable dependencies.
 
         Raises:
             NotImplementedError: If node subclass does not implement the run() method.
 
         Returns:
-            NodeResult[StateT]: Execution results are persisted via modified state wrapped in the NodeResult type.
-            Different NodeResult types define how results should be communicated.
-        """  # noqa: E501
+            NodeResult[StateT]: Execution results persisted via modified state wrapped
+            in the NodeResult type. Different NodeResult types define how results
+            should be communicated.
+        """
         raise NotImplementedError()
 
     async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> BaseSessionRunContext:
@@ -149,7 +168,10 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         broker: BrokerAnnotation,
     ) -> None:
         ctx = await self.prepare_context(envelope)
-        output = await self.run(ctx)
+        if self._run_accepts_input:
+            output = await self.run(ctx, envelope.input)  # type: ignore[call-arg]
+        else:
+            output = await self.run(ctx)
 
         if isinstance(output, Silent):
             logging.warning(
@@ -181,6 +203,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
                 Envelope(
                     context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
+                    input=output.input,
                 ),
                 topic=output.topic,
                 correlation_id=correlation_id,
@@ -202,6 +225,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
                             state=delegate.value, deps=envelope.context.deps
                         ),
                         reply_stack=new_stack,
+                        input=delegate.input,
                     ),
                     topic=delegate.topic,
                     correlation_id=correlation_id,
@@ -232,6 +256,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
                 Envelope(
                     context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
+                    input=first.input,  # type: ignore[union-attr]
                 ),
                 topic=first.topic,
                 correlation_id=correlation_id,
