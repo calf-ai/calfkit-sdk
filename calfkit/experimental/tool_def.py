@@ -43,7 +43,9 @@ class ToolNodeDef(BaseToolNodeDef):
     #     )
     #     return ctx
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps[Any]]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps[Any]], input: Any | None = None
+    ) -> NodeResult[State]:
         # TODO: consider a more sophistcated or target way to store and retrieve payloads from state.  # noqa: E501
         # A targetted way would allow reciever nodes to know exactly what payload to run and process.  # noqa: E501
         ctx.state.run_state.tool_calls

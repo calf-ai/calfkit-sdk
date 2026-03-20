@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
+from calfkit.experimental._types import InputT
 from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.node_def import (
     BaseNodeDef,
@@ -27,8 +28,8 @@ from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
 class BaseAgentNodeDef(
-    Generic[AgentDepsT, AgentOutputT],
-    BaseNodeDef[State, Deps[AgentDepsT]],
+    Generic[AgentDepsT, AgentOutputT, InputT],
+    BaseNodeDef[State, Deps[AgentDepsT], InputT],
 ):
     def __init__(
         self,
@@ -70,7 +71,9 @@ class BaseAgentNodeDef(
     # TODO: consider the agent node to operate as a router as well.
     # For example, sequential multi-tool calls: each tool result is routed back to the agent
     # before firing the next, instead of a fully choreographed approach using reply_stack.
-    async def run(self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]], input: InputT | None = None
+    ) -> NodeResult[State]:
         prompt = self._input_to_prompt_func(ctx)
         if ctx.deps.agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel):

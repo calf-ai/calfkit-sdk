@@ -2,7 +2,7 @@ import logging
 import warnings
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Annotated, Generic
+from typing import Annotated, Any, Generic
 
 from faststream import Context
 from faststream.kafka.annotations import (
@@ -11,9 +11,8 @@ from faststream.kafka.annotations import (
 from pydantic import BaseModel, Field
 from typing_extensions import TypeAliasType, TypeVar
 
-from calfkit.experimental._types import DepsT, StateT
+from calfkit.experimental._types import DepsT, InputT, StateT
 from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.payload_model import Payload
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +32,7 @@ class Delegate(Generic[StateT]):
 
     topic: str
     value: StateT | None = None
+    input: Any | None = None
 
 
 @dataclass
@@ -86,12 +86,6 @@ NodeResult = TypeAliasType(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class Hop:
-    input_payload: Payload  # payload to pass into node as input
-    result_topic: str  # publish result of node execution to this topic
-
-
 class Envelope(BaseModel, Generic[StateT, DepsT]):
     """Wire format — framework internal. Carries routing metadata + developer context.
 
@@ -101,6 +95,7 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
 
     context: BaseSessionRunContext[StateT, DepsT]
     reply_stack: list[str] = Field(default_factory=list)
+    input: Any | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +103,7 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(Generic[StateT, DepsT]):
+class BaseNodeDef(Generic[StateT, DepsT, InputT]):
     def __init__(
         self,
         node_id: str,
@@ -132,20 +127,25 @@ class BaseNodeDef(Generic[StateT, DepsT]):
     # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
-    async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[StateT]:
-        """Runs the node's logicusing provided context
+    async def run(
+        self, ctx: BaseSessionRunContext[StateT, DepsT], input: InputT | None = None
+    ) -> NodeResult[StateT]:
+        """Runs the node's logic using provided context and optional per-invocation input.
 
         Args:
-            ctx (BaseSessionRunContext[StateT, DepsT]):
-            Session context containing mutable state and immutable dependencies. Nodes act on states.
+            ctx: Session context containing mutable state and immutable dependencies.
+            input: Per-invocation command data for this node. Carried on the Envelope
+                and passed through by the framework. ``None`` when replying or when
+                the caller did not supply input.
 
         Raises:
             NotImplementedError: If node subclass does not implement the run() method.
 
         Returns:
-            NodeResult[StateT]: Execution results are persisted via modified state wrapped in the NodeResult type.
-            Different NodeResult types define how results should be communicated.
-        """  # noqa: E501
+            NodeResult[StateT]: Execution results persisted via modified state wrapped
+            in the NodeResult type. Different NodeResult types define how results
+            should be communicated.
+        """
         raise NotImplementedError()
 
     async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> BaseSessionRunContext:
@@ -159,7 +159,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         broker: BrokerAnnotation,
     ) -> None:
         ctx = await self.prepare_context(envelope)
-        output = await self.run(ctx)
+        output = await self.run(ctx, envelope.input)
 
         if isinstance(output, Silent):
             logging.warning(
@@ -191,6 +191,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
                 Envelope(
                     context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
+                    input=output.input,
                 ),
                 topic=output.topic,
                 correlation_id=correlation_id,
@@ -212,6 +213,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
                             state=delegate.value, deps=envelope.context.deps
                         ),
                         reply_stack=new_stack,
+                        input=delegate.input,
                     ),
                     topic=delegate.topic,
                     correlation_id=correlation_id,
@@ -242,6 +244,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
                 Envelope(
                     context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
+                    input=first.input,
                 ),
                 topic=first.topic,
                 correlation_id=correlation_id,

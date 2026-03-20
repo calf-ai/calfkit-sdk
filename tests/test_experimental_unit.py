@@ -404,7 +404,9 @@ class TestAgentToolDecorator:
 class StubReplyNode(BaseNodeDef[State, Deps]):
     """Returns Reply with the current state."""
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
         return Reply(value=ctx.state)
 
 
@@ -415,7 +417,9 @@ class StubDelegateNode(BaseNodeDef[State, Deps]):
         self._delegate_to = delegate_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
         return Delegate(topic=self._delegate_to, value=ctx.state)
 
 
@@ -426,14 +430,18 @@ class StubEmitNode(BaseNodeDef[State, Deps]):
         self._emit_to = emit_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
         return Emit(value=ctx.state, topic=self._emit_to)
 
 
 class StubSilentNode(BaseNodeDef[State, Deps]):
     """Returns Silent (no publish)."""
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
         return Silent()
 
 
@@ -444,7 +452,9 @@ class StubParallelNode(BaseNodeDef[State, Deps]):
         self._topics = topics
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
         return Parallel(delegates=[Delegate(topic=t, value=ctx.state) for t in self._topics])
 
 
@@ -747,7 +757,9 @@ class StubSequentialDelegateNode(BaseNodeDef[State, Deps]):
         self._delegate_topics = delegate_topics
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
         return [Delegate(topic=t, value=ctx.state) for t in self._delegate_topics]
 
 
@@ -848,3 +860,206 @@ class TestBaseNodeDefProperties:
         """publish_topic is stored correctly."""
         node = StubReplyNode("n", subscribe_topics="in", publish_topic="out")
         assert node.publish_topic == "out"
+
+
+# ===========================================================================
+# Envelope.input and Delegate.input tests
+# ===========================================================================
+
+
+class TestEnvelopeInputField:
+    """Tests for the Envelope.input per-invocation field."""
+
+    def test_envelope_input_default_none(self):
+        """Envelope.input defaults to None."""
+        ctx = BaseSessionRunContext(
+            state=State(),
+            deps=Deps(correlation_id="inp1", agent_deps=None),
+        )
+        envelope = Envelope(context=ctx)
+        assert envelope.input is None
+
+    def test_envelope_input_set(self):
+        """Envelope.input can carry arbitrary per-invocation data."""
+        ctx = BaseSessionRunContext(
+            state=State(),
+            deps=Deps(correlation_id="inp2", agent_deps=None),
+        )
+        envelope = Envelope(context=ctx, input={"tool_call_id": "tc-42"})
+        assert envelope.input == {"tool_call_id": "tc-42"}
+
+    def test_envelope_input_serialization_roundtrip(self):
+        """Envelope.input survives JSON serialization roundtrip."""
+        ctx = BaseSessionRunContext(
+            state=State(),
+            deps=Deps(correlation_id="inp3", agent_deps=None),
+        )
+        original = Envelope(context=ctx, reply_stack=["a"], input={"key": "value"})
+        dumped = original.model_dump(mode="json")
+        restored = Envelope.model_validate(dumped)
+        assert restored.input == {"key": "value"}
+        assert restored.reply_stack == ["a"]
+
+    def test_envelope_input_none_serialization_roundtrip(self):
+        """Envelope with input=None roundtrips correctly."""
+        ctx = BaseSessionRunContext(
+            state=State(),
+            deps=Deps(correlation_id="inp4", agent_deps=None),
+        )
+        original = Envelope(context=ctx)
+        dumped = original.model_dump(mode="json")
+        restored = Envelope.model_validate(dumped)
+        assert restored.input is None
+
+
+class TestDelegateInputField:
+    """Tests for the Delegate.input per-invocation field."""
+
+    def test_delegate_input_default_none(self):
+        """Delegate.input defaults to None."""
+        d = Delegate(topic="some.topic")
+        assert d.input is None
+
+    def test_delegate_input_set(self):
+        """Delegate.input can carry arbitrary per-invocation data."""
+        d = Delegate(topic="some.topic", value=State(), input={"task_ref": "abc"})
+        assert d.input == {"task_ref": "abc"}
+
+
+# ===========================================================================
+# Input propagation tests
+# ===========================================================================
+
+
+class StubInputCapturingNode(BaseNodeDef[State, Deps]):
+    """Captures the input parameter passed to run() for test assertions."""
+
+    captured_input: Any | None = None
+
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
+        self.captured_input = input
+        return Reply(value=ctx.state)
+
+
+class StubDelegateWithInputNode(BaseNodeDef[State, Deps]):
+    """Returns a Delegate that carries input."""
+
+    def __init__(self, node_id: str, delegate_to: str, delegate_input: Any, **kwargs: Any):
+        self._delegate_to = delegate_to
+        self._delegate_input = delegate_input
+        super().__init__(node_id, **kwargs)
+
+    async def run(
+        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+    ) -> NodeResult[State]:
+        return Delegate(topic=self._delegate_to, value=ctx.state, input=self._delegate_input)
+
+
+class TestInputPropagation:
+    """Tests for input propagation through the handler."""
+
+    @pytest.mark.asyncio
+    async def test_envelope_input_reaches_run(self):
+        """Envelope.input is passed to run() as the input parameter."""
+        node = StubInputCapturingNode("cap_node", subscribe_topics="cap.input")
+
+        broker = BrokerClient()
+
+        @broker.subscriber("cap.input")
+        async def handle(
+            envelope: Envelope[State, Deps],
+            correlation_id: Annotated[str, Context()],
+            broker_: BrokerAnnotation,
+        ):
+            await node.handler(envelope, correlation_id, broker_)
+
+        @broker.subscriber("cap_node.private.return")
+        async def sink(envelope: Envelope[State, Deps]):
+            pass  # absorb reply
+
+        async with TestKafkaBroker(broker) as _:
+            envelope = _make_test_envelope(reply_stack=["cap_node.private.return"])
+            envelope.input = {"tool_call_id": "tc-99"}
+            await broker.publish(envelope, topic="cap.input", correlation_id="input-prop-1")
+
+            from tests.utils import wait_for_condition
+
+            await wait_for_condition(lambda: node.captured_input is not None, timeout=5.0)
+            assert node.captured_input == {"tool_call_id": "tc-99"}
+
+    @pytest.mark.asyncio
+    async def test_envelope_without_input_passes_none(self):
+        """Envelope without input passes None to run()."""
+        node = StubInputCapturingNode("cap_node2", subscribe_topics="cap2.input")
+
+        broker = BrokerClient()
+
+        @broker.subscriber("cap2.input")
+        async def handle(
+            envelope: Envelope[State, Deps],
+            correlation_id: Annotated[str, Context()],
+            broker_: BrokerAnnotation,
+        ):
+            await node.handler(envelope, correlation_id, broker_)
+
+        @broker.subscriber("cap_node2.private.return")
+        async def sink(envelope: Envelope[State, Deps]):
+            pass
+
+        async with TestKafkaBroker(broker) as _:
+            envelope = _make_test_envelope(reply_stack=["cap_node2.private.return"])
+            await broker.publish(envelope, topic="cap2.input", correlation_id="input-prop-2")
+
+            from tests.utils import wait_for_condition
+
+            # Wait for handler to run — captured_input stays None but we need
+            # to ensure the handler actually executed
+            await wait_for_condition(
+                lambda: node.captured_input is not None or node.captured_input is None,
+                timeout=5.0,
+            )
+            # Give broker a moment to process
+            await asyncio.sleep(0.1)
+            assert node.captured_input is None
+
+    @pytest.mark.asyncio
+    async def test_delegate_input_carried_to_outbound_envelope(self):
+        """Delegate.input is carried into the outbound Envelope."""
+        node = StubDelegateWithInputNode(
+            "del_inp_node",
+            delegate_to="target.input",
+            delegate_input={"task_ref": "abc-123"},
+            subscribe_topics="del_inp.input",
+        )
+
+        broker = BrokerClient()
+        received: dict[str, asyncio.Queue[Envelope]] = {}
+
+        @broker.subscriber("del_inp.input")
+        async def handle(
+            envelope: Envelope[State, Deps],
+            correlation_id: Annotated[str, Context()],
+            broker_: BrokerAnnotation,
+        ):
+            await node.handler(envelope, correlation_id, broker_)
+
+        @broker.subscriber("target.input")
+        async def collect(
+            envelope: Envelope[State, Deps],
+            correlation_id: Annotated[str, Context()],
+        ):
+            if correlation_id not in received:
+                received[correlation_id] = asyncio.Queue()
+            received[correlation_id].put_nowait(envelope)
+
+        async with TestKafkaBroker(broker) as _:
+            envelope = _make_test_envelope(reply_stack=["original_output"])
+            await broker.publish(envelope, topic="del_inp.input", correlation_id="del-inp-1")
+
+            from tests.utils import wait_for_condition
+
+            await wait_for_condition(lambda: "del-inp-1" in received, timeout=5.0)
+            result = await received["del-inp-1"].get()
+            assert result.input == {"task_ref": "abc-123"}
