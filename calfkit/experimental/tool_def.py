@@ -7,7 +7,6 @@ from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.node_def import BaseNodeDef, NodeResult, Reply, Silent
-from calfkit.experimental.payload_model import Payload
 from calfkit.experimental.state_and_deps_models import (
     Deps,
     State,
@@ -47,7 +46,7 @@ class ToolNodeDef(BaseToolNodeDef):
     async def run(self, ctx: BaseSessionRunContext[State, Deps[Any]]) -> NodeResult[State]:
         # TODO: consider a more sophistcated or target way to store and retrieve payloads from state.  # noqa: E501
         # A targetted way would allow reciever nodes to know exactly what payload to run and process.  # noqa: E501
-        payload = Payload.model_validate(ctx.state.run_state.todo_stack[-1])
+        ctx.state.run_state.tool_calls
         tool_call_part = find_first_tool_call_part(payload)
         if tool_call_part is None:
             logging.warning("tool node ran but no matching tool call found in payload.")

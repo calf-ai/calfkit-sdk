@@ -86,18 +86,6 @@ class State(BaseModel):
     run_state: AgentActivityState = Field(default_factory=AgentActivityState)
 
 
-AgentStateSubsetT = TypeVar("AgentStateSubsetT", CoreMessageState, InFlightToolsState)
-
-PartialState = Annotated[CoreMessageState | InFlightToolsState | Any, Discriminator("kind")]
-
-
-class NodeConsumeState(BaseModel, Generic[AgentStateSubsetT]):
-    """Used to partially consume a subset of the complete agent state"""
-
-    model_config = ConfigDict(extra="ignore")
-    run_state: AgentStateSubsetT
-
-
 class Deps(BaseModel, Generic[AgentDepsT]):
     """immutable dependencies for agent executions"""
 
@@ -108,3 +96,18 @@ class Deps(BaseModel, Generic[AgentDepsT]):
         default=None,
         description="Additional dependency metadata.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Experimental PartialState implementation
+# ---------------------------------------------------------------------------
+AgentStateSubsetT = TypeVar("AgentStateSubsetT", CoreMessageState, InFlightToolsState)
+
+PartialState = Annotated[CoreMessageState | InFlightToolsState | Any, Discriminator("kind")]
+
+
+class NodeConsumeState(BaseModel, Generic[AgentStateSubsetT]):
+    """Used to partially consume a subset of the complete agent state"""
+
+    model_config = ConfigDict(extra="ignore")
+    run_state: AgentStateSubsetT
