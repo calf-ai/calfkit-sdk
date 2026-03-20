@@ -7,12 +7,10 @@ from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.node_def import BaseNodeDef, NodeResult, Reply, Silent
-from calfkit.experimental.payload_model import Payload
 from calfkit.experimental.state_and_deps_models import (
     Deps,
     State,
 )
-from calfkit.experimental.utils import find_first_tool_call_part
 from calfkit.models.tool_context import ToolContext
 
 
@@ -44,7 +42,7 @@ class ToolNodeDef(BaseToolNodeDef):
     #     )
     #     return ctx
 
-    async def run(  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def run(  # type: ignore[override]
         self, ctx: BaseSessionRunContext[State, Deps[Any]], tool_call_id: str
     ) -> NodeResult[State]:
         tool_call_part = ctx.state.run_state.tool_calls.get(tool_call_id)

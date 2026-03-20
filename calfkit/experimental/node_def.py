@@ -169,7 +169,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
     ) -> None:
         ctx = await self.prepare_context(envelope)
         if self._run_accepts_input:
-            output = await self.run(ctx, envelope.input)
+            output = await self.run(ctx, envelope.input)  # type: ignore[call-arg]
         else:
             output = await self.run(ctx)
 
@@ -256,7 +256,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
                 Envelope(
                     context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
-                    input=first.input,
+                    input=first.input,  # type: ignore[union-attr]
                 ),
                 topic=first.topic,
                 correlation_id=correlation_id,
