@@ -5,15 +5,8 @@ from typing_extensions import TypeVar
 
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ToolCallPart
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
-from calfkit.experimental.payload_model import Payload
-
-DataT = TypeVar("DataT", default=dict[str, Any])
-
-AgentOutputT = TypeVar("AgentOutputT", default=Any)
-
-AgentInputT = TypeVar("AgentInputT", default=Any)
-
-AgentDepsT = TypeVar("AgentDepsT", default=Any)
+from calfkit.experimental._types import AgentDepsT
+from calfkit.experimental.data_model.payload import Payload
 
 
 class WorkflowState(BaseModel):

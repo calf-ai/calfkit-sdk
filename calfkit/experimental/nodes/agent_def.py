@@ -8,22 +8,20 @@ from pydantic import BaseModel
 from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.experimental._types import InputT
-from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.node_def import (
+from calfkit.experimental._types import AgentDepsT, AgentOutputT, InputT
+from calfkit.experimental.context.agent_context import AgentSessionRunContext
+from calfkit.experimental.data_model.payload import Payload, ToolCallPart
+from calfkit.experimental.data_model.state_deps import (
+    Deps,
+    State,
+)
+from calfkit.experimental.nodes.node_def import (
     BaseNodeDef,
     Delegate,
     NodeResult,
     Reply,
 )
-from calfkit.experimental.payload_model import Payload, ToolCallPart
-from calfkit.experimental.state_and_deps_models import (
-    AgentDepsT,
-    AgentOutputT,
-    Deps,
-    State,
-)
-from calfkit.experimental.tool_def import ToolNodeDef
+from calfkit.experimental.nodes.tool_def import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
@@ -40,12 +38,11 @@ class BaseAgentNodeDef(
         model_client: PydanticModelClient,
         deps_type: type[AgentDepsT] | None = None,
         final_output_type: type[AgentOutputT] | type[str] = str,
-        input_to_prompt_func: Callable[[BaseSessionRunContext[State, Deps[AgentDepsT]]], str]
-        | None = None,
+        input_to_prompt_func: Callable[[AgentSessionRunContext[AgentDepsT]], str] | None = None,
     ):
-        self._input_to_prompt_func: Callable[
-            [BaseSessionRunContext[State, Deps[AgentDepsT]]], str
-        ] = self._prepare_prompt if input_to_prompt_func is None else input_to_prompt_func
+        self._input_to_prompt_func: Callable[[AgentSessionRunContext[AgentDepsT]], str] = (
+            self._prepare_prompt if input_to_prompt_func is None else input_to_prompt_func
+        )
         self.deps_type = deps_type
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
@@ -59,19 +56,19 @@ class BaseAgentNodeDef(
         )
 
     def input_to_prompt(
-        self, func: Callable[[BaseSessionRunContext[State, Deps[AgentDepsT]]], str]
-    ) -> Callable[[BaseSessionRunContext[State, Deps[AgentDepsT]]], str]:
+        self, func: Callable[[AgentSessionRunContext[AgentDepsT]], str]
+    ) -> Callable[[AgentSessionRunContext[AgentDepsT]], str]:
         """decorator to define function to parse structured input to string"""
         self._input_to_prompt_func = func
         return func
 
-    def _prepare_prompt(self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]]) -> str:
+    def _prepare_prompt(self, ctx: AgentSessionRunContext[AgentDepsT]) -> str:
         return ctx.state.run_state.todo_stack[-1].text()
 
     # TODO: consider the agent node to operate as a router as well.
     # For example, sequential multi-tool calls: each tool result is routed back to the agent
     # before firing the next, instead of a fully choreographed approach using reply_stack.
-    async def run(self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]]) -> NodeResult[State]:
+    async def run(self, ctx: AgentSessionRunContext[AgentDepsT]) -> NodeResult[State]:
         prompt = self._input_to_prompt_func(ctx)
         if ctx.deps.agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel):

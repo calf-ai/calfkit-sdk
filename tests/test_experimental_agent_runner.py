@@ -27,12 +27,12 @@ from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.agent_def import BaseAgentNodeDef
-from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.node_def import Delegate, Envelope, Reply
-from calfkit.experimental.payload_model import Payload, TextPart, ToolCallPart
-from calfkit.experimental.state_and_deps_models import AgentActivityState, Deps, State
-from calfkit.experimental.tool_def import agent_tool as experimental_agent_tool
+from calfkit.experimental.context.context_models import BaseSessionRunContext
+from calfkit.experimental.data_model.payload import Payload, TextPart, ToolCallPart
+from calfkit.experimental.data_model.state_deps import AgentActivityState, Deps, State
+from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
+from calfkit.experimental.nodes.node_def import Delegate, Envelope, Reply
+from calfkit.experimental.nodes.tool_def import agent_tool as experimental_agent_tool
 from calfkit.models.tool_context import ToolContext
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from tests.utils import wait_for_condition
@@ -586,7 +586,7 @@ async def test_tool_node_returns_silent_when_no_tool_call():
 
     Verifies graceful handling of payloads without tool calls.
     """
-    from calfkit.experimental.node_def import Silent
+    from calfkit.experimental.nodes.node_def import Silent
 
     # Payload with only a TextPart -- no ToolCallPart
     text_payload = Payload(

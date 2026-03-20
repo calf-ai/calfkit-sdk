@@ -6,7 +6,7 @@ from calfkit.experimental._types import DepsT, StateT
 
 
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
-    """Developer-facing context for a session — just state + deps."""
+    """Base generic context for a session — just state + deps."""
 
     state: StateT
     """The state of the graph. Mutable."""

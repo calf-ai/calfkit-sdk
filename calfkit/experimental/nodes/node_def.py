@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypeAliasType, TypeVar
 
 from calfkit.experimental._types import DepsT, InputT, StateT
-from calfkit.experimental.context_models import BaseSessionRunContext
+from calfkit.experimental.context.context_models import BaseSessionRunContext
 
 logger = logging.getLogger(__name__)
 
