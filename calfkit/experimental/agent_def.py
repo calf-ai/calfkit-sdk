@@ -71,9 +71,7 @@ class BaseAgentNodeDef(
     # TODO: consider the agent node to operate as a router as well.
     # For example, sequential multi-tool calls: each tool result is routed back to the agent
     # before firing the next, instead of a fully choreographed approach using reply_stack.
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]], input: InputT | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]]) -> NodeResult[State]:
         prompt = self._input_to_prompt_func(ctx)
         if ctx.deps.agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel):

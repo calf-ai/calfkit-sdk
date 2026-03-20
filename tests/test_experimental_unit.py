@@ -404,9 +404,7 @@ class TestAgentToolDecorator:
 class StubReplyNode(BaseNodeDef[State, Deps]):
     """Returns Reply with the current state."""
 
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
         return Reply(value=ctx.state)
 
 
@@ -417,9 +415,7 @@ class StubDelegateNode(BaseNodeDef[State, Deps]):
         self._delegate_to = delegate_to
         super().__init__(node_id, **kwargs)
 
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
         return Delegate(topic=self._delegate_to, value=ctx.state)
 
 
@@ -430,18 +426,14 @@ class StubEmitNode(BaseNodeDef[State, Deps]):
         self._emit_to = emit_to
         super().__init__(node_id, **kwargs)
 
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
         return Emit(value=ctx.state, topic=self._emit_to)
 
 
 class StubSilentNode(BaseNodeDef[State, Deps]):
     """Returns Silent (no publish)."""
 
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
         return Silent()
 
 
@@ -452,9 +444,7 @@ class StubParallelNode(BaseNodeDef[State, Deps]):
         self._topics = topics
         super().__init__(node_id, **kwargs)
 
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
         return Parallel(delegates=[Delegate(topic=t, value=ctx.state) for t in self._topics])
 
 
@@ -757,9 +747,7 @@ class StubSequentialDelegateNode(BaseNodeDef[State, Deps]):
         self._delegate_topics = delegate_topics
         super().__init__(node_id, **kwargs)
 
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
         return [Delegate(topic=t, value=ctx.state) for t in self._delegate_topics]
 
 
@@ -932,14 +920,18 @@ class TestDelegateInputField:
 
 
 class StubInputCapturingNode(BaseNodeDef[State, Deps]):
-    """Captures the input parameter passed to run() for test assertions."""
+    """Captures the input parameter passed to run() for test assertions.
+
+    Uses a custom parameter name (not 'input') to verify that the framework's
+    signature inspection is name-agnostic.
+    """
 
     captured_input: Any | None = None
 
     async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
+        self, ctx: BaseSessionRunContext[State, Deps], my_custom_input: Any | None = None
     ) -> NodeResult[State]:
-        self.captured_input = input
+        self.captured_input = my_custom_input
         return Reply(value=ctx.state)
 
 
@@ -951,9 +943,7 @@ class StubDelegateWithInputNode(BaseNodeDef[State, Deps]):
         self._delegate_input = delegate_input
         super().__init__(node_id, **kwargs)
 
-    async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
         return Delegate(topic=self._delegate_to, value=ctx.state, input=self._delegate_input)
 
 

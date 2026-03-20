@@ -1,3 +1,4 @@
+import inspect
 import logging
 import warnings
 from abc import abstractmethod
@@ -104,6 +105,15 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
 
 
 class BaseNodeDef(Generic[StateT, DepsT, InputT]):
+    _run_accepts_input: bool
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        sig = inspect.signature(cls.run)
+        # Unbound method signature includes self, so self + ctx = 2 params.
+        # If > 2, the subclass declared an input parameter (any name).
+        cls._run_accepts_input = len(sig.parameters) > 2
+
     def __init__(
         self,
         node_id: str,
@@ -127,16 +137,15 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
     # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
-    async def run(
-        self, ctx: BaseSessionRunContext[StateT, DepsT], input: InputT | None = None
-    ) -> NodeResult[StateT]:
-        """Runs the node's logic using provided context and optional per-invocation input.
+    async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[StateT]:
+        """Runs the node's logic using provided context.
+
+        Subclasses that need per-invocation input can add an optional parameter
+        (any name). The framework inspects the signature at class definition time
+        and will pass ``envelope.input`` automatically if the parameter is declared.
 
         Args:
             ctx: Session context containing mutable state and immutable dependencies.
-            input: Per-invocation command data for this node. Carried on the Envelope
-                and passed through by the framework. ``None`` when replying or when
-                the caller did not supply input.
 
         Raises:
             NotImplementedError: If node subclass does not implement the run() method.
@@ -159,7 +168,10 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         broker: BrokerAnnotation,
     ) -> None:
         ctx = await self.prepare_context(envelope)
-        output = await self.run(ctx, envelope.input)
+        if self._run_accepts_input:
+            output = await self.run(ctx, envelope.input)
+        else:
+            output = await self.run(ctx)
 
         if isinstance(output, Silent):
             logging.warning(
