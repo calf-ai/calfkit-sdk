@@ -6,9 +6,14 @@ from typing import Any, cast
 from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.node_def import BaseNodeDef, NodeResult, Reply, Silent
+from calfkit.experimental.node_def import BaseNodeDef, Envelope, NodeResult, Reply, Silent
 from calfkit.experimental.payload_model import Payload
-from calfkit.experimental.state_and_deps_models import Deps, State
+from calfkit.experimental.state_and_deps_models import (
+    Deps,
+    InFlightToolsState,
+    NodeConsumeState,
+    State,
+)
 from calfkit.experimental.utils import find_first_tool_call_part
 from calfkit.models.tool_context import ToolContext
 
@@ -30,10 +35,21 @@ class ToolNodeDef(BaseToolNodeDef):
             publish_topic=publish_topic,
         )
 
+    # async def prepare_context(
+    #     self, envelope: Envelope[State, Deps[Any]]
+    # ) -> BaseSessionRunContext[NodeConsumeState[InFlightToolsState], Deps[Any]]:
+    #     consume_state = NodeConsumeState[InFlightToolsState].model_validate(
+    #         envelope.context.state.model_dump()
+    #     )
+    #     ctx = BaseSessionRunContext[NodeConsumeState[InFlightToolsState], Deps[Any]](
+    #         state=consume_state, deps=envelope.context.deps
+    #     )
+    #     return ctx
+
     async def run(self, ctx: BaseSessionRunContext[State, Deps[Any]]) -> NodeResult[State]:
         # TODO: consider a more sophistcated or target way to store and retrieve payloads from state.  # noqa: E501
         # A targetted way would allow reciever nodes to know exactly what payload to run and process.  # noqa: E501
-        payload = Payload.model_validate(ctx.state.todo_stack[-1])
+        payload = Payload.model_validate(ctx.state.run_state.todo_stack[-1])
         tool_call_part = find_first_tool_call_part(payload)
         if tool_call_part is None:
             logging.warning("tool node ran but no matching tool call found in payload.")
@@ -44,7 +60,7 @@ class ToolNodeDef(BaseToolNodeDef):
             agent_name=payload.source_node_id,
             tool_call_id=tool_call_part.tool_call_id,
             tool_name=tool_call_part.tool_name,
-            messages=ctx.state.message_history,
+            messages=ctx.state.run_state.message_history,
             run_id=ctx.deps.correlation_id,
         )
 
@@ -67,9 +83,9 @@ class ToolNodeDef(BaseToolNodeDef):
         #       ],
         #   )
 
-        if ctx.state.uncommited_tool_results is None:
-            ctx.state.uncommited_tool_results = {}
-        ctx.state.uncommited_tool_results[tool_call_part.tool_call_id] = ToolReturn(
+        if ctx.state.run_state.tool_results is None:
+            ctx.state.run_state.tool_results = {}
+        ctx.state.run_state.tool_results[tool_call_part.tool_call_id] = ToolReturn(
             return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}
         )
 

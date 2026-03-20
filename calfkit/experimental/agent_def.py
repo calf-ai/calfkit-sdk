@@ -65,7 +65,7 @@ class BaseAgentNodeDef(
         return func
 
     def _prepare_prompt(self, ctx: BaseSessionRunContext[State, Deps[AgentDepsT]]) -> str:
-        return ctx.state.todo_stack[-1].text()
+        return ctx.state.run_state.todo_stack[-1].text()
 
     # TODO: consider the agent node to operate as a router as well.
     # For example, sequential multi-tool calls: each tool result is routed back to the agent
@@ -83,11 +83,11 @@ class BaseAgentNodeDef(
                     )
         # TODO: add check that all requested tool calls IDs have a result
         tool_results = None
-        if ctx.state.uncommited_tool_results is not None:
-            tool_results = DeferredToolResults(calls=ctx.state.uncommited_tool_results)
+        if ctx.state.run_state is not None:
+            tool_results = DeferredToolResults(calls=ctx.state.run_state.tool_results)
         result = await self._agent_loop.run(
             user_prompt=prompt,
-            message_history=ctx.state.message_history,
+            message_history=ctx.state.run_state.message_history,
             instructions=self.system_prompt,
             toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools])],
             deps=ctx.deps.agent_deps,
@@ -96,14 +96,14 @@ class BaseAgentNodeDef(
         if isinstance(result.output, DeferredToolRequests):
             # The LLM called one or more tools
             messages = result.new_messages()  # preserve conversation history
-            ctx.state.message_history.extend(messages)
+            ctx.state.run_state.message_history.extend(messages)
 
             tool_state_delegations = list[Delegate[State]]()
             tool_call_state = State()
             for tool_call in result.output.calls:
                 # TODO: fix multiple calls to same tool.
                 # Multiple publishes to same topic, there may be duplication of work.
-                tool_call_state.todo_stack.append(  # one payload per tool call
+                tool_call_state.run_state.todo_stack.append(  # one payload per tool call
                     Payload(
                         correlation_id=ctx.deps.correlation_id,
                         source_node_id=self.id,
@@ -130,7 +130,7 @@ class BaseAgentNodeDef(
             return tool_state_delegations
 
         elif isinstance(result.output, self.final_output_type):
-            ctx.state.message_history.extend(result.new_messages())
+            ctx.state.run_state.message_history.extend(result.new_messages())
             return Reply(value=ctx.state)
 
         else:

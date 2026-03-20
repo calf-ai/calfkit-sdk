@@ -36,6 +36,15 @@ class Delegate(Generic[StateT]):
 
 
 @dataclass
+class Sequential(Generic[StateT]):
+    """Sequentially forward a shared state from node to node,
+    where the final state is returned to caller."""
+
+    topics: list[str]  # passed to topics in this list in order index 0 -> n
+    value: StateT | None = None
+
+
+@dataclass
 class Emit(Generic[StateT]):
     """Terminal: fire-and-forget publish to a topic. No reply expected."""
 
@@ -65,7 +74,8 @@ NodeResult = TypeAliasType(
     | list[Emit[_T]]
     | list[Delegate[_T]]
     | Parallel[_T]
-    | Silent,
+    | Silent
+    | Sequential[_T],
     type_params=(_T,),
 )
 """All possible return types from a node's ``run`` method."""
