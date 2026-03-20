@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from uuid_utils import uuid7
 
 if TYPE_CHECKING:
-    from calfkit.experimental.payload_model import Payload, ToolCallPart
+    from calfkit.experimental.data_model.payload import Payload, ToolCallPart
 
 
 def generate_payload_id() -> str:
@@ -22,7 +22,7 @@ def find_first_tool_call_part(payload: Payload) -> ToolCallPart | None:
     Returns:
         ToolCallPart | None: The first ToolCallPart found, or None.
     """
-    from calfkit.experimental.payload_model import ToolCallPart as _ToolCallPart
+    from calfkit.experimental.data_model.payload import ToolCallPart as _ToolCallPart
 
     parts = payload.parts
     for part in parts:

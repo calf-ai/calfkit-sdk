@@ -5,12 +5,12 @@ from typing import Any, cast
 
 from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
-from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.node_def import BaseNodeDef, NodeResult, Reply, Silent
-from calfkit.experimental.state_and_deps_models import (
+from calfkit.experimental.context.agent_context import AgentSessionRunContext
+from calfkit.experimental.data_model.state_deps import (
     Deps,
     State,
 )
+from calfkit.experimental.nodes.node_def import BaseNodeDef, NodeResult, Reply, Silent
 from calfkit.models.tool_context import ToolContext
 
 
@@ -43,7 +43,7 @@ class ToolNodeDef(BaseToolNodeDef):
     #     return ctx
 
     async def run(  # type: ignore[override]
-        self, ctx: BaseSessionRunContext[State, Deps[Any]], tool_call_id: str
+        self, ctx: AgentSessionRunContext[Any], tool_call_id: str
     ) -> NodeResult[State]:
         tool_call_part = ctx.state.run_state.tool_calls.get(tool_call_id)
         if tool_call_part is None:

@@ -1,7 +1,7 @@
 import asyncio
 
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.agent_dispatcher import AgentDispatcher
+from calfkit.experimental.backlog.agent_dispatcher import AgentDispatcher
 from calfkit.runners.service import NodesService
 from examples.daytrading_agents_arena.trading_tools import make_trading_tools
 
