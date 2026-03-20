@@ -13,7 +13,6 @@ import pytest
 from faststream import Context
 from faststream.kafka import TestKafkaBroker
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
-from pydantic import BaseModel
 
 from calfkit.broker.broker import BrokerClient
 from calfkit.experimental.context_models import BaseSessionRunContext

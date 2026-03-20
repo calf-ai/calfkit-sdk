@@ -1,4 +1,3 @@
-import logging
 from typing import Annotated, Any, Generic
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field
@@ -6,7 +5,6 @@ from typing_extensions import TypeVar
 
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ToolCallPart
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
-from calfkit._vendor.pydantic_ai.tools import _deferred_tool_call_result_discriminator
 from calfkit.experimental.payload_model import Payload
 
 DataT = TypeVar("DataT", default=dict[str, Any])

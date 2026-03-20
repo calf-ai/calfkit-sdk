@@ -6,12 +6,10 @@ from typing import Any, cast
 from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.context_models import BaseSessionRunContext
-from calfkit.experimental.node_def import BaseNodeDef, Envelope, NodeResult, Reply, Silent
+from calfkit.experimental.node_def import BaseNodeDef, NodeResult, Reply, Silent
 from calfkit.experimental.payload_model import Payload
 from calfkit.experimental.state_and_deps_models import (
     Deps,
-    InFlightToolsState,
-    NodeConsumeState,
     State,
 )
 from calfkit.experimental.utils import find_first_tool_call_part
@@ -96,7 +94,7 @@ class ToolNodeDef(BaseToolNodeDef):
         return cast(ToolDefinition, self._tool.tool_def)
 
 
-def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> BaseToolNodeDef:
+def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> ToolNodeDef:
     """Tool decorator to turn a function into a deployable node that agents can call"""
     subscribe_topic = f"tool.{func.__name__}.input"
     publish_topic = f"tool.{func.__name__}.output"

@@ -32,7 +32,6 @@ from calfkit.experimental.context_models import BaseSessionRunContext
 from calfkit.experimental.node_def import Delegate, Envelope, Reply
 from calfkit.experimental.payload_model import Payload, TextPart, ToolCallPart
 from calfkit.experimental.state_and_deps_models import AgentActivityState, Deps, State
-from calfkit.experimental.tool_def import ToolNodeDef
 from calfkit.experimental.tool_def import agent_tool as experimental_agent_tool
 from calfkit.models.tool_context import ToolContext
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
@@ -160,7 +159,11 @@ async def test_basic_agent_text_reply():
     )
 
     ctx = BaseSessionRunContext(
-        state=State(run_state=AgentActivityState(todo_stack=[make_payload("What is 2 + 2?", correlation_id="test-1")])),
+        state=State(
+            run_state=AgentActivityState(
+                todo_stack=[make_payload("What is 2 + 2?", correlation_id="test-1")]
+            )
+        ),
         deps=Deps(correlation_id="test-1", agent_deps=None),
     )
 
@@ -168,7 +171,9 @@ async def test_basic_agent_text_reply():
 
     assert isinstance(result, Reply), f"Expected Reply, got {type(result).__name__}"
     assert isinstance(result.value, State)
-    assert len(result.value.run_state.message_history) > 0, "Should have message_history from LLM call"
+    assert len(result.value.run_state.message_history) > 0, (
+        "Should have message_history from LLM call"
+    )
 
     # The response should mention "4"
     last_msg = result.value.run_state.message_history[-1]
@@ -259,7 +264,11 @@ async def test_agent_multi_turn_memory():
 
     # First turn: introduce information
     ctx1 = BaseSessionRunContext(
-        state=State(run_state=AgentActivityState(todo_stack=[make_payload("My name is Alice.", correlation_id="turn-1")])),
+        state=State(
+            run_state=AgentActivityState(
+                todo_stack=[make_payload("My name is Alice.", correlation_id="turn-1")]
+            )
+        ),
         deps=Deps(correlation_id="turn-1", agent_deps=None),
     )
 
@@ -304,7 +313,9 @@ async def test_agent_tool_visibility():
 
     ctx = BaseSessionRunContext(
         state=State(
-            run_state=AgentActivityState(todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="vis-1")])
+            run_state=AgentActivityState(
+                todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="vis-1")]
+            )
         ),
         deps=Deps(correlation_id="vis-1", agent_deps=None),
     )
@@ -339,7 +350,9 @@ async def test_agent_tool_delegation_uses_correct_topic():
 
     ctx = BaseSessionRunContext(
         state=State(
-            run_state=AgentActivityState(todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="topic-1")])
+            run_state=AgentActivityState(
+                todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="topic-1")]
+            )
         ),
         deps=Deps(correlation_id="topic-1", agent_deps=None),
     )
@@ -379,7 +392,9 @@ async def test_agent_tool_delegation_preserves_message_history():
 
     ctx = BaseSessionRunContext(
         state=State(
-            run_state=AgentActivityState(todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="hist-1")])
+            run_state=AgentActivityState(
+                todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="hist-1")]
+            )
         ),
         deps=Deps(correlation_id="hist-1", agent_deps=None),
     )
@@ -603,7 +618,7 @@ async def test_agent_with_tool_context_injection_full_flow():
     agent_node = BaseAgentNodeDef(
         agent_id="ctx_agent",
         model_client=make_model_client(),
-        system_prompt="You must use the ctx_echo_tool tool for every request. Pass the user's message.",
+        system_prompt="You must use the ctx_echo_tool tool for every request. Pass the user's message.",  # noqa: E501
         tools=[ctx_echo_tool],
     )
 
