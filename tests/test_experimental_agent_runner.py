@@ -27,7 +27,7 @@ from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.context.session_context import BaseSessionRunContext
+from calfkit.experimental.base_models.session_context import BaseSessionRunContext
 from calfkit.experimental.data_model.payload import Payload, TextPart, ToolCallPart
 from calfkit.experimental.data_model.state_deps import AgentActivityState, Deps, State
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
@@ -118,9 +118,7 @@ def make_envelope(
         state = State(run_state=AgentActivityState(todo_stack=[payload]))
     else:
         # Carry forward existing state, add new prompt to todo_stack
-        updated_run_state = state.run_state.model_copy(
-            update={"todo_stack": [*state.run_state.todo_stack, payload]}
-        )
+        updated_run_state = state.model_copy(update={"todo_stack": [*state.todo_stack, payload]})
         state = state.model_copy(update={"run_state": updated_run_state})
     deps = Deps(correlation_id=correlation_id, agent_deps=agent_deps)
     return Envelope(
@@ -237,13 +235,13 @@ async def test_basic_agent_text_reply_via_broker():
 
         # Verify state arrived with message history
         assert result.context.state is not None
-        assert len(result.context.state.run_state.message_history) > 0
+        assert len(result.context.state.message_history) > 0
 
         # reply_stack should be empty (popped the output_topic)
         assert result.reply_stack == []
 
         # Response should mention Paris
-        text = " ".join(str(p) for p in result.context.state.run_state.message_history[-1].parts)
+        text = " ".join(str(p) for p in result.context.state.message_history[-1].parts)
         assert "paris" in text.lower(), f"Expected 'Paris' in response: {text}"
 
 
@@ -411,7 +409,7 @@ async def test_agent_tool_delegation_preserves_message_history():
 
     # The state should preserve message_history from the LLM call
     # (user prompt + model tool call response)
-    assert len(state.run_state.message_history) > 0, (
+    assert len(state.message_history) > 0, (
         "Delegate state should carry message_history from the LLM interaction"
     )
 
@@ -492,11 +490,11 @@ async def test_agent_with_single_tool_call_full_flow():
 
         # The final response should incorporate the tool result
         assert result.context.state is not None
-        assert len(result.context.state.run_state.message_history) > 0
+        assert len(result.context.state.message_history) > 0
 
         # The tool returns "It's raining heavily in Tokyo"
         # so the final response should mention rain
-        text = " ".join(str(p) for p in result.context.state.run_state.message_history[-1].parts)
+        text = " ".join(str(p) for p in result.context.state.message_history[-1].parts)
         assert "rain" in text.lower(), f"Expected 'rain' in response: {text}"
 
 
@@ -512,7 +510,7 @@ async def test_tool_node_direct_execution():
     Verifies:
     - Tool extracts ToolCallPart from state.todo_stack
     - Tool function is executed with correct kwargs
-    - Result is stored in state.run_state.tool_results keyed by tool_call_id
+    - Result is stored in state.tool_results keyed by tool_call_id
     """
     tool_call_payload = Payload(
         correlation_id="tool-exec-1",
@@ -672,4 +670,4 @@ async def test_agent_with_tool_context_injection_full_flow():
 
         # The tool should have received the correct context
         assert result.context.state is not None
-        assert len(result.context.state.run_state.message_history) > 0
+        assert len(result.context.state.message_history) > 0

@@ -45,7 +45,7 @@ class ToolNodeDef(BaseToolNodeDef):
     async def run(
         self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str
     ) -> NodeResult[State]:
-        tool_call_part = ctx.state.run_state.tool_calls.get(tool_call_id)
+        tool_call_part = ctx.state.get_tool_call(tool_call_id)
         if tool_call_part is None:
             logging.warning(
                 f"tool node reached but no matching tool call found in run state for tool_call_id={tool_call_id}"  # noqa: E501
@@ -57,7 +57,7 @@ class ToolNodeDef(BaseToolNodeDef):
             agent_name=source_node_name,
             tool_call_id=tool_call_part.tool_call_id,
             tool_name=tool_call_part.tool_name,
-            messages=ctx.state.run_state.message_history,
+            messages=ctx.state.message_history,
             run_id=ctx.deps.correlation_id,
         )
 
@@ -79,11 +79,9 @@ class ToolNodeDef(BaseToolNodeDef):
         #           BinaryContent(data=png_bytes, media_type="image/png"),
         #       ],
         #   )
-
-        if ctx.state.run_state.tool_results is None:
-            ctx.state.run_state.tool_results = {}
-        ctx.state.run_state.tool_results[tool_call_part.tool_call_id] = ToolReturn(
-            return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}
+        ctx.state.add_tool_result(
+            tool_call_part.tool_call_id,
+            ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}),
         )
 
         return Reply[State](value=ctx.state)

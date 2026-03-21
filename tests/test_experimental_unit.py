@@ -15,7 +15,7 @@ from faststream.kafka import TestKafkaBroker
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.context.session_context import BaseSessionRunContext
+from calfkit.experimental.base_models.session_context import BaseSessionRunContext
 from calfkit.experimental.data_model.payload import (
     DataPart,
     FilePart,
@@ -173,9 +173,9 @@ class TestStateModel:
     def test_default_values(self):
         """State has correct default field values."""
         state = State()
-        assert state.run_state.todo_stack == []
-        assert state.run_state.message_history == []
-        assert state.run_state.tool_results is None
+        assert state.todo_stack == []
+        assert state.message_history == []
+        assert state.tool_results is None
 
     def test_state_serialization_roundtrip(self):
         """State survives serialization roundtrip."""
@@ -273,7 +273,7 @@ class TestEnvelopeModel:
         restored = Envelope.model_validate(dumped)
 
         assert restored.reply_stack == ["reply_topic"]
-        assert len(restored.context.state.run_state.todo_stack) == 1
+        assert len(restored.context.state.todo_stack) == 1
         assert restored.context.deps.correlation_id == "e3"
 
 
@@ -508,7 +508,7 @@ class TestReplyChoreography:
             # reply_stack should be empty (popped "output_topic")
             assert result.reply_stack == []
             # State should be preserved
-            assert len(result.context.state.run_state.todo_stack) == 1
+            assert len(result.context.state.todo_stack) == 1
 
     @pytest.mark.asyncio
     async def test_reply_with_empty_stack_drops_message(self):
@@ -637,7 +637,7 @@ class TestEmitChoreography:
             result = await received["emit-test-1"].get()
             # Emit sends BaseSessionRunContext, not Envelope
             assert isinstance(result, BaseSessionRunContext)
-            assert len(result.state.run_state.todo_stack) == 1
+            assert len(result.state.todo_stack) == 1
 
 
 class TestSilentChoreography:
