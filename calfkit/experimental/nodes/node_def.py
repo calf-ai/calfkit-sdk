@@ -64,7 +64,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
     async def run(
-        self, ctx: BaseSessionRunContext[StateT, DepsT], *args, **kwargs
+        self, ctx: BaseSessionRunContext[StateT, DepsT], *args: Any, **kwargs: Any
     ) -> NodeResult[StateT]:
         """Runs the node's logic using provided context.
 
@@ -214,7 +214,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         #     # Push self._return_topic (bottom), then remaining delegate
         #     # topics in reverse, so popping goes:
         #     #   first.topic → output[1].topic → ... → self._return_topic
-        #     remaining_topics = [d.topic for d in reversed(output[1:])]  # type: ignore[attr-defined]
+        #     remaining_topics = [d.topic for d in reversed(output[1:])]
         #     new_stack = [
         #         *envelope.reply_stack,
         #         self._return_topic,

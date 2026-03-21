@@ -8,7 +8,7 @@ from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.experimental._types import AgentDepsT, AgentOutputT, InputT
-from calfkit.experimental.base_models.actions import ReturnCall, TailCall
+from calfkit.experimental.base_models.actions import Call, NodeResult, ReturnCall, TailCall
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
 from calfkit.experimental.data_model.state_deps import (
     Deps,
@@ -16,8 +16,6 @@ from calfkit.experimental.data_model.state_deps import (
 )
 from calfkit.experimental.nodes.node_def import (
     BaseNodeDef,
-    Call,
-    NodeResult,
 )
 from calfkit.experimental.nodes.tool_def import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient

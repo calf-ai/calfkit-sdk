@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Generic
 
-from typing_extensions import Self, TypeAliasType, TypeVar
+from typing_extensions import TypeAliasType, TypeVar
 
 from calfkit.experimental._types import StateT
 

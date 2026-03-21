@@ -15,6 +15,7 @@ from faststream.kafka import TestKafkaBroker
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit.broker.broker import BrokerClient
+from calfkit.experimental.base_models.actions import Call, Delegate, Parallel, ReturnCall, TailCall
 from calfkit.experimental.base_models.session_context import (
     BaseSessionRunContext,
     CallFrame,
@@ -28,7 +29,6 @@ from calfkit.experimental.data_model.payload import (
     TextPart,
     ToolCallPart,
 )
-from calfkit.experimental.base_models.actions import Call, Delegate, Parallel, ReturnCall, TailCall
 from calfkit.experimental.data_model.state_deps import Deps, State
 from calfkit.experimental.nodes.node_def import (
     BaseNodeDef,
@@ -500,9 +500,7 @@ class TestReturnCallChoreography:
             received[correlation_id].put_nowait(envelope)
 
         async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(
-                reply_stack=[], callback_topic="output_topic"
-            )
+            test_envelope = _make_test_envelope(reply_stack=[], callback_topic="output_topic")
             await broker.publish(
                 test_envelope,
                 topic="reply_node.input",
@@ -601,9 +599,7 @@ class TestTailCallChoreography:
             received[correlation_id].put_nowait(envelope)
 
         async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(
-                reply_stack=[], callback_topic="original_callback"
-            )
+            test_envelope = _make_test_envelope(reply_stack=[], callback_topic="original_callback")
             await broker.publish(
                 test_envelope,
                 topic="emitter.input",

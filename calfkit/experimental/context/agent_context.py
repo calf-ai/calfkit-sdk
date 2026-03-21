@@ -11,11 +11,3 @@ AgentSessionRunContext = TypeAliasType(
 )
 """Developer-facing context for a session.
 Generic on dependency as it is developer supplied type."""
-
-AgentSessionRunContext = TypeAliasType(
-    "AgentSessionRunContext",
-    BaseSessionRunContext[State, Deps[AgentDepsT]],
-    type_params=(AgentDepsT,),
-)
-"""Developer-facing context for a session.
-Generic on dependency as it is developer supplied type."""

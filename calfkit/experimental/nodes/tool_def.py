@@ -5,12 +5,13 @@ from typing import Any, cast
 
 from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
+from calfkit.experimental.base_models.actions import NodeResult, ReturnCall, Silent
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
 from calfkit.experimental.data_model.state_deps import (
     Deps,
     State,
 )
-from calfkit.experimental.nodes.node_def import BaseNodeDef, NodeResult, Reply, Silent
+from calfkit.experimental.nodes.node_def import BaseNodeDef
 from calfkit.models.tool_context import ToolContext
 
 
@@ -30,17 +31,6 @@ class ToolNodeDef(BaseToolNodeDef):
             subscribe_topics=subscribe_topics,
             publish_topic=publish_topic,
         )
-
-    # async def prepare_context(
-    #     self, envelope: Envelope[State, Deps[Any]]
-    # ) -> BaseSessionRunContext[NodeConsumeState[InFlightToolsState], Deps[Any]]:
-    #     consume_state = NodeConsumeState[InFlightToolsState].model_validate(
-    #         envelope.context.state.model_dump()
-    #     )
-    #     ctx = BaseSessionRunContext[NodeConsumeState[InFlightToolsState], Deps[Any]](
-    #         state=consume_state, deps=envelope.context.deps
-    #     )
-    #     return ctx
 
     async def run(
         self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str
@@ -84,7 +74,7 @@ class ToolNodeDef(BaseToolNodeDef):
             ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}),
         )
 
-        return Reply[State](value=ctx.state)
+        return ReturnCall[State](state=ctx.state)
 
     @property
     def tool_schema(self) -> ToolDefinition:

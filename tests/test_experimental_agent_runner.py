@@ -29,7 +29,12 @@ from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart as VendorToolCallPart
 from calfkit.broker.broker import BrokerClient
 from calfkit.experimental.base_models.actions import Call, ReturnCall
-from calfkit.experimental.base_models.session_context import BaseSessionRunContext
+from calfkit.experimental.base_models.session_context import (
+    BaseSessionRunContext,
+    CallFrame,
+    Stack,
+    WorkflowState,
+)
 from calfkit.experimental.data_model.state_deps import Deps, State
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
 from calfkit.experimental.nodes.node_def import Envelope
@@ -93,6 +98,32 @@ def ctx_echo_tool(ctx: ToolContext, message: str) -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def make_envelope(
+    user_prompt: str,
+    *,
+    correlation_id: str,
+    reply_stack: list[str] | None = None,
+    agent_deps: Any = None,
+) -> Envelope[State, Deps]:
+    """Create a test envelope with a staged user prompt."""
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content=user_prompt)]))
+    initial_frame = CallFrame(
+        target_topic="test.input",
+        callback_topic=reply_stack[0] if reply_stack else "test.return",
+        input_args=None,
+    )
+    call_stack: Stack[CallFrame] = Stack()
+    call_stack.push(initial_frame)
+    return Envelope(
+        context=BaseSessionRunContext(
+            state=state,
+            deps=Deps(correlation_id=correlation_id, agent_deps=agent_deps),
+        ),
+        internal_workflow_state=WorkflowState(call_stack=call_stack),
+        reply_stack=reply_stack or [],
+    )
 
 
 def make_model_client() -> OpenAIModelClient:

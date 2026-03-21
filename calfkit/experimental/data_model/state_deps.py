@@ -21,7 +21,7 @@ class CoreMessageState(BaseAgentActivityState):
     """The state for committed messages and structured objects"""
 
     model_config = ConfigDict(extra="ignore")
-    uncommitted_message: ModelMessage | None
+    uncommitted_message: ModelMessage | None = None
     message_history: list[ModelMessage] = Field(
         default_factory=list, description="Append-only message history list"
     )
@@ -61,10 +61,10 @@ class InFlightToolsState(BaseAgentActivityState):
     # Map of tool call IDs to tool results
     tool_results: dict[str, ToolCallResult | Any] = Field(default_factory=dict)
 
-    def add_tool_call(self, tool_call: ToolCallPart):
+    def add_tool_call(self, tool_call: ToolCallPart) -> None:
         self._tool_calls[tool_call.tool_call_id] = tool_call
 
-    def add_tool_result(self, tool_call_id: str, tool_result: ToolCallResult | Any):
+    def add_tool_result(self, tool_call_id: str, tool_result: ToolCallResult | Any) -> None:
         self.tool_results[tool_call_id] = tool_result
 
     def get_tool_call(self, tool_call_id: str) -> ToolCallPart | None:
