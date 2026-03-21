@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, Any, Generic
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field
@@ -10,7 +11,6 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
 from calfkit.experimental._types import AgentDepsT
-from calfkit.experimental.data_model.payload import Payload
 
 
 class BaseAgentActivityState(BaseModel):
@@ -21,15 +21,9 @@ class CoreMessageState(BaseAgentActivityState):
     """The state for committed messages and structured objects"""
 
     model_config = ConfigDict(extra="ignore")
+    uncommitted_message: ModelMessage | None
     message_history: list[ModelMessage] = Field(
         default_factory=list, description="Append-only message history list"
-    )
-    todo_stack: list[Payload] = Field(
-        default_factory=list,
-        description=(
-            "Stack of agents' completed actions, executions, objects. "
-            "When an agent finishes its turn, a new payload is produced and pushed to this stack."
-        ),
     )
 
     def latest_tool_calls(self) -> list[ToolCallPart]:
@@ -40,6 +34,19 @@ class CoreMessageState(BaseAgentActivityState):
             elif isinstance(msg.tool_calls, list):
                 pending_tool_calls.extend(msg.tool_calls)
         return pending_tool_calls
+
+    def stage_message(self, message: ModelMessage) -> None:
+        self.uncommitted_message = message
+
+    def commit_message_to_history(self) -> None:
+        if self.uncommitted_message is None:
+            err_msg = (
+                "The staged message(uncommitted_message) is None, can't be committed to history."
+            )
+            logging.error(err_msg)
+            raise RuntimeError(err_msg)
+        self.message_history.append(self.uncommitted_message)
+        self.uncommitted_message = None
 
 
 class InFlightToolsState(BaseAgentActivityState):

@@ -16,7 +16,6 @@ Known issues that tests will surface:
 
 import asyncio
 import os
-import time
 from typing import Annotated, Any
 
 import pytest
@@ -26,12 +25,14 @@ from faststream.kafka import TestKafkaBroker
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit._vendor.pydantic_ai import models
+from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
+from calfkit._vendor.pydantic_ai.messages import ToolCallPart as VendorToolCallPart
 from calfkit.broker.broker import BrokerClient
+from calfkit.experimental.base_models.actions import Call, ReturnCall
 from calfkit.experimental.base_models.session_context import BaseSessionRunContext
-from calfkit.experimental.data_model.payload import Payload, TextPart, ToolCallPart
-from calfkit.experimental.data_model.state_deps import AgentActivityState, Deps, State
+from calfkit.experimental.data_model.state_deps import Deps, State
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
-from calfkit.experimental.nodes.node_def import Delegate, Envelope, Reply
+from calfkit.experimental.nodes.node_def import Envelope
 from calfkit.experimental.nodes.tool_def import agent_tool as experimental_agent_tool
 from calfkit.models.tool_context import ToolContext
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
@@ -94,39 +95,6 @@ def ctx_echo_tool(ctx: ToolContext, message: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def make_payload(user_prompt: str, *, correlation_id: str) -> Payload:
-    """Create a Payload with a single TextPart."""
-    return Payload(
-        correlation_id=correlation_id,
-        source_node_id="client",
-        parts=[TextPart(text=user_prompt)],
-        timestamp=time.time(),
-    )
-
-
-def make_envelope(
-    user_prompt: str,
-    *,
-    correlation_id: str,
-    reply_stack: list[str],
-    agent_deps: Any = None,
-    state: State | None = None,
-) -> Envelope[State, Deps]:
-    """Create an Envelope with a user prompt payload in State.run_state.todo_stack."""
-    payload = make_payload(user_prompt, correlation_id=correlation_id)
-    if state is None:
-        state = State(run_state=AgentActivityState(todo_stack=[payload]))
-    else:
-        # Carry forward existing state, add new prompt to todo_stack
-        updated_run_state = state.model_copy(update={"todo_stack": [*state.todo_stack, payload]})
-        state = state.model_copy(update={"run_state": updated_run_state})
-    deps = Deps(correlation_id=correlation_id, agent_deps=agent_deps)
-    return Envelope(
-        context=BaseSessionRunContext(state=state, deps=deps),
-        reply_stack=reply_stack,
-    )
-
-
 def make_model_client() -> OpenAIModelClient:
     """Create an OpenAI model client from environment variables."""
     return OpenAIModelClient(
@@ -143,12 +111,12 @@ def make_model_client() -> OpenAIModelClient:
 @pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_basic_agent_text_reply():
-    """Agent with no tools receives a prompt and returns a text Reply.
+    """Agent with no tools receives a prompt and returns a text ReturnCall.
 
     Verifies:
-    - Agent processes prompt from state.todo_stack via _prepare_prompt
+    - Agent processes staged prompt from uncommitted_message
     - LLM generates a text response (no tool calls)
-    - run() returns Reply[State] with updated message_history
+    - run() returns ReturnCall[State] with updated message_history
     """
     agent_node = BaseAgentNodeDef(
         agent_id="basic_agent",
@@ -156,25 +124,22 @@ async def test_basic_agent_text_reply():
         system_prompt="You are a helpful assistant. Always respond briefly in one sentence.",
     )
 
+    state = State(
+        uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What is 2 + 2?")])
+    )
     ctx = BaseSessionRunContext(
-        state=State(
-            run_state=AgentActivityState(
-                todo_stack=[make_payload("What is 2 + 2?", correlation_id="test-1")]
-            )
-        ),
+        state=state,
         deps=Deps(correlation_id="test-1", agent_deps=None),
     )
 
     result = await agent_node.run(ctx)
 
-    assert isinstance(result, Reply), f"Expected Reply, got {type(result).__name__}"
-    assert isinstance(result.value, State)
-    assert len(result.value.run_state.message_history) > 0, (
-        "Should have message_history from LLM call"
-    )
+    assert isinstance(result, ReturnCall), f"Expected ReturnCall, got {type(result).__name__}"
+    assert isinstance(result.state, State)
+    assert len(result.state.message_history) > 0, "Should have message_history from LLM call"
 
     # The response should mention "4"
-    last_msg = result.value.run_state.message_history[-1]
+    last_msg = result.state.message_history[-1]
     text = " ".join(str(p) for p in last_msg.parts)
     assert "4" in text, f"Expected '4' in response: {text}"
 
@@ -261,35 +226,35 @@ async def test_agent_multi_turn_memory():
     )
 
     # First turn: introduce information
+    state1 = State(
+        uncommitted_message=ModelRequest(parts=[UserPromptPart(content="My name is Alice.")])
+    )
     ctx1 = BaseSessionRunContext(
-        state=State(
-            run_state=AgentActivityState(
-                todo_stack=[make_payload("My name is Alice.", correlation_id="turn-1")]
-            )
-        ),
+        state=state1,
         deps=Deps(correlation_id="turn-1", agent_deps=None),
     )
 
     result1 = await agent_node.run(ctx1)
-    assert isinstance(result1, Reply), f"First turn: expected Reply, got {type(result1).__name__}"
-    assert len(result1.value.run_state.message_history) > 0
-
-    # Second turn: carry forward run_state with message_history, ask about first turn
-    second_payload = make_payload("What is my name?", correlation_id="turn-2")
-    carried_run_state = result1.value.run_state.model_copy(
-        update={"todo_stack": [*result1.value.run_state.todo_stack, second_payload]}
+    assert isinstance(result1, ReturnCall), (
+        f"First turn: expected ReturnCall, got {type(result1).__name__}"
     )
-    state2 = State(run_state=carried_run_state)
+    assert len(result1.state.message_history) > 0
+
+    # Second turn: carry forward message_history, stage new prompt
+    state2 = result1.state
+    state2.stage_message(ModelRequest(parts=[UserPromptPart(content="What is my name?")]))
     ctx2 = BaseSessionRunContext(
         state=state2,
         deps=Deps(correlation_id="turn-2", agent_deps=None),
     )
 
     result2 = await agent_node.run(ctx2)
-    assert isinstance(result2, Reply), f"Second turn: expected Reply, got {type(result2).__name__}"
+    assert isinstance(result2, ReturnCall), (
+        f"Second turn: expected ReturnCall, got {type(result2).__name__}"
+    )
 
     # Agent should remember "Alice" from the first turn
-    text = " ".join(str(p) for p in result2.value.run_state.message_history[-1].parts)
+    text = " ".join(str(p) for p in result2.state.message_history[-1].parts)
     assert "alice" in text.lower(), f"Expected 'Alice' in response: {text}"
 
 
@@ -300,7 +265,7 @@ async def test_agent_tool_visibility():
 
     Verifies:
     - When given a tool-appropriate prompt, the LLM chooses to call the tool
-    - run() returns a list of Delegates (not a Reply) when tool calls are made
+    - run() returns a Call (not a ReturnCall) when tool calls are made
     """
     agent_node = BaseAgentNodeDef(
         agent_id="visibility_agent",
@@ -309,35 +274,32 @@ async def test_agent_tool_visibility():
         tools=[get_weather],
     )
 
+    state = State(
+        uncommitted_message=ModelRequest(
+            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
+        )
+    )
     ctx = BaseSessionRunContext(
-        state=State(
-            run_state=AgentActivityState(
-                todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="vis-1")]
-            )
-        ),
+        state=state,
         deps=Deps(correlation_id="vis-1", agent_deps=None),
     )
 
     result = await agent_node.run(ctx)
 
-    # The LLM should call the get_weather tool, resulting in Delegate(s)
-    assert isinstance(result, list), (
-        f"Expected list[Delegate] (tool call), got {type(result).__name__}: {result}"
+    # The LLM should call the get_weather tool, resulting in a Call
+    assert isinstance(result, Call), (
+        f"Expected Call (tool call), got {type(result).__name__}: {result}"
     )
-    assert len(result) > 0
-    for item in result:
-        assert isinstance(item, Delegate), f"Expected Delegate, got {type(item).__name__}"
 
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_agent_tool_delegation_uses_correct_topic():
-    """When the LLM calls a tool, the Delegate should route to the tool's actual
+    """When the LLM calls a tool, the Call should route to the tool's actual
     subscribe topic (not a hardcoded placeholder).
 
     Verifies:
-    - Each Delegate.topic matches the corresponding tool's subscribe topic
-    - The Delegate state contains the correct ToolCallPart in todo_stack
+    - Call.target_topic matches the corresponding tool's subscribe topic
     """
     agent_node = BaseAgentNodeDef(
         agent_id="topic_agent",
@@ -346,28 +308,24 @@ async def test_agent_tool_delegation_uses_correct_topic():
         tools=[get_weather],
     )
 
+    state = State(
+        uncommitted_message=ModelRequest(
+            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
+        )
+    )
     ctx = BaseSessionRunContext(
-        state=State(
-            run_state=AgentActivityState(
-                todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="topic-1")]
-            )
-        ),
+        state=state,
         deps=Deps(correlation_id="topic-1", agent_deps=None),
     )
 
     result = await agent_node.run(ctx)
-    assert isinstance(result, list) and len(result) > 0
+    assert isinstance(result, Call)
 
-    # The delegate topic should be the tool's actual subscribe topic
+    # The call target should be the tool's actual subscribe topic
     expected_topic = get_weather.subscribe_topics[0]  # "tool.get_weather.input"
-    delegate_with_state = [d for d in result if d.value is not None]
-    assert len(delegate_with_state) > 0, "At least one delegate should carry the state"
-
-    # Verify the delegate routes to the correct tool topic
-    for delegate in result:
-        assert delegate.topic == expected_topic, (
-            f"Delegate topic should be '{expected_topic}', got '{delegate.topic}'"
-        )
+    assert result.target_topic == expected_topic, (
+        f"Call target should be '{expected_topic}', got '{result.target_topic}'"
+    )
 
 
 @pytest.mark.asyncio
@@ -378,7 +336,7 @@ async def test_agent_tool_delegation_preserves_message_history():
     the tool returns.
 
     Verifies:
-    - The delegate's State includes message_history from the LLM interaction
+    - The Call's State includes message_history from the LLM interaction
     - After tool return, the agent has context to produce a final response
     """
     agent_node = BaseAgentNodeDef(
@@ -388,29 +346,25 @@ async def test_agent_tool_delegation_preserves_message_history():
         tools=[get_weather],
     )
 
+    state = State(
+        uncommitted_message=ModelRequest(
+            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
+        )
+    )
     ctx = BaseSessionRunContext(
-        state=State(
-            run_state=AgentActivityState(
-                todo_stack=[make_payload("What's the weather in Tokyo?", correlation_id="hist-1")]
-            )
-        ),
+        state=state,
         deps=Deps(correlation_id="hist-1", agent_deps=None),
     )
 
     result = await agent_node.run(ctx)
-    assert isinstance(result, list)
+    assert isinstance(result, Call), f"Expected Call, got {type(result).__name__}"
 
-    # Find the delegate that carries the state
-    delegate_with_state = [d for d in result if d.value is not None]
-    assert len(delegate_with_state) > 0
-
-    state = delegate_with_state[0].value
-    assert isinstance(state, State)
+    assert isinstance(result.state, State)
 
     # The state should preserve message_history from the LLM call
     # (user prompt + model tool call response)
-    assert len(state.message_history) > 0, (
-        "Delegate state should carry message_history from the LLM interaction"
+    assert len(result.state.message_history) > 0, (
+        "Call state should carry message_history from the LLM interaction"
     )
 
 
@@ -508,34 +462,28 @@ async def test_tool_node_direct_execution():
     """ToolNodeDef.run() processes a ToolCallPart and returns Reply with tool result.
 
     Verifies:
-    - Tool extracts ToolCallPart from state.todo_stack
+    - Tool extracts ToolCallPart from state via get_tool_call()
     - Tool function is executed with correct kwargs
     - Result is stored in state.tool_results keyed by tool_call_id
     """
-    tool_call_payload = Payload(
-        correlation_id="tool-exec-1",
-        source_node_id="caller_agent",
-        parts=[
-            ToolCallPart(
-                tool_call_id="call-1",
-                kwargs={"location": "Paris"},
-                tool_name="get_weather",
-            )
-        ],
-        timestamp=time.time(),
+    state = State(uncommitted_message=None)
+    state.add_tool_call(
+        VendorToolCallPart(
+            tool_name="get_weather",
+            args={"location": "Paris"},
+            tool_call_id="call-1",
+        )
     )
-
-    state = State(run_state=AgentActivityState(todo_stack=[tool_call_payload]))
     deps = Deps(correlation_id="tool-exec-1", agent_deps=None)
     ctx = BaseSessionRunContext(state=state, deps=deps)
 
-    result = await get_weather.run(ctx)
+    result = await get_weather.run(ctx, "call-1", "caller_agent")
 
-    assert isinstance(result, Reply), f"Expected Reply, got {type(result).__name__}"
-    assert result.value.uncommited_tool_results is not None
-    assert "call-1" in result.value.uncommited_tool_results
+    assert isinstance(result, ReturnCall), f"Expected ReturnCall, got {type(result).__name__}"
+    assert len(result.state.tool_results) > 0
+    assert "call-1" in result.state.tool_results
 
-    tool_return = result.value.uncommited_tool_results["call-1"]
+    tool_return = result.state.tool_results["call-1"]
     assert "raining heavily" in str(tool_return.return_value)
     assert "Paris" in str(tool_return.return_value)
 
@@ -549,30 +497,24 @@ async def test_tool_node_context_injection():
     - ToolContext.deps is set from context.deps.agent_deps
     - Tool function receives these values correctly
     """
-    tool_call_payload = Payload(
-        correlation_id="ctx-inject-1",
-        source_node_id="test_source_agent",
-        parts=[
-            ToolCallPart(
-                tool_call_id="call-ctx-1",
-                kwargs={"message": "hello"},
-                tool_name="ctx_echo_tool",
-            )
-        ],
-        timestamp=time.time(),
+    state = State(uncommitted_message=None)
+    state.add_tool_call(
+        VendorToolCallPart(
+            tool_name="ctx_echo_tool",
+            args={"message": "hello"},
+            tool_call_id="call-ctx-1",
+        )
     )
-
-    state = State(run_state=AgentActivityState(todo_stack=[tool_call_payload]))
     deps = Deps(correlation_id="ctx-inject-1", agent_deps={"api_key": "sk-test-123"})
     ctx = BaseSessionRunContext(state=state, deps=deps)
 
-    result = await ctx_echo_tool.run(ctx)
+    result = await ctx_echo_tool.run(ctx, "call-ctx-1", "test_source_agent")
 
-    assert isinstance(result, Reply)
-    assert result.value.uncommited_tool_results is not None
-    assert "call-ctx-1" in result.value.uncommited_tool_results
+    assert isinstance(result, ReturnCall)
+    assert len(result.state.tool_results) > 0
+    assert "call-ctx-1" in result.state.tool_results
 
-    tool_return = result.value.uncommited_tool_results["call-ctx-1"]
+    tool_return = result.state.tool_results["call-ctx-1"]
     content = str(tool_return.return_value)
     assert "agent=test_source_agent" in content, f"agent_name not injected: {content}"
     assert "msg=hello" in content, f"message arg missing: {content}"
@@ -586,19 +528,13 @@ async def test_tool_node_returns_silent_when_no_tool_call():
     """
     from calfkit.experimental.nodes.node_def import Silent
 
-    # Payload with only a TextPart -- no ToolCallPart
-    text_payload = Payload(
-        correlation_id="no-tool-1",
-        source_node_id="some_agent",
-        parts=[TextPart(text="This is just text, no tool call")],
-        timestamp=time.time(),
-    )
-
-    state = State(run_state=AgentActivityState(todo_stack=[text_payload]))
+    # State with no tool calls registered
+    state = State(uncommitted_message=None)
     deps = Deps(correlation_id="no-tool-1", agent_deps=None)
     ctx = BaseSessionRunContext(state=state, deps=deps)
 
-    result = await get_weather.run(ctx)
+    # Pass a non-existent tool_call_id — should return Silent
+    result = await get_weather.run(ctx, "nonexistent-call-id", "some_agent")
 
     assert isinstance(result, Silent), f"Expected Silent, got {type(result).__name__}"
 

@@ -1,11 +1,12 @@
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, Sequence
+from typing import Any, Generic
 
 import uuid_utils
 from pydantic import BaseModel, ConfigDict, Field
 
 from calfkit.experimental._types import DepsT, StackItemT, StateT
-from calfkit.experimental.base_models.actions import _Call, Call
+from calfkit.experimental.base_models.actions import Call, _Call
 
 
 @dataclass
@@ -54,6 +55,7 @@ class WorkflowState(BaseModel):
         description="Additional data that can be accessed programmatically by the application.",
     )
 
+    @property
     def current_frame(self) -> CallFrame:
         return self.call_stack.peek()
 

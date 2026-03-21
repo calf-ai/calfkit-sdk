@@ -2,63 +2,25 @@ import inspect
 import logging
 import warnings
 from abc import abstractmethod
-from collections.abc import Sequence
 from typing import Annotated, Any, Generic
 
 from faststream import Context
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
-from pydantic import BaseModel, Field
 
 from calfkit.experimental._types import DepsT, InputT, StateT
 from calfkit.experimental.base_models.actions import (
     Call,
-    Delegate,
-    Emit,
     NodeResult,
-    Parallel,
-    Reply,
     ReturnCall,
     Silent,
     TailCall,
 )
-from calfkit.experimental.base_models.session_context import BaseSessionRunContext, WorkflowState
+from calfkit.experimental.base_models.envelope import Envelope
+from calfkit.experimental.base_models.session_context import BaseSessionRunContext
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Wire format (framework-internal)
-# ---------------------------------------------------------------------------
-
-
-class Envelope(BaseModel, Generic[StateT, DepsT]):
-    """Wire format — framework internal. Carries routing metadata + developer context.
-
-    Uses plain BaseModel (not CompactBaseModel) so all fields are always
-    serialized — no exclude_unset gotchas with reply_stack.
-    """
-
-    context: BaseSessionRunContext[StateT, DepsT]
-    _internal_workflow_state: WorkflowState = Field(
-        description="The internal, framework-level state tracking workflow"
-    )
-    reply_stack: list[str] = Field(default_factory=list)
-    input_args: Sequence[Any] | None = None
-
-    @classmethod
-    def construct_with_input_args(
-        cls,
-        context: BaseSessionRunContext[StateT, DepsT],
-        *input_args: Any,
-        reply_stack: list[str] | None = None,
-    ):
-        args = list(input_args) if input_args else None
-        if reply_stack:
-            return cls(context=context, reply_stack=reply_stack, input_args=args)
-        else:
-            return cls(context=context, input_args=args)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +70,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
 
         Subclasses that need per-invocation input can add an optional parameter
         (any name). The framework inspects the signature at class definition time
-        and will pass ``envelope.input_args`` automatically if the parameter is declared.
+        and will pass ``current_frame.input_args`` automatically if the parameter is declared.
 
         Args:
             ctx: Session context containing mutable state and immutable dependencies.
@@ -134,29 +96,32 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         broker: BrokerAnnotation,
     ) -> None:
         ctx = await self.prepare_context(envelope)
-        if self._run_accepts_input and envelope.input_args is not None:
-            output = await self.run(ctx, *envelope.input_args)
+        if (
+            self._run_accepts_input
+            and envelope.internal_workflow_state.current_frame.input_args is not None
+        ):
+            output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
         else:
             output = await self.run(ctx)
 
         if isinstance(output, Call):
             # push to callstack and call the target topic
-            envelope._internal_workflow_state.invoke_frame(output, self.subscribe_topics[0])
+            envelope.internal_workflow_state.invoke_frame(output, self.subscribe_topics[0])
             await broker.publish(
                 Envelope(
                     context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
-                    _internal_workflow_state=envelope._internal_workflow_state,
+                    internal_workflow_state=envelope.internal_workflow_state,
                 ),
-                topic=envelope._internal_workflow_state.current_frame().target_topic,
+                topic=envelope.internal_workflow_state.current_frame.target_topic,
                 correlation_id=correlation_id,
             )
         elif isinstance(output, ReturnCall):
             # unwind current frame and return to previous topic
-            frame = envelope._internal_workflow_state.unwind_frame()
+            frame = envelope.internal_workflow_state.unwind_frame()
             await broker.publish(
                 Envelope(
                     context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
-                    _internal_workflow_state=envelope._internal_workflow_state,
+                    internal_workflow_state=envelope.internal_workflow_state,
                 ),
                 topic=frame.callback_topic,
                 correlation_id=correlation_id,
@@ -165,14 +130,14 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
 
         elif isinstance(output, TailCall):
             # tailcall optimization: replace current call frame with new tailcall
-            frame = envelope._internal_workflow_state.unwind_frame()
-            envelope._internal_workflow_state.invoke_frame(output, frame.callback_topic)
+            frame = envelope.internal_workflow_state.unwind_frame()
+            envelope.internal_workflow_state.invoke_frame(output, frame.callback_topic)
             await broker.publish(
                 Envelope(
                     context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
-                    _internal_workflow_state=envelope._internal_workflow_state,
+                    internal_workflow_state=envelope.internal_workflow_state,
                 ),
-                topic=envelope._internal_workflow_state.current_frame().target_topic,
+                topic=envelope.internal_workflow_state.current_frame.target_topic,
                 correlation_id=correlation_id,
             )
             return

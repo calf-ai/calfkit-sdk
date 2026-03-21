@@ -1,6 +1,4 @@
 import logging
-import time
-from collections.abc import Callable
 from typing import Any, Generic
 
 from pydantic import BaseModel
@@ -12,7 +10,6 @@ from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.experimental._types import AgentDepsT, AgentOutputT, InputT
 from calfkit.experimental.base_models.actions import ReturnCall, TailCall
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
-from calfkit.experimental.data_model.payload import Payload, ToolCallPart
 from calfkit.experimental.data_model.state_deps import (
     Deps,
     State,
@@ -20,9 +17,7 @@ from calfkit.experimental.data_model.state_deps import (
 from calfkit.experimental.nodes.node_def import (
     BaseNodeDef,
     Call,
-    Delegate,
     NodeResult,
-    Reply,
 )
 from calfkit.experimental.nodes.tool_def import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -95,6 +90,10 @@ class BaseAgentNodeDef(
             if len(latest_tool_calls) > 0
             else None
         )
+
+        if ctx.state.uncommitted_message is not None:
+            ctx.state.commit_message_to_history()
+
         result = await self._agent_loop.run(
             message_history=ctx.state.message_history,
             instructions=self.system_prompt,
