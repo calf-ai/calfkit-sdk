@@ -22,10 +22,9 @@ def find_first_tool_call_part(payload: Payload) -> ToolCallPart | None:
     Returns:
         ToolCallPart | None: The first ToolCallPart found, or None.
     """
-    from calfkit.experimental.data_model.payload import ToolCallPart as _ToolCallPart
 
     parts = payload.parts
     for part in parts:
-        if isinstance(part, _ToolCallPart):
+        if isinstance(part, ToolCallPart):
             return part
     return None

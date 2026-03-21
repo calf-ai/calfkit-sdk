@@ -1042,6 +1042,17 @@ class ModelRequest:
         """Create a `ModelRequest` with a single user prompt as text."""
         return cls(parts=[UserPromptPart(user_prompt, name=name)], instructions=instructions)
 
+    @classmethod
+    def retry_prompt(
+        cls,
+        content: list[pydantic_core.ErrorDetails] | str,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+    ) -> ModelRequest:
+        """Create a `ModelRequest` with a single `RetryPromptPart`."""
+        return cls(parts=[RetryPromptPart(content=content, tool_name=tool_name, tool_call_id=tool_call_id)])
+
     __repr__ = _utils.dataclasses_no_defaults_repr
 
 

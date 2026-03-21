@@ -1,22 +1,16 @@
+import logging
 from typing import Annotated, Any, Generic
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field
 from typing_extensions import TypeVar
 
-from calfkit._vendor.pydantic_ai.messages import ModelMessage, ToolCallPart
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ToolCallPart,
+)
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
 from calfkit.experimental._types import AgentDepsT
-from calfkit.experimental.data_model.payload import Payload
-
-
-class WorkflowState(BaseModel):
-    """The current control state for the routing within the workflow."""
-
-    model_config = ConfigDict(extra="ignore")
-    metadata: Any = Field(
-        default=None,
-        description="Additional data that can be accessed programmatically by the application.",
-    )
 
 
 class BaseAgentActivityState(BaseModel):
@@ -24,19 +18,35 @@ class BaseAgentActivityState(BaseModel):
 
 
 class CoreMessageState(BaseAgentActivityState):
-    """The state for committed messages and objects"""
+    """The state for committed messages and structured objects"""
 
     model_config = ConfigDict(extra="ignore")
+    uncommitted_message: ModelMessage | None = None
     message_history: list[ModelMessage] = Field(
         default_factory=list, description="Append-only message history list"
     )
-    todo_stack: list[Payload] = Field(
-        default_factory=list,
-        description=(
-            "Stack of agents' completed actions, executions, objects. "
-            "When an agent finishes its turn, a new payload is produced and pushed to this stack."
-        ),
-    )
+
+    def latest_tool_calls(self) -> list[ToolCallPart]:
+        pending_tool_calls = list()
+        for msg in reversed(self.message_history):
+            if isinstance(msg, ModelRequest):
+                break
+            elif isinstance(msg.tool_calls, list):
+                pending_tool_calls.extend(msg.tool_calls)
+        return pending_tool_calls
+
+    def stage_message(self, message: ModelMessage) -> None:
+        self.uncommitted_message = message
+
+    def commit_message_to_history(self) -> None:
+        if self.uncommitted_message is None:
+            err_msg = (
+                "The staged message(uncommitted_message) is None, can't be committed to history."
+            )
+            logging.error(err_msg)
+            raise RuntimeError(err_msg)
+        self.message_history.append(self.uncommitted_message)
+        self.uncommitted_message = None
 
 
 class InFlightToolsState(BaseAgentActivityState):
@@ -45,21 +55,33 @@ class InFlightToolsState(BaseAgentActivityState):
 
     model_config = ConfigDict(extra="ignore")
 
+    # Map of tool call IDS to tool calls
+    _tool_calls: dict[str, ToolCallPart] = Field(default_factory=dict)
+
     # Map of tool call IDs to tool results
     tool_results: dict[str, ToolCallResult | Any] = Field(default_factory=dict)
 
-    # Map of tool call IDS to tool calls
-    tool_calls: dict[str, ToolCallPart] = Field(default_factory=dict)
+    def add_tool_call(self, tool_call: ToolCallPart) -> None:
+        self._tool_calls[tool_call.tool_call_id] = tool_call
 
-    @property
-    def all_calls_completed(self) -> bool:
-        for tool_call_id in self.tool_calls:
-            if tool_call_id not in self.tool_results:
+    def add_tool_result(self, tool_call_id: str, tool_result: ToolCallResult | Any) -> None:
+        self.tool_results[tool_call_id] = tool_result
+
+    def get_tool_call(self, tool_call_id: str) -> ToolCallPart | None:
+        return self._tool_calls.get(tool_call_id)
+
+    def get_tool_result(self, tool_call_id: str) -> ToolCallResult | Any | None:
+        return self.tool_results.get(tool_call_id)
+
+    def all_call_ids_complete(self, *call_ids: str) -> bool:
+        for call_id in call_ids:
+            _ = self._tool_calls[call_id]
+            if call_id not in self.tool_results:
                 return False
         return True
 
 
-class AgentActivityState(CoreMessageState, InFlightToolsState):
+class State(CoreMessageState, InFlightToolsState):
     """A flat unified state tracking all current states within an agent's loop.
     Inheritance is ordered by priority, so important state fields take precedence."""
 
@@ -70,13 +92,12 @@ class AgentActivityState(CoreMessageState, InFlightToolsState):
     )
 
 
-class State(BaseModel):
-    """mutable data model to track state of an execution among one or more agents,
-    sharing correlation id"""
+# class State(BaseModel):
+#     """mutable data model to track state of an execution among one or more agents,
+#     sharing correlation id"""
 
-    model_config = ConfigDict(extra="ignore")
-    workflow_state: WorkflowState = Field(default_factory=WorkflowState)
-    run_state: AgentActivityState = Field(default_factory=AgentActivityState)
+#     model_config = ConfigDict(extra="ignore")
+#     run_state: AgentActivityState = Field(default_factory=AgentActivityState)
 
 
 class Deps(BaseModel, Generic[AgentDepsT]):

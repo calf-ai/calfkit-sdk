@@ -1,7 +1,7 @@
 """Unit tests for experimental choreography-based node architecture.
 
 Tests models (Payload, State, Deps, Envelope), schema generation,
-base node choreography (Reply, Delegate, Emit, Silent routing), and
+base node choreography (Call, ReturnCall, TailCall, Silent routing), and
 tool node mechanics. Does NOT require real LLM API calls.
 """
 
@@ -15,7 +15,13 @@ from faststream.kafka import TestKafkaBroker
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.context.context_models import BaseSessionRunContext
+from calfkit.experimental.base_models.actions import Call, Delegate, Parallel, ReturnCall, TailCall
+from calfkit.experimental.base_models.session_context import (
+    BaseSessionRunContext,
+    CallFrame,
+    Stack,
+    WorkflowState,
+)
 from calfkit.experimental.data_model.payload import (
     DataPart,
     FilePart,
@@ -23,15 +29,11 @@ from calfkit.experimental.data_model.payload import (
     TextPart,
     ToolCallPart,
 )
-from calfkit.experimental.data_model.state_deps import AgentActivityState, Deps, State
+from calfkit.experimental.data_model.state_deps import Deps, State
 from calfkit.experimental.nodes.node_def import (
     BaseNodeDef,
-    Delegate,
-    Emit,
     Envelope,
     NodeResult,
-    Parallel,
-    Reply,
     Silent,
 )
 from calfkit.experimental.nodes.tool_def import ToolNodeDef
@@ -173,27 +175,21 @@ class TestStateModel:
     def test_default_values(self):
         """State has correct default field values."""
         state = State()
-        assert state.run_state.todo_stack == []
-        assert state.run_state.message_history == []
-        assert state.run_state.tool_results is None
+        assert state.message_history == []
+        assert state.tool_results is None
 
     def test_state_serialization_roundtrip(self):
         """State survives serialization roundtrip."""
-        payload = Payload(
-            correlation_id="s1",
-            parts=[TextPart(text="task")],
-            timestamp=time.time(),
-        )
-        state = State(run_state=AgentActivityState(todo_stack=[payload]))
+        state = State(uncommitted_message=None)
         dumped = state.model_dump(mode="json")
         restored = State.model_validate(dumped)
-        assert len(restored.run_state.todo_stack) == 1
-        assert restored.run_state.todo_stack[0].correlation_id == "s1"
+        assert restored.message_history == []
 
     def test_state_extra_fields_ignored(self):
         """State ignores extra fields (ConfigDict extra='ignore')."""
         data = {
-            "run_state": {"todo_stack": [], "message_history": []},
+            "uncommitted_message": None,
+            "message_history": [],
             "unknown_field": "ignored",
         }
         state = State.model_validate(data)
@@ -258,23 +254,25 @@ class TestEnvelopeModel:
         Uses plain BaseModel (not CompactBaseModel), so all fields
         are always included -- no exclude_unset gotchas.
         """
-        payload = Payload(
-            correlation_id="e3",
-            parts=[TextPart(text="hello")],
-            timestamp=time.time(),
-        )
+        initial_frame = CallFrame(target_topic="t", callback_topic="cb", input_args=None)
+        call_stack = Stack[CallFrame]()
+        call_stack.push(initial_frame)
         ctx = BaseSessionRunContext(
-            state=State(run_state=AgentActivityState(todo_stack=[payload])),
+            state=State(uncommitted_message=None),
             deps=Deps(correlation_id="e3", agent_deps={"k": "v"}),
         )
-        original = Envelope(context=ctx, reply_stack=["reply_topic"])
+        original = Envelope(
+            context=ctx,
+            internal_workflow_state=WorkflowState(call_stack=call_stack),
+            reply_stack=["reply_topic"],
+        )
 
         dumped = original.model_dump(mode="json")
         restored = Envelope.model_validate(dumped)
 
         assert restored.reply_stack == ["reply_topic"]
-        assert len(restored.context.state.run_state.todo_stack) == 1
         assert restored.context.deps.correlation_id == "e3"
+        assert restored.context.state.message_history == []
 
 
 # ===========================================================================
@@ -397,37 +395,37 @@ class TestAgentToolDecorator:
 
 
 # ===========================================================================
-# Base node choreography tests (Reply, Delegate, Emit, Silent, Parallel)
+# Base node choreography tests (Call, ReturnCall, TailCall, Silent, Parallel)
 # ===========================================================================
 
 
-class StubReplyNode(BaseNodeDef[State, Deps]):
-    """Returns Reply with the current state."""
+class StubReturnCallNode(BaseNodeDef[State, Deps]):
+    """Returns ReturnCall with the current state (callback the caller)."""
 
     async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
-        return Reply(value=ctx.state)
+        return ReturnCall(state=ctx.state)
 
 
-class StubDelegateNode(BaseNodeDef[State, Deps]):
-    """Returns a Delegate to a target topic."""
+class StubCallNode(BaseNodeDef[State, Deps]):
+    """Returns a Call to a target topic (push frame, expect callback)."""
 
-    def __init__(self, node_id: str, delegate_to: str, **kwargs: Any):
-        self._delegate_to = delegate_to
+    def __init__(self, node_id: str, call_to: str, **kwargs: Any):
+        self._call_to = call_to
         super().__init__(node_id, **kwargs)
 
     async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
-        return Delegate(topic=self._delegate_to, value=ctx.state)
+        return Call(self._call_to, ctx.state)
 
 
-class StubEmitNode(BaseNodeDef[State, Deps]):
-    """Returns an Emit to a target topic."""
+class StubTailCallNode(BaseNodeDef[State, Deps]):
+    """Returns a TailCall to a target topic (fire-and-forget, inherits callback)."""
 
-    def __init__(self, node_id: str, emit_to: str, **kwargs: Any):
-        self._emit_to = emit_to
+    def __init__(self, node_id: str, tail_call_to: str, **kwargs: Any):
+        self._tail_call_to = tail_call_to
         super().__init__(node_id, **kwargs)
 
     async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
-        return Emit(value=ctx.state, topic=self._emit_to)
+        return TailCall(self._tail_call_to, ctx.state)
 
 
 class StubSilentNode(BaseNodeDef[State, Deps]):
@@ -448,29 +446,38 @@ class StubParallelNode(BaseNodeDef[State, Deps]):
         return Parallel(delegates=[Delegate(topic=t, value=ctx.state) for t in self._topics])
 
 
-def _make_test_envelope(reply_stack: list[str]) -> Envelope[State, Deps]:
-    """Create a minimal test envelope."""
-    payload = Payload(
-        correlation_id="choreo-test",
-        parts=[TextPart(text="test input")],
-        timestamp=time.time(),
+def _make_test_envelope(
+    reply_stack: list[str],
+    *,
+    target_topic: str = "test.input",
+    callback_topic: str = "test.return",
+    input_args: list[Any] | None = None,
+) -> Envelope[State, Deps]:
+    """Create a minimal test envelope with a single-frame call stack."""
+    initial_frame = CallFrame(
+        target_topic=target_topic,
+        callback_topic=callback_topic,
+        input_args=input_args,
     )
+    call_stack = Stack[CallFrame]()
+    call_stack.push(initial_frame)
     return Envelope(
         context=BaseSessionRunContext(
-            state=State(run_state=AgentActivityState(todo_stack=[payload])),
+            state=State(uncommitted_message=None),
             deps=Deps(correlation_id="choreo-test", agent_deps=None),
         ),
+        internal_workflow_state=WorkflowState(call_stack=call_stack),
         reply_stack=reply_stack,
     )
 
 
-class TestReplyChoreography:
-    """Tests for Reply routing through the handler."""
+class TestReturnCallChoreography:
+    """Tests for ReturnCall routing through the handler."""
 
     @pytest.mark.asyncio
-    async def test_reply_routes_to_reply_stack_top(self):
-        """Reply pops reply_stack and publishes to the top topic."""
-        node = StubReplyNode("reply_node", subscribe_topics="reply_node.input")
+    async def test_return_call_routes_to_callback_topic(self):
+        """ReturnCall unwinds the call frame and publishes to callback_topic."""
+        node = StubReturnCallNode("reply_node", subscribe_topics="reply_node.input")
 
         broker = BrokerClient()
         received: dict[str, asyncio.Queue[Envelope]] = {}
@@ -493,7 +500,7 @@ class TestReplyChoreography:
             received[correlation_id].put_nowait(envelope)
 
         async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(reply_stack=["output_topic"])
+            test_envelope = _make_test_envelope(reply_stack=[], callback_topic="output_topic")
             await broker.publish(
                 test_envelope,
                 topic="reply_node.input",
@@ -505,56 +512,26 @@ class TestReplyChoreography:
             await wait_for_condition(lambda: "reply-test-1" in received, timeout=5.0)
             result = await received["reply-test-1"].get()
 
-            # reply_stack should be empty (popped "output_topic")
-            assert result.reply_stack == []
             # State should be preserved
-            assert len(result.context.state.run_state.todo_stack) == 1
+            assert result.context.state is not None
+
+
+class TestCallChoreography:
+    """Tests for Call routing through the handler."""
 
     @pytest.mark.asyncio
-    async def test_reply_with_empty_stack_drops_message(self):
-        """Reply with empty reply_stack logs warning and drops the message."""
-        node = StubReplyNode("orphan_node", subscribe_topics="orphan.input")
-
-        broker = BrokerClient()
-        received: list[Envelope] = []
-
-        @broker.subscriber("orphan.input")
-        async def handle(
-            envelope: Envelope[State, Deps],
-            correlation_id: Annotated[str, Context()],
-            broker_: BrokerAnnotation,
-        ):
-            await node.handler(envelope, correlation_id, broker_)
-
-        # No collector -- nothing should be published
-        async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(reply_stack=[])
-            await broker.publish(
-                test_envelope,
-                topic="orphan.input",
-                correlation_id="orphan-1",
-            )
-            # If we get here without error, the message was dropped gracefully
-            assert len(received) == 0
-
-
-class TestDelegateChoreography:
-    """Tests for Delegate routing through the handler."""
-
-    @pytest.mark.asyncio
-    async def test_delegate_pushes_return_topic_and_routes(self):
-        """Delegate pushes self._return_topic onto reply_stack and publishes
-        to the delegate's topic."""
-        node = StubDelegateNode(
-            "delegator",
-            delegate_to="target_node.input",
-            subscribe_topics="delegator.input",
+    async def test_call_pushes_frame_and_routes_to_target(self):
+        """Call pushes a new frame to the call stack and publishes to the target topic."""
+        node = StubCallNode(
+            "caller",
+            call_to="target_node.input",
+            subscribe_topics="caller.input",
         )
 
         broker = BrokerClient()
         received: dict[str, asyncio.Queue[Envelope]] = {}
 
-        @broker.subscriber("delegator.input")
+        @broker.subscriber("caller.input")
         async def handle(
             envelope: Envelope[State, Deps],
             correlation_id: Annotated[str, Context()],
@@ -572,39 +549,37 @@ class TestDelegateChoreography:
             received[correlation_id].put_nowait(envelope)
 
         async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(reply_stack=["original_output"])
+            test_envelope = _make_test_envelope(reply_stack=[])
             await broker.publish(
                 test_envelope,
-                topic="delegator.input",
-                correlation_id="delegate-test-1",
+                topic="caller.input",
+                correlation_id="call-test-1",
             )
 
             from tests.utils import wait_for_condition
 
-            await wait_for_condition(lambda: "delegate-test-1" in received, timeout=5.0)
-            result = await received["delegate-test-1"].get()
+            await wait_for_condition(lambda: "call-test-1" in received, timeout=5.0)
+            result = await received["call-test-1"].get()
 
-            # reply_stack should have original + return topic
-            assert result.reply_stack == [
-                "original_output",
-                "delegator.private.return",
-            ]
+            # Current frame should target the callee, with callback to caller's subscribe topic
+            assert result.internal_workflow_state.current_frame.target_topic == "target_node.input"
+            assert result.internal_workflow_state.current_frame.callback_topic == "caller.input"
 
 
-class TestEmitChoreography:
-    """Tests for Emit (fire-and-forget) routing."""
+class TestTailCallChoreography:
+    """Tests for TailCall (fire-and-forget, inherits callback) routing."""
 
     @pytest.mark.asyncio
-    async def test_emit_publishes_without_reply_stack(self):
-        """Emit publishes a BaseSessionRunContext (not Envelope) to the target topic."""
-        node = StubEmitNode(
+    async def test_tail_call_replaces_frame_and_routes(self):
+        """TailCall unwinds current frame, invokes new frame inheriting callback, and publishes."""
+        node = StubTailCallNode(
             "emitter",
-            emit_to="event_log",
+            tail_call_to="event_log",
             subscribe_topics="emitter.input",
         )
 
         broker = BrokerClient()
-        received: dict[str, asyncio.Queue] = {}
+        received: dict[str, asyncio.Queue[Envelope]] = {}
 
         @broker.subscriber("emitter.input")
         async def handle(
@@ -616,28 +591,31 @@ class TestEmitChoreography:
 
         @broker.subscriber("event_log")
         async def collect(
-            ctx: BaseSessionRunContext[State, Deps],
+            envelope: Envelope[State, Deps],
             correlation_id: Annotated[str, Context()],
         ):
             if correlation_id not in received:
                 received[correlation_id] = asyncio.Queue()
-            received[correlation_id].put_nowait(ctx)
+            received[correlation_id].put_nowait(envelope)
 
         async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(reply_stack=["should_not_matter"])
+            test_envelope = _make_test_envelope(reply_stack=[], callback_topic="original_callback")
             await broker.publish(
                 test_envelope,
                 topic="emitter.input",
-                correlation_id="emit-test-1",
+                correlation_id="tail-call-test-1",
             )
 
             from tests.utils import wait_for_condition
 
-            await wait_for_condition(lambda: "emit-test-1" in received, timeout=5.0)
-            result = await received["emit-test-1"].get()
-            # Emit sends BaseSessionRunContext, not Envelope
-            assert isinstance(result, BaseSessionRunContext)
-            assert len(result.state.run_state.todo_stack) == 1
+            await wait_for_condition(lambda: "tail-call-test-1" in received, timeout=5.0)
+            result = await received["tail-call-test-1"].get()
+
+            # TailCall inherits the original callback_topic
+            assert result.internal_workflow_state.current_frame.target_topic == "event_log"
+            assert (
+                result.internal_workflow_state.current_frame.callback_topic == "original_callback"
+            )
 
 
 class TestSilentChoreography:
@@ -820,84 +798,68 @@ class TestBaseNodeDefProperties:
 
     def test_node_id_and_name(self):
         """id and name properties return the node_id."""
-        node = StubReplyNode("my_node", subscribe_topics="my_node.input")
+        node = StubReturnCallNode("my_node", subscribe_topics="my_node.input")
         assert node.id == "my_node"
         assert node.name == "my_node"
 
     def test_return_topic_convention(self):
         """_return_topic follows {node_id}.private.return convention."""
-        node = StubReplyNode("test_node", subscribe_topics="test_node.input")
+        node = StubReturnCallNode("test_node", subscribe_topics="test_node.input")
         assert node._return_topic == "test_node.private.return"
 
     def test_subscribe_topics_string_becomes_list(self):
         """Single string subscribe_topics is wrapped in a list."""
-        node = StubReplyNode("n", subscribe_topics="single.topic")
+        node = StubReturnCallNode("n", subscribe_topics="single.topic")
         assert node.subscribe_topics == ["single.topic"]
 
     def test_subscribe_topics_list_preserved(self):
         """List subscribe_topics is preserved as-is."""
-        node = StubReplyNode("n", subscribe_topics=["topic.a", "topic.b"])
+        node = StubReturnCallNode("n", subscribe_topics=["topic.a", "topic.b"])
         assert node.subscribe_topics == ["topic.a", "topic.b"]
 
     def test_subscribe_topics_none_warns(self):
         """subscribe_topics=None emits a RuntimeWarning."""
         with pytest.warns(RuntimeWarning, match="not subscribed to any topics"):
-            StubReplyNode("orphan")
+            StubReturnCallNode("orphan")
 
     def test_publish_topic(self):
         """publish_topic is stored correctly."""
-        node = StubReplyNode("n", subscribe_topics="in", publish_topic="out")
+        node = StubReturnCallNode("n", subscribe_topics="in", publish_topic="out")
         assert node.publish_topic == "out"
 
 
 # ===========================================================================
-# Envelope.input and Delegate.input tests
+# CallFrame.input_args and Delegate.input tests
 # ===========================================================================
 
 
-class TestEnvelopeInputField:
-    """Tests for the Envelope.input per-invocation field."""
+class TestCallFrameInputArgs:
+    """Tests for input_args on the CallFrame (via WorkflowState.current_frame)."""
 
-    def test_envelope_input_default_none(self):
-        """Envelope.input defaults to None."""
-        ctx = BaseSessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="inp1", agent_deps=None),
-        )
-        envelope = Envelope(context=ctx)
-        assert envelope.input is None
+    def test_current_frame_input_default_none(self):
+        """CallFrame.input_args defaults to None when constructed without it."""
+        envelope = _make_test_envelope(reply_stack=[])
+        assert envelope.internal_workflow_state.current_frame.input_args is None
 
-    def test_envelope_input_set(self):
-        """Envelope.input can carry arbitrary per-invocation data."""
-        ctx = BaseSessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="inp2", agent_deps=None),
-        )
-        envelope = Envelope(context=ctx, input={"tool_call_id": "tc-42"})
-        assert envelope.input == {"tool_call_id": "tc-42"}
+    def test_current_frame_input_set(self):
+        """CallFrame.input_args carries arbitrary per-invocation data."""
+        envelope = _make_test_envelope(reply_stack=[], input_args=["tc-42", "agent_name"])
+        assert envelope.internal_workflow_state.current_frame.input_args == ["tc-42", "agent_name"]
 
-    def test_envelope_input_serialization_roundtrip(self):
-        """Envelope.input survives JSON serialization roundtrip."""
-        ctx = BaseSessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="inp3", agent_deps=None),
-        )
-        original = Envelope(context=ctx, reply_stack=["a"], input={"key": "value"})
+    def test_current_frame_input_serialization_roundtrip(self):
+        """CallFrame.input_args survives Envelope JSON serialization roundtrip."""
+        original = _make_test_envelope(reply_stack=["a"], input_args=["tc-1", "my_agent"])
         dumped = original.model_dump(mode="json")
         restored = Envelope.model_validate(dumped)
-        assert restored.input == {"key": "value"}
+        assert restored.internal_workflow_state.current_frame.input_args == ["tc-1", "my_agent"]
         assert restored.reply_stack == ["a"]
 
-    def test_envelope_input_none_serialization_roundtrip(self):
-        """Envelope with input=None roundtrips correctly."""
-        ctx = BaseSessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="inp4", agent_deps=None),
-        )
-        original = Envelope(context=ctx)
+    def test_current_frame_input_none_serialization_roundtrip(self):
+        """CallFrame with input_args=None roundtrips correctly."""
+        original = _make_test_envelope(reply_stack=[])
         dumped = original.model_dump(mode="json")
         restored = Envelope.model_validate(dumped)
-        assert restored.input is None
+        assert restored.internal_workflow_state.current_frame.input_args is None
 
 
 class TestDelegateInputField:
@@ -906,12 +868,12 @@ class TestDelegateInputField:
     def test_delegate_input_default_none(self):
         """Delegate.input defaults to None."""
         d = Delegate(topic="some.topic")
-        assert d.input is None
+        assert d.input_args is None
 
     def test_delegate_input_set(self):
-        """Delegate.input can carry arbitrary per-invocation data."""
-        d = Delegate(topic="some.topic", value=State(), input={"task_ref": "abc"})
-        assert d.input == {"task_ref": "abc"}
+        """Delegate.input_args can carry per-invocation positional args."""
+        d = Delegate(topic="some.topic", value=State(), input_args=["tc-1", "source_node"])
+        assert d.input_args == ["tc-1", "source_node"]
 
 
 # ===========================================================================
@@ -932,19 +894,19 @@ class StubInputCapturingNode(BaseNodeDef[State, Deps]):
         self, ctx: BaseSessionRunContext[State, Deps], my_custom_input: Any | None = None
     ) -> NodeResult[State]:
         self.captured_input = my_custom_input
-        return Reply(value=ctx.state)
+        return ReturnCall(state=ctx.state)
 
 
-class StubDelegateWithInputNode(BaseNodeDef[State, Deps]):
-    """Returns a Delegate that carries input."""
+class StubCallWithInputNode(BaseNodeDef[State, Deps]):
+    """Returns a Call that carries input_args."""
 
-    def __init__(self, node_id: str, delegate_to: str, delegate_input: Any, **kwargs: Any):
-        self._delegate_to = delegate_to
-        self._delegate_input = delegate_input
+    def __init__(self, node_id: str, call_to: str, call_input: list[Any], **kwargs: Any):
+        self._call_to = call_to
+        self._call_input = call_input
         super().__init__(node_id, **kwargs)
 
     async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
-        return Delegate(topic=self._delegate_to, value=ctx.state, input=self._delegate_input)
+        return Call(self._call_to, ctx.state, *self._call_input)
 
 
 class TestInputPropagation:
@@ -952,7 +914,7 @@ class TestInputPropagation:
 
     @pytest.mark.asyncio
     async def test_envelope_input_reaches_run(self):
-        """Envelope.input is passed to run() as the input parameter."""
+        """envelope.input_args is passed to run() as the input parameter."""
         node = StubInputCapturingNode("cap_node", subscribe_topics="cap.input")
 
         broker = BrokerClient()
@@ -970,14 +932,15 @@ class TestInputPropagation:
             pass  # absorb reply
 
         async with TestKafkaBroker(broker) as _:
-            envelope = _make_test_envelope(reply_stack=["cap_node.private.return"])
-            envelope.input = {"tool_call_id": "tc-99"}
+            envelope = _make_test_envelope(
+                reply_stack=["cap_node.private.return"], input_args=["tc-99"]
+            )
             await broker.publish(envelope, topic="cap.input", correlation_id="input-prop-1")
 
             from tests.utils import wait_for_condition
 
             await wait_for_condition(lambda: node.captured_input is not None, timeout=5.0)
-            assert node.captured_input == {"tool_call_id": "tc-99"}
+            assert node.captured_input == "tc-99"
 
     @pytest.mark.asyncio
     async def test_envelope_without_input_passes_none(self):
@@ -1015,12 +978,12 @@ class TestInputPropagation:
             assert node.captured_input is None
 
     @pytest.mark.asyncio
-    async def test_delegate_input_carried_to_outbound_envelope(self):
-        """Delegate.input is carried into the outbound Envelope."""
-        node = StubDelegateWithInputNode(
+    async def test_call_input_carried_to_outbound_frame(self):
+        """Call input_args are carried into the outbound CallFrame."""
+        node = StubCallWithInputNode(
             "del_inp_node",
-            delegate_to="target.input",
-            delegate_input={"task_ref": "abc-123"},
+            call_to="target.input",
+            call_input=["abc-123", "source_node"],
             subscribe_topics="del_inp.input",
         )
 
@@ -1052,4 +1015,7 @@ class TestInputPropagation:
 
             await wait_for_condition(lambda: "del-inp-1" in received, timeout=5.0)
             result = await received["del-inp-1"].get()
-            assert result.input == {"task_ref": "abc-123"}
+            assert result.internal_workflow_state.current_frame.input_args == [
+                "abc-123",
+                "source_node",
+            ]

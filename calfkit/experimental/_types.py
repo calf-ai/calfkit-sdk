@@ -15,3 +15,6 @@ AgentOutputT = TypeVar("AgentOutputT", default=Any)
 AgentInputT = TypeVar("AgentInputT", default=Any)
 
 AgentDepsT = TypeVar("AgentDepsT", default=Any)
+
+# Execution Stack generic type
+StackItemT = TypeVar("StackItemT", default=Any)
