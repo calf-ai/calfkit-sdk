@@ -27,7 +27,7 @@ from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.context.context_models import BaseSessionRunContext
+from calfkit.experimental.context.session_context import BaseSessionRunContext
 from calfkit.experimental.data_model.payload import Payload, TextPart, ToolCallPart
 from calfkit.experimental.data_model.state_deps import AgentActivityState, Deps, State
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef

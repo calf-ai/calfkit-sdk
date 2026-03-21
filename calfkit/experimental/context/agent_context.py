@@ -1,7 +1,7 @@
 from typing_extensions import TypeAliasType
 
 from calfkit.experimental._types import AgentDepsT
-from calfkit.experimental.context.context_models import BaseSessionRunContext
+from calfkit.experimental.context.session_context import BaseSessionRunContext
 from calfkit.experimental.data_model.state_deps import Deps, State
 
 AgentSessionRunContext = TypeAliasType(

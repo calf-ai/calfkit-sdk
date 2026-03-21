@@ -2,6 +2,7 @@ import inspect
 import logging
 import warnings
 from abc import abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Generic
 
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypeAliasType, TypeVar
 
 from calfkit.experimental._types import DepsT, InputT, StateT
-from calfkit.experimental.context.context_models import BaseSessionRunContext
+from calfkit.experimental.context.session_context import BaseSessionRunContext
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class Delegate(Generic[StateT]):
 
     topic: str
     value: StateT | None = None
-    input: Any | None = None
+    input_args: Sequence[Any] | None = None
 
 
 @dataclass
@@ -96,7 +97,20 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
 
     context: BaseSessionRunContext[StateT, DepsT]
     reply_stack: list[str] = Field(default_factory=list)
-    input: Any | None = None
+    input_args: Sequence[Any] | None = None
+
+    @classmethod
+    def construct_with_input_args(
+        cls,
+        context: BaseSessionRunContext[StateT, DepsT],
+        *input_args: Any,
+        reply_stack: list[str] | None = None,
+    ):
+        args = list(input_args) if input_args else None
+        if reply_stack:
+            return cls(context=context, reply_stack=reply_stack, input_args=args)
+        else:
+            return cls(context=context, input_args=args)
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +151,14 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
     # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
-    async def run(self, ctx: BaseSessionRunContext[StateT, DepsT]) -> NodeResult[StateT]:
+    async def run(
+        self, ctx: BaseSessionRunContext[StateT, DepsT], *args, **kwargs
+    ) -> NodeResult[StateT]:
         """Runs the node's logic using provided context.
 
         Subclasses that need per-invocation input can add an optional parameter
         (any name). The framework inspects the signature at class definition time
-        and will pass ``envelope.input`` automatically if the parameter is declared.
+        and will pass ``envelope.input_args`` automatically if the parameter is declared.
 
         Args:
             ctx: Session context containing mutable state and immutable dependencies.
@@ -168,8 +184,8 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         broker: BrokerAnnotation,
     ) -> None:
         ctx = await self.prepare_context(envelope)
-        if self._run_accepts_input:
-            output = await self.run(ctx, envelope.input)  # type: ignore[call-arg]
+        if self._run_accepts_input and envelope.input_args is not None:
+            output = await self.run(ctx, *envelope.input_args)
         else:
             output = await self.run(ctx)
 
@@ -203,7 +219,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
                 Envelope(
                     context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
-                    input=output.input,
+                    input_args=output.input_args,
                 ),
                 topic=output.topic,
                 correlation_id=correlation_id,
@@ -225,7 +241,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
                             state=delegate.value, deps=envelope.context.deps
                         ),
                         reply_stack=new_stack,
-                        input=delegate.input,
+                        input_args=delegate.input_args,
                     ),
                     topic=delegate.topic,
                     correlation_id=correlation_id,
@@ -252,11 +268,13 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
                 *remaining_topics,
             ]
             first = output[0]
+            if not isinstance(first, Delegate):  # just to silence the type checker
+                return
             await broker.publish(
                 Envelope(
                     context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
                     reply_stack=new_stack,
-                    input=first.input,  # type: ignore[union-attr]
+                    input_args=first.input_args,
                 ),
                 topic=first.topic,
                 correlation_id=correlation_id,

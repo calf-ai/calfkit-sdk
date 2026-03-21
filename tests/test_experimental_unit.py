@@ -15,7 +15,7 @@ from faststream.kafka import TestKafkaBroker
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.context.context_models import BaseSessionRunContext
+from calfkit.experimental.context.session_context import BaseSessionRunContext
 from calfkit.experimental.data_model.payload import (
     DataPart,
     FilePart,
@@ -851,41 +851,41 @@ class TestBaseNodeDefProperties:
 
 
 # ===========================================================================
-# Envelope.input and Delegate.input tests
+# envelope.input_args and Delegate.input tests
 # ===========================================================================
 
 
 class TestEnvelopeInputField:
-    """Tests for the Envelope.input per-invocation field."""
+    """Tests for the envelope.input_args per-invocation field."""
 
     def test_envelope_input_default_none(self):
-        """Envelope.input defaults to None."""
+        """envelope.input_args defaults to None."""
         ctx = BaseSessionRunContext(
             state=State(),
             deps=Deps(correlation_id="inp1", agent_deps=None),
         )
         envelope = Envelope(context=ctx)
-        assert envelope.input is None
+        assert envelope.input_args is None
 
     def test_envelope_input_set(self):
-        """Envelope.input can carry arbitrary per-invocation data."""
+        """envelope.input_args can carry arbitrary per-invocation data."""
         ctx = BaseSessionRunContext(
             state=State(),
             deps=Deps(correlation_id="inp2", agent_deps=None),
         )
-        envelope = Envelope(context=ctx, input={"tool_call_id": "tc-42"})
-        assert envelope.input == {"tool_call_id": "tc-42"}
+        envelope = Envelope(context=ctx, input_args=["tc-42", "agent_name"])
+        assert envelope.input_args == ["tc-42", "agent_name"]
 
     def test_envelope_input_serialization_roundtrip(self):
-        """Envelope.input survives JSON serialization roundtrip."""
+        """envelope.input_args survives JSON serialization roundtrip."""
         ctx = BaseSessionRunContext(
             state=State(),
             deps=Deps(correlation_id="inp3", agent_deps=None),
         )
-        original = Envelope(context=ctx, reply_stack=["a"], input={"key": "value"})
+        original = Envelope(context=ctx, reply_stack=["a"], input_args=["tc-1", "my_agent"])
         dumped = original.model_dump(mode="json")
         restored = Envelope.model_validate(dumped)
-        assert restored.input == {"key": "value"}
+        assert restored.input_args == ["tc-1", "my_agent"]
         assert restored.reply_stack == ["a"]
 
     def test_envelope_input_none_serialization_roundtrip(self):
@@ -897,7 +897,7 @@ class TestEnvelopeInputField:
         original = Envelope(context=ctx)
         dumped = original.model_dump(mode="json")
         restored = Envelope.model_validate(dumped)
-        assert restored.input is None
+        assert restored.input_args is None
 
 
 class TestDelegateInputField:
@@ -906,12 +906,12 @@ class TestDelegateInputField:
     def test_delegate_input_default_none(self):
         """Delegate.input defaults to None."""
         d = Delegate(topic="some.topic")
-        assert d.input is None
+        assert d.input_args is None
 
     def test_delegate_input_set(self):
-        """Delegate.input can carry arbitrary per-invocation data."""
-        d = Delegate(topic="some.topic", value=State(), input={"task_ref": "abc"})
-        assert d.input == {"task_ref": "abc"}
+        """Delegate.input_args can carry per-invocation positional args."""
+        d = Delegate(topic="some.topic", value=State(), input_args=["tc-1", "source_node"])
+        assert d.input_args == ["tc-1", "source_node"]
 
 
 # ===========================================================================
@@ -944,7 +944,7 @@ class StubDelegateWithInputNode(BaseNodeDef[State, Deps]):
         super().__init__(node_id, **kwargs)
 
     async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
-        return Delegate(topic=self._delegate_to, value=ctx.state, input=self._delegate_input)
+        return Delegate(topic=self._delegate_to, value=ctx.state, input_args=self._delegate_input)
 
 
 class TestInputPropagation:
@@ -952,7 +952,7 @@ class TestInputPropagation:
 
     @pytest.mark.asyncio
     async def test_envelope_input_reaches_run(self):
-        """Envelope.input is passed to run() as the input parameter."""
+        """envelope.input_args is passed to run() as the input parameter."""
         node = StubInputCapturingNode("cap_node", subscribe_topics="cap.input")
 
         broker = BrokerClient()
@@ -971,13 +971,13 @@ class TestInputPropagation:
 
         async with TestKafkaBroker(broker) as _:
             envelope = _make_test_envelope(reply_stack=["cap_node.private.return"])
-            envelope.input = {"tool_call_id": "tc-99"}
+            envelope.input_args = ["tc-99"]
             await broker.publish(envelope, topic="cap.input", correlation_id="input-prop-1")
 
             from tests.utils import wait_for_condition
 
             await wait_for_condition(lambda: node.captured_input is not None, timeout=5.0)
-            assert node.captured_input == {"tool_call_id": "tc-99"}
+            assert node.captured_input == "tc-99"
 
     @pytest.mark.asyncio
     async def test_envelope_without_input_passes_none(self):
@@ -1020,7 +1020,7 @@ class TestInputPropagation:
         node = StubDelegateWithInputNode(
             "del_inp_node",
             delegate_to="target.input",
-            delegate_input={"task_ref": "abc-123"},
+            delegate_input=["abc-123", "source_node"],
             subscribe_topics="del_inp.input",
         )
 
@@ -1052,4 +1052,4 @@ class TestInputPropagation:
 
             await wait_for_condition(lambda: "del-inp-1" in received, timeout=5.0)
             result = await received["del-inp-1"].get()
-            assert result.input == {"task_ref": "abc-123"}
+            assert result.input_args == ["abc-123", "source_node"]

@@ -42,8 +42,8 @@ class ToolNodeDef(BaseToolNodeDef):
     #     )
     #     return ctx
 
-    async def run(  # type: ignore[override]
-        self, ctx: AgentSessionRunContext[Any], tool_call_id: str
+    async def run(
+        self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str
     ) -> NodeResult[State]:
         tool_call_part = ctx.state.run_state.tool_calls.get(tool_call_id)
         if tool_call_part is None:
@@ -54,7 +54,7 @@ class ToolNodeDef(BaseToolNodeDef):
 
         tool_call_ctx = ToolContext(
             deps=ctx.deps.agent_deps,
-            # agent_name=payload.source_node_id,
+            agent_name=source_node_name,
             tool_call_id=tool_call_part.tool_call_id,
             tool_name=tool_call_part.tool_name,
             messages=ctx.state.run_state.message_history,
@@ -94,7 +94,7 @@ class ToolNodeDef(BaseToolNodeDef):
 
 
 def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> ToolNodeDef:
-    """Tool decorator to turn a function into a deployable node that agents can call"""
+    """Decorator to turn a function into a deployable tool node that agents can call"""
     subscribe_topic = f"tool.{func.__name__}.input"
     publish_topic = f"tool.{func.__name__}.output"
     tool_node = ToolNodeDef(

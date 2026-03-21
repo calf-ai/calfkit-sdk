@@ -46,7 +46,10 @@ class BaseAgentNodeDef(
         self.deps_type = deps_type
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
-        self.tools = tools or list[ToolNodeDef]()
+        if tools:
+            self.tools = {tool.tool_schema.name: tool for tool in tools}
+        else:
+            self.tools = dict[str, ToolNodeDef]()
         super().__init__(agent_id)
 
         self._agent_loop: Agent[Any, Any] = Agent(
@@ -87,7 +90,7 @@ class BaseAgentNodeDef(
             user_prompt=prompt,
             message_history=ctx.state.run_state.message_history,
             instructions=self.system_prompt,
-            toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools])],
+            toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools.values()])],
             deps=ctx.deps.agent_deps,
             deferred_tool_results=tool_results,
         )
@@ -119,11 +122,29 @@ class BaseAgentNodeDef(
                 # feeds a mutable state from node to node in sequential scenarios.
                 # Potentially a Sequential class that defines one state and any number of nodes,
                 # so the state is passed in order to all defined nodes.
-                tool_state_delegations.append(
-                    Delegate[State](
-                        topic="test",
+                tool_node = self.tools.get(tool_call.tool_name)
+                if tool_node is None:
+                    logging.error(f"tool={tool_call.tool_name} does not exist.")
+                    # ctx.state.run_state.message_history.append()
+                elif tool_node.subscribe_topics is None:
+                    logging.error(
+                        f"tool={tool_call.tool_name} is unreachable. No subscribe topics were provided for the tool node."  # noqa: E501
                     )
-                )
+                    ctx.state.run_state.message_history.append()
+                elif tool_node is not None and tool_node.subscribe_topics is not None:
+                    tool_topic = tool_node.subscribe_topics[0]
+                    tool_state_delegations.append(
+                        Delegate[State](
+                            topic=tool_topic,
+                            input_args=(
+                                tool_call.tool_call_id,
+                                self.name,
+                            ),
+                        )
+                    )
+                else:
+                    # should never reach here
+                    pass
             tool_state_delegations[-1].value = tool_call_state
             return tool_state_delegations
 
