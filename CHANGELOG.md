@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.17](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.16...v0.1.17) (2026-03-21)
+
+
+### Features
+
+* (choreographed durable agents) replace reply-stack with call-stack workflow model and flatten State ([#101](https://github.com/calf-ai/calfkit-sdk/issues/101)) ([52f8989](https://github.com/calf-ai/calfkit-sdk/commit/52f898937ee4c4b801b246f79175914281890b86))
+* implement experimental choreography-based node definitions for durable agent and multi-agent workflows ([#96](https://github.com/calf-ai/calfkit-sdk/issues/96)) ([ec5c1ae](https://github.com/calf-ai/calfkit-sdk/commit/ec5c1ae3d4d67574185b3f640a1490f0faedcf13))
+* restructure state models, add per-invocation input injection, and TDD test coverage for experimental nodes  ([#98](https://github.com/calf-ai/calfkit-sdk/issues/98)) ([2ce6ea3](https://github.com/calf-ai/calfkit-sdk/commit/2ce6ea324b653379f0f38d858013d5ecd47902e8))
+
 ## [0.1.16](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.15...v0.1.16) (2026-03-06)
 
 
