@@ -151,6 +151,7 @@ async def test_basic_agent_text_reply():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="basic_agent",
+        subscribe_topics="basic_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Always respond briefly in one sentence.",
     )
@@ -169,10 +170,10 @@ async def test_basic_agent_text_reply():
     assert isinstance(result.state, State)
     assert len(result.state.message_history) > 0, "Should have message_history from LLM call"
 
-    # The response should mention "4"
+    # The response should mention "4" (digit or word)
     last_msg = result.state.message_history[-1]
-    text = " ".join(str(p) for p in last_msg.parts)
-    assert "4" in text, f"Expected '4' in response: {text}"
+    text = " ".join(str(p) for p in last_msg.parts).lower()
+    assert "4" in text or "four" in text, f"Expected '4' or 'four' in response: {text}"
 
 
 @pytest.mark.asyncio
@@ -187,6 +188,7 @@ async def test_basic_agent_text_reply_via_broker():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="broker_agent",
+        subscribe_topics="broker_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Respond briefly.",
     )
@@ -252,6 +254,7 @@ async def test_agent_multi_turn_memory():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="memory_agent",
+        subscribe_topics="memory_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Respond briefly.",
     )
@@ -300,6 +303,7 @@ async def test_agent_tool_visibility():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="visibility_agent",
+        subscribe_topics="visibility_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
         tools=[get_weather],
@@ -334,6 +338,7 @@ async def test_agent_tool_delegation_uses_correct_topic():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="topic_agent",
+        subscribe_topics="topic_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
         tools=[get_weather],
@@ -372,6 +377,7 @@ async def test_agent_tool_delegation_preserves_message_history():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="history_agent",
+        subscribe_topics="history_agent.input",
         model_client=make_model_client(),
         system_prompt="Use get_weather for weather questions.",
         tools=[get_weather],
@@ -418,6 +424,7 @@ async def test_agent_with_single_tool_call_full_flow():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="full_flow_agent",
+        subscribe_topics="full_flow_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
         tools=[get_weather],
@@ -582,6 +589,7 @@ async def test_agent_with_tool_context_injection_full_flow():
     """
     agent_node = BaseAgentNodeDef(
         agent_id="ctx_agent",
+        subscribe_topics="ctx_agent.input",
         model_client=make_model_client(),
         system_prompt="You must use the ctx_echo_tool tool for every request. Pass the user's message.",  # noqa: E501
         tools=[ctx_echo_tool],

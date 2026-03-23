@@ -30,6 +30,8 @@ class BaseAgentNodeDef(
         agent_id: str,
         *,
         system_prompt: str = "You are a helpful AI assistant.",
+        subscribe_topics: str | list[str],
+        publish_topic: str | None = None,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
         deps_type: type[AgentDepsT] | None = None,
@@ -42,7 +44,7 @@ class BaseAgentNodeDef(
             self.tools = {tool.tool_schema.name: tool for tool in tools}
         else:
             self.tools = dict[str, ToolNodeDef]()
-        super().__init__(agent_id)
+        super().__init__(agent_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
 
         self._agent_loop: Agent[Any, Any] = Agent(
             model_client,
@@ -50,9 +52,6 @@ class BaseAgentNodeDef(
             output_type=[final_output_type, DeferredToolRequests],  # tool calling is always on
         )
 
-    # TODO: consider the agent node to operate as a router as well.
-    # For example, sequential multi-tool calls: each tool result is routed back to the agent
-    # before firing the next, instead of a fully choreographed approach using reply_stack.
     async def run(self, ctx: AgentSessionRunContext[AgentDepsT]) -> NodeResult[State]:
         if ctx.deps.agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel):
@@ -65,6 +64,7 @@ class BaseAgentNodeDef(
                     )
 
         latest_tool_calls = ctx.state.latest_tool_calls()
+        tool_results = None
 
         if len(latest_tool_calls) > 0:
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
@@ -78,16 +78,12 @@ class BaseAgentNodeDef(
                     self.name,
                 )
 
-        tool_results = (
-            DeferredToolResults(
+            tool_results = DeferredToolResults(
                 calls={
                     tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id)
                     for tc in latest_tool_calls
                 }
             )
-            if len(latest_tool_calls) > 0
-            else None
-        )
 
         if ctx.state.uncommitted_message is not None:
             ctx.state.commit_message_to_history()
@@ -105,7 +101,7 @@ class BaseAgentNodeDef(
             ctx.state.message_history.extend(messages)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
-            tool_call_state = State()
+            tool_call_state = ctx.state.model_copy(deep=True)
             for tool_call in result.output.calls:
                 tool_call_state.add_tool_call(tool_call)
 
@@ -146,7 +142,8 @@ class BaseAgentNodeDef(
                     self.name,
                 )
             else:  # All tool calls were invalid, we need to retry.
-                # TODO: consider a node retry return type that doesn't require round trip to itself
+                # TODO: consider a node retry return type that doesn't require round trip to itself.
+                # Tailcall to itself is a roundtrip.
                 return TailCall[State](target_topic=self.subscribe_topics[0], state=tool_call_state)
 
         elif isinstance(result.output, self.final_output_type):

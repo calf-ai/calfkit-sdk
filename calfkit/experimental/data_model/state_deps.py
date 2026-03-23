@@ -56,26 +56,26 @@ class InFlightToolsState(BaseAgentActivityState):
     model_config = ConfigDict(extra="ignore")
 
     # Map of tool call IDS to tool calls
-    _tool_calls: dict[str, ToolCallPart] = Field(default_factory=dict)
+    tool_calls: dict[str, ToolCallPart] = Field(default_factory=dict)
 
     # Map of tool call IDs to tool results
     tool_results: dict[str, ToolCallResult | Any] = Field(default_factory=dict)
 
     def add_tool_call(self, tool_call: ToolCallPart) -> None:
-        self._tool_calls[tool_call.tool_call_id] = tool_call
+        self.tool_calls[tool_call.tool_call_id] = tool_call
 
     def add_tool_result(self, tool_call_id: str, tool_result: ToolCallResult | Any) -> None:
         self.tool_results[tool_call_id] = tool_result
 
     def get_tool_call(self, tool_call_id: str) -> ToolCallPart | None:
-        return self._tool_calls.get(tool_call_id)
+        return self.tool_calls.get(tool_call_id)
 
     def get_tool_result(self, tool_call_id: str) -> ToolCallResult | Any | None:
         return self.tool_results.get(tool_call_id)
 
     def all_call_ids_complete(self, *call_ids: str) -> bool:
         for call_id in call_ids:
-            _ = self._tool_calls[call_id]
+            _ = self.tool_calls[call_id]
             if call_id not in self.tool_results:
                 return False
         return True

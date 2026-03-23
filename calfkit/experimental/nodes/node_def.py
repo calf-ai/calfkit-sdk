@@ -51,12 +51,10 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         elif subscribe_topics is not None:
             self.subscribe_topics = list(subscribe_topics)
         else:
-            warnings.warn(
+            logging.error(
                 f"node {node_id} is not subscribed to any topics. It is unreachable.",
-                RuntimeWarning,
-                stacklevel=2,
             )
-            self.subscribe_topics = []
+            raise RuntimeError("node {node_id} is not subscribed to any topics. It is unreachable.")
         self.publish_topic = publish_topic
         self._return_topic = f"{node_id}.private.return"
 
@@ -147,6 +145,8 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
                 f"node ({self.name}) ran and was silent with no explicit publish. This is the end of this event-stream, any state modifications will not be carried downstream."  # noqa: E501
             )
             return
+        else:
+            logging.error("Return type is unknown so the message was not published anywhere.")
 
         # elif isinstance(output, Reply):
         #     if not envelope.reply_stack:
