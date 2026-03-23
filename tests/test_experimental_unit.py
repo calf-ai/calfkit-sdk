@@ -448,7 +448,6 @@ class StubSilentNode(BaseNodeDef[State, Deps]):
         return Silent()
 
 
-
 def _make_test_envelope(
     reply_stack: list[str],
     *,
