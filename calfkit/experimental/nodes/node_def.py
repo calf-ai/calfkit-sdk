@@ -17,7 +17,7 @@ from calfkit.experimental.base_models.actions import (
     TailCall,
 )
 from calfkit.experimental.base_models.envelope import Envelope
-from calfkit.experimental.base_models.session_context import BaseSessionRunContext
+from calfkit.experimental.base_models.session_context import SessionRunContext
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
     async def run(
-        self, ctx: BaseSessionRunContext[StateT, DepsT], *args: Any, **kwargs: Any
+        self, ctx: SessionRunContext[StateT, DepsT], *args: Any, **kwargs: Any
     ) -> NodeResult[StateT]:
         """Runs the node's logic using provided context.
 
@@ -82,7 +82,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         """
         raise NotImplementedError()
 
-    async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> BaseSessionRunContext:
+    async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
         return ctx
 
@@ -106,7 +106,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
             envelope.internal_workflow_state.invoke_frame(output, self.subscribe_topics[0])
             await broker.publish(
                 Envelope(
-                    context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
+                    context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                     internal_workflow_state=envelope.internal_workflow_state,
                 ),
                 topic=envelope.internal_workflow_state.current_frame.target_topic,
@@ -117,7 +117,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
             frame = envelope.internal_workflow_state.unwind_frame()
             await broker.publish(
                 Envelope(
-                    context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
+                    context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                     internal_workflow_state=envelope.internal_workflow_state,
                 ),
                 topic=frame.callback_topic,
@@ -131,7 +131,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
             envelope.internal_workflow_state.invoke_frame(output, frame.callback_topic)
             await broker.publish(
                 Envelope(
-                    context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
+                    context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                     internal_workflow_state=envelope.internal_workflow_state,
                 ),
                 topic=envelope.internal_workflow_state.current_frame.target_topic,
@@ -158,7 +158,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         #     remaining_stack = envelope.reply_stack[:-1]
         #     await broker.publish(
         #         Envelope(
-        #             context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
+        #             context=SessionRunContext(state=output.value, deps=envelope.context.deps),
         #             reply_stack=remaining_stack,
         #         ),
         #         topic=topic,
@@ -169,7 +169,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         #     new_stack = [*envelope.reply_stack, self._return_topic]
         #     await broker.publish(
         #         Envelope(
-        #             context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
+        #             context=SessionRunContext(state=output.value, deps=envelope.context.deps),
         #             reply_stack=new_stack,
         #             input_args=output.input_args,
         #         ),
@@ -179,7 +179,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
 
         # elif isinstance(output, Emit):
         #     await broker.publish(
-        #         BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
+        #         SessionRunContext(state=output.value, deps=envelope.context.deps),
         #         topic=output.topic,
         #         correlation_id=correlation_id,
         #     )
@@ -189,7 +189,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         #     for delegate in output.delegates:
         #         await broker.publish(
         #             Envelope(
-        #                 context=BaseSessionRunContext(
+        #                 context=SessionRunContext(
         #                     state=delegate.value, deps=envelope.context.deps
         #                 ),
         #                 reply_stack=new_stack,
@@ -203,7 +203,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         #     # mypy can't narrow list element types from all(isinstance(...))
         #     for emit in output:
         #         await broker.publish(
-        #             BaseSessionRunContext(state=emit.value, deps=envelope.context.deps),
+        #             SessionRunContext(state=emit.value, deps=envelope.context.deps),
         #             topic=emit.topic,
         #             correlation_id=correlation_id,
         #         )
@@ -224,7 +224,7 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         #         return
         #     await broker.publish(
         #         Envelope(
-        #             context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
+        #             context=SessionRunContext(state=first.value, deps=envelope.context.deps),
         #             reply_stack=new_stack,
         #             input_args=first.input_args,
         #         ),

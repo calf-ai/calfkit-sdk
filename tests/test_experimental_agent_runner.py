@@ -30,8 +30,8 @@ from calfkit._vendor.pydantic_ai.messages import ToolCallPart as VendorToolCallP
 from calfkit.broker.broker import BrokerClient
 from calfkit.experimental.base_models.actions import Call, ReturnCall
 from calfkit.experimental.base_models.session_context import (
-    BaseSessionRunContext,
     CallFrame,
+    SessionRunContext,
     Stack,
     WorkflowState,
 )
@@ -117,7 +117,7 @@ def make_envelope(
     call_stack: Stack[CallFrame] = Stack()
     call_stack.push(initial_frame)
     return Envelope(
-        context=BaseSessionRunContext(
+        context=SessionRunContext(
             state=state,
             deps=Deps(correlation_id=correlation_id, agent_deps=agent_deps),
         ),
@@ -159,7 +159,7 @@ async def test_basic_agent_text_reply():
     state = State(
         uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What is 2 + 2?")])
     )
-    ctx = BaseSessionRunContext(
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="test-1", agent_deps=None),
     )
@@ -263,7 +263,7 @@ async def test_agent_multi_turn_memory():
     state1 = State(
         uncommitted_message=ModelRequest(parts=[UserPromptPart(content="My name is Alice.")])
     )
-    ctx1 = BaseSessionRunContext(
+    ctx1 = SessionRunContext(
         state=state1,
         deps=Deps(correlation_id="turn-1", agent_deps=None),
     )
@@ -277,7 +277,7 @@ async def test_agent_multi_turn_memory():
     # Second turn: carry forward message_history, stage new prompt
     state2 = result1.state
     state2.stage_message(ModelRequest(parts=[UserPromptPart(content="What is my name?")]))
-    ctx2 = BaseSessionRunContext(
+    ctx2 = SessionRunContext(
         state=state2,
         deps=Deps(correlation_id="turn-2", agent_deps=None),
     )
@@ -314,7 +314,7 @@ async def test_agent_tool_visibility():
             parts=[UserPromptPart(content="What's the weather in Tokyo?")]
         )
     )
-    ctx = BaseSessionRunContext(
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="vis-1", agent_deps=None),
     )
@@ -349,7 +349,7 @@ async def test_agent_tool_delegation_uses_correct_topic():
             parts=[UserPromptPart(content="What's the weather in Tokyo?")]
         )
     )
-    ctx = BaseSessionRunContext(
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="topic-1", agent_deps=None),
     )
@@ -388,7 +388,7 @@ async def test_agent_tool_delegation_preserves_message_history():
             parts=[UserPromptPart(content="What's the weather in Tokyo?")]
         )
     )
-    ctx = BaseSessionRunContext(
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="hist-1", agent_deps=None),
     )
@@ -513,7 +513,7 @@ async def test_tool_node_direct_execution():
         )
     )
     deps = Deps(correlation_id="tool-exec-1", agent_deps=None)
-    ctx = BaseSessionRunContext(state=state, deps=deps)
+    ctx = SessionRunContext(state=state, deps=deps)
 
     result = await get_weather.run(ctx, "call-1", "caller_agent")
 
@@ -544,7 +544,7 @@ async def test_tool_node_context_injection():
         )
     )
     deps = Deps(correlation_id="ctx-inject-1", agent_deps={"api_key": "sk-test-123"})
-    ctx = BaseSessionRunContext(state=state, deps=deps)
+    ctx = SessionRunContext(state=state, deps=deps)
 
     result = await ctx_echo_tool.run(ctx, "call-ctx-1", "test_source_agent")
 
@@ -569,7 +569,7 @@ async def test_tool_node_returns_silent_when_no_tool_call():
     # State with no tool calls registered
     state = State(uncommitted_message=None)
     deps = Deps(correlation_id="no-tool-1", agent_deps=None)
-    ctx = BaseSessionRunContext(state=state, deps=deps)
+    ctx = SessionRunContext(state=state, deps=deps)
 
     # Pass a non-existent tool_call_id — should return Silent
     result = await get_weather.run(ctx, "nonexistent-call-id", "some_agent")

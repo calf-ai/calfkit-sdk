@@ -82,14 +82,22 @@ class Deps(BaseModel, Generic[UserDepsT]):
 
     model_config = ConfigDict(extra="ignore", frozen=True)
     correlation_id: str
-    agent_deps: UserDepsT = Field(description="user-provided agent dependencies")
+    agent_deps: UserDepsT | None = Field(description="user-provided agent dependencies")
 
 
-class BaseSessionRunContext(BaseModel, Generic[StateT, UserDepsT]):
+class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     """Base generic context for a session — just state + deps."""
+
+    state: StateT
+
+    deps: DepsT
+
+
+class SessionRunContext(Generic[StateT, UserDepsT], BaseSessionRunContext[StateT, Deps[UserDepsT]]):
+    """Session context for a session — just state + deps."""
 
     state: StateT = Field(description="Mutable app state.")
     """The app state. Mutable."""
 
-    deps: Deps[UserDepsT] | None = Field(description="Immutable execution dependencies.")
+    deps: Deps[UserDepsT] = Field(description="Immutable execution dependencies.")
     """Dependencies for the execution. Immutable."""

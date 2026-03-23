@@ -4,7 +4,7 @@ from typing import Any, Generic
 from pydantic import BaseModel, Field
 
 from calfkit.experimental._types import DepsT, StateT
-from calfkit.experimental.base_models.session_context import BaseSessionRunContext, WorkflowState
+from calfkit.experimental.base_models.session_context import SessionRunContext, WorkflowState
 
 
 # ---------------------------------------------------------------------------
@@ -17,7 +17,7 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
     serialized — no exclude_unset gotchas with reply_stack.
     """
 
-    context: BaseSessionRunContext[StateT, DepsT]
+    context: SessionRunContext[StateT, DepsT]
     internal_workflow_state: WorkflowState = Field(
         description="The internal, framework-level state tracking workflow"
     )

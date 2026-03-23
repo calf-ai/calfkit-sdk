@@ -17,8 +17,8 @@ from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 from calfkit.broker.broker import BrokerClient
 from calfkit.experimental.base_models.actions import Call, Delegate, ReturnCall, TailCall
 from calfkit.experimental.base_models.session_context import (
-    BaseSessionRunContext,
     CallFrame,
+    SessionRunContext,
     Stack,
     WorkflowState,
 )
@@ -231,7 +231,7 @@ class TestEnvelopeModel:
 
     def test_envelope_creation(self):
         """Envelope wraps context and reply_stack."""
-        ctx = BaseSessionRunContext(
+        ctx = SessionRunContext(
             state=State(),
             deps=Deps(correlation_id="e1", agent_deps=None),
         )
@@ -248,7 +248,7 @@ class TestEnvelopeModel:
 
     def test_envelope_default_empty_reply_stack(self):
         """Envelope defaults to empty reply_stack."""
-        ctx = BaseSessionRunContext(
+        ctx = SessionRunContext(
             state=State(),
             deps=Deps(correlation_id="e2", agent_deps=None),
         )
@@ -270,7 +270,7 @@ class TestEnvelopeModel:
         initial_frame = CallFrame(target_topic="t", callback_topic="cb", input_args=None)
         call_stack = Stack[CallFrame]()
         call_stack.push(initial_frame)
-        ctx = BaseSessionRunContext(
+        ctx = SessionRunContext(
             state=State(uncommitted_message=None),
             deps=Deps(correlation_id="e3", agent_deps={"k": "v"}),
         )
@@ -415,7 +415,7 @@ class TestAgentToolDecorator:
 class StubReturnCallNode(BaseNodeDef[State, Deps]):
     """Returns ReturnCall with the current state (callback the caller)."""
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return ReturnCall(state=ctx.state)
 
 
@@ -426,7 +426,7 @@ class StubCallNode(BaseNodeDef[State, Deps]):
         self._call_to = call_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return Call(self._call_to, ctx.state)
 
 
@@ -437,14 +437,14 @@ class StubTailCallNode(BaseNodeDef[State, Deps]):
         self._tail_call_to = tail_call_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return TailCall(self._tail_call_to, ctx.state)
 
 
 class StubSilentNode(BaseNodeDef[State, Deps]):
     """Returns Silent (no publish)."""
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return Silent()
 
 
@@ -464,7 +464,7 @@ def _make_test_envelope(
     call_stack = Stack[CallFrame]()
     call_stack.push(initial_frame)
     return Envelope(
-        context=BaseSessionRunContext(
+        context=SessionRunContext(
             state=State(uncommitted_message=None),
             deps=Deps(correlation_id="choreo-test", agent_deps=None),
         ),
@@ -753,7 +753,7 @@ class StubInputCapturingNode(BaseNodeDef[State, Deps]):
     captured_input: Any | None = None
 
     async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], my_custom_input: Any | None = None
+        self, ctx: SessionRunContext[State, Deps], my_custom_input: Any | None = None
     ) -> NodeResult[State]:
         self.captured_input = my_custom_input
         return ReturnCall(state=ctx.state)
@@ -767,7 +767,7 @@ class StubCallWithInputNode(BaseNodeDef[State, Deps]):
         self._call_input = call_input
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return Call(self._call_to, ctx.state, *self._call_input)
 
 

@@ -1,30 +1,21 @@
 import os
 from collections.abc import Iterable
-from typing import Any, Generic, Sequence
+from typing import Any, Sequence
 
 from faststream.kafka import KafkaBroker
-from faststream.kafka.publisher.usecase import (
-    BatchPublisher,
-    DefaultPublisher,
-)
-from faststream.kafka.subscriber.usecase import (
-    BatchSubscriber,
-    ConcurrentBetweenPartitionsSubscriber,
-    ConcurrentDefaultSubscriber,
-    DefaultSubscriber,
-)
 from typing_extensions import Self
 
 from calfkit.broker.middleware import ContextInjectionMiddleware
 from calfkit.experimental._types import DepsT, StateT
 from calfkit.experimental.base_models.envelope import Envelope
 from calfkit.experimental.base_models.session_context import (
-    BaseSessionRunContext,
     CallFrame,
     CallFrameStack,
-    Stack,
+    Deps,
+    SessionRunContext,
     WorkflowState,
 )
+from calfkit.experimental.client.invocation_handle import InvocationHandle
 from calfkit.experimental.nodes.node_def import BaseNodeDef
 
 
@@ -52,9 +43,8 @@ class BaseClient:
         run_args: Sequence[Any],
         correlation_id: str,
         state: StateT,
-        result_type: type | None = None,
         deps: DepsT | None = None,
-    ):
+    ) -> InvocationHandle[StateT]:
         """Invoke the agent asynchronously, fire-and-forget.
 
         Args:
@@ -74,6 +64,13 @@ class BaseClient:
 
         envelope = Envelope[StateT, DepsT](
             internal_workflow_state=WorkflowState(call_stack=call_stack),
-            context=BaseSessionRunContext(state=state, deps=deps),
+            context=SessionRunContext(
+                state=state, deps=Deps(correlation_id=correlation_id, agent_deps=deps)
+            ),
         )
-        return await self._connection.publish(envelope, correlation_id=correlation_id)
+        await self._connection.publish(envelope, correlation_id=correlation_id)
+
+        return InvocationHandle[StateT](
+            correlation_id=correlation_id,
+            state_type=type(state),
+        )
