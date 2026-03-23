@@ -15,10 +15,10 @@ from faststream.kafka import TestKafkaBroker
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit.broker.broker import BrokerClient
-from calfkit.experimental.base_models.actions import Call, Delegate, Parallel, ReturnCall, TailCall
+from calfkit.experimental.base_models.actions import Call, Delegate, ReturnCall, TailCall
 from calfkit.experimental.base_models.session_context import (
-    BaseSessionRunContext,
     CallFrame,
+    SessionRunContext,
     Stack,
     WorkflowState,
 )
@@ -176,7 +176,7 @@ class TestStateModel:
         """State has correct default field values."""
         state = State()
         assert state.message_history == []
-        assert state.tool_results is None
+        assert state.tool_results == {}
 
     def test_state_serialization_roundtrip(self):
         """State survives serialization roundtrip."""
@@ -231,21 +231,34 @@ class TestEnvelopeModel:
 
     def test_envelope_creation(self):
         """Envelope wraps context and reply_stack."""
-        ctx = BaseSessionRunContext(
+        ctx = SessionRunContext(
             state=State(),
             deps=Deps(correlation_id="e1", agent_deps=None),
         )
-        envelope = Envelope(context=ctx, reply_stack=["topic_a", "topic_b"])
+        initial_frame = CallFrame(target_topic="t", callback_topic="cb", input_args=None)
+        call_stack = Stack[CallFrame]()
+        call_stack.push(initial_frame)
+        envelope = Envelope(
+            context=ctx,
+            internal_workflow_state=WorkflowState(call_stack=call_stack),
+            reply_stack=["topic_a", "topic_b"],
+        )
         assert envelope.reply_stack == ["topic_a", "topic_b"]
         assert envelope.context.deps.correlation_id == "e1"
 
     def test_envelope_default_empty_reply_stack(self):
         """Envelope defaults to empty reply_stack."""
-        ctx = BaseSessionRunContext(
+        ctx = SessionRunContext(
             state=State(),
             deps=Deps(correlation_id="e2", agent_deps=None),
         )
-        envelope = Envelope(context=ctx)
+        initial_frame = CallFrame(target_topic="t", callback_topic="cb", input_args=None)
+        call_stack = Stack[CallFrame]()
+        call_stack.push(initial_frame)
+        envelope = Envelope(
+            context=ctx,
+            internal_workflow_state=WorkflowState(call_stack=call_stack),
+        )
         assert envelope.reply_stack == []
 
     def test_envelope_serialization_roundtrip(self):
@@ -257,7 +270,7 @@ class TestEnvelopeModel:
         initial_frame = CallFrame(target_topic="t", callback_topic="cb", input_args=None)
         call_stack = Stack[CallFrame]()
         call_stack.push(initial_frame)
-        ctx = BaseSessionRunContext(
+        ctx = SessionRunContext(
             state=State(uncommitted_message=None),
             deps=Deps(correlation_id="e3", agent_deps={"k": "v"}),
         )
@@ -268,7 +281,7 @@ class TestEnvelopeModel:
         )
 
         dumped = original.model_dump(mode="json")
-        restored = Envelope.model_validate(dumped)
+        restored = Envelope[State, Deps].model_validate(dumped)
 
         assert restored.reply_stack == ["reply_topic"]
         assert restored.context.deps.correlation_id == "e3"
@@ -402,7 +415,7 @@ class TestAgentToolDecorator:
 class StubReturnCallNode(BaseNodeDef[State, Deps]):
     """Returns ReturnCall with the current state (callback the caller)."""
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return ReturnCall(state=ctx.state)
 
 
@@ -413,7 +426,7 @@ class StubCallNode(BaseNodeDef[State, Deps]):
         self._call_to = call_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return Call(self._call_to, ctx.state)
 
 
@@ -424,26 +437,15 @@ class StubTailCallNode(BaseNodeDef[State, Deps]):
         self._tail_call_to = tail_call_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return TailCall(self._tail_call_to, ctx.state)
 
 
 class StubSilentNode(BaseNodeDef[State, Deps]):
     """Returns Silent (no publish)."""
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return Silent()
-
-
-class StubParallelNode(BaseNodeDef[State, Deps]):
-    """Returns Parallel with two delegates."""
-
-    def __init__(self, node_id: str, topics: list[str], **kwargs: Any):
-        self._topics = topics
-        super().__init__(node_id, **kwargs)
-
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
-        return Parallel(delegates=[Delegate(topic=t, value=ctx.state) for t in self._topics])
 
 
 def _make_test_envelope(
@@ -462,7 +464,7 @@ def _make_test_envelope(
     call_stack = Stack[CallFrame]()
     call_stack.push(initial_frame)
     return Envelope(
-        context=BaseSessionRunContext(
+        context=SessionRunContext(
             state=State(uncommitted_message=None),
             deps=Deps(correlation_id="choreo-test", agent_deps=None),
         ),
@@ -648,146 +650,6 @@ class TestSilentChoreography:
             assert len(any_output) == 0
 
 
-class TestParallelChoreography:
-    """Tests for Parallel fan-out routing."""
-
-    @pytest.mark.asyncio
-    async def test_parallel_fans_out_to_all_topics(self):
-        """Parallel publishes to all delegate topics with correct reply_stack."""
-        node = StubParallelNode(
-            "fan_out",
-            topics=["worker_a.input", "worker_b.input"],
-            subscribe_topics="fan_out.input",
-        )
-
-        broker = BrokerClient()
-        received_a: dict[str, asyncio.Queue[Envelope]] = {}
-        received_b: dict[str, asyncio.Queue[Envelope]] = {}
-
-        @broker.subscriber("fan_out.input")
-        async def handle(
-            envelope: Envelope[State, Deps],
-            correlation_id: Annotated[str, Context()],
-            broker_: BrokerAnnotation,
-        ):
-            await node.handler(envelope, correlation_id, broker_)
-
-        @broker.subscriber("worker_a.input")
-        async def collect_a(
-            envelope: Envelope[State, Deps],
-            correlation_id: Annotated[str, Context()],
-        ):
-            if correlation_id not in received_a:
-                received_a[correlation_id] = asyncio.Queue()
-            received_a[correlation_id].put_nowait(envelope)
-
-        @broker.subscriber("worker_b.input")
-        async def collect_b(
-            envelope: Envelope[State, Deps],
-            correlation_id: Annotated[str, Context()],
-        ):
-            if correlation_id not in received_b:
-                received_b[correlation_id] = asyncio.Queue()
-            received_b[correlation_id].put_nowait(envelope)
-
-        async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(reply_stack=["final_output"])
-            await broker.publish(
-                test_envelope,
-                topic="fan_out.input",
-                correlation_id="parallel-1",
-            )
-
-            from tests.utils import wait_for_condition
-
-            await wait_for_condition(
-                lambda: "parallel-1" in received_a and "parallel-1" in received_b,
-                timeout=5.0,
-            )
-            result_a = await received_a["parallel-1"].get()
-            result_b = await received_b["parallel-1"].get()
-
-            # Both should have the return topic pushed
-            expected_stack = ["final_output", "fan_out.private.return"]
-            assert result_a.reply_stack == expected_stack
-            assert result_b.reply_stack == expected_stack
-
-
-# ===========================================================================
-# Sequential delegates (list[Delegate]) choreography
-# ===========================================================================
-
-
-class StubSequentialDelegateNode(BaseNodeDef[State, Deps]):
-    """Returns a list of Delegates for sequential chaining."""
-
-    def __init__(self, node_id: str, delegate_topics: list[str], **kwargs: Any):
-        self._delegate_topics = delegate_topics
-        super().__init__(node_id, **kwargs)
-
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
-        return [Delegate(topic=t, value=ctx.state) for t in self._delegate_topics]
-
-
-class TestSequentialDelegateChoreography:
-    """Tests for list[Delegate] sequential chaining."""
-
-    @pytest.mark.asyncio
-    async def test_sequential_delegates_chain_correctly(self):
-        """Sequential delegates: first topic gets published, rest are stacked.
-
-        For delegates [A, B, C], the handler should:
-        - Publish to A with reply_stack = [original, self._return_topic, C, B]
-        - When A replies → B runs → when B replies → C runs → when C replies → original
-        """
-        node = StubSequentialDelegateNode(
-            "seq_node",
-            delegate_topics=["step_a", "step_b"],
-            subscribe_topics="seq_node.input",
-        )
-
-        broker = BrokerClient()
-        received: dict[str, asyncio.Queue[Envelope]] = {}
-
-        @broker.subscriber("seq_node.input")
-        async def handle(
-            envelope: Envelope[State, Deps],
-            correlation_id: Annotated[str, Context()],
-            broker_: BrokerAnnotation,
-        ):
-            await node.handler(envelope, correlation_id, broker_)
-
-        @broker.subscriber("step_a")
-        async def collect_a(
-            envelope: Envelope[State, Deps],
-            correlation_id: Annotated[str, Context()],
-        ):
-            if correlation_id not in received:
-                received[correlation_id] = asyncio.Queue()
-            received[correlation_id].put_nowait(envelope)
-
-        async with TestKafkaBroker(broker) as _:
-            test_envelope = _make_test_envelope(reply_stack=["final_output"])
-            await broker.publish(
-                test_envelope,
-                topic="seq_node.input",
-                correlation_id="seq-1",
-            )
-
-            from tests.utils import wait_for_condition
-
-            await wait_for_condition(lambda: "seq-1" in received, timeout=5.0)
-            result = await received["seq-1"].get()
-
-            # reply_stack should be: [original, return_topic, step_b (reversed remaining)]
-            expected_stack = [
-                "final_output",
-                "seq_node.private.return",
-                "step_b",
-            ]
-            assert result.reply_stack == expected_stack
-
-
 # ===========================================================================
 # BaseNodeDef property tests
 # ===========================================================================
@@ -817,9 +679,9 @@ class TestBaseNodeDefProperties:
         node = StubReturnCallNode("n", subscribe_topics=["topic.a", "topic.b"])
         assert node.subscribe_topics == ["topic.a", "topic.b"]
 
-    def test_subscribe_topics_none_warns(self):
-        """subscribe_topics=None emits a RuntimeWarning."""
-        with pytest.warns(RuntimeWarning, match="not subscribed to any topics"):
+    def test_subscribe_topics_none_raises(self):
+        """subscribe_topics=None raises RuntimeError."""
+        with pytest.raises(RuntimeError, match="not subscribed to any topics"):
             StubReturnCallNode("orphan")
 
     def test_publish_topic(self):
@@ -850,7 +712,7 @@ class TestCallFrameInputArgs:
         """CallFrame.input_args survives Envelope JSON serialization roundtrip."""
         original = _make_test_envelope(reply_stack=["a"], input_args=["tc-1", "my_agent"])
         dumped = original.model_dump(mode="json")
-        restored = Envelope.model_validate(dumped)
+        restored = Envelope[State, Deps].model_validate(dumped)
         assert restored.internal_workflow_state.current_frame.input_args == ["tc-1", "my_agent"]
         assert restored.reply_stack == ["a"]
 
@@ -858,7 +720,7 @@ class TestCallFrameInputArgs:
         """CallFrame with input_args=None roundtrips correctly."""
         original = _make_test_envelope(reply_stack=[])
         dumped = original.model_dump(mode="json")
-        restored = Envelope.model_validate(dumped)
+        restored = Envelope[State, Deps].model_validate(dumped)
         assert restored.internal_workflow_state.current_frame.input_args is None
 
 
@@ -891,7 +753,7 @@ class StubInputCapturingNode(BaseNodeDef[State, Deps]):
     captured_input: Any | None = None
 
     async def run(
-        self, ctx: BaseSessionRunContext[State, Deps], my_custom_input: Any | None = None
+        self, ctx: SessionRunContext[State, Deps], my_custom_input: Any | None = None
     ) -> NodeResult[State]:
         self.captured_input = my_custom_input
         return ReturnCall(state=ctx.state)
@@ -905,7 +767,7 @@ class StubCallWithInputNode(BaseNodeDef[State, Deps]):
         self._call_input = call_input
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: BaseSessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
         return Call(self._call_to, ctx.state, *self._call_input)
 
 

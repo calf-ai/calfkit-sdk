@@ -1,6 +1,5 @@
 import inspect
 import logging
-import warnings
 from abc import abstractmethod
 from typing import Annotated, Any, Generic
 
@@ -18,7 +17,7 @@ from calfkit.experimental.base_models.actions import (
     TailCall,
 )
 from calfkit.experimental.base_models.envelope import Envelope
-from calfkit.experimental.base_models.session_context import BaseSessionRunContext
+from calfkit.experimental.base_models.session_context import SessionRunContext
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(Generic[StateT, DepsT, InputT]):
+class BaseNodeDef(Generic[StateT, DepsT]):
     _run_accepts_input: bool
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -51,12 +50,10 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         elif subscribe_topics is not None:
             self.subscribe_topics = list(subscribe_topics)
         else:
-            warnings.warn(
+            logging.error(
                 f"node {node_id} is not subscribed to any topics. It is unreachable.",
-                RuntimeWarning,
-                stacklevel=2,
             )
-            self.subscribe_topics = []
+            raise RuntimeError("node {node_id} is not subscribed to any topics. It is unreachable.")
         self.publish_topic = publish_topic
         self._return_topic = f"{node_id}.private.return"
 
@@ -64,7 +61,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
     async def run(
-        self, ctx: BaseSessionRunContext[StateT, DepsT], *args: Any, **kwargs: Any
+        self, ctx: SessionRunContext[StateT, DepsT], *args: Any, **kwargs: Any
     ) -> NodeResult[StateT]:
         """Runs the node's logic using provided context.
 
@@ -85,7 +82,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         """
         raise NotImplementedError()
 
-    async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> BaseSessionRunContext:
+    async def prepare_context(self, envelope: Envelope[StateT, DepsT]) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
         return ctx
 
@@ -109,7 +106,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
             envelope.internal_workflow_state.invoke_frame(output, self.subscribe_topics[0])
             await broker.publish(
                 Envelope(
-                    context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
+                    context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                     internal_workflow_state=envelope.internal_workflow_state,
                 ),
                 topic=envelope.internal_workflow_state.current_frame.target_topic,
@@ -120,7 +117,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
             frame = envelope.internal_workflow_state.unwind_frame()
             await broker.publish(
                 Envelope(
-                    context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
+                    context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                     internal_workflow_state=envelope.internal_workflow_state,
                 ),
                 topic=frame.callback_topic,
@@ -134,7 +131,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
             envelope.internal_workflow_state.invoke_frame(output, frame.callback_topic)
             await broker.publish(
                 Envelope(
-                    context=BaseSessionRunContext(state=output.state, deps=envelope.context.deps),
+                    context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                     internal_workflow_state=envelope.internal_workflow_state,
                 ),
                 topic=envelope.internal_workflow_state.current_frame.target_topic,
@@ -147,6 +144,8 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
                 f"node ({self.name}) ran and was silent with no explicit publish. This is the end of this event-stream, any state modifications will not be carried downstream."  # noqa: E501
             )
             return
+        else:
+            logging.error("Return type is unknown so the message was not published anywhere.")
 
         # elif isinstance(output, Reply):
         #     if not envelope.reply_stack:
@@ -159,7 +158,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         #     remaining_stack = envelope.reply_stack[:-1]
         #     await broker.publish(
         #         Envelope(
-        #             context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
+        #             context=SessionRunContext(state=output.value, deps=envelope.context.deps),
         #             reply_stack=remaining_stack,
         #         ),
         #         topic=topic,
@@ -170,7 +169,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         #     new_stack = [*envelope.reply_stack, self._return_topic]
         #     await broker.publish(
         #         Envelope(
-        #             context=BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
+        #             context=SessionRunContext(state=output.value, deps=envelope.context.deps),
         #             reply_stack=new_stack,
         #             input_args=output.input_args,
         #         ),
@@ -180,7 +179,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
 
         # elif isinstance(output, Emit):
         #     await broker.publish(
-        #         BaseSessionRunContext(state=output.value, deps=envelope.context.deps),
+        #         SessionRunContext(state=output.value, deps=envelope.context.deps),
         #         topic=output.topic,
         #         correlation_id=correlation_id,
         #     )
@@ -190,7 +189,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         #     for delegate in output.delegates:
         #         await broker.publish(
         #             Envelope(
-        #                 context=BaseSessionRunContext(
+        #                 context=SessionRunContext(
         #                     state=delegate.value, deps=envelope.context.deps
         #                 ),
         #                 reply_stack=new_stack,
@@ -204,7 +203,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         #     # mypy can't narrow list element types from all(isinstance(...))
         #     for emit in output:
         #         await broker.publish(
-        #             BaseSessionRunContext(state=emit.value, deps=envelope.context.deps),
+        #             SessionRunContext(state=emit.value, deps=envelope.context.deps),
         #             topic=emit.topic,
         #             correlation_id=correlation_id,
         #         )
@@ -225,7 +224,7 @@ class BaseNodeDef(Generic[StateT, DepsT, InputT]):
         #         return
         #     await broker.publish(
         #         Envelope(
-        #             context=BaseSessionRunContext(state=first.value, deps=envelope.context.deps),
+        #             context=SessionRunContext(state=first.value, deps=envelope.context.deps),
         #             reply_stack=new_stack,
         #             input_args=first.input_args,
         #         ),

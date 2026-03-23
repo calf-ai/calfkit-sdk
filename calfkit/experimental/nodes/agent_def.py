@@ -7,13 +7,11 @@ from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.experimental._types import AgentDepsT, AgentOutputT, InputT
+from calfkit.experimental._types import AgentDepsT, AgentOutputT
 from calfkit.experimental.base_models.actions import Call, NodeResult, ReturnCall, TailCall
+from calfkit.experimental.base_models.session_context import Deps
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
-from calfkit.experimental.data_model.state_deps import (
-    Deps,
-    State,
-)
+from calfkit.experimental.data_model.state_deps import State
 from calfkit.experimental.nodes.node_def import (
     BaseNodeDef,
 )
@@ -22,14 +20,16 @@ from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
 class BaseAgentNodeDef(
-    Generic[AgentDepsT, AgentOutputT, InputT],
-    BaseNodeDef[State, Deps[AgentDepsT], InputT],
+    Generic[AgentDepsT, AgentOutputT],
+    BaseNodeDef[State, Deps[AgentDepsT]],
 ):
     def __init__(
         self,
         agent_id: str,
         *,
         system_prompt: str = "You are a helpful AI assistant.",
+        subscribe_topics: str | list[str],
+        publish_topic: str | None = None,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
         deps_type: type[AgentDepsT] | None = None,
@@ -42,7 +42,7 @@ class BaseAgentNodeDef(
             self.tools = {tool.tool_schema.name: tool for tool in tools}
         else:
             self.tools = dict[str, ToolNodeDef]()
-        super().__init__(agent_id)
+        super().__init__(agent_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
 
         self._agent_loop: Agent[Any, Any] = Agent(
             model_client,
@@ -50,11 +50,8 @@ class BaseAgentNodeDef(
             output_type=[final_output_type, DeferredToolRequests],  # tool calling is always on
         )
 
-    # TODO: consider the agent node to operate as a router as well.
-    # For example, sequential multi-tool calls: each tool result is routed back to the agent
-    # before firing the next, instead of a fully choreographed approach using reply_stack.
     async def run(self, ctx: AgentSessionRunContext[AgentDepsT]) -> NodeResult[State]:
-        if ctx.deps.agent_deps is not None and self.deps_type is not None:
+        if ctx.deps is not None and ctx.deps.agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel):
                 ctx.deps.agent_deps = self.deps_type.model_validate(ctx.deps.agent_deps)
             else:
@@ -65,6 +62,7 @@ class BaseAgentNodeDef(
                     )
 
         latest_tool_calls = ctx.state.latest_tool_calls()
+        tool_results = None
 
         if len(latest_tool_calls) > 0:
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
@@ -78,16 +76,12 @@ class BaseAgentNodeDef(
                     self.name,
                 )
 
-        tool_results = (
-            DeferredToolResults(
+            tool_results = DeferredToolResults(
                 calls={
                     tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id)
                     for tc in latest_tool_calls
                 }
             )
-            if len(latest_tool_calls) > 0
-            else None
-        )
 
         if ctx.state.uncommitted_message is not None:
             ctx.state.commit_message_to_history()
@@ -96,7 +90,7 @@ class BaseAgentNodeDef(
             message_history=ctx.state.message_history,
             instructions=self.system_prompt,
             toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools.values()])],
-            deps=ctx.deps.agent_deps,
+            deps=ctx.deps.agent_deps if ctx.deps else None,
             deferred_tool_results=tool_results,
         )
         if isinstance(result.output, DeferredToolRequests):
@@ -105,7 +99,7 @@ class BaseAgentNodeDef(
             ctx.state.message_history.extend(messages)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
-            tool_call_state = State()
+            tool_call_state = ctx.state.model_copy(deep=True)
             for tool_call in result.output.calls:
                 tool_call_state.add_tool_call(tool_call)
 
@@ -146,7 +140,8 @@ class BaseAgentNodeDef(
                     self.name,
                 )
             else:  # All tool calls were invalid, we need to retry.
-                # TODO: consider a node retry return type that doesn't require round trip to itself
+                # TODO: consider a node retry return type that doesn't require round trip to itself.
+                # Tailcall to itself is a roundtrip.
                 return TailCall[State](target_topic=self.subscribe_topics[0], state=tool_call_state)
 
         elif isinstance(result.output, self.final_output_type):

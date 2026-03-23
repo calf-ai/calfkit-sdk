@@ -15,7 +15,7 @@ from calfkit.experimental.nodes.node_def import BaseNodeDef
 from calfkit.models.tool_context import ToolContext
 
 
-class BaseToolNodeDef(BaseNodeDef[State, Deps[Any], str], ABC):
+class BaseToolNodeDef(BaseNodeDef[State, Deps[Any]], ABC):
     @property
     @abstractmethod
     def tool_schema(self) -> ToolDefinition: ...

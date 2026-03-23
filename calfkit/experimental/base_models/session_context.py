@@ -4,8 +4,9 @@ from typing import Any, Generic
 
 import uuid_utils
 from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import TypeAliasType
 
-from calfkit.experimental._types import DepsT, StackItemT, StateT
+from calfkit.experimental._types import DepsT, StackItemT, StateT, UserDepsT
 from calfkit.experimental.base_models.actions import Call, _Call
 
 
@@ -41,15 +42,18 @@ class Stack(Generic[StackItemT]):
 class CallFrame:
     target_topic: str
     callback_topic: str  # return address
-    input_args: Sequence[Any] | None
+    input_args: Sequence[Any] | None = field(default=None)
     frame_id: str = field(default_factory=lambda: uuid_utils.uuid7().hex)
+
+
+CallFrameStack = Stack[CallFrame]
 
 
 class WorkflowState(BaseModel):
     """The current control state for the routing and metadata representing the workflow. Framework-level wiring."""  # noqa: E501
 
     model_config = ConfigDict(extra="ignore")
-    call_stack: Stack[CallFrame]
+    call_stack: CallFrameStack
     metadata: Any = Field(
         default=None,
         description="Additional data that can be accessed programmatically by the application.",
@@ -73,11 +77,27 @@ class WorkflowState(BaseModel):
         return self.call_stack.push(frame)
 
 
+class Deps(BaseModel, Generic[UserDepsT]):
+    """immutable dependencies for agent executions"""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+    correlation_id: str
+    agent_deps: UserDepsT | None = Field(description="user-provided agent dependencies")
+
+
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     """Base generic context for a session — just state + deps."""
+
+    state: StateT
+
+    deps: DepsT
+
+
+class SessionRunContext(Generic[StateT, UserDepsT], BaseSessionRunContext[StateT, Deps[UserDepsT]]):
+    """Session context for a session — just state + deps."""
 
     state: StateT = Field(description="Mutable app state.")
     """The app state. Mutable."""
 
-    deps: DepsT = Field(description="Immutable execution dependencies.")
+    deps: Deps[UserDepsT] = Field(description="Immutable execution dependencies.")
     """Dependencies for the execution. Immutable."""
