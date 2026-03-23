@@ -21,5 +21,3 @@ class Envelope(BaseModel, Generic[StateT, DepsT]):
     internal_workflow_state: WorkflowState = Field(
         description="The internal, framework-level state tracking workflow"
     )
-    reply_stack: list[str] = Field(default_factory=list)
-    input_args: Sequence[Any] | None = None

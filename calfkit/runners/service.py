@@ -1,5 +1,12 @@
 from typing import Any
 
+from faststream.kafka.subscriber.usecase import (
+    BatchSubscriber,
+    ConcurrentBetweenPartitionsSubscriber,
+    ConcurrentDefaultSubscriber,
+    DefaultSubscriber,
+)
+
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.base_node import BaseNode
 
@@ -7,7 +14,12 @@ from calfkit.nodes.base_node import BaseNode
 class NodesService:
     def __init__(self, broker: BrokerClient):
         self._broker = broker
-        self._subscribers: list[Any] = []
+        self._subscribers: list[
+            DefaultSubscriber
+            | BatchSubscriber
+            | ConcurrentDefaultSubscriber
+            | ConcurrentBetweenPartitionsSubscriber
+        ] = []
 
     def register_node(
         self,

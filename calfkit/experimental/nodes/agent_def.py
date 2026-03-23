@@ -22,8 +22,8 @@ from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
 class BaseAgentNodeDef(
-    Generic[AgentDepsT, AgentOutputT, InputT],
-    BaseNodeDef[State, Deps[AgentDepsT], InputT],
+    Generic[AgentDepsT, AgentOutputT],
+    BaseNodeDef[State, Deps[AgentDepsT]],
 ):
     def __init__(
         self,
@@ -53,7 +53,7 @@ class BaseAgentNodeDef(
         )
 
     async def run(self, ctx: AgentSessionRunContext[AgentDepsT]) -> NodeResult[State]:
-        if ctx.deps.agent_deps is not None and self.deps_type is not None:
+        if ctx.deps is not None and ctx.deps.agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel):
                 ctx.deps.agent_deps = self.deps_type.model_validate(ctx.deps.agent_deps)
             else:
@@ -92,7 +92,7 @@ class BaseAgentNodeDef(
             message_history=ctx.state.message_history,
             instructions=self.system_prompt,
             toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools.values()])],
-            deps=ctx.deps.agent_deps,
+            deps=ctx.deps.agent_deps if ctx.deps else None,
             deferred_tool_results=tool_results,
         )
         if isinstance(result.output, DeferredToolRequests):

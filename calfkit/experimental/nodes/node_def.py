@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(Generic[StateT, DepsT, InputT]):
+class BaseNodeDef(Generic[StateT, DepsT]):
     _run_accepts_input: bool
 
     def __init_subclass__(cls, **kwargs: Any) -> None:

@@ -10,7 +10,6 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
 )
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
-from calfkit.experimental._types import AgentDepsT
 
 
 class BaseAgentActivityState(BaseModel):
@@ -98,18 +97,6 @@ class State(CoreMessageState, InFlightToolsState):
 
 #     model_config = ConfigDict(extra="ignore")
 #     run_state: AgentActivityState = Field(default_factory=AgentActivityState)
-
-
-class Deps(BaseModel, Generic[AgentDepsT]):
-    """immutable dependencies for agent executions"""
-
-    model_config = ConfigDict(extra="ignore", frozen=True)
-    correlation_id: str
-    agent_deps: AgentDepsT = Field(description="user-provided agent dependencies")
-    metadata: Any = Field(
-        default=None,
-        description="Additional dependency metadata.",
-    )
 
 
 # ---------------------------------------------------------------------------
