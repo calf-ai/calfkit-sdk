@@ -114,9 +114,7 @@ def deploy_structured_broker() -> BrokerClient:
     broker = BrokerClient()
     service = NodesService(broker)
 
-    model_client = OpenAIModelClient(
-        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
-    )
+    model_client = OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
 
     # Deploy shared chat nodes (one plain, one with each output_type)
     service.register_node(ChatNode(model_client))
@@ -148,10 +146,7 @@ def deploy_structured_broker() -> BrokerClient:
             tool_nodes=[calculate],
             name="math_agent",
             input_topic="structured.math.input",
-            system_prompt=(
-                "You are a math assistant. Use the calculate tool to evaluate "
-                "expressions, then return the structured result."
-            ),
+            system_prompt=("You are a math assistant. Use the calculate tool to evaluate expressions, then return the structured result."),
             message_history_store=InMemoryMessageHistoryStore(),
         )
     )
@@ -179,10 +174,7 @@ def deploy_structured_broker() -> BrokerClient:
             name="input_only_agent",
             input_topic="structured.inputonly.input",
             deps_type=ReviewRequest,
-            system_prompt=(
-                "You receive structured product data as context. "
-                "Respond with a plain text summary mentioning the product name."
-            ),
+            system_prompt=("You receive structured product data as context. Respond with a plain text summary mentioning the product name."),
         )
     )
 
@@ -273,10 +265,7 @@ async def test_structured_input_and_output(deploy_structured_broker):
     async with TestKafkaBroker(broker) as _:
         client = RouterServiceClient(broker, router_node)
         response = await client.request(
-            user_prompt=(
-                "Review the following product. "
-                "Product name: Thunderbolt Cable. Category: Electronics."
-            ),
+            user_prompt=("Review the following product. Product name: Thunderbolt Cable. Category: Electronics."),
             deps={"product_name": "Thunderbolt Cable", "category": "Electronics"},
         )
 

@@ -50,9 +50,7 @@ def deploy_delegation_broker() -> tuple[BrokerClient, AgentRouterNode, AgentRout
     service = NodesService(broker)
 
     # 1. Deploy LLM model node worker
-    model_client = OpenAIModelClient(
-        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
-    )
+    model_client = OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
     chat_node = ChatNode(model_client)
     service.register_node(chat_node)
 
@@ -65,10 +63,7 @@ def deploy_delegation_broker() -> tuple[BrokerClient, AgentRouterNode, AgentRout
         name="agent_b",
         tool_nodes=[get_weather],
         message_history_store=InMemoryMessageHistoryStore(),
-        system_prompt=(
-            "You are a weather specialist. When asked about weather, "
-            "you can use your tool and report the results. Be concise."
-        ),
+        system_prompt=("You are a weather specialist. When asked about weather, you can use your tool and report the results. Be concise."),
     )
     service.register_node(agent_b_router, group_id="agent_b")
 

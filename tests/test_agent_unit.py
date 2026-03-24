@@ -90,9 +90,7 @@ async def test_agent_memory_with_function_model():
 
         if call_count == 1:
             # First call - should have only the initial user prompt
-            assert len(messages) == 1, (
-                f"First call should have 1 message, got {len(messages)}: {messages}"
-            )
+            assert len(messages) == 1, f"First call should have 1 message, got {len(messages)}: {messages}"
             # Check the user prompt content
             user_content = str(messages[0].parts[0])
             assert "Hello, my name is Alice" in user_content
@@ -100,9 +98,7 @@ async def test_agent_memory_with_function_model():
         elif call_count == 2:
             # Second call - should have previous messages in history
             # Expected: user prompt 1, model response 1, user prompt 2
-            assert len(messages) == 3, (
-                f"Second call should have 3 messages in history, got {len(messages)}: {messages}"
-            )
+            assert len(messages) == 3, f"Second call should have 3 messages in history, got {len(messages)}: {messages}"
 
             # Verify first user prompt is preserved
             first_msg = messages[0]
@@ -217,9 +213,7 @@ async def test_tool_visibility_with_function_model():
         tool_names = [tool.name for tool in available_tools]
 
         # Assert exactly the tools we provided are visible
-        assert len(available_tools) == 2, (
-            f"Expected 2 tools, got {len(available_tools)}\nTool names: {tool_names}"
-        )
+        assert len(available_tools) == 2, f"Expected 2 tools, got {len(available_tools)}\nTool names: {tool_names}"
         assert "get_weather" in tool_names, f"get_weather not in tool names: {tool_names}"
         assert "get_temperature" in tool_names, f"get_temperature not in tool names: {tool_names}"
 
@@ -227,14 +221,10 @@ async def test_tool_visibility_with_function_model():
         for tool in available_tools:
             if tool.name == "get_weather":
                 desc = tool.description or ""
-                assert "weather" in desc.lower(), (
-                    f"get_weather description missing 'weather': {desc}"
-                )
+                assert "weather" in desc.lower(), f"get_weather description missing 'weather': {desc}"
             elif tool.name == "get_temperature":
                 desc = tool.description or ""
-                assert "temperature" in desc.lower(), (
-                    f"get_temperature description missing 'temperature': {desc}"
-                )
+                assert "temperature" in desc.lower(), f"get_temperature description missing 'temperature': {desc}"
 
         if not tool_call_made:
             # First call - make a tool call
@@ -467,10 +457,7 @@ def test_named_chat_node_removes_shared_subscribe_topic():
     chat = ChatNode(name="gpt-5-nano")
     for topics in chat.bound_registry.values():
         subscribe_topics = topics.get("subscribe_topics", [])
-        assert "ai_prompted" not in subscribe_topics, (
-            "Shared topic 'ai_prompted' should be removed for named "
-            f"ChatNode, got {subscribe_topics}"
-        )
+        assert "ai_prompted" not in subscribe_topics, f"Shared topic 'ai_prompted' should be removed for named ChatNode, got {subscribe_topics}"
 
 
 def test_unnamed_chat_node_backwards_compat():

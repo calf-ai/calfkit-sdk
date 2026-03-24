@@ -4,11 +4,13 @@ from typing import Any
 
 from faststream import FastStream
 from faststream.kafka import KafkaBroker
+from typing_extensions import deprecated
 
 from calfkit.broker.deployable import Deployable
 from calfkit.broker.middleware import ContextInjectionMiddleware
 
 
+@deprecated("Will soon be removed in favor for new experimental client")
 class BrokerClient(KafkaBroker, Deployable):
     """Lightweight wrapper over Faststream connecting to brokers"""
 

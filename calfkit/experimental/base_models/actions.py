@@ -116,17 +116,7 @@ _T = TypeVar("_T")
 
 NodeResult = TypeAliasType(
     "NodeResult",
-    Reply[_T]
-    | Emit[_T]
-    | Delegate[_T]
-    | list[Emit[_T]]
-    | list[Delegate[_T]]
-    | Parallel[_T]
-    | Silent
-    | Sequential[_T]
-    | Call[_T]
-    | ReturnCall[_T]
-    | TailCall[_T],
+    Silent | Call[_T] | ReturnCall[_T] | TailCall[_T],
     type_params=(_T,),
 )
 """All possible return types from a node's ``run`` method."""

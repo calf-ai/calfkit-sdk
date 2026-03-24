@@ -81,8 +81,7 @@ class BaseNode(ABC, Generic[InputT, OutputT]):
     ) -> None:
         self.name = name
         self.bound_registry: dict[Callable[..., Any], TopicsDict] = {
-            fn.__get__(self, type(self)): topics_dict
-            for fn, topics_dict in self._handler_registry.items()
+            fn.__get__(self, type(self)): topics_dict for fn, topics_dict in self._handler_registry.items()
         }
         if name is not None:
             self._resolve_private_topics()
@@ -144,9 +143,7 @@ class BaseNode(ABC, Generic[InputT, OutputT]):
             input_topics = input_topic
 
         for handler, topics in list(self.bound_registry.items()):
-            if (input_topics is not None and "shared_subscribe_topic" in topics) or (
-                output_topic is not None and "publish_topic" in topics
-            ):
+            if (input_topics is not None and "shared_subscribe_topic" in topics) or (output_topic is not None and "publish_topic" in topics):
                 # Copy to avoid mutating class-level _handler_registry dicts
                 # (bound_registry shares references for unnamed nodes)
                 updated = cast(TopicsDict, {**topics})
@@ -154,9 +151,7 @@ class BaseNode(ABC, Generic[InputT, OutputT]):
                     old_shared = updated["shared_subscribe_topic"]
                     updated["shared_subscribe_topic"] = input_topics[0]
                     # Replace old shared topic with all new input topics
-                    updated["subscribe_topics"] = [
-                        t for t in updated.get("subscribe_topics", []) if t != old_shared
-                    ] + input_topics
+                    updated["subscribe_topics"] = [t for t in updated.get("subscribe_topics", []) if t != old_shared] + input_topics
                 if output_topic is not None and "publish_topic" in updated:
                     updated["publish_topic"] = output_topic
                 self.bound_registry[handler] = updated

@@ -71,10 +71,7 @@ class PriceBook:
         print(f"\n{'=' * 78}")
         print(f"  Price Book @ {now} UTC")
         print(f"{'=' * 78}")
-        print(
-            f"  {'Product':<14} {'Price':>12} {'Bid':>12} {'Ask':>12}"
-            f" {'Spread':>10} {'Vol 24h':>14}"
-        )
+        print(f"  {'Product':<14} {'Price':>12} {'Bid':>12} {'Ask':>12} {'Spread':>10} {'Vol 24h':>14}")
         print(f"  {'-' * 74}")
 
         for product_id in PRODUCTS:
@@ -161,11 +158,7 @@ class CandleBook:
             buf.write("product,time,open,high,low,close,volume\n")
             for pid in product_ids:
                 for c in self._candles.get((pid, tf.granularity), []):
-                    buf.write(
-                        f"{pid},{c.time.strftime('%Y-%m-%dT%H:%M:%SZ')},"
-                        f"{c.open:.2f},{c.high:.2f},{c.low:.2f},"
-                        f"{c.close:.2f},{c.volume:.2f}\n"
-                    )
+                    buf.write(f"{pid},{c.time.strftime('%Y-%m-%dT%H:%M:%SZ')},{c.open:.2f},{c.high:.2f},{c.low:.2f},{c.close:.2f},{c.volume:.2f}\n")
             buf.write("\n")
         return buf.getvalue()
 

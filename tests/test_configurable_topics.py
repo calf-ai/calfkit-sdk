@@ -70,9 +70,7 @@ def test_single_input_topic_override():
 
 def test_multiple_input_topics_override():
     """List input_topic: subscribed_topic returns first; subscribe_topics has all."""
-    node = AgentRouterNode(
-        name="multi_input_router", input_topic=["upstream.a", "upstream.b", "upstream.c"]
-    )
+    node = AgentRouterNode(name="multi_input_router", input_topic=["upstream.a", "upstream.b", "upstream.c"])
     assert node.subscribed_topic == "upstream.a"
 
     for topics in node.bound_registry.values():

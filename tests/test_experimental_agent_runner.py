@@ -11,7 +11,7 @@ Known issues that tests will surface:
 - agent_def.py:106 creates new State() for tool delegations, losing message_history
 - agent_def.py:129 only assigns state to the last delegate (multi-tool broken)
 - agent_def.py:77 tries to assign to frozen Deps model (deps validation path)
-- agent_def.py:52 calls super().__init__(agent_id) without subscribe_topics
+- agent_def.py:52 calls super().__init__(node_id) without subscribe_topics
 """
 
 import asyncio
@@ -30,14 +30,15 @@ from calfkit._vendor.pydantic_ai.messages import ToolCallPart as VendorToolCallP
 from calfkit.broker.broker import BrokerClient
 from calfkit.experimental.base_models.actions import Call, ReturnCall
 from calfkit.experimental.base_models.session_context import (
-    BaseSessionRunContext,
     CallFrame,
+    Deps,
+    SessionRunContext,
     Stack,
     WorkflowState,
 )
-from calfkit.experimental.data_model.state_deps import Deps, State
+from calfkit.experimental.data_model.state_deps import State
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
-from calfkit.experimental.nodes.node_def import Envelope
+from calfkit.experimental.nodes.base import Envelope
 from calfkit.experimental.nodes.tool_def import agent_tool as experimental_agent_tool
 from calfkit.models.tool_context import ToolContext
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
@@ -117,7 +118,7 @@ def make_envelope(
     call_stack: Stack[CallFrame] = Stack()
     call_stack.push(initial_frame)
     return Envelope(
-        context=BaseSessionRunContext(
+        context=SessionRunContext(
             state=state,
             deps=Deps(correlation_id=correlation_id, agent_deps=agent_deps),
         ),
@@ -150,15 +151,14 @@ async def test_basic_agent_text_reply():
     - run() returns ReturnCall[State] with updated message_history
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="basic_agent",
+        node_id="basic_agent",
+        subscribe_topics="basic_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Always respond briefly in one sentence.",
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What is 2 + 2?")])
-    )
-    ctx = BaseSessionRunContext(
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What is 2 + 2?")]))
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="test-1", agent_deps=None),
     )
@@ -169,10 +169,10 @@ async def test_basic_agent_text_reply():
     assert isinstance(result.state, State)
     assert len(result.state.message_history) > 0, "Should have message_history from LLM call"
 
-    # The response should mention "4"
+    # The response should mention "4" (digit or word)
     last_msg = result.state.message_history[-1]
-    text = " ".join(str(p) for p in last_msg.parts)
-    assert "4" in text, f"Expected '4' in response: {text}"
+    text = " ".join(str(p) for p in last_msg.parts).lower()
+    assert "4" in text or "four" in text, f"Expected '4' or 'four' in response: {text}"
 
 
 @pytest.mark.asyncio
@@ -186,7 +186,8 @@ async def test_basic_agent_text_reply_via_broker():
     - State with message_history arrives at the collector
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="broker_agent",
+        node_id="broker_agent",
+        subscribe_topics="broker_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Respond briefly.",
     )
@@ -251,38 +252,33 @@ async def test_agent_multi_turn_memory():
     - Agent can recall information introduced in the first turn
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="memory_agent",
+        node_id="memory_agent",
+        subscribe_topics="memory_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Respond briefly.",
     )
 
     # First turn: introduce information
-    state1 = State(
-        uncommitted_message=ModelRequest(parts=[UserPromptPart(content="My name is Alice.")])
-    )
-    ctx1 = BaseSessionRunContext(
+    state1 = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="My name is Alice.")]))
+    ctx1 = SessionRunContext(
         state=state1,
         deps=Deps(correlation_id="turn-1", agent_deps=None),
     )
 
     result1 = await agent_node.run(ctx1)
-    assert isinstance(result1, ReturnCall), (
-        f"First turn: expected ReturnCall, got {type(result1).__name__}"
-    )
+    assert isinstance(result1, ReturnCall), f"First turn: expected ReturnCall, got {type(result1).__name__}"
     assert len(result1.state.message_history) > 0
 
     # Second turn: carry forward message_history, stage new prompt
     state2 = result1.state
     state2.stage_message(ModelRequest(parts=[UserPromptPart(content="What is my name?")]))
-    ctx2 = BaseSessionRunContext(
+    ctx2 = SessionRunContext(
         state=state2,
         deps=Deps(correlation_id="turn-2", agent_deps=None),
     )
 
     result2 = await agent_node.run(ctx2)
-    assert isinstance(result2, ReturnCall), (
-        f"Second turn: expected ReturnCall, got {type(result2).__name__}"
-    )
+    assert isinstance(result2, ReturnCall), f"Second turn: expected ReturnCall, got {type(result2).__name__}"
 
     # Agent should remember "Alice" from the first turn
     text = " ".join(str(p) for p in result2.state.message_history[-1].parts)
@@ -299,18 +295,15 @@ async def test_agent_tool_visibility():
     - run() returns a Call (not a ReturnCall) when tool calls are made
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="visibility_agent",
+        node_id="visibility_agent",
+        subscribe_topics="visibility_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
         tools=[get_weather],
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(
-            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
-        )
-    )
-    ctx = BaseSessionRunContext(
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="vis-1", agent_deps=None),
     )
@@ -318,9 +311,7 @@ async def test_agent_tool_visibility():
     result = await agent_node.run(ctx)
 
     # The LLM should call the get_weather tool, resulting in a Call
-    assert isinstance(result, Call), (
-        f"Expected Call (tool call), got {type(result).__name__}: {result}"
-    )
+    assert isinstance(result, Call), f"Expected Call (tool call), got {type(result).__name__}: {result}"
 
 
 @pytest.mark.asyncio
@@ -333,18 +324,15 @@ async def test_agent_tool_delegation_uses_correct_topic():
     - Call.target_topic matches the corresponding tool's subscribe topic
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="topic_agent",
+        node_id="topic_agent",
+        subscribe_topics="topic_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
         tools=[get_weather],
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(
-            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
-        )
-    )
-    ctx = BaseSessionRunContext(
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="topic-1", agent_deps=None),
     )
@@ -354,9 +342,7 @@ async def test_agent_tool_delegation_uses_correct_topic():
 
     # The call target should be the tool's actual subscribe topic
     expected_topic = get_weather.subscribe_topics[0]  # "tool.get_weather.input"
-    assert result.target_topic == expected_topic, (
-        f"Call target should be '{expected_topic}', got '{result.target_topic}'"
-    )
+    assert result.target_topic == expected_topic, f"Call target should be '{expected_topic}', got '{result.target_topic}'"
 
 
 @pytest.mark.asyncio
@@ -371,18 +357,15 @@ async def test_agent_tool_delegation_preserves_message_history():
     - After tool return, the agent has context to produce a final response
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="history_agent",
+        node_id="history_agent",
+        subscribe_topics="history_agent.input",
         model_client=make_model_client(),
         system_prompt="Use get_weather for weather questions.",
         tools=[get_weather],
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(
-            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
-        )
-    )
-    ctx = BaseSessionRunContext(
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="hist-1", agent_deps=None),
     )
@@ -394,9 +377,7 @@ async def test_agent_tool_delegation_preserves_message_history():
 
     # The state should preserve message_history from the LLM call
     # (user prompt + model tool call response)
-    assert len(result.state.message_history) > 0, (
-        "Call state should carry message_history from the LLM interaction"
-    )
+    assert len(result.state.message_history) > 0, "Call state should carry message_history from the LLM interaction"
 
 
 @pytest.mark.asyncio
@@ -417,7 +398,8 @@ async def test_agent_with_single_tool_call_full_flow():
     - Tool result is incorporated into the final response
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="full_flow_agent",
+        node_id="full_flow_agent",
+        subscribe_topics="full_flow_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
         tools=[get_weather],
@@ -506,7 +488,7 @@ async def test_tool_node_direct_execution():
         )
     )
     deps = Deps(correlation_id="tool-exec-1", agent_deps=None)
-    ctx = BaseSessionRunContext(state=state, deps=deps)
+    ctx = SessionRunContext(state=state, deps=deps)
 
     result = await get_weather.run(ctx, "call-1", "caller_agent")
 
@@ -537,7 +519,7 @@ async def test_tool_node_context_injection():
         )
     )
     deps = Deps(correlation_id="ctx-inject-1", agent_deps={"api_key": "sk-test-123"})
-    ctx = BaseSessionRunContext(state=state, deps=deps)
+    ctx = SessionRunContext(state=state, deps=deps)
 
     result = await ctx_echo_tool.run(ctx, "call-ctx-1", "test_source_agent")
 
@@ -557,12 +539,12 @@ async def test_tool_node_returns_silent_when_no_tool_call():
 
     Verifies graceful handling of payloads without tool calls.
     """
-    from calfkit.experimental.nodes.node_def import Silent
+    from calfkit.experimental.nodes.base import Silent
 
     # State with no tool calls registered
     state = State(uncommitted_message=None)
     deps = Deps(correlation_id="no-tool-1", agent_deps=None)
-    ctx = BaseSessionRunContext(state=state, deps=deps)
+    ctx = SessionRunContext(state=state, deps=deps)
 
     # Pass a non-existent tool_call_id — should return Silent
     result = await get_weather.run(ctx, "nonexistent-call-id", "some_agent")
@@ -581,7 +563,8 @@ async def test_agent_with_tool_context_injection_full_flow():
     - The tool result incorporating context values flows back to the agent
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="ctx_agent",
+        node_id="ctx_agent",
+        subscribe_topics="ctx_agent.input",
         model_client=make_model_client(),
         system_prompt="You must use the ctx_echo_tool tool for every request. Pass the user's message.",  # noqa: E501
         tools=[ctx_echo_tool],

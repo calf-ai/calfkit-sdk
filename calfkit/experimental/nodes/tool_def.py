@@ -8,23 +8,22 @@ from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.base_models.actions import NodeResult, ReturnCall, Silent
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
 from calfkit.experimental.data_model.state_deps import (
-    Deps,
     State,
 )
-from calfkit.experimental.nodes.node_def import BaseNodeDef
+from calfkit.experimental.nodes.base import BaseNodeDef
 from calfkit.models.tool_context import ToolContext
 
+logger = logging.getLogger(__name__)
 
-class BaseToolNodeDef(BaseNodeDef[State, Deps[Any], str], ABC):
+
+class BaseToolNodeDef(BaseNodeDef[Any], ABC):
     @property
     @abstractmethod
     def tool_schema(self) -> ToolDefinition: ...
 
 
 class ToolNodeDef(BaseToolNodeDef):
-    def __init__(
-        self, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str
-    ):
+    def __init__(self, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str):
         self._tool = Tool(func)
         super().__init__(
             node_id=f"tool_{func.__name__}",
@@ -32,13 +31,19 @@ class ToolNodeDef(BaseToolNodeDef):
             publish_topic=publish_topic,
         )
 
-    async def run(
-        self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str
-    ) -> NodeResult[State]:
+    async def run(self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str) -> NodeResult[State]:
+        logger.debug(
+            "[%s] tool run entered tool=%s tool_call_id=%s source=%s",
+            ctx.deps.correlation_id[:8],
+            self.name,
+            tool_call_id,
+            source_node_name,
+        )
         tool_call_part = ctx.state.get_tool_call(tool_call_id)
         if tool_call_part is None:
-            logging.warning(
-                f"tool node reached but no matching tool call found in run state for tool_call_id={tool_call_id}"  # noqa: E501
+            logger.warning(
+                "tool node reached but no matching tool call found in run state for tool_call_id=%s",
+                tool_call_id,
             )
             return Silent()
 
@@ -74,6 +79,7 @@ class ToolNodeDef(BaseToolNodeDef):
             ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}),
         )
 
+        logger.debug("[%s] tool completed tool=%s", ctx.deps.correlation_id[:8], self.name)
         return ReturnCall[State](state=ctx.state)
 
     @property
@@ -85,8 +91,6 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Tool
     """Decorator to turn a function into a deployable tool node that agents can call"""
     subscribe_topic = f"tool.{func.__name__}.input"
     publish_topic = f"tool.{func.__name__}.output"
-    tool_node = ToolNodeDef(
-        func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic
-    )
+    tool_node = ToolNodeDef(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic)
 
     return tool_node

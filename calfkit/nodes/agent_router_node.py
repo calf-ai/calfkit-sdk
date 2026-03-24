@@ -149,16 +149,11 @@ class AgentRouterNode(BaseNode):
                 ctx.deps = self.deps_type.model_validate(ctx.deps)
             else:
                 if not isinstance(ctx.deps, self.deps_type):
-                    logging.error(
-                        "incoming deps does not match defined deps_type: \n"
-                        + f"deps={ctx.deps}\n\ndeps_type={self.deps_type}"
-                    )
+                    logging.error("incoming deps does not match defined deps_type: \n" + f"deps={ctx.deps}\n\ndeps_type={self.deps_type}")
 
         # Load existing history from store (for multi-turn conversations)
         if self.message_history_store is not None and ctx.thread_id is not None:
-            ctx.state.message_history = await self.message_history_store.get(
-                thread_id=ctx.thread_id, scope=self.name
-            )
+            ctx.state.message_history = await self.message_history_store.get(thread_id=ctx.thread_id, scope=self.name)
 
         # Commit any pre-existing uncommitted messages (e.g., from delegation handoff
         # where the DelegationTool prepares a user prompt as an uncommitted message)
@@ -170,9 +165,7 @@ class AgentRouterNode(BaseNode):
                     messages=uncommitted_messages,
                     scope=self.name,
                 )
-                ctx.state.message_history = await self.message_history_store.get(
-                    thread_id=ctx.thread_id, scope=self.name
-                )
+                ctx.state.message_history = await self.message_history_store.get(thread_id=ctx.thread_id, scope=self.name)
             else:
                 ctx.state.message_history.extend(uncommitted_messages)
 
@@ -205,9 +198,7 @@ class AgentRouterNode(BaseNode):
                 messages=uncommitted_messages,
                 scope=self.name,
             )
-            ctx.state.message_history = await self.message_history_store.get(
-                thread_id=ctx.thread_id, scope=self.name
-            )
+            ctx.state.message_history = await self.message_history_store.get(thread_id=ctx.thread_id, scope=self.name)
         else:
             ctx.state.message_history.extend(uncommitted_messages)
 
@@ -218,13 +209,8 @@ class AgentRouterNode(BaseNode):
 
         # Route based on latest message
         if isinstance(ctx.state.latest_message_in_history, ModelResponse):
-            if (
-                ctx.state.latest_message_in_history.finish_reason == "tool_call"
-                or ctx.state.latest_message_in_history.tool_calls
-            ):
-                await self._route_tool_calls(
-                    ctx, ctx.state.latest_message_in_history.tool_calls, correlation_id, broker
-                )
+            if ctx.state.latest_message_in_history.finish_reason == "tool_call" or ctx.state.latest_message_in_history.tool_calls:
+                await self._route_tool_calls(ctx, ctx.state.latest_message_in_history.tool_calls, correlation_id, broker)
             else:
                 await self._reply_to_sender(ctx, correlation_id, broker)
         elif ctx.state.pending_tool_calls:
@@ -312,9 +298,7 @@ class AgentRouterNode(BaseNode):
             for tool_call in tool_calls:
                 await self._route_tool(ctx, tool_call, correlation_id, broker)
 
-    async def _reply_to_sender(
-        self, event_envelope: EventEnvelope, correlation_id: str, broker: Any
-    ) -> None:
+    async def _reply_to_sender(self, event_envelope: EventEnvelope, correlation_id: str, broker: Any) -> None:
         """Send the final response back to the client.
 
         Args:
@@ -352,11 +336,7 @@ class AgentRouterNode(BaseNode):
         name = event_envelope.state.agent_name or self.name
         params = event_envelope.state.model_request_params
         if params is None:
-            params = ModelRequestParameters(
-                function_tools=[tool.tool_schema for tool in self.tools]
-                if self.tools is not None
-                else []
-            )
+            params = ModelRequestParameters(function_tools=[tool.tool_schema for tool in self.tools] if self.tools is not None else [])
 
         event_envelope.payload = ChatPayload(
             user_prompt=user_prompt,
@@ -403,11 +383,7 @@ class AgentRouterNode(BaseNode):
             user_prompt=user_prompt,
             instructions=self.system_prompt,
             name=self.name,
-            patch_model_request_params=(
-                ModelRequestParameters(function_tools=[t.tool_schema for t in self.tools])
-                if self.tools
-                else None
-            ),
+            patch_model_request_params=(ModelRequestParameters(function_tools=[t.tool_schema for t in self.tools]) if self.tools else None),
         )
         event_envelope = EventEnvelope(
             trace_id=correlation_id,
