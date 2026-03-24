@@ -88,6 +88,7 @@ class BaseNodeDef(Generic[DepsT]):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> Envelope[DepsT]:
+        logger.debug("[%s] handler entered node=%s", correlation_id[:8], self._node_id)
         ctx = await self.prepare_context(envelope)
         if (
             self._run_accepts_input
@@ -99,6 +100,8 @@ class BaseNodeDef(Generic[DepsT]):
         else:
             output = await self.run(ctx)
 
+        logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self._node_id)
+
         publish_envelope: Envelope[DepsT]
 
         if isinstance(output, Call):
@@ -108,9 +111,11 @@ class BaseNodeDef(Generic[DepsT]):
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
             )
+            target_topic = envelope.internal_workflow_state.current_frame.target_topic
+            logger.debug("[%s] Call target=%s frame_pushed node=%s", correlation_id[:8], target_topic, self._node_id)
             await broker.publish(
                 publish_envelope,
-                topic=envelope.internal_workflow_state.current_frame.target_topic,
+                topic=target_topic,
                 correlation_id=correlation_id,
             )
         elif isinstance(output, ReturnCall):
@@ -120,6 +125,7 @@ class BaseNodeDef(Generic[DepsT]):
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
             )
+            logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self._node_id)
             await broker.publish(
                 publish_envelope,
                 topic=frame.callback_topic,
@@ -134,19 +140,22 @@ class BaseNodeDef(Generic[DepsT]):
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
             )
+            target_topic = envelope.internal_workflow_state.current_frame.target_topic
+            logger.debug("[%s] TailCall target=%s node=%s", correlation_id[:8], target_topic, self._node_id)
             await broker.publish(
                 publish_envelope,
-                topic=envelope.internal_workflow_state.current_frame.target_topic,
+                topic=target_topic,
                 correlation_id=correlation_id,
             )
 
         elif isinstance(output, Silent):
-            logging.warning(
-                f"node ({self.name}) ran and was silent with no explicit publish. This is the end of this event-stream, any state modifications will not be carried downstream."  # noqa: E501
+            logger.warning(
+                "node (%s) ran and was silent with no explicit publish. This is the end of this event-stream, any state modifications will not be carried downstream.",  # noqa: E501
+                self.name,
             )
             publish_envelope = envelope
         else:
-            logging.error(
+            logger.error(
                 "Return type is unknown or invalid so the message was not published anywhere."
             )
             publish_envelope = envelope

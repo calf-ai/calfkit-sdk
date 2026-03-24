@@ -13,6 +13,8 @@ from calfkit.experimental.data_model.state_deps import (
 from calfkit.experimental.nodes.base import BaseNodeDef
 from calfkit.models.tool_context import ToolContext
 
+logger = logging.getLogger(__name__)
+
 
 class BaseToolNodeDef(BaseNodeDef[Any], ABC):
     @property
@@ -34,10 +36,18 @@ class ToolNodeDef(BaseToolNodeDef):
     async def run(
         self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str
     ) -> NodeResult[State]:
+        logger.debug(
+            "[%s] tool run entered tool=%s tool_call_id=%s source=%s",
+            ctx.deps.correlation_id[:8],
+            self.name,
+            tool_call_id,
+            source_node_name,
+        )
         tool_call_part = ctx.state.get_tool_call(tool_call_id)
         if tool_call_part is None:
-            logging.warning(
-                f"tool node reached but no matching tool call found in run state for tool_call_id={tool_call_id}"  # noqa: E501
+            logger.warning(
+                "tool node reached but no matching tool call found in run state for tool_call_id=%s",
+                tool_call_id,
             )
             return Silent()
 
@@ -73,6 +83,7 @@ class ToolNodeDef(BaseToolNodeDef):
             ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}),
         )
 
+        logger.debug("[%s] tool completed tool=%s", ctx.deps.correlation_id[:8], self.name)
         return ReturnCall[State](state=ctx.state)
 
     @property

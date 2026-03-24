@@ -17,6 +17,8 @@ from calfkit.experimental.nodes.base import (
 from calfkit.experimental.nodes.tool_def import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
+logger = logging.getLogger(__name__)
+
 NoneType = type(None)
 
 
@@ -60,15 +62,23 @@ class BaseAgentNodeDef(
 
     async def run(self, ctx: AgentSessionRunContext[AgentDepsT]) -> NodeResult[State]:
         agent_deps: AgentDepsT = cast(AgentDepsT, ctx.deps.agent_deps)
+        logger.debug(
+            "[%s] agent run entered node=%s pending_tool_calls=%d history_len=%d",
+            ctx.deps.correlation_id[:8],
+            self.name,
+            len(ctx.state.latest_tool_calls()),
+            len(ctx.state.message_history),
+        )
 
         if agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel) and not isinstance(agent_deps, self.deps_type):
                 agent_deps = cast(AgentDepsT, self.deps_type.model_validate(agent_deps))
                 ctx.deps = ctx.deps.model_copy(update={"agent_deps": agent_deps})
             elif not isinstance(agent_deps, self.deps_type):
-                logging.error(
-                    "incoming deps does not match defined deps_type: \n"
-                    + f"deps={agent_deps}\n\ndeps_type={self.deps_type}"
+                logger.error(
+                    "incoming deps does not match defined deps_type: deps=%s deps_type=%s",
+                    agent_deps,
+                    self.deps_type,
                 )
 
         latest_tool_calls = ctx.state.latest_tool_calls()
@@ -78,6 +88,13 @@ class BaseAgentNodeDef(
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
                 target_tool_call = next(
                     tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results
+                )
+                logger.debug(
+                    "[%s] routing pending tool call=%s tool=%s node=%s",
+                    ctx.deps.correlation_id[:8],
+                    target_tool_call.tool_call_id,
+                    target_tool_call.tool_name,
+                    self.name,
                 )
                 return Call[State](
                     self.tools_registry[target_tool_call.tool_name].subscribe_topics[0],
@@ -105,6 +122,12 @@ class BaseAgentNodeDef(
         )
         if isinstance(result.output, DeferredToolRequests):
             # The LLM called one or more tools
+            logger.debug(
+                "[%s] model returned DeferredToolRequests tool_count=%d node=%s",
+                ctx.deps.correlation_id[:8],
+                len(result.output.calls),
+                self.name,
+            )
             messages = result.new_messages()  # preserve conversation history
             ctx.state.message_history.extend(messages)
             latest_tool_calls = ctx.state.latest_tool_calls()
@@ -115,7 +138,7 @@ class BaseAgentNodeDef(
 
                 tool_node = self.tools_registry.get(tool_call.tool_name)
                 if tool_node is None:
-                    logging.error(f"tool={tool_call.tool_name} does not exist.")
+                    logger.error("tool=%s does not exist.", tool_call.tool_name)
                     ctx.state.add_tool_result(
                         tool_call.tool_call_id,
                         RetryPromptPart(
@@ -125,8 +148,9 @@ class BaseAgentNodeDef(
                         ),
                     )
                 elif tool_node.subscribe_topics is None:
-                    logging.error(
-                        f"tool={tool_call.tool_name} is unreachable. No subscribe topics were provided for the tool node."  # noqa: E501
+                    logger.error(
+                        "tool=%s is unreachable. No subscribe topics were provided for the tool node.",
+                        tool_call.tool_name,
                     )
                     ctx.state.add_tool_result(
                         tool_call.tool_call_id,
@@ -143,6 +167,13 @@ class BaseAgentNodeDef(
                 target_tool_call = next(
                     tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results
                 )
+                logger.debug(
+                    "[%s] routing new tool call=%s tool=%s node=%s",
+                    ctx.deps.correlation_id[:8],
+                    target_tool_call.tool_call_id,
+                    target_tool_call.tool_name,
+                    self.name,
+                )
                 return Call[State](
                     self.tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                     tool_call_state,
@@ -152,9 +183,11 @@ class BaseAgentNodeDef(
             else:  # All tool calls were invalid, we need to retry.
                 # TODO: consider a node retry return type that doesn't require round trip to itself.
                 # Tailcall to itself is a roundtrip.
+                logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
                 return TailCall[State](target_topic=self.subscribe_topics[0], state=tool_call_state)
 
         elif isinstance(result.output, self.final_output_type):
+            logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.deps.correlation_id[:8], self.name)
             ctx.state.message_history.extend(result.new_messages())
             return ReturnCall[State](state=ctx.state)
 

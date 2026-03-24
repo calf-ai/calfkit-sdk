@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Iterable, Sequence
 from typing import Any, Generic
@@ -17,6 +18,8 @@ from calfkit.experimental.base_models.session_context import (
 )
 from calfkit.experimental.client.invocation_handle import InvocationHandle
 from calfkit.experimental.data_model.state_deps import State
+
+logger = logging.getLogger(__name__)
 
 
 class BaseClient(Generic[StateT, DepsT]):
@@ -59,6 +62,8 @@ class BaseClient(Generic[StateT, DepsT]):
         Returns:
             The execution handle.
         """
+        logger.debug("[%s] invoke topic=%s reply=%s", correlation_id[:8], topic, reply_topic)
+
         if not self._connection._connection:
             await self._connection.start()
 

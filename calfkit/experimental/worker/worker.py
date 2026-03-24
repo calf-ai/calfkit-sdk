@@ -1,9 +1,12 @@
+import logging
 from typing import Any
 
 from faststream import FastStream
 
 from calfkit.experimental.client import Client
 from calfkit.experimental.nodes.base import BaseNodeDef
+
+logger = logging.getLogger(__name__)
 
 
 class Worker:
@@ -28,6 +31,12 @@ class Worker:
         if not self._prepared:
             for node in self._nodes:
                 group_id = self._group_id or node.name
+                logger.info(
+                    "registering node=%s subscribe=%s publish=%s",
+                    node.name,
+                    node.subscribe_topics,
+                    node.publish_topic,
+                )
                 subscriber = self._client._connection.subscriber(
                     *node.subscribe_topics,
                     group_id=group_id,
@@ -44,5 +53,6 @@ class Worker:
 
     async def run(self, **extra_run_args: Any) -> None:
         """Blocking method to run worker as a service until stopped."""
+        logger.info("worker starting with %d node(s)", len(self._nodes))
         self.prepare()
         await FastStream(self._client._connection).run(**extra_run_args)
