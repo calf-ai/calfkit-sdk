@@ -1,7 +1,5 @@
 import logging
-from typing import Generic, cast
-
-from pydantic import BaseModel
+from typing import Any, Generic, cast
 
 from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
@@ -14,7 +12,7 @@ from calfkit.experimental.data_model.state_deps import State
 from calfkit.experimental.nodes.base import (
     BaseNodeDef,
 )
-from calfkit.experimental.nodes.tool_def import BaseToolNodeDef, ToolNodeDef
+from calfkit.experimental.nodes.tool_def import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 logger = logging.getLogger(__name__)
@@ -46,7 +44,7 @@ class BaseAgentNodeDef(
             cast(type[AgentOutputT], final_output_type),
             DeferredToolRequests,
         ]
-        self._agent_loop: Agent[dict, AgentOutputT | DeferredToolRequests] = Agent(
+        self._agent_loop: Agent[dict[str, Any], AgentOutputT | DeferredToolRequests] = Agent(
             model_client,
             name=self.name,
             output_type=output_types,
@@ -93,7 +91,7 @@ class BaseAgentNodeDef(
             message_history=ctx.state.message_history,
             instructions=self.system_prompt,
             toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools_registry.values()])],
-            deps=agent_deps,  # type: ignore[arg-type]  # None valid when AgentDepsT=NoneType
+            deps=agent_deps,  # None valid when AgentDepsT=NoneType
             deferred_tool_results=tool_results,
         )
         if isinstance(result.output, DeferredToolRequests):

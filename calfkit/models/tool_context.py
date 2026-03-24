@@ -1,7 +1,6 @@
 import dataclasses
 
 from calfkit._vendor.pydantic_ai._run_context import RunContext
-from calfkit.experimental._types import DepsT
 from calfkit.experimental.base_models.session_context import Deps
 
 

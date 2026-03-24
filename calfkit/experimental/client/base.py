@@ -7,7 +7,7 @@ from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
 from calfkit.broker.middleware import ContextInjectionMiddleware
-from calfkit.experimental._types import DepsT, StateT
+from calfkit.experimental._types import StateT
 from calfkit.experimental.base_models.envelope import Envelope
 from calfkit.experimental.base_models.session_context import (
     CallFrame,

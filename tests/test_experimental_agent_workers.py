@@ -1,5 +1,4 @@
 import os
-from dataclasses import dataclass
 from typing import Annotated, Any
 
 import pytest
@@ -11,9 +10,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse
-from calfkit.experimental._types import AgentDepsT, DepsT
 from calfkit.experimental.base_models.envelope import Envelope
-from calfkit.experimental.base_models.session_context import Deps
 from calfkit.experimental.client import Client
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
 from calfkit.experimental.nodes.tool_def import BaseToolNodeDef, ToolNodeDef, agent_tool
