@@ -22,7 +22,7 @@ from calfkit.experimental.data_model.state_deps import State
 logger = logging.getLogger(__name__)
 
 
-class BaseClient(Generic[StateT, DepsT]):
+class BaseClient(Generic[StateT]):
     def __init__(self, connection: KafkaBroker):
         self._connection = connection
         return
@@ -49,7 +49,7 @@ class BaseClient(Generic[StateT, DepsT]):
         correlation_id: str,
         state: State,
         run_args: Sequence[Any] | None = None,
-        deps: DepsT | None = None,
+        deps: dict[str, Any] | None = None,
     ) -> InvocationHandle:
         """Invoke the node asynchronously, fire-and-forget.
 
@@ -70,9 +70,9 @@ class BaseClient(Generic[StateT, DepsT]):
         call_stack = CallFrameStack()
         call_stack.push(CallFrame(target_topic=topic, callback_topic=reply_topic, input_args=run_args))
 
-        envelope = Envelope[DepsT](
+        envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
-            context=SessionRunContext(state=state, deps=Deps(correlation_id=correlation_id, agent_deps=deps)),
+            context=SessionRunContext(state=state, deps=Deps(correlation_id=correlation_id, provided_deps=deps or dict())),
         )
         await self._connection.publish(envelope, topic=topic, correlation_id=correlation_id)
 

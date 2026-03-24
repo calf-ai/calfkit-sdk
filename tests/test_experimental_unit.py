@@ -415,7 +415,7 @@ class TestAgentToolDecorator:
 class StubReturnCallNode(BaseNodeDef[State, Deps]):
     """Returns ReturnCall with the current state (callback the caller)."""
 
-    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         return ReturnCall(state=ctx.state)
 
 
@@ -426,7 +426,7 @@ class StubCallNode(BaseNodeDef[State, Deps]):
         self._call_to = call_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         return Call(self._call_to, ctx.state)
 
 
@@ -437,14 +437,14 @@ class StubTailCallNode(BaseNodeDef[State, Deps]):
         self._tail_call_to = tail_call_to
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         return TailCall(self._tail_call_to, ctx.state)
 
 
 class StubSilentNode(BaseNodeDef[State, Deps]):
     """Returns Silent (no publish)."""
 
-    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         return Silent()
 
 
@@ -750,7 +750,7 @@ class StubInputCapturingNode(BaseNodeDef[State, Deps]):
 
     captured_input: Any | None = None
 
-    async def run(self, ctx: SessionRunContext[State, Deps], my_custom_input: Any | None = None) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext, my_custom_input: Any | None = None) -> NodeResult[State]:
         self.captured_input = my_custom_input
         return ReturnCall(state=ctx.state)
 
@@ -763,7 +763,7 @@ class StubCallWithInputNode(BaseNodeDef[State, Deps]):
         self._call_input = call_input
         super().__init__(node_id, **kwargs)
 
-    async def run(self, ctx: SessionRunContext[State, Deps]) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         return Call(self._call_to, ctx.state, *self._call_input)
 
 

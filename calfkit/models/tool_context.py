@@ -1,10 +1,12 @@
 import dataclasses
 
 from calfkit._vendor.pydantic_ai._run_context import RunContext
+from calfkit.experimental._types import DepsT
+from calfkit.experimental.base_models.session_context import Deps
 
 
 @dataclasses.dataclass(kw_only=True)
-class ToolContext(RunContext):
+class ToolContext(RunContext[Deps]):
     """RunContext subclass for distributed tool execution.
 
     Injected as the first parameter of @agent_tool functions.

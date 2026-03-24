@@ -1,6 +1,24 @@
 import asyncio
+import os
 import time
 from collections.abc import Callable
+
+import pytest
+from dotenv import load_dotenv
+
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+)
+
+load_dotenv()
+
+# Skip integration tests if OpenAI API key is not available
+skip_if_no_openai_key = pytest.mark.skipif(
+    not os.getenv("OPENAI_API_KEY"),
+    reason="Skipping integration test: OPENAI_API_KEY not set in environment",
+)
 
 
 async def wait_for_condition(
@@ -27,3 +45,28 @@ async def wait_for_condition(
         if elapsed > timeout:
             raise asyncio.TimeoutError(f"Condition not met within {timeout}s timeout")
         await asyncio.sleep(poll_interval)
+
+
+def print_message_history(message_history: list[ModelMessage]) -> None:
+    separator = "-" * 60
+
+    for i, message in enumerate(message_history):
+        print(separator)
+
+        if isinstance(message, ModelRequest):
+            print(f"[{i}] REQUEST")
+            for part in message.parts:
+                print(f"  [{part.part_kind}] {part!r}")
+
+        elif isinstance(message, ModelResponse):
+            model = message.model_name or "unknown"
+            print(f"[{i}] RESPONSE (model={model})")
+            if message.text:
+                print(f"  [text] {message.text}")
+            if message.thinking:
+                print(f"  [thinking] {message.thinking[:200]}")
+            for tc in message.tool_calls:
+                print(f"  [tool-call] {tc.tool_name}(id={tc.tool_call_id})")
+                print(f"    args: {tc.args_as_json_str()[:300]}")
+
+    print(separator)

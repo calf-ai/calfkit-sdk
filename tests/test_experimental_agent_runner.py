@@ -106,8 +106,8 @@ def make_envelope(
     *,
     correlation_id: str,
     reply_stack: list[str] | None = None,
-    agent_deps: Any = None,
-) -> Envelope[State, Deps]:
+    provided_deps: Any = None,
+) -> Envelope:
     """Create a test envelope with a staged user prompt."""
     state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content=user_prompt)]))
     initial_frame = CallFrame(
@@ -120,7 +120,7 @@ def make_envelope(
     return Envelope(
         context=SessionRunContext(
             state=state,
-            deps=Deps(correlation_id=correlation_id, agent_deps=agent_deps),
+            deps=Deps(correlation_id=correlation_id, provided_deps=provided_deps),
         ),
         internal_workflow_state=WorkflowState(call_stack=call_stack),
         reply_stack=reply_stack or [],
@@ -160,7 +160,7 @@ async def test_basic_agent_text_reply():
     state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What is 2 + 2?")]))
     ctx = SessionRunContext(
         state=state,
-        deps=Deps(correlation_id="test-1", agent_deps=None),
+        deps=Deps(correlation_id="test-1", provided_deps=None),
     )
 
     result = await agent_node.run(ctx)
@@ -262,7 +262,7 @@ async def test_agent_multi_turn_memory():
     state1 = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="My name is Alice.")]))
     ctx1 = SessionRunContext(
         state=state1,
-        deps=Deps(correlation_id="turn-1", agent_deps=None),
+        deps=Deps(correlation_id="turn-1", provided_deps=None),
     )
 
     result1 = await agent_node.run(ctx1)
@@ -274,7 +274,7 @@ async def test_agent_multi_turn_memory():
     state2.stage_message(ModelRequest(parts=[UserPromptPart(content="What is my name?")]))
     ctx2 = SessionRunContext(
         state=state2,
-        deps=Deps(correlation_id="turn-2", agent_deps=None),
+        deps=Deps(correlation_id="turn-2", provided_deps=None),
     )
 
     result2 = await agent_node.run(ctx2)
@@ -305,7 +305,7 @@ async def test_agent_tool_visibility():
     state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
     ctx = SessionRunContext(
         state=state,
-        deps=Deps(correlation_id="vis-1", agent_deps=None),
+        deps=Deps(correlation_id="vis-1", provided_deps=None),
     )
 
     result = await agent_node.run(ctx)
@@ -334,7 +334,7 @@ async def test_agent_tool_delegation_uses_correct_topic():
     state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
     ctx = SessionRunContext(
         state=state,
-        deps=Deps(correlation_id="topic-1", agent_deps=None),
+        deps=Deps(correlation_id="topic-1", provided_deps=None),
     )
 
     result = await agent_node.run(ctx)
@@ -367,7 +367,7 @@ async def test_agent_tool_delegation_preserves_message_history():
     state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
     ctx = SessionRunContext(
         state=state,
-        deps=Deps(correlation_id="hist-1", agent_deps=None),
+        deps=Deps(correlation_id="hist-1", provided_deps=None),
     )
 
     result = await agent_node.run(ctx)
@@ -487,7 +487,7 @@ async def test_tool_node_direct_execution():
             tool_call_id="call-1",
         )
     )
-    deps = Deps(correlation_id="tool-exec-1", agent_deps=None)
+    deps = Deps(correlation_id="tool-exec-1", provided_deps=None)
     ctx = SessionRunContext(state=state, deps=deps)
 
     result = await get_weather.run(ctx, "call-1", "caller_agent")
@@ -507,7 +507,7 @@ async def test_tool_node_context_injection():
 
     Verifies:
     - ToolContext.agent_name is set from payload.source_node_id
-    - ToolContext.deps is set from context.deps.agent_deps
+    - ToolContext.deps is set from context.deps.provided_deps
     - Tool function receives these values correctly
     """
     state = State(uncommitted_message=None)
@@ -518,7 +518,7 @@ async def test_tool_node_context_injection():
             tool_call_id="call-ctx-1",
         )
     )
-    deps = Deps(correlation_id="ctx-inject-1", agent_deps={"api_key": "sk-test-123"})
+    deps = Deps(correlation_id="ctx-inject-1", provided_deps={"api_key": "sk-test-123"})
     ctx = SessionRunContext(state=state, deps=deps)
 
     result = await ctx_echo_tool.run(ctx, "call-ctx-1", "test_source_agent")
@@ -543,7 +543,7 @@ async def test_tool_node_returns_silent_when_no_tool_call():
 
     # State with no tool calls registered
     state = State(uncommitted_message=None)
-    deps = Deps(correlation_id="no-tool-1", agent_deps=None)
+    deps = Deps(correlation_id="no-tool-1", provided_deps=None)
     ctx = SessionRunContext(state=state, deps=deps)
 
     # Pass a non-existent tool_call_id — should return Silent
@@ -559,7 +559,7 @@ async def test_agent_with_tool_context_injection_full_flow():
 
     Verifies:
     - ToolContext.agent_name reflects the calling agent's id
-    - ToolContext.deps carries the agent_deps from the original request
+    - ToolContext.deps carries the provided_deps from the original request
     - The tool result incorporating context values flows back to the agent
     """
     agent_node = BaseAgentNodeDef(
@@ -610,7 +610,7 @@ async def test_agent_with_tool_context_injection_full_flow():
             "test message",
             correlation_id=corr_id,
             reply_stack=[output_topic],
-            agent_deps={"api_key": "sk-ctx-test"},
+            provided_deps={"api_key": "sk-ctx-test"},
         )
 
         await broker.publish(envelope, topic=agent_input_topic, correlation_id=corr_id)

@@ -13,22 +13,27 @@ class Worker:
     def __init__(
         self,
         client: Client,
-        nodes: list[BaseNodeDef],
-        max_workers: int | None = None,
+        nodes: list[BaseNodeDef] | None = None,
+        max_workers: int = 1,
         group_id: str | None = None,
         extra_publish_kwargs: dict[str, Any] = {},
         extra_subscribe_kwargs: dict[str, Any] = {},
     ):
         self._client = client
-        self._nodes = nodes
+        self._nodes = nodes or list()
         self._max_workers = max_workers
         self._group_id = group_id
         self._extra_publish_kwargs = extra_publish_kwargs
         self._extra_subscribe_kwargs = extra_subscribe_kwargs
         self._prepared = False
 
+    def add_nodes(self, *nodes: BaseNodeDef) -> None:
+        self._nodes.extend(nodes)
+
     def prepare(self) -> None:
-        if not self._prepared:
+        if self._prepared:
+            raise RuntimeError("prepare() already called")
+        else:
             for node in self._nodes:
                 group_id = self._group_id or node.name
                 logger.info(
