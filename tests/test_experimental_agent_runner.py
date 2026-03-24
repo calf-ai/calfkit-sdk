@@ -11,7 +11,7 @@ Known issues that tests will surface:
 - agent_def.py:106 creates new State() for tool delegations, losing message_history
 - agent_def.py:129 only assigns state to the last delegate (multi-tool broken)
 - agent_def.py:77 tries to assign to frozen Deps model (deps validation path)
-- agent_def.py:52 calls super().__init__(agent_id) without subscribe_topics
+- agent_def.py:52 calls super().__init__(node_id) without subscribe_topics
 """
 
 import asyncio
@@ -150,7 +150,7 @@ async def test_basic_agent_text_reply():
     - run() returns ReturnCall[State] with updated message_history
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="basic_agent",
+        node_id="basic_agent",
         subscribe_topics="basic_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Always respond briefly in one sentence.",
@@ -187,7 +187,7 @@ async def test_basic_agent_text_reply_via_broker():
     - State with message_history arrives at the collector
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="broker_agent",
+        node_id="broker_agent",
         subscribe_topics="broker_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Respond briefly.",
@@ -253,7 +253,7 @@ async def test_agent_multi_turn_memory():
     - Agent can recall information introduced in the first turn
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="memory_agent",
+        node_id="memory_agent",
         subscribe_topics="memory_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a helpful assistant. Respond briefly.",
@@ -302,7 +302,7 @@ async def test_agent_tool_visibility():
     - run() returns a Call (not a ReturnCall) when tool calls are made
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="visibility_agent",
+        node_id="visibility_agent",
         subscribe_topics="visibility_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
@@ -337,7 +337,7 @@ async def test_agent_tool_delegation_uses_correct_topic():
     - Call.target_topic matches the corresponding tool's subscribe topic
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="topic_agent",
+        node_id="topic_agent",
         subscribe_topics="topic_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
@@ -376,7 +376,7 @@ async def test_agent_tool_delegation_preserves_message_history():
     - After tool return, the agent has context to produce a final response
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="history_agent",
+        node_id="history_agent",
         subscribe_topics="history_agent.input",
         model_client=make_model_client(),
         system_prompt="Use get_weather for weather questions.",
@@ -423,7 +423,7 @@ async def test_agent_with_single_tool_call_full_flow():
     - Tool result is incorporated into the final response
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="full_flow_agent",
+        node_id="full_flow_agent",
         subscribe_topics="full_flow_agent.input",
         model_client=make_model_client(),
         system_prompt="You are a weather assistant. Always use the get_weather tool.",
@@ -588,7 +588,7 @@ async def test_agent_with_tool_context_injection_full_flow():
     - The tool result incorporating context values flows back to the agent
     """
     agent_node = BaseAgentNodeDef(
-        agent_id="ctx_agent",
+        node_id="ctx_agent",
         subscribe_topics="ctx_agent.input",
         model_client=make_model_client(),
         system_prompt="You must use the ctx_echo_tool tool for every request. Pass the user's message.",  # noqa: E501

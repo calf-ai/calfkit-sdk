@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Generic
+from typing import Generic, cast
 
 from pydantic import BaseModel
 
@@ -9,7 +9,6 @@ from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.experimental._types import AgentDepsT, AgentOutputT
 from calfkit.experimental.base_models.actions import Call, NodeResult, ReturnCall, TailCall
-from calfkit.experimental.base_models.session_context import Deps
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
 from calfkit.experimental.data_model.state_deps import State
 from calfkit.experimental.nodes.node_def import (
@@ -18,48 +17,59 @@ from calfkit.experimental.nodes.node_def import (
 from calfkit.experimental.nodes.tool_def import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
+NoneType = type(None)
+
 
 class BaseAgentNodeDef(
     Generic[AgentDepsT, AgentOutputT],
-    BaseNodeDef[State, Deps[AgentDepsT]],
+    BaseNodeDef[State, AgentDepsT],
 ):
     def __init__(
         self,
-        agent_id: str,
+        node_id: str,
         *,
         system_prompt: str = "You are a helpful AI assistant.",
         subscribe_topics: str | list[str],
-        publish_topic: str | None = None,
+        publish_topic: str,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
-        deps_type: type[AgentDepsT] | None = None,
-        final_output_type: type[AgentOutputT] | type[str] = str,
+        deps_type: type[AgentDepsT] = NoneType,
+        final_output_type: type[AgentOutputT] = str,
     ):
         self.deps_type = deps_type
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
-        if tools:
-            self.tools = {tool.tool_schema.name: tool for tool in tools}
-        else:
-            self.tools = dict[str, ToolNodeDef]()
-        super().__init__(agent_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
+        self.tools = tools
+        self.tools_registry = (
+            {tool.tool_schema.name: tool for tool in tools} if tools else dict[str, ToolNodeDef]()
+        )
+        super().__init__(
+            node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic
+        )
 
-        self._agent_loop: Agent[Any, Any] = Agent(
+        output_types: list[type[AgentOutputT | DeferredToolRequests]] = [
+            final_output_type,
+            DeferredToolRequests,
+        ]
+        self._agent_loop: Agent[AgentDepsT, AgentOutputT | DeferredToolRequests] = Agent(
             model_client,
             name=self.name,
-            output_type=[final_output_type, DeferredToolRequests],  # tool calling is always on
+            output_type=output_types,
+            deps_type=deps_type,
         )
 
     async def run(self, ctx: AgentSessionRunContext[AgentDepsT]) -> NodeResult[State]:
-        if ctx.deps is not None and ctx.deps.agent_deps is not None and self.deps_type is not None:
-            if issubclass(self.deps_type, BaseModel):
-                ctx.deps.agent_deps = self.deps_type.model_validate(ctx.deps.agent_deps)
-            else:
-                if not isinstance(ctx.deps.agent_deps, self.deps_type):
-                    logging.error(
-                        "incoming deps does not match defined deps_type: \n"
-                        + f"deps={ctx.deps.agent_deps}\n\ndeps_type={self.deps_type}"
-                    )
+        agent_deps: AgentDepsT = cast(AgentDepsT, ctx.deps.agent_deps)
+
+        if agent_deps is not None and self.deps_type is not None:
+            if issubclass(self.deps_type, BaseModel) and not isinstance(agent_deps, self.deps_type):
+                agent_deps = cast(AgentDepsT, self.deps_type.model_validate(agent_deps))
+                ctx.deps = ctx.deps.model_copy(update={"agent_deps": agent_deps})
+            elif not isinstance(agent_deps, self.deps_type):
+                logging.error(
+                    "incoming deps does not match defined deps_type: \n"
+                    + f"deps={agent_deps}\n\ndeps_type={self.deps_type}"
+                )
 
         latest_tool_calls = ctx.state.latest_tool_calls()
         tool_results = None
@@ -70,7 +80,7 @@ class BaseAgentNodeDef(
                     tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results
                 )
                 return Call[State](
-                    self.tools[target_tool_call.tool_name].subscribe_topics[0],
+                    self.tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                     ctx.state,
                     target_tool_call.tool_call_id,
                     self.name,
@@ -89,8 +99,8 @@ class BaseAgentNodeDef(
         result = await self._agent_loop.run(
             message_history=ctx.state.message_history,
             instructions=self.system_prompt,
-            toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools.values()])],
-            deps=ctx.deps.agent_deps if ctx.deps else None,
+            toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools_registry.values()])],
+            deps=agent_deps,
             deferred_tool_results=tool_results,
         )
         if isinstance(result.output, DeferredToolRequests):
@@ -103,7 +113,7 @@ class BaseAgentNodeDef(
             for tool_call in result.output.calls:
                 tool_call_state.add_tool_call(tool_call)
 
-                tool_node = self.tools.get(tool_call.tool_name)
+                tool_node = self.tools_registry.get(tool_call.tool_name)
                 if tool_node is None:
                     logging.error(f"tool={tool_call.tool_name} does not exist.")
                     ctx.state.add_tool_result(
@@ -134,7 +144,7 @@ class BaseAgentNodeDef(
                     tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results
                 )
                 return Call[State](
-                    self.tools[target_tool_call.tool_name].subscribe_topics[0],
+                    self.tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                     tool_call_state,
                     target_tool_call.tool_call_id,
                     self.name,

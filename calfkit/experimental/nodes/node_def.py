@@ -41,19 +41,14 @@ class BaseNodeDef(Generic[StateT, DepsT]):
         self,
         node_id: str,
         *,
-        subscribe_topics: str | list[str] | None = None,
-        publish_topic: str | None = None,
+        subscribe_topics: str | list[str],
+        publish_topic: str,
     ):
         self._node_id = node_id
         if isinstance(subscribe_topics, str):
             self.subscribe_topics = [subscribe_topics]
         elif subscribe_topics is not None:
             self.subscribe_topics = list(subscribe_topics)
-        else:
-            logging.error(
-                f"node {node_id} is not subscribed to any topics. It is unreachable.",
-            )
-            raise RuntimeError("node {node_id} is not subscribed to any topics. It is unreachable.")
         self.publish_topic = publish_topic
         self._return_topic = f"{node_id}.private.return"
 

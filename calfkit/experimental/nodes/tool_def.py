@@ -8,14 +8,13 @@ from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.experimental.base_models.actions import NodeResult, ReturnCall, Silent
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
 from calfkit.experimental.data_model.state_deps import (
-    Deps,
     State,
 )
 from calfkit.experimental.nodes.node_def import BaseNodeDef
 from calfkit.models.tool_context import ToolContext
 
 
-class BaseToolNodeDef(BaseNodeDef[State, Deps[Any]], ABC):
+class BaseToolNodeDef(BaseNodeDef[State, Any], ABC):
     @property
     @abstractmethod
     def tool_schema(self) -> ToolDefinition: ...
