@@ -30,7 +30,7 @@ from calfkit.experimental.data_model.payload import (
     ToolCallPart,
 )
 from calfkit.experimental.data_model.state_deps import Deps, State
-from calfkit.experimental.nodes.node_def import (
+from calfkit.experimental.nodes.base import (
     BaseNodeDef,
     Envelope,
     NodeResult,

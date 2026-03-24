@@ -1,9 +1,7 @@
-from typing import Generic
-
 from calfkit.experimental._types import StateT
+from calfkit.experimental.data_model.state_deps import State
 
 
-class InvocationHandle(Generic[StateT]):
-    def __init__(self, correlation_id: str, state_type: type[StateT]):
+class InvocationHandle:
+    def __init__(self, correlation_id: str):
         self._correlation_id = correlation_id
-        self._state_type = state_type

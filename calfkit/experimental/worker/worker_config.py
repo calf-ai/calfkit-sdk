@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from calfkit.experimental.nodes.node_def import BaseNodeDef
+from calfkit.experimental.nodes.base import BaseNodeDef
 
 
 @dataclass

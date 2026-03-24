@@ -10,11 +10,11 @@ from calfkit.experimental.context.agent_context import AgentSessionRunContext
 from calfkit.experimental.data_model.state_deps import (
     State,
 )
-from calfkit.experimental.nodes.node_def import BaseNodeDef
+from calfkit.experimental.nodes.base import BaseNodeDef
 from calfkit.models.tool_context import ToolContext
 
 
-class BaseToolNodeDef(BaseNodeDef[State, Any], ABC):
+class BaseToolNodeDef(BaseNodeDef[Any], ABC):
     @property
     @abstractmethod
     def tool_schema(self) -> ToolDefinition: ...

@@ -1,6 +1,6 @@
 import os
-from collections.abc import Iterable
-from typing import Any, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any, Generic
 
 from faststream.kafka import KafkaBroker
 from typing_extensions import Self
@@ -16,10 +16,10 @@ from calfkit.experimental.base_models.session_context import (
     WorkflowState,
 )
 from calfkit.experimental.client.invocation_handle import InvocationHandle
-from calfkit.experimental.nodes.node_def import BaseNodeDef
+from calfkit.experimental.data_model.state_deps import State
 
 
-class BaseClient:
+class BaseClient(Generic[StateT, DepsT]):
     def __init__(self, connection: KafkaBroker):
         self._connection = connection
         return
@@ -35,17 +35,20 @@ class BaseClient:
         )
         return cls(broker_connection)
 
-    async def invoke_node(
+    @property
+    def broker(self):
+        return self._connection
+
+    async def _invoke(
         self,
-        node: BaseNodeDef[StateT, DepsT],
         topic: str,
         reply_topic: str,
-        run_args: Sequence[Any],
         correlation_id: str,
-        state: StateT,
-        deps: DepsT | None = None,
-    ) -> InvocationHandle[StateT]:
-        """Invoke the agent asynchronously, fire-and-forget.
+        state: State,
+        run_args: Sequence[Any] | None = None,
+        deps: DepsT = None,
+    ) -> InvocationHandle:
+        """Invoke the node asynchronously, fire-and-forget.
 
         Args:
             topic: Topic to send args to.
@@ -60,17 +63,18 @@ class BaseClient:
             await self._connection.start()
 
         call_stack = CallFrameStack()
-        call_stack.push(CallFrame(topic, reply_topic, input_args=run_args))
+        call_stack.push(
+            CallFrame(target_topic=topic, callback_topic=reply_topic, input_args=run_args)
+        )
 
-        envelope = Envelope[StateT, DepsT](
+        envelope = Envelope[DepsT](
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(
                 state=state, deps=Deps(correlation_id=correlation_id, agent_deps=deps)
             ),
         )
-        await self._connection.publish(envelope, correlation_id=correlation_id)
+        await self._connection.publish(envelope, topic=topic, correlation_id=correlation_id)
 
-        return InvocationHandle[StateT](
+        return InvocationHandle(
             correlation_id=correlation_id,
-            state_type=type(state),
         )

@@ -11,7 +11,7 @@ from calfkit.experimental._types import AgentDepsT, AgentOutputT
 from calfkit.experimental.base_models.actions import Call, NodeResult, ReturnCall, TailCall
 from calfkit.experimental.context.agent_context import AgentSessionRunContext
 from calfkit.experimental.data_model.state_deps import State
-from calfkit.experimental.nodes.node_def import (
+from calfkit.experimental.nodes.base import (
     BaseNodeDef,
 )
 from calfkit.experimental.nodes.tool_def import ToolNodeDef
@@ -22,7 +22,7 @@ NoneType = type(None)
 
 class BaseAgentNodeDef(
     Generic[AgentDepsT, AgentOutputT],
-    BaseNodeDef[State, AgentDepsT],
+    BaseNodeDef[AgentDepsT],
 ):
     def __init__(
         self,

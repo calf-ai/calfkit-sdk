@@ -31,13 +31,14 @@ from calfkit.broker.broker import BrokerClient
 from calfkit.experimental.base_models.actions import Call, ReturnCall
 from calfkit.experimental.base_models.session_context import (
     CallFrame,
+    Deps,
     SessionRunContext,
     Stack,
     WorkflowState,
 )
-from calfkit.experimental.data_model.state_deps import Deps, State
+from calfkit.experimental.data_model.state_deps import State
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
-from calfkit.experimental.nodes.node_def import Envelope
+from calfkit.experimental.nodes.base import Envelope
 from calfkit.experimental.nodes.tool_def import agent_tool as experimental_agent_tool
 from calfkit.models.tool_context import ToolContext
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
@@ -564,7 +565,7 @@ async def test_tool_node_returns_silent_when_no_tool_call():
 
     Verifies graceful handling of payloads without tool calls.
     """
-    from calfkit.experimental.nodes.node_def import Silent
+    from calfkit.experimental.nodes.base import Silent
 
     # State with no tool calls registered
     state = State(uncommitted_message=None)

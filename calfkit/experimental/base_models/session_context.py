@@ -8,6 +8,7 @@ from typing_extensions import TypeAliasType
 
 from calfkit.experimental._types import DepsT, StackItemT, StateT, UserDepsT
 from calfkit.experimental.base_models.actions import Call, _Call
+from calfkit.experimental.data_model.state_deps import State
 
 
 @dataclass
@@ -89,15 +90,10 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     """Base generic context for a session — just state + deps."""
 
     state: StateT
-
-    deps: DepsT
-
-
-class SessionRunContext(Generic[StateT, UserDepsT], BaseSessionRunContext[StateT, Deps[UserDepsT]]):
-    """Session context for a session — just state + deps."""
-
-    state: StateT = Field(description="Mutable app state.")
     """The app state. Mutable."""
 
-    deps: Deps[UserDepsT] = Field(description="Immutable execution dependencies.")
+    deps: DepsT
     """Dependencies for the execution. Immutable."""
+
+
+SessionRunContext = BaseSessionRunContext[State, Deps[UserDepsT]]
