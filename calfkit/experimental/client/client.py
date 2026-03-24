@@ -14,12 +14,13 @@ class Client(BaseClient[State]):
         topic: str,
         reply_topic: str,
         correlation_id: str,
+        temp_instructions: str | None = None,
         message_history: list[ModelMessage] | None = None,
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
     ) -> InvocationHandle:
         state = State(message_history=message_history or list())
-        state.stage_message(ModelRequest.user_text_prompt(user_prompt))
+        state.stage_message(ModelRequest.user_text_prompt(user_prompt, instructions=temp_instructions))
         return await self._invoke(
             topic=topic,
             reply_topic=reply_topic,

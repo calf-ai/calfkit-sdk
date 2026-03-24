@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 import pytest
@@ -10,6 +11,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse
+from calfkit.experimental._types import AgentOutputT
 from calfkit.experimental.base_models.envelope import Envelope
 from calfkit.experimental.client import Client
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
@@ -25,7 +27,16 @@ load_dotenv()
 # Ensure model requests are allowed for integration tests
 models.ALLOW_MODEL_REQUESTS = True
 
+
+@dataclass
+class Response:
+    response: str
+    recipient_names: list[str]
+
+
 SimpleAgent = BaseAgentNodeDef[str]
+
+StructuredAgent = BaseAgentNodeDef[Response]
 
 user_name: str = "Conan"
 agent_name: str = "LeBron James III"
@@ -83,6 +94,17 @@ class AgentProvider(Provider):
         )
 
     @provide
+    def get_structured_agent(self, model_client: PydanticModelClient) -> StructuredAgent:
+        return StructuredAgent(
+            "test_structured_agent",
+            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}.",
+            subscribe_topics="test_agent.input",
+            publish_topic="test_agent.output",
+            model_client=model_client,
+            final_output_type=Response,
+        )
+
+    @provide
     def get_multiple_tools(self) -> AnyOf[list[BaseToolNodeDef], list[ToolNodeDef]]:
         return [agent_tool(read_mind), agent_tool(get_users_name), agent_tool(weather)]
 
@@ -130,6 +152,13 @@ def deploy_agent():
 
 
 @pytest.fixture(scope="session")
+def deploy_structured_agent():
+    worker = di_container.get(Worker)
+    agent = di_container.get(StructuredAgent)
+    worker.add_nodes(agent)
+
+
+@pytest.fixture(scope="session")
 def deploy_multiple_agent_tools():
     tools = di_container.get(list[ToolNodeDef])
     worker = di_container.get(Worker)
@@ -162,10 +191,18 @@ def prepare_worker():
     worker.prepare()
 
 
-async def send_message(prompt: str, msg_history: list[ModelMessage] | None = None, deps: dict[str, Any] | None = None) -> Envelope:
+async def send_message(
+    prompt: str,
+    callback_topic: str,
+    temp_instructions: str | None = None,
+    msg_history: list[ModelMessage] | None = None,
+    deps: dict[str, Any] | None = None,
+) -> Envelope:
     corr_id = uuid_utils.uuid7().hex
     client = di_container.get(Client)
-    await client.invoke_node(prompt, "test_agent.input", "test_agent.tools_test.output", corr_id, message_history=msg_history, deps=deps)
+    await client.invoke_node(
+        prompt, "test_agent.input", callback_topic, corr_id, temp_instructions=temp_instructions, message_history=msg_history, deps=deps
+    )
     resp_store = di_container.get(dict)
     assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
 
@@ -290,14 +327,14 @@ async def test_simple_agent_with_multiturn_convo(deploy_agent, deploy_multiple_a
     gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
-        result = await send_message("do you know my name?")
+        result = await send_message("do you know my name? DO NOT tell me your name for now.", "test_agent.tools_test.output")
         resp_msg = result.context.state.message_history[-1]
 
         assert isinstance(resp_msg, ModelResponse)
         assert resp_msg.text is not None
         assert user_name.lower() in resp_msg.text.lower()
 
-        result = await send_message("And what's your name?", msg_history=result.context.state.message_history)
+        result = await send_message("And what's your name?", "test_agent.tools_test.output", msg_history=result.context.state.message_history)
 
         resp_msg = result.context.state.message_history[-1]
 
@@ -305,7 +342,9 @@ async def test_simple_agent_with_multiturn_convo(deploy_agent, deploy_multiple_a
         assert resp_msg.text is not None
         assert agent_name.lower() in resp_msg.text.lower()
 
-        result = await send_message("What's the weather in vegas rn and read my mind pls.", msg_history=result.context.state.message_history)
+        result = await send_message(
+            "What's the weather in vegas rn and read my mind pls.", "test_agent.tools_test.output", msg_history=result.context.state.message_history
+        )
 
         resp_msg = result.context.state.message_history[-1]
 
@@ -332,6 +371,7 @@ async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_ag
     async with TestKafkaBroker(broker) as _:
         result = await send_message(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
+            "test_agent.tools_test.output",
             deps={"ephemeral_id": "id1"},
         )
         resp_msg = result.context.state.message_history[-1]
@@ -341,7 +381,10 @@ async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_ag
         assert caller_id_lookup["id1"] in resp_msg.text.lower()
 
         result = await send_message(
-            "I'm on my android phone now. What's this new number?", msg_history=result.context.state.message_history, deps={"ephemeral_id": "id2"}
+            "I'm on my android phone now. What's this new number?",
+            "test_agent.tools_test.output",
+            msg_history=result.context.state.message_history,
+            deps={"ephemeral_id": "id2"},
         )
 
         resp_msg = result.context.state.message_history[-1]
@@ -351,7 +394,10 @@ async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_ag
         assert caller_id_lookup["id2"] in resp_msg.text.lower()
 
         result = await send_message(
-            "This is my google phone, please check this number.", msg_history=result.context.state.message_history, deps={"ephemeral_id": "id3"}
+            "This is my google phone, please check this number.",
+            "test_agent.tools_test.output",
+            msg_history=result.context.state.message_history,
+            deps={"ephemeral_id": "id3"},
         )
 
         resp_msg = result.context.state.message_history[-1]
@@ -363,27 +409,34 @@ async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_ag
         print_message_history(result.context.state.message_history)
 
 
+# TODO: final output type needs to be deserialized client side as well. Need to review how structured outputs are sent to client. In ModelMessage?
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_structured_output_agent(deploy_agent, deploy_multiple_agent_tools):
-    agent = di_container.get(SimpleAgent)
+async def test_structured_output_agent(deploy_structured_agent, deploy_multiple_agent_tools):
+    agent = di_container.get(StructuredAgent)
     tools = di_container.get(list[ToolNodeDef])
     agent.add_tools(*tools)
     prepare_worker()
 
     broker = di_container.get(KafkaBroker)
     gather_results = gather_factory()
-    gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
+    gather_results = broker.subscriber("test_agent.structured_output_test.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
-        result = await send_message("do you know my name?")
+        result = await send_message(
+            "do you know my name?",
+            "test_agent.structured_output_test.output",
+            "when responding, always direct responses to specific recipients you would like to target.",
+        )
         resp_msg = result.context.state.message_history[-1]
 
         assert isinstance(resp_msg, ModelResponse)
         assert resp_msg.text is not None
         assert user_name.lower() in resp_msg.text.lower()
 
-        result = await send_message("And what's your name?", msg_history=result.context.state.message_history)
+        result = await send_message(
+            "And what's your name?", "test_agent.structured_output_test.output", msg_history=result.context.state.message_history
+        )
 
         resp_msg = result.context.state.message_history[-1]
 
@@ -391,7 +444,11 @@ async def test_structured_output_agent(deploy_agent, deploy_multiple_agent_tools
         assert resp_msg.text is not None
         assert agent_name.lower() in resp_msg.text.lower()
 
-        result = await send_message("What's the weather in vegas rn and read my mind pls.", msg_history=result.context.state.message_history)
+        result = await send_message(
+            "What's the weather in vegas rn and read my mind pls.",
+            "test_agent.structured_output_test.output",
+            msg_history=result.context.state.message_history,
+        )
 
         resp_msg = result.context.state.message_history[-1]
 
