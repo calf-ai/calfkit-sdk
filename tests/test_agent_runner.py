@@ -67,9 +67,7 @@ def deploy_broker() -> BrokerClient:
     service = NodesService(broker)
 
     # 1. Deploy llm model node worker
-    model_client = OpenAIModelClient(
-        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
-    )
+    model_client = OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
     chat_node = ChatNode(model_client)
     service.register_node(chat_node)
 

@@ -14,9 +14,7 @@ def register_gate(gate: DecisionGate) -> None:
         ValueError: If a gate with the same ``kind`` is already registered.
     """
     if gate.kind in _GATES:
-        raise ValueError(
-            f"A gate with kind {gate.kind!r} is already registered. Use a unique `kind` value."
-        )
+        raise ValueError(f"A gate with kind {gate.kind!r} is already registered. Use a unique `kind` value.")
     _GATES[gate.kind] = gate
 
 

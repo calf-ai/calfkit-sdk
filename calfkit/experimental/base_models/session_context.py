@@ -4,7 +4,6 @@ from typing import Any, Generic
 
 import uuid_utils
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import TypeAliasType
 
 from calfkit.experimental._types import DepsT, StackItemT, StateT, UserDepsT
 from calfkit.experimental.base_models.actions import Call, _Call

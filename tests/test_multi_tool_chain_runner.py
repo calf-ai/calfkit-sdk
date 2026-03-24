@@ -72,9 +72,7 @@ def deploy_chain_broker() -> BrokerClient:
     broker = BrokerClient()
     service = NodesService(broker)
 
-    model_client = OpenAIModelClient(
-        os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
-    )
+    model_client = OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
     service.register_node(ChatNode(model_client))
 
     service.register_node(lookup_employee_id)
@@ -128,8 +126,6 @@ async def test_sequential_tool_chain(deploy_chain_broker):
         final_msg = await asyncio.wait_for(response.get_final_response(), timeout=30.0)
         assert isinstance(final_msg, ModelResponse)
         assert final_msg.text is not None
-        assert "95,000" in final_msg.text or "95000" in final_msg.text, (
-            f"Expected salary figure in response, got: {final_msg.text}"
-        )
+        assert "95,000" in final_msg.text or "95000" in final_msg.text, f"Expected salary figure in response, got: {final_msg.text}"
 
         print(f"Response: {final_msg.text}")

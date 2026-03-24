@@ -92,11 +92,7 @@ class EnvelopeState(CompactBaseModel):
 
     def replace_uncommitted_with_turn_context(self) -> None:
         """Replace uncommitted messages with conversation context from the groupchat turns queue."""
-        self.uncommitted_messages = (
-            self.groupchat_data.flat_messages_from_turns_queue
-            if self.groupchat_data is not None
-            else []
-        )
+        self.uncommitted_messages = self.groupchat_data.flat_messages_from_turns_queue if self.groupchat_data is not None else []
 
     def push_delegation_frame(self, frame: DelegationFrame) -> None:
         """Push a delegation frame onto the stack.

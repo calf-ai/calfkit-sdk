@@ -37,9 +37,7 @@ class MessageHistoryStore(ABC):
         """
         ...
 
-    async def append_many(
-        self, thread_id: str, messages: Sequence[ModelMessage], scope: str | None = None
-    ) -> None:
+    async def append_many(self, thread_id: str, messages: Sequence[ModelMessage], scope: str | None = None) -> None:
         """Append multiple messages to history.
 
         Default implementation calls append() for each message.

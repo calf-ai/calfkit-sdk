@@ -27,9 +27,7 @@ class InMemoryMessageHistoryStore(MessageHistoryStore):
         """Append a single message to history."""
         self._messages[thread_id].append((scope, message))
 
-    async def append_many(
-        self, thread_id: str, messages: Sequence[ModelMessage], scope: str | None = None
-    ) -> None:
+    async def append_many(self, thread_id: str, messages: Sequence[ModelMessage], scope: str | None = None) -> None:
         self._messages[thread_id].extend((scope, msg) for msg in messages)
 
     async def delete(self, thread_id: str, scope: str | None = None) -> None:
@@ -37,6 +35,4 @@ class InMemoryMessageHistoryStore(MessageHistoryStore):
         if scope is None:
             self._messages.pop(thread_id, None)
         else:
-            self._messages[thread_id] = [
-                (s, msg) for s, msg in self._messages[thread_id] if s != scope
-            ]
+            self._messages[thread_id] = [(s, msg) for s, msg in self._messages[thread_id] if s != scope]

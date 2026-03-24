@@ -31,9 +31,7 @@ class BaseServiceClient:
             )
         return correlation_id
 
-    async def message_to_node(
-        self, node: BaseNode, payload_kwargs: dict[str, Any], *, correlation_id: str | None = None
-    ) -> str:
+    async def message_to_node(self, node: BaseNode, payload_kwargs: dict[str, Any], *, correlation_id: str | None = None) -> str:
         if node.subscribed_topic is None:
             raise RuntimeError(f"Node's subscribed topic can't be None: {node}")
         schema = node.input_message_schema

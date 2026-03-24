@@ -26,9 +26,7 @@ class NodeRunner(Registrator):
             pub: str | None = topics_dict.get("publish_topic")
             subs: list[str] = topics_dict.get("subscribe_topics", [])
             for sub in subs:
-                handler_fn = broker.subscriber(
-                    sub, max_workers=max_workers, group_id=group_id, **extra_subscribe_kwargs
-                )(handler_fn)
+                handler_fn = broker.subscriber(sub, max_workers=max_workers, group_id=group_id, **extra_subscribe_kwargs)(handler_fn)
             if pub is not None:
                 handler_fn = broker.publisher(pub, **extra_publish_kwargs)(handler_fn)
 

@@ -35,9 +35,7 @@ class Turn(CompactBaseModel):
         self.messages.extend(messages)
 
     @classmethod
-    def create_new_turn(
-        cls, messages: list[ModelMessage] | None = None, skipped: bool = False
-    ) -> "Turn":
+    def create_new_turn(cls, messages: list[ModelMessage] | None = None, skipped: bool = False) -> "Turn":
         return cls(messages=messages if messages is not None else [], skipped=skipped)
 
 
@@ -145,14 +143,10 @@ class GroupchatDataModel(CompactBaseModel):
             agent_names.append(node.name or "general-agent (no name)")
 
         if len(agent_topics) < 2:
-            raise ValueError(
-                f"A groupchat requires at least 2 agents with valid topics, got {len(agent_topics)}"
-            )
+            raise ValueError(f"A groupchat requires at least 2 agents with valid topics, got {len(agent_topics)}")
 
         if system_prompt_addition is None:
-            system_prompt_addition = (
-                "\n\nYou are in a groupchat with other agents. The agents in the groupchat are:\n"
-            )
+            system_prompt_addition = "\n\nYou are in a groupchat with other agents. The agents in the groupchat are:\n"
             system_prompt_addition += "\n".join("- " + name for name in agent_names)
         return cls(
             groupchat_agent_topics=agent_topics,

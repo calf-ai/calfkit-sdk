@@ -1,11 +1,9 @@
-from collections.abc import Sequence
-from typing import Any, Generic
+from typing import Generic
 
 from pydantic import BaseModel, Field
 
-from calfkit.experimental._types import DepsT, StateT
+from calfkit.experimental._types import DepsT
 from calfkit.experimental.base_models.session_context import SessionRunContext, WorkflowState
-from calfkit.experimental.data_model.state_deps import State
 
 
 # ---------------------------------------------------------------------------
@@ -19,9 +17,7 @@ class BaseEnvelope(BaseModel, Generic[DepsT]):
     """
 
     context: SessionRunContext[DepsT]
-    internal_workflow_state: WorkflowState = Field(
-        description="The internal, framework-level state tracking workflow"
-    )
+    internal_workflow_state: WorkflowState = Field(description="The internal, framework-level state tracking workflow")
 
 
 Envelope = BaseEnvelope[DepsT]

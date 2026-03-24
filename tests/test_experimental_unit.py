@@ -615,9 +615,7 @@ class TestTailCallChoreography:
 
             # TailCall inherits the original callback_topic
             assert result.internal_workflow_state.current_frame.target_topic == "event_log"
-            assert (
-                result.internal_workflow_state.current_frame.callback_topic == "original_callback"
-            )
+            assert result.internal_workflow_state.current_frame.callback_topic == "original_callback"
 
 
 class TestSilentChoreography:
@@ -752,9 +750,7 @@ class StubInputCapturingNode(BaseNodeDef[State, Deps]):
 
     captured_input: Any | None = None
 
-    async def run(
-        self, ctx: SessionRunContext[State, Deps], my_custom_input: Any | None = None
-    ) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[State, Deps], my_custom_input: Any | None = None) -> NodeResult[State]:
         self.captured_input = my_custom_input
         return ReturnCall(state=ctx.state)
 
@@ -794,9 +790,7 @@ class TestInputPropagation:
             pass  # absorb reply
 
         async with TestKafkaBroker(broker) as _:
-            envelope = _make_test_envelope(
-                reply_stack=["cap_node.private.return"], input_args=["tc-99"]
-            )
+            envelope = _make_test_envelope(reply_stack=["cap_node.private.return"], input_args=["tc-99"])
             await broker.publish(envelope, topic="cap.input", correlation_id="input-prop-1")
 
             from tests.utils import wait_for_condition

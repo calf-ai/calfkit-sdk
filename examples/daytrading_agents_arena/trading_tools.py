@@ -141,8 +141,7 @@ class AccountStore:
             available = ", ".join(sorted(self._price_book.snapshot().keys()))
             return TradeResult(
                 False,
-                f"No live price for '{product_id}'. "
-                f"Available: {available or 'none (waiting for price data)'}",
+                f"No live price for '{product_id}'. Available: {available or 'none (waiting for price data)'}",
             )
 
         if quantity <= 0:
@@ -150,9 +149,7 @@ class AccountStore:
 
         rounded = round(quantity, 1)
         if abs(quantity - rounded) > 1e-9:
-            return TradeResult(
-                False, "Quantity must have at most 1 decimal place (e.g., 0.5, 1.2)."
-            )
+            return TradeResult(False, "Quantity must have at most 1 decimal place (e.g., 0.5, 1.2).")
         quantity = rounded
 
         account = self.get_or_create(agent_id)
@@ -169,17 +166,14 @@ class AccountStore:
             existing_qty = account.positions.get(product_id, 0)
             now_ts = datetime.now().timestamp()
             existing_ts = account.avg_entry_ts.get(product_id, now_ts)
-            account.avg_entry_ts[product_id] = (existing_qty * existing_ts + quantity * now_ts) / (
-                existing_qty + quantity
-            )
+            account.avg_entry_ts[product_id] = (existing_qty * existing_ts + quantity * now_ts) / (existing_qty + quantity)
             account.positions[product_id] = existing_qty + quantity
             account.cost_basis[product_id] = account.cost_basis.get(product_id, 0.0) + cost
             account.trade_count += 1
             self._record_trade(agent_id, action, product_id, quantity, price, latency)
             return TradeResult(
                 True,
-                f"Bought {quantity} {product_id} @ ${price:,.2f} for ${cost:,.2f}. "
-                f"Cash remaining: ${account.cash:,.2f}.",
+                f"Bought {quantity} {product_id} @ ${price:,.2f} for ${cost:,.2f}. Cash remaining: ${account.cash:,.2f}.",
             )
 
         # sell
@@ -188,16 +182,13 @@ class AccountStore:
         if quantity > held:
             return TradeResult(
                 False,
-                f"Insufficient holdings. Want to sell {quantity} {product_id} "
-                f"but only hold {held}.",
+                f"Insufficient holdings. Want to sell {quantity} {product_id} but only hold {held}.",
             )
         proceeds = price * quantity
         account.cash += proceeds
         # Reduce cost basis proportionally (average cost method)
         avg_cost = account.avg_cost_per_unit(product_id)
-        account.cost_basis[product_id] = account.cost_basis.get(product_id, 0.0) - (
-            avg_cost * quantity
-        )
+        account.cost_basis[product_id] = account.cost_basis.get(product_id, 0.0) - (avg_cost * quantity)
         new_qty = round(held - quantity, 1)
         if new_qty <= 0:
             del account.positions[product_id]
@@ -209,8 +200,7 @@ class AccountStore:
         self._record_trade(agent_id, action, product_id, quantity, price, latency)
         return TradeResult(
             True,
-            f"Sold {quantity} {product_id} @ ${price:,.2f} for ${proceeds:,.2f}. "
-            f"Cash remaining: ${account.cash:,.2f}.",
+            f"Sold {quantity} {product_id} @ ${price:,.2f} for ${proceeds:,.2f}. Cash remaining: ${account.cash:,.2f}.",
         )
 
     def _record_trade(
@@ -240,9 +230,7 @@ class PlotextChart:
         self._balance_history = balance_history
         self._chart_height = chart_height
 
-    def __rich_console__(
-        self, console: object, options: object
-    ) -> typing.Generator[Text, None, None]:
+    def __rich_console__(self, console: object, options: object) -> typing.Generator[Text, None, None]:
         width = getattr(options, "max_width", 80)
 
         plt.clf()
@@ -326,9 +314,7 @@ class PortfolioView:
             Layout(name="chart", size=15),
         )
         layout["header"].update(self._build_header())
-        layout["summary_header"].update(
-            Text.from_markup("[bold]Agent Account Summaries[/]", justify="center")
-        )
+        layout["summary_header"].update(Text.from_markup("[bold]Agent Account Summaries[/]", justify="center"))
         layout["summary"].update(self._build_summary_cards())
         layout["body"].split_row(
             Layout(name="positions", ratio=3),
@@ -346,10 +332,7 @@ class PortfolioView:
     def _build_header(self) -> Panel:
         now = datetime.now().strftime("%H:%M:%S")
         return Panel(
-            Text.from_markup(
-                "[bold cyan]Portfolio Dashboard[/]  [bold red]●[/] "
-                f"[bold green]LIVE[/]  [dim]|  {now}[/]"
-            ),
+            Text.from_markup(f"[bold cyan]Portfolio Dashboard[/]  [bold red]●[/] [bold green]LIVE[/]  [dim]|  {now}[/]"),
             style="cyan",
             height=3,
         )
@@ -368,9 +351,7 @@ class PortfolioView:
             value = account.portfolio_value(price_book)
             card = Panel(
                 Text.from_markup(
-                    f"[magenta]Total Value:[/] ${value:,.2f}\n"
-                    f"[yellow]Positions:[/] {len(account.positions)}  "
-                    f"[cyan]Trades:[/] {account.trade_count}"
+                    f"[magenta]Total Value:[/] ${value:,.2f}\n[yellow]Positions:[/] {len(account.positions)}  [cyan]Trades:[/] {account.trade_count}"
                 ),
                 title=f"[bold]#{rank} {agent_id}[/]",
                 border_style="cyan",
@@ -508,9 +489,7 @@ view = PortfolioView(store)
 # ── Shared tool logic ────────────────────────────────────────────
 
 
-def _execute_trade(
-    agent_id: str, product_id: str, quantity: float, action: str, latency: float | None = None
-) -> str:
+def _execute_trade(agent_id: str, product_id: str, quantity: float, action: str, latency: float | None = None) -> str:
     result = store.execute_trade(agent_id, product_id, quantity, action, latency=latency)
     view.rerender()
     return result.message
@@ -541,10 +520,7 @@ def _get_portfolio(agent_id: str) -> str:
     if not account.positions:
         lines.append("Positions: none")
     else:
-        lines.append(
-            "| Ticker | Qty | Avg Cost | Total Cost "
-            "| Current Price | Mkt Value | P&L | Avg Time Held |"
-        )
+        lines.append("| Ticker | Qty | Avg Cost | Total Cost | Current Price | Mkt Value | P&L | Avg Time Held |")
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
         for pid in sorted(account.positions):
             qty = account.positions[pid]
@@ -564,10 +540,7 @@ def _get_portfolio(agent_id: str) -> str:
                     f"| {pnl_sign}${pnl:,.2f} | {hold_str} |"
                 )
             else:
-                lines.append(
-                    f"| {pid} | {qty:g} | ${avg_cost:,.2f} | ${total_cost:,.2f} "
-                    f"| N/A | N/A | N/A | {hold_str} |"
-                )
+                lines.append(f"| {pid} | {qty:g} | ${avg_cost:,.2f} | ${total_cost:,.2f} | N/A | N/A | N/A | {hold_str} |")
 
     portfolio_val = account.portfolio_value(pb)
     lines.append(f"\nTotal portfolio value: ${portfolio_val:,.2f}")

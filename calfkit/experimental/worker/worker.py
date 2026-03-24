@@ -43,11 +43,9 @@ class Worker:
                     max_workers=self._max_workers,
                     **self._extra_subscribe_kwargs,
                 )
-                node.handler = subscriber(node.handler)
+                handler = subscriber(node.handler)
                 if node.publish_topic:
-                    node.handler = self._client._connection.publisher(
-                        node.publish_topic, **self._extra_publish_kwargs
-                    )(node.handler)
+                    self._client._connection.publisher(node.publish_topic, **self._extra_publish_kwargs)(handler)
 
             self._prepared = True
 

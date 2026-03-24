@@ -37,14 +37,10 @@ class AgentProvider(Provider):
 
     @provide
     def get_model_client(self) -> WithParents[OpenAIModelClient]:
-        return OpenAIModelClient(
-            os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT")
-        )
+        return OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
 
     @provide
-    def get_simple_agent(
-        self, model_client: PydanticModelClient
-    ) -> AnyOf[SimpleAgent, BaseAgentNodeDef]:
+    def get_simple_agent(self, model_client: PydanticModelClient) -> AnyOf[SimpleAgent, BaseAgentNodeDef]:
         return SimpleAgent(
             "test_simple_agent",
             system_prompt="You are a helpful AI assistant. You're name is LeBron James III.",
@@ -82,9 +78,7 @@ class TestUtilsProvider(Provider):
         return dict()
 
 
-di_container = make_container(
-    WorkerProvider(), ClientProvider(), AgentProvider(), TestUtilsProvider()
-)
+di_container = make_container(WorkerProvider(), ClientProvider(), AgentProvider(), TestUtilsProvider())
 
 
 @pytest.fixture(scope="session")
@@ -119,15 +113,11 @@ async def test_agent(deploy_worker):
 
     async with TestKafkaBroker(broker) as _:
         corr_id = uuid_utils.uuid7().hex
-        await client.invoke_node(
-            "Hi, what's your name?", "test_agent.input", "test_agent.output", corr_id
-        )
+        await client.invoke_node("Hi, what's your name?", "test_agent.input", "test_agent.output", corr_id)
 
         # TestKafkaBroker is synchronous — the entire handler chain completes
         # inline during invoke_node(), so resp_store is already populated.
-        assert corr_id in resp_store, (
-            f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
-        )
+        assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
 
         response = resp_store[corr_id]
         assert isinstance(response, Envelope)

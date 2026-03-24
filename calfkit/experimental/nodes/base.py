@@ -56,9 +56,7 @@ class BaseNodeDef(Generic[DepsT]):
     # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
-    async def run(
-        self, ctx: SessionRunContext[DepsT], *args: Any, **kwargs: Any
-    ) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext[DepsT], *args: Any, **kwargs: Any) -> NodeResult[State]:
         """Runs the node's logic using provided context.
 
         Subclasses that need per-invocation input can add an optional parameter
@@ -90,13 +88,8 @@ class BaseNodeDef(Generic[DepsT]):
     ) -> Envelope[DepsT]:
         logger.debug("[%s] handler entered node=%s", correlation_id[:8], self._node_id)
         ctx = await self.prepare_context(envelope)
-        if (
-            self._run_accepts_input
-            and envelope.internal_workflow_state.current_frame.input_args is not None
-        ):
-            output = await self.run(
-                ctx, *envelope.internal_workflow_state.current_frame.input_args
-            )
+        if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
+            output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
         else:
             output = await self.run(ctx)
 
@@ -155,9 +148,7 @@ class BaseNodeDef(Generic[DepsT]):
             )
             publish_envelope = envelope
         else:
-            logger.error(
-                "Return type is unknown or invalid so the message was not published anywhere."
-            )
+            logger.error("Return type is unknown or invalid so the message was not published anywhere.")
             publish_envelope = envelope
 
         return publish_envelope

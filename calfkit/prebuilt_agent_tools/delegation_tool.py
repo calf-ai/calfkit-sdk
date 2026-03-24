@@ -28,9 +28,7 @@ Args:
     message (str): The message to provide the delegate agent in order to provide context."""
 
         self._delegations_topic_registry: dict[str, str] = {
-            node.name: node.entrypoint_topic
-            for node in nodes
-            if node.entrypoint_topic is not None and node.name is not None
+            node.name: node.entrypoint_topic for node in nodes if node.entrypoint_topic is not None and node.name is not None
         }
 
         def delegation_tool(name: str, message: str) -> None:
@@ -73,10 +71,7 @@ Args:
         if target_topic is None:
             tool_result = ToolReturnPart(
                 tool_name=tool_call_req.tool_name,
-                content=(
-                    f"Error: agent '{target_name}' not found."
-                    f" Available agents: {', '.join(self._delegations_topic_registry.keys())}"
-                ),
+                content=(f"Error: agent '{target_name}' not found. Available agents: {', '.join(self._delegations_topic_registry.keys())}"),
                 tool_call_id=tool_call_req.tool_call_id,
             )
             event_envelope.payload = None
@@ -87,9 +82,7 @@ Args:
         if not reply_to:
             tool_result = ToolReturnPart(
                 tool_name=tool_call_req.tool_name,
-                content=(
-                    "Error: delegation requires reply_to (caller must publish with reply_to set)."
-                ),
+                content=("Error: delegation requires reply_to (caller must publish with reply_to set)."),
                 tool_call_id=tool_call_req.tool_call_id,
             )
             event_envelope.payload = None
@@ -100,10 +93,7 @@ Args:
         if event_envelope.thread_id is None:
             tool_result = ToolReturnPart(
                 tool_name=tool_call_req.tool_name,
-                content=(
-                    "Error: delegation requires a thread_id"
-                    " (message history store must be configured)."
-                ),
+                content=("Error: delegation requires a thread_id (message history store must be configured)."),
                 tool_call_id=tool_call_req.tool_call_id,
             )
             event_envelope.payload = None
@@ -133,9 +123,7 @@ Args:
         delegation.payload = None
 
         # Prepare the user prompt for the sub-agent, attributed to the caller
-        delegation.state.prepare_uncommitted_agent_messages(
-            [ModelRequest.user_text_prompt(message, name=payload.agent_name)]
-        )
+        delegation.state.prepare_uncommitted_agent_messages([ModelRequest.user_text_prompt(message, name=payload.agent_name)])
 
         await broker.publish(
             delegation,
@@ -162,16 +150,10 @@ Args:
 
         # Extract sub-agent's response — check payload first, then text
         if event_envelope.payload is not None:
-            response_text = (
-                json.dumps(event_envelope.payload)
-                if isinstance(event_envelope.payload, dict)
-                else str(event_envelope.payload)
-            )
+            response_text = json.dumps(event_envelope.payload) if isinstance(event_envelope.payload, dict) else str(event_envelope.payload)
         else:
             last_msg = event_envelope.state.latest_message_in_history
-            response_text = (
-                last_msg.text if isinstance(last_msg, ModelResponse) and last_msg.text else ""
-            )
+            response_text = last_msg.text if isinstance(last_msg, ModelResponse) and last_msg.text else ""
 
         # Wrap the sub-agent's response as a ToolReturnPart for the caller's LLM
         tool_result = ToolReturnPart(

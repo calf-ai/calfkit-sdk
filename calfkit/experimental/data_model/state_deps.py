@@ -21,9 +21,7 @@ class CoreMessageState(BaseAgentActivityState):
 
     model_config = ConfigDict(extra="ignore")
     uncommitted_message: ModelMessage | None = None
-    message_history: list[ModelMessage] = Field(
-        default_factory=list, description="Append-only message history list"
-    )
+    message_history: list[ModelMessage] = Field(default_factory=list, description="Append-only message history list")
 
     def latest_tool_calls(self) -> list[ToolCallPart]:
         pending_tool_calls = list()
@@ -39,9 +37,7 @@ class CoreMessageState(BaseAgentActivityState):
 
     def commit_message_to_history(self) -> None:
         if self.uncommitted_message is None:
-            err_msg = (
-                "The staged message(uncommitted_message) is None, can't be committed to history."
-            )
+            err_msg = "The staged message(uncommitted_message) is None, can't be committed to history."
             logging.error(err_msg)
             raise RuntimeError(err_msg)
         self.message_history.append(self.uncommitted_message)

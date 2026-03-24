@@ -21,9 +21,7 @@ class InvokeResponse:
         self,
         correlation_id: str,
     ):
-        self.send, self.receive = create_memory_object_stream[EventEnvelope](
-            max_buffer_size=math.inf
-        )
+        self.send, self.receive = create_memory_object_stream[EventEnvelope](max_buffer_size=math.inf)
         self._done = asyncio.Event()
         self._final_response: ModelMessage | None = None
         self._final_envelope: EventEnvelope | None = None
@@ -167,9 +165,7 @@ class RouterServiceClient(Generic[AgentDepsT]):
         """
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
-        subscriber = self._broker.subscriber(
-            self._node.publish_to_topic or "", persistent=False, group_id=uuid_utils.uuid4().hex
-        )
+        subscriber = self._broker.subscriber(self._node.publish_to_topic or "", persistent=False, group_id=uuid_utils.uuid4().hex)
 
         handler, response_pipe = self._get_ephemeral_handler(correlation_id)
         subscriber(handler)

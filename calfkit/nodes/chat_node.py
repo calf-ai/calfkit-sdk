@@ -28,9 +28,7 @@ class ChatNode(BaseNode, ABC):
         self.model_client = model_client
         self._structured_output_type = output_type
         if model_client is not None:
-            agent_output_types: list[type] = (
-                [output_type, DeferredToolRequests] if output_type else [str, DeferredToolRequests]
-            )
+            agent_output_types: list[type] = [output_type, DeferredToolRequests] if output_type else [str, DeferredToolRequests]
             self.agent: Agent[Any, Any] = Agent(
                 model_client,
                 output_type=agent_output_types,
@@ -50,11 +48,7 @@ class ChatNode(BaseNode, ABC):
             raise RuntimeError("Unable to handle incoming request because Model client is None.")
 
         # Read from ChatPayload
-        payload = (
-            ChatPayload.model_validate(event_envelope.payload)
-            if event_envelope.payload is not None
-            else ChatPayload()
-        )
+        payload = ChatPayload.model_validate(event_envelope.payload) if event_envelope.payload is not None else ChatPayload()
 
         # Build ExternalToolset from payload's tool definitions
         toolsets: list[ExternalToolset[Any]] = []
@@ -83,11 +77,7 @@ class ChatNode(BaseNode, ABC):
         if isinstance(result.output, DeferredToolRequests):
             event_envelope.payload = None
         else:
-            event_envelope.payload = (
-                result.output.model_dump(mode="json")
-                if hasattr(result.output, "model_dump")
-                else result.output
-            )
+            event_envelope.payload = result.output.model_dump(mode="json") if hasattr(result.output, "model_dump") else result.output
 
         # Add new messages to state's uncommitted
         for msg in result.new_messages():

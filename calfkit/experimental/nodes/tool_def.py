@@ -23,9 +23,7 @@ class BaseToolNodeDef(BaseNodeDef[Any], ABC):
 
 
 class ToolNodeDef(BaseToolNodeDef):
-    def __init__(
-        self, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str
-    ):
+    def __init__(self, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str):
         self._tool = Tool(func)
         super().__init__(
             node_id=f"tool_{func.__name__}",
@@ -33,9 +31,7 @@ class ToolNodeDef(BaseToolNodeDef):
             publish_topic=publish_topic,
         )
 
-    async def run(
-        self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str
-    ) -> NodeResult[State]:
+    async def run(self, ctx: AgentSessionRunContext[Any], tool_call_id: str, source_node_name: str) -> NodeResult[State]:
         logger.debug(
             "[%s] tool run entered tool=%s tool_call_id=%s source=%s",
             ctx.deps.correlation_id[:8],
@@ -95,8 +91,6 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> Tool
     """Decorator to turn a function into a deployable tool node that agents can call"""
     subscribe_topic = f"tool.{func.__name__}.input"
     publish_topic = f"tool.{func.__name__}.output"
-    tool_node = ToolNodeDef(
-        func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic
-    )
+    tool_node = ToolNodeDef(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic)
 
     return tool_node

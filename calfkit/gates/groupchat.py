@@ -15,8 +15,7 @@ class GroupchatGate(DecisionGate):
     def prompt(self) -> str:
         lines = [
             "<system_reminder>",
-            "You do not need to mention this system_reminder"
-            " to anybody in the chat, as they are already aware.",
+            "You do not need to mention this system_reminder to anybody in the chat, as they are already aware.",
             "It is now your opportunity to send a message into the groupchat.",
             "Based on the conversation, please review if you should respond or not.",
             "If you do not want to send a message, reply with the exact text"

@@ -35,33 +35,29 @@ class BaseAgentNodeDef(
         publish_topic: str,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
-        deps_type: type[AgentDepsT] = NoneType,
-        final_output_type: type[AgentOutputT] = str,
+        deps_type: type[AgentDepsT] | type[None] = NoneType,
+        final_output_type: type[AgentOutputT] | type[str] = str,
     ):
         self.deps_type = deps_type
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
         self.tools = tools
-        self.tools_registry = (
-            {tool.tool_schema.name: tool for tool in tools} if tools else dict[str, ToolNodeDef]()
-        )
-        super().__init__(
-            node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic
-        )
+        self.tools_registry = {tool.tool_schema.name: tool for tool in tools} if tools else dict[str, ToolNodeDef]()
+        super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
 
         output_types: list[type[AgentOutputT | DeferredToolRequests]] = [
-            final_output_type,
+            cast(type[AgentOutputT], final_output_type),
             DeferredToolRequests,
         ]
         self._agent_loop: Agent[AgentDepsT, AgentOutputT | DeferredToolRequests] = Agent(
             model_client,
             name=self.name,
             output_type=output_types,
-            deps_type=deps_type,
+            deps_type=cast(type[AgentDepsT], deps_type),
         )
 
     async def run(self, ctx: AgentSessionRunContext[AgentDepsT]) -> NodeResult[State]:
-        agent_deps: AgentDepsT = cast(AgentDepsT, ctx.deps.agent_deps)
+        agent_deps = ctx.deps.agent_deps
         logger.debug(
             "[%s] agent run entered node=%s pending_tool_calls=%d history_len=%d",
             ctx.deps.correlation_id[:8],
@@ -72,7 +68,7 @@ class BaseAgentNodeDef(
 
         if agent_deps is not None and self.deps_type is not None:
             if issubclass(self.deps_type, BaseModel) and not isinstance(agent_deps, self.deps_type):
-                agent_deps = cast(AgentDepsT, self.deps_type.model_validate(agent_deps))
+                agent_deps = self.deps_type.model_validate(agent_deps)
                 ctx.deps = ctx.deps.model_copy(update={"agent_deps": agent_deps})
             elif not isinstance(agent_deps, self.deps_type):
                 logger.error(
@@ -86,9 +82,7 @@ class BaseAgentNodeDef(
 
         if len(latest_tool_calls) > 0:
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
-                target_tool_call = next(
-                    tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results
-                )
+                target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
                 logger.debug(
                     "[%s] routing pending tool call=%s tool=%s node=%s",
                     ctx.deps.correlation_id[:8],
@@ -103,12 +97,7 @@ class BaseAgentNodeDef(
                     self.name,
                 )
 
-            tool_results = DeferredToolResults(
-                calls={
-                    tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id)
-                    for tc in latest_tool_calls
-                }
-            )
+            tool_results = DeferredToolResults(calls={tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id) for tc in latest_tool_calls})
 
         if ctx.state.uncommitted_message is not None:
             ctx.state.commit_message_to_history()
@@ -117,7 +106,7 @@ class BaseAgentNodeDef(
             message_history=ctx.state.message_history,
             instructions=self.system_prompt,
             toolsets=[ExternalToolset([tool.tool_schema for tool in self.tools_registry.values()])],
-            deps=agent_deps,
+            deps=agent_deps,  # type: ignore[arg-type]  # None valid when AgentDepsT=NoneType
             deferred_tool_results=tool_results,
         )
         if isinstance(result.output, DeferredToolRequests):
@@ -161,12 +150,8 @@ class BaseAgentNodeDef(
                         ),
                     )
 
-            if not tool_call_state.all_call_ids_complete(
-                *[tc.tool_call_id for tc in latest_tool_calls]
-            ):
-                target_tool_call = next(
-                    tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results
-                )
+            if not tool_call_state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
+                target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
                 logger.debug(
                     "[%s] routing new tool call=%s tool=%s node=%s",
                     ctx.deps.correlation_id[:8],
@@ -192,6 +177,4 @@ class BaseAgentNodeDef(
             return ReturnCall[State](state=ctx.state)
 
         else:
-            raise RuntimeError(
-                "Invalid point reached: model output was not the final output type nor a tool call."
-            )
+            raise RuntimeError("Invalid point reached: model output was not the final output type nor a tool call.")

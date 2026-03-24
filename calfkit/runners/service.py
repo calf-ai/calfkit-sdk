@@ -14,12 +14,7 @@ from calfkit.nodes.base_node import BaseNode
 class NodesService:
     def __init__(self, broker: BrokerClient):
         self._broker = broker
-        self._subscribers: list[
-            DefaultSubscriber
-            | BatchSubscriber
-            | ConcurrentDefaultSubscriber
-            | ConcurrentBetweenPartitionsSubscriber
-        ] = []
+        self._subscribers: list[DefaultSubscriber | BatchSubscriber | ConcurrentDefaultSubscriber | ConcurrentBetweenPartitionsSubscriber] = []
 
     def register_node(
         self,

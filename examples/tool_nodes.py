@@ -160,9 +160,7 @@ async def main():
     print(f"  - get_stock_price registered subbed to (topic: {get_stock_price.publish_to_topic})")
 
     service.register_node(get_exchange_rate)
-    print(
-        f"  - get_exchange_rate registered subbed to (topic: {get_exchange_rate.publish_to_topic})"
-    )
+    print(f"  - get_exchange_rate registered subbed to (topic: {get_exchange_rate.publish_to_topic})")
 
     print("\nTool nodes ready. Waiting for requests...")
 

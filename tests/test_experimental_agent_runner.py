@@ -157,9 +157,7 @@ async def test_basic_agent_text_reply():
         system_prompt="You are a helpful assistant. Always respond briefly in one sentence.",
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What is 2 + 2?")])
-    )
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What is 2 + 2?")]))
     ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="test-1", agent_deps=None),
@@ -261,18 +259,14 @@ async def test_agent_multi_turn_memory():
     )
 
     # First turn: introduce information
-    state1 = State(
-        uncommitted_message=ModelRequest(parts=[UserPromptPart(content="My name is Alice.")])
-    )
+    state1 = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="My name is Alice.")]))
     ctx1 = SessionRunContext(
         state=state1,
         deps=Deps(correlation_id="turn-1", agent_deps=None),
     )
 
     result1 = await agent_node.run(ctx1)
-    assert isinstance(result1, ReturnCall), (
-        f"First turn: expected ReturnCall, got {type(result1).__name__}"
-    )
+    assert isinstance(result1, ReturnCall), f"First turn: expected ReturnCall, got {type(result1).__name__}"
     assert len(result1.state.message_history) > 0
 
     # Second turn: carry forward message_history, stage new prompt
@@ -284,9 +278,7 @@ async def test_agent_multi_turn_memory():
     )
 
     result2 = await agent_node.run(ctx2)
-    assert isinstance(result2, ReturnCall), (
-        f"Second turn: expected ReturnCall, got {type(result2).__name__}"
-    )
+    assert isinstance(result2, ReturnCall), f"Second turn: expected ReturnCall, got {type(result2).__name__}"
 
     # Agent should remember "Alice" from the first turn
     text = " ".join(str(p) for p in result2.state.message_history[-1].parts)
@@ -310,11 +302,7 @@ async def test_agent_tool_visibility():
         tools=[get_weather],
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(
-            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
-        )
-    )
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
     ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="vis-1", agent_deps=None),
@@ -323,9 +311,7 @@ async def test_agent_tool_visibility():
     result = await agent_node.run(ctx)
 
     # The LLM should call the get_weather tool, resulting in a Call
-    assert isinstance(result, Call), (
-        f"Expected Call (tool call), got {type(result).__name__}: {result}"
-    )
+    assert isinstance(result, Call), f"Expected Call (tool call), got {type(result).__name__}: {result}"
 
 
 @pytest.mark.asyncio
@@ -345,11 +331,7 @@ async def test_agent_tool_delegation_uses_correct_topic():
         tools=[get_weather],
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(
-            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
-        )
-    )
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
     ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="topic-1", agent_deps=None),
@@ -360,9 +342,7 @@ async def test_agent_tool_delegation_uses_correct_topic():
 
     # The call target should be the tool's actual subscribe topic
     expected_topic = get_weather.subscribe_topics[0]  # "tool.get_weather.input"
-    assert result.target_topic == expected_topic, (
-        f"Call target should be '{expected_topic}', got '{result.target_topic}'"
-    )
+    assert result.target_topic == expected_topic, f"Call target should be '{expected_topic}', got '{result.target_topic}'"
 
 
 @pytest.mark.asyncio
@@ -384,11 +364,7 @@ async def test_agent_tool_delegation_preserves_message_history():
         tools=[get_weather],
     )
 
-    state = State(
-        uncommitted_message=ModelRequest(
-            parts=[UserPromptPart(content="What's the weather in Tokyo?")]
-        )
-    )
+    state = State(uncommitted_message=ModelRequest(parts=[UserPromptPart(content="What's the weather in Tokyo?")]))
     ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id="hist-1", agent_deps=None),
@@ -401,9 +377,7 @@ async def test_agent_tool_delegation_preserves_message_history():
 
     # The state should preserve message_history from the LLM call
     # (user prompt + model tool call response)
-    assert len(result.state.message_history) > 0, (
-        "Call state should carry message_history from the LLM interaction"
-    )
+    assert len(result.state.message_history) > 0, "Call state should carry message_history from the LLM interaction"
 
 
 @pytest.mark.asyncio
