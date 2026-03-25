@@ -11,7 +11,6 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse
-from calfkit.experimental._types import AgentOutputT
 from calfkit.experimental.base_models.envelope import Envelope
 from calfkit.experimental.client import Client
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
