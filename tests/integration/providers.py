@@ -1,11 +1,12 @@
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
-import pytest
-from dishka import AnyOf, Provider, Scope, WithParents, make_container, provide
+from dishka import AnyOf, Provider, Scope, WithParents, provide
 from dotenv import load_dotenv
 from faststream.kafka import KafkaBroker
 
+from calfkit.experimental._types import OutputT
 from calfkit.experimental.client import Client
 from calfkit.experimental.nodes.agent_def import Agent, BaseAgentNodeDef
 from calfkit.experimental.nodes.tool_def import BaseToolNodeDef, ToolNodeDef, agent_tool
@@ -84,6 +85,23 @@ class AgentProvider(Provider):
         )
 
     @provide
+    def get_structured_agent_factory(self, model_client: PydanticModelClient, worker: Worker) -> Callable:
+        def factory(output_type: type[OutputT]) -> Agent[OutputT]:
+            agent = Agent[output_type](
+                "test_custom_structured_agent",
+                system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
+                subscribe_topics="test_agent.input",
+                publish_topic="test_agent.output",
+                model_client=model_client,
+                final_output_type=output_type,
+            )
+            worker.add_nodes(agent)
+
+            return agent
+
+        return factory
+
+    @provide
     def get_structured_agent(self, model_client: PydanticModelClient) -> StructuredAgent:
         return StructuredAgent(
             "test_structured_agent",
@@ -121,45 +139,6 @@ class WorkerProvider(Provider):
     @provide
     def get_worker(self, client: Client) -> Worker:
         return Worker(client, max_workers=1)
-
-
-@pytest.fixture
-def container():
-    c = make_container(WorkerProvider(), ClientProvider(), AgentProvider())
-    yield c
-    c.close()
-
-
-@pytest.fixture
-def deploy_agent(container) -> SimpleAgent:
-    worker = container.get(Worker)
-    agent = container.get(SimpleAgent)
-    worker.add_nodes(agent)
-    return agent
-
-
-@pytest.fixture
-def deploy_structured_agent(container) -> StructuredAgent:
-    worker = container.get(Worker)
-    agent = container.get(StructuredAgent)
-    worker.add_nodes(agent)
-    return agent
-
-
-@pytest.fixture
-def deploy_multiple_agent_tools(container) -> list[ToolNodeDef]:
-    tools = container.get(list[ToolNodeDef])
-    worker = container.get(Worker)
-    worker.add_nodes(*tools)
-    return tools
-
-
-@pytest.fixture
-def deploy_caller_id_agent_tool(container) -> ToolNodeDef:
-    tool = container.get(ToolNodeDef)
-    worker = container.get(Worker)
-    worker.add_nodes(tool)
-    return tool
 
 
 def prepare_worker(container):

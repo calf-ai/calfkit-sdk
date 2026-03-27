@@ -1,18 +1,22 @@
-import pytest
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit.experimental.client import Client
 from calfkit.experimental.nodes.tool_def import ToolNodeDef
-from tests.providers import Response, SimpleAgent, StructuredAgent, agent_name, caller_id_lookup, prepare_worker, user_name
+from tests.integration.providers import (
+    Response,
+    agent_name,
+    caller_id_lookup,
+    prepare_worker,
+    user_name,
+)
 from tests.utils import print_message_history, skip_if_no_openai_key
 
 # Ensure model requests are allowed for integration tests
 models.ALLOW_MODEL_REQUESTS = True
 
 
-@pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_simple_agent_q_and_a(container, deploy_agent):
     prepare_worker(container)
@@ -30,7 +34,6 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
         print(f"Response message: {result.output}")
 
 
-@pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_agent_tools):
     deploy_agent.add_tools(deploy_multiple_agent_tools[2])
@@ -51,7 +54,6 @@ async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_a
         assert "1967" in result.output
 
 
-@pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_multiple_agent_tools):
     deploy_agent.add_tools(*deploy_multiple_agent_tools)
@@ -75,7 +77,6 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
         assert "snow" in result.output.lower()
 
 
-@pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy_multiple_agent_tools):
     deploy_agent.add_tools(*deploy_multiple_agent_tools)
@@ -112,7 +113,6 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
         print_message_history(result.message_history)
 
 
-@pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_caller_id_agent_tool):
     deploy_agent.add_tools(deploy_caller_id_agent_tool)
@@ -152,7 +152,6 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
         print_message_history(result.message_history)
 
 
-@pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_structured_output_agent(container, deploy_structured_agent):
     tools = container.get(list[ToolNodeDef])
