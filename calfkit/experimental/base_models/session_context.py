@@ -77,12 +77,15 @@ class WorkflowState(BaseModel):
         return self.call_stack.push(frame)
 
 
-class Deps(BaseModel, Generic[UserDepsT]):
+class BaseDeps(BaseModel, Generic[UserDepsT]):
     """immutable dependencies for agent executions"""
 
     model_config = ConfigDict(extra="ignore", frozen=True)
     correlation_id: str
-    agent_deps: UserDepsT | None = Field(description="user-provided agent dependencies")
+    provided_deps: UserDepsT = Field(description="user-provided agent dependencies")
+
+
+Deps = BaseDeps[dict[str, Any]]
 
 
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
@@ -95,4 +98,4 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     """Dependencies for the execution. Immutable."""
 
 
-SessionRunContext = BaseSessionRunContext[State, Deps[UserDepsT]]
+SessionRunContext = BaseSessionRunContext[State, Deps]

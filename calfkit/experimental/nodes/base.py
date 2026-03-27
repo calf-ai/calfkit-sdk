@@ -1,14 +1,13 @@
 import inspect
 import logging
 from abc import abstractmethod
-from typing import Annotated, Any, Generic
+from typing import Annotated, Any
 
 from faststream import Context
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
 
-from calfkit.experimental._types import DepsT
 from calfkit.experimental.base_models.actions import (
     Call,
     NodeResult,
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(Generic[DepsT]):
+class BaseNodeDef:
     _run_accepts_input: bool
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -56,7 +55,7 @@ class BaseNodeDef(Generic[DepsT]):
     # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
     # like a delgation or emit. So the communication-specific handler can properly handle it
     @abstractmethod
-    async def run(self, ctx: SessionRunContext[DepsT], *args: Any, **kwargs: Any) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext, *args: Any, **kwargs: Any) -> NodeResult[State]:
         """Runs the node's logic using provided context.
 
         Subclasses that need per-invocation input can add an optional parameter
@@ -76,16 +75,16 @@ class BaseNodeDef(Generic[DepsT]):
         """
         raise NotImplementedError()
 
-    async def prepare_context(self, envelope: Envelope[DepsT]) -> SessionRunContext:
+    async def prepare_context(self, envelope: Envelope) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
         return ctx
 
     async def handler(
         self,
-        envelope: Envelope[DepsT],
+        envelope: Envelope,
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
-    ) -> Envelope[DepsT]:
+    ) -> Envelope:
         logger.debug("[%s] handler entered node=%s", correlation_id[:8], self._node_id)
         ctx = await self.prepare_context(envelope)
         if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
@@ -95,7 +94,7 @@ class BaseNodeDef(Generic[DepsT]):
 
         logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self._node_id)
 
-        publish_envelope: Envelope[DepsT]
+        publish_envelope: Envelope
 
         if isinstance(output, Call):
             # push to callstack and call the target topic

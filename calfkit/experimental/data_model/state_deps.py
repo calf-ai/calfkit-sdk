@@ -10,6 +10,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
 )
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
+from calfkit.experimental.data_model.payload import ContentPart
 
 
 class BaseAgentActivityState(BaseModel):
@@ -22,6 +23,7 @@ class CoreMessageState(BaseAgentActivityState):
     model_config = ConfigDict(extra="ignore")
     uncommitted_message: ModelMessage | None = None
     message_history: list[ModelMessage] = Field(default_factory=list, description="Append-only message history list")
+    final_output_parts: list[ContentPart] = Field(default_factory=list)
 
     def latest_tool_calls(self) -> list[ToolCallPart]:
         pending_tool_calls = list()

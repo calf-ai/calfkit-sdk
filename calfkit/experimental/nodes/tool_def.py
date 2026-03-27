@@ -16,7 +16,7 @@ from calfkit.models.tool_context import ToolContext
 logger = logging.getLogger(__name__)
 
 
-class BaseToolNodeDef(BaseNodeDef[Any], ABC):
+class BaseToolNodeDef(BaseNodeDef, ABC):
     @property
     @abstractmethod
     def tool_schema(self) -> ToolDefinition: ...
@@ -48,7 +48,7 @@ class ToolNodeDef(BaseToolNodeDef):
             return Silent()
 
         tool_call_ctx = ToolContext(
-            deps=ctx.deps.agent_deps,
+            deps=ctx.deps,
             agent_name=source_node_name,
             tool_call_id=tool_call_part.tool_call_id,
             tool_name=tool_call_part.tool_name,

@@ -22,7 +22,7 @@ class FilePart(BaseModel):
 
 class DataPart(BaseModel):
     kind: Literal["data"] = "data"
-    data: dict[str, Any]
+    data: dict[str, Any] | list[Any] | Any
     schema_: dict[str, Any] | None = Field(default=None, alias="schema")
     metadata: dict[str, Any] | None = None
 

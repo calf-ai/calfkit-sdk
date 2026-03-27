@@ -5,7 +5,7 @@ from calfkit.experimental.base_models.session_context import SessionRunContext
 
 AgentSessionRunContext = TypeAliasType(
     "AgentSessionRunContext",
-    SessionRunContext[AgentDepsT],
+    SessionRunContext,
     type_params=(AgentDepsT,),
 )
 """Developer-facing context for a session.
