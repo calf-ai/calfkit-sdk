@@ -181,6 +181,8 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
         result = await client.execute_node("Hi, what's your name?", "test_agent.input")
 
         assert result.output is not None
+        assert isinstance(result.output, str)
+        assert agent_name.lower() in result.output.lower()
         print()
         print(f"Response message: {result.output}")
 
@@ -204,6 +206,8 @@ async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_a
         print_message_history(result.message_history)
 
         assert any(len(msg.tool_calls) > 0 for msg in result.message_history if isinstance(msg, ModelResponse))
+        assert isinstance(result.output, str)
+        assert "1967" in result.output
 
 
 @pytest.mark.asyncio
@@ -219,8 +223,7 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
 
     async with TestKafkaBroker(broker) as _:
         result = await client.execute_node(
-            "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?",
-            "test_agent.input",
+            "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?", "test_agent.input", output_type=str
         )
 
         print_message_history(result.message_history)
@@ -228,6 +231,7 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
         assert sum(len(msg.tool_calls) for msg in result.message_history if isinstance(msg, ModelResponse)) > 1
         assert result.output is not None
         assert user_name.lower() in result.output.lower()
+        assert isinstance(result.output, str)
         assert "1967" in result.output.lower()
         assert "snow" in result.output.lower()
 
