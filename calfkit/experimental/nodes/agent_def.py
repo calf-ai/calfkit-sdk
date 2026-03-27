@@ -1,8 +1,10 @@
 import logging
-from typing import Any, Generic, cast
+from typing import Any, Generic
 
-from calfkit._vendor.pydantic_ai import Agent, DeferredToolRequests
+from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
+from calfkit._vendor.pydantic_ai import DeferredToolRequests
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
+from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.experimental._types import AgentOutputT
@@ -34,21 +36,17 @@ class BaseAgentNodeDef(
         publish_topic: str,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
-        final_output_type: type[AgentOutputT] | type[str] = str,
+        final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
         self.tools = tools or list()
         super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
 
-        output_types: list[type[AgentOutputT | DeferredToolRequests]] = [
-            cast(type[AgentOutputT], final_output_type),
-            DeferredToolRequests,
-        ]
-        self._agent_loop: Agent[dict[str, Any], AgentOutputT | DeferredToolRequests] = Agent(
+        self._agent_loop: InternalAgentLoop[dict[str, Any], AgentOutputT | DeferredToolRequests] = InternalAgentLoop(
             model_client,
             name=self.name,
-            output_type=output_types,
+            output_type=[final_output_type, DeferredToolRequests],
             deps_type=dict,
         )
 
@@ -157,7 +155,7 @@ class BaseAgentNodeDef(
                 logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
                 return TailCall[State](target_topic=self.subscribe_topics[0], state=tool_call_state)
 
-        elif isinstance(result.output, self.final_output_type):
+        else:
             logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.deps.correlation_id[:8], self.name)
             ctx.state.message_history.extend(result.new_messages())
             if isinstance(result.output, str):
@@ -166,8 +164,8 @@ class BaseAgentNodeDef(
                 ctx.state.final_output_parts = [DataPart(data=result.output)]
             return ReturnCall[State](state=ctx.state)
 
-        else:
-            raise RuntimeError("Invalid point reached: model output was not the final output type nor a tool call.")
-
     def add_tools(self, *tools: ToolNodeDef) -> None:
         self.tools.extend(tools)
+
+
+Agent = BaseAgentNodeDef

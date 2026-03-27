@@ -12,6 +12,8 @@ DataT = TypeVar("DataT", default=dict[str, Any])
 
 AgentOutputT = TypeVar("AgentOutputT", default=Any)
 
+OutputT = TypeVar("OutputT", default=Any)
+
 AgentInputT = TypeVar("AgentInputT", default=Any)
 
 AgentDepsT = TypeVar("AgentDepsT", default=Any)
