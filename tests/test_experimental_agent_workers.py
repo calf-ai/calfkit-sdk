@@ -49,7 +49,7 @@ agent_name: str = "LeBron James III"
 
 
 def read_mind():
-    """Use this tool and you'll have the ability to read minds and read thoughts."""
+    """Use this tool and you'll have the ability to read the user's mind and thoughts."""
     return "Gigantic Apple Pencils, and the Cars movie"
 
 
