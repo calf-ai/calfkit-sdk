@@ -199,11 +199,10 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
     async with TestKafkaBroker(broker) as _:
         response = await client.execute_node("Hi, what's your name?", "test_agent.input")
 
-        assert isinstance(response.context.state.message_history[-1], ModelResponse)
+        output = deserialize_output(response.context.state.final_output_parts)
+        assert output.text is not None
         print()
-        print(f"Response message: {response.context.state.message_history[-1].text}")
-        if response.context.state.message_history[-1].thinking:
-            print(f"    thinking: {response.context.state.message_history[-1].thinking}")
+        print(f"Response message: {output.text}")
 
 
 @pytest.mark.asyncio
@@ -220,7 +219,8 @@ async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_a
     async with TestKafkaBroker(broker) as _:
         response = await client.execute_node("Hi, what's my birthday?", "test_agent.input")
 
-        assert isinstance(response.context.state.message_history[-1], ModelResponse)
+        output = deserialize_output(response.context.state.final_output_parts)
+        assert output.text is not None
 
         print_message_history(response.context.state.message_history)
 
@@ -244,15 +244,15 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
             "test_agent.input",
         )
 
-        assert isinstance(response.context.state.message_history[-1], ModelResponse)
+        output = deserialize_output(response.context.state.final_output_parts)
 
         print_message_history(response.context.state.message_history)
 
         assert sum(len(msg.tool_calls) for msg in response.context.state.message_history if isinstance(msg, ModelResponse)) > 1
-        assert response.context.state.message_history[-1].text is not None
-        assert user_name.lower() in response.context.state.message_history[-1].text.lower()
-        assert "1967" in response.context.state.message_history[-1].text.lower()
-        assert "snow" in response.context.state.message_history[-1].text.lower()
+        assert output.text is not None
+        assert user_name.lower() in output.text.lower()
+        assert "1967" in output.text.lower()
+        assert "snow" in output.text.lower()
 
 
 @pytest.mark.asyncio
@@ -268,36 +268,31 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
 
     async with TestKafkaBroker(broker) as _:
         result = await client.execute_node("Do you know my name?", "test_agent.input")
-        resp_msg = result.context.state.message_history[-1]
+        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert user_name.lower() in resp_msg.text.lower()
+        assert output.text is not None
+        assert user_name.lower() in output.text.lower()
 
         result = await client.execute_node(
             "And what's your name?",
             "test_agent.input",
             message_history=result.context.state.message_history,
         )
+        output = deserialize_output(result.context.state.final_output_parts)
 
-        resp_msg = result.context.state.message_history[-1]
-
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert agent_name.lower() in resp_msg.text.lower()
+        assert output.text is not None
+        assert agent_name.lower() in output.text.lower()
 
         result = await client.execute_node(
             "What's the weather in vegas rn and what's my birthday?",
             "test_agent.input",
             message_history=result.context.state.message_history,
         )
+        output = deserialize_output(result.context.state.final_output_parts)
 
-        resp_msg = result.context.state.message_history[-1]
-
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert "1967" in resp_msg.text.lower()
-        assert "snow" in resp_msg.text.lower()
+        assert output.text is not None
+        assert "1967" in output.text.lower()
+        assert "snow" in output.text.lower()
 
         print_message_history(result.context.state.message_history)
 
@@ -319,35 +314,30 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
             "test_agent.input",
             deps={"ephemeral_id": "id1"},
         )
-        resp_msg = result.context.state.message_history[-1]
+        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert caller_id_lookup["id1"] in resp_msg.text.lower()
+        assert output.text is not None
+        assert caller_id_lookup["id1"] in output.text.lower()
 
         result = await client.execute_node(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
             "test_agent.input",
             deps={"ephemeral_id": "id2"},
         )
+        output = deserialize_output(result.context.state.final_output_parts)
 
-        resp_msg = result.context.state.message_history[-1]
-
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert caller_id_lookup["id2"] in resp_msg.text.lower()
+        assert output.text is not None
+        assert caller_id_lookup["id2"] in output.text.lower()
 
         result = await client.execute_node(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
             "test_agent.input",
             deps={"ephemeral_id": "id3"},
         )
+        output = deserialize_output(result.context.state.final_output_parts)
 
-        resp_msg = result.context.state.message_history[-1]
-
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert caller_id_lookup["id3"] in resp_msg.text.lower()
+        assert output.text is not None
+        assert caller_id_lookup["id3"] in output.text.lower()
 
         print_message_history(result.context.state.message_history)
 
