@@ -49,7 +49,7 @@ agent_name: str = "LeBron James III"
 
 
 def read_mind():
-    """Use this tool and you'll have the ability to read minds."""
+    """Use this tool and you'll have the ability to read minds and read thoughts."""
     return "Gigantic Apple Pencils, and the Cars movie"
 
 
@@ -147,38 +147,42 @@ class TestUtilsProvider(Provider):
         return dict()
 
 
-di_container = make_container(WorkerProvider(), ClientProvider(), AgentProvider(), TestUtilsProvider())
+@pytest.fixture
+def container():
+    c = make_container(WorkerProvider(), ClientProvider(), AgentProvider(), TestUtilsProvider())
+    yield c
+    c.close()
 
 
-@pytest.fixture(scope="session")
-def deploy_agent():
-    worker = di_container.get(Worker)
-    agent = di_container.get(SimpleAgent)
+@pytest.fixture
+def deploy_agent(container):
+    worker = container.get(Worker)
+    agent = container.get(SimpleAgent)
     worker.add_nodes(agent)
 
 
-@pytest.fixture(scope="session")
-def deploy_structured_agent():
-    worker = di_container.get(Worker)
-    agent = di_container.get(StructuredAgent)
+@pytest.fixture
+def deploy_structured_agent(container):
+    worker = container.get(Worker)
+    agent = container.get(StructuredAgent)
     worker.add_nodes(agent)
 
 
-@pytest.fixture(scope="session")
-def deploy_multiple_agent_tools():
-    tools = di_container.get(list[ToolNodeDef])
-    worker = di_container.get(Worker)
+@pytest.fixture
+def deploy_multiple_agent_tools(container):
+    tools = container.get(list[ToolNodeDef])
+    worker = container.get(Worker)
     worker.add_nodes(*tools)
 
 
-@pytest.fixture(scope="session")
-def deploy_caller_id_agent_tool():
-    tool = di_container.get(ToolNodeDef)
-    worker = di_container.get(Worker)
+@pytest.fixture
+def deploy_caller_id_agent_tool(container):
+    tool = container.get(ToolNodeDef)
+    worker = container.get(Worker)
     worker.add_nodes(tool)
 
 
-def gather_factory():
+def gather_factory(container):
     async def gather_results(
         envelope: Envelope,
         correlation_id: Annotated[str, Context()],
@@ -186,18 +190,19 @@ def gather_factory():
         # Access dishka container directly instead of FastStream's Depends,
         # which passes the return value through Pydantic validation and
         # shallow-copies bare types like `dict`.
-        resp_store = di_container.get(dict)
+        resp_store = container.get(dict)
         resp_store[correlation_id] = envelope
 
     return gather_results
 
 
-def prepare_worker():
-    worker = di_container.get(Worker)
+def prepare_worker(container):
+    worker = container.get(Worker)
     worker.prepare()
 
 
 async def send_message(
+    container,
     prompt: str,
     callback_topic: str,
     temp_instructions: str | None = None,
@@ -205,11 +210,11 @@ async def send_message(
     deps: dict[str, Any] | None = None,
 ) -> Envelope:
     corr_id = uuid_utils.uuid7().hex
-    client = di_container.get(Client)
+    client = container.get(Client)
     await client.invoke_node(
         prompt, "test_agent.input", callback_topic, corr_id, temp_instructions=temp_instructions, message_history=msg_history, deps=deps
     )
-    resp_store = di_container.get(dict)
+    resp_store = container.get(dict)
     assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
 
     response = resp_store[corr_id]
@@ -222,14 +227,14 @@ async def send_message(
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_simple_agent_q_and_a(deploy_agent):
-    prepare_worker()
+async def test_simple_agent_q_and_a(container, deploy_agent):
+    prepare_worker(container)
 
-    broker = di_container.get(KafkaBroker)
-    client = di_container.get(Client)
-    resp_store = di_container.get(dict)
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+    resp_store = container.get(dict)
 
-    gather_results = gather_factory()
+    gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.q_and_a.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
@@ -251,16 +256,16 @@ async def test_simple_agent_q_and_a(deploy_agent):
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_simple_agent_with_tool(deploy_agent, deploy_multiple_agent_tools):
-    agent = di_container.get(SimpleAgent)
-    tools = di_container.get(list[ToolNodeDef])
+async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_agent_tools):
+    agent = container.get(SimpleAgent)
+    tools = container.get(list[ToolNodeDef])
     agent.add_tools(tools[0])
-    prepare_worker()
+    prepare_worker(container)
 
-    broker = di_container.get(KafkaBroker)
-    resp_store = di_container.get(dict)
-    client = di_container.get(Client)
-    gather_results = gather_factory()
+    broker = container.get(KafkaBroker)
+    resp_store = container.get(dict)
+    client = container.get(Client)
+    gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.tool_test.output")(gather_results)
     async with TestKafkaBroker(broker) as _:
         corr_id = uuid_utils.uuid7().hex
@@ -282,16 +287,16 @@ async def test_simple_agent_with_tool(deploy_agent, deploy_multiple_agent_tools)
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_simple_agent_with_multiple_tools(deploy_agent, deploy_multiple_agent_tools):
-    agent = di_container.get(SimpleAgent)
-    tools = di_container.get(list[ToolNodeDef])
+async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_multiple_agent_tools):
+    agent = container.get(SimpleAgent)
+    tools = container.get(list[ToolNodeDef])
     agent.add_tools(*tools)
-    prepare_worker()
+    prepare_worker(container)
 
-    broker = di_container.get(KafkaBroker)
-    resp_store = di_container.get(dict)
-    client = di_container.get(Client)
-    gather_results = gather_factory()
+    broker = container.get(KafkaBroker)
+    resp_store = container.get(dict)
+    client = container.get(Client)
+    gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
     async with TestKafkaBroker(broker) as _:
         corr_id = uuid_utils.uuid7().hex
@@ -300,6 +305,7 @@ async def test_simple_agent_with_multiple_tools(deploy_agent, deploy_multiple_ag
             "test_agent.input",
             "test_agent.tools_test.output",
             corr_id,
+            temp_instructions="You are able to read minds by using the appropriate tool.",
         )
 
         # TestKafkaBroker is synchronous — the entire handler chain completes
@@ -322,25 +328,27 @@ async def test_simple_agent_with_multiple_tools(deploy_agent, deploy_multiple_ag
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_simple_agent_with_multiturn_convo(deploy_agent, deploy_multiple_agent_tools):
-    agent = di_container.get(SimpleAgent)
-    tools = di_container.get(list[ToolNodeDef])
+async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy_multiple_agent_tools):
+    agent = container.get(SimpleAgent)
+    tools = container.get(list[ToolNodeDef])
     agent.add_tools(*tools)
-    prepare_worker()
+    prepare_worker(container)
 
-    broker = di_container.get(KafkaBroker)
-    gather_results = gather_factory()
+    broker = container.get(KafkaBroker)
+    gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
-        result = await send_message("do you know my name? DO NOT tell me your name for now.", "test_agent.tools_test.output")
+        result = await send_message(container, "do you know my name? DO NOT tell me your name for now.", "test_agent.tools_test.output")
         resp_msg = result.context.state.message_history[-1]
 
         assert isinstance(resp_msg, ModelResponse)
         assert resp_msg.text is not None
         assert user_name.lower() in resp_msg.text.lower()
 
-        result = await send_message("And what's your name?", "test_agent.tools_test.output", msg_history=result.context.state.message_history)
+        result = await send_message(
+            container, "And what's your name?", "test_agent.tools_test.output", msg_history=result.context.state.message_history
+        )
 
         resp_msg = result.context.state.message_history[-1]
 
@@ -349,7 +357,10 @@ async def test_simple_agent_with_multiturn_convo(deploy_agent, deploy_multiple_a
         assert agent_name.lower() in resp_msg.text.lower()
 
         result = await send_message(
-            "What's the weather in vegas rn and read my mind pls.", "test_agent.tools_test.output", msg_history=result.context.state.message_history
+            container,
+            "What's the weather in vegas rn and read my mind pls.",
+            "test_agent.tools_test.output",
+            msg_history=result.context.state.message_history,
         )
 
         resp_msg = result.context.state.message_history[-1]
@@ -364,18 +375,19 @@ async def test_simple_agent_with_multiturn_convo(deploy_agent, deploy_multiple_a
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_agent_tool):
-    agent = di_container.get(SimpleAgent)
-    tool = di_container.get(ToolNodeDef)
+async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_caller_id_agent_tool):
+    agent = container.get(SimpleAgent)
+    tool = container.get(ToolNodeDef)
     agent.add_tools(tool)
-    prepare_worker()
+    prepare_worker(container)
 
-    broker = di_container.get(KafkaBroker)
-    gather_results = gather_factory()
+    broker = container.get(KafkaBroker)
+    gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
         result = await send_message(
+            container,
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
             "test_agent.tools_test.output",
             deps={"ephemeral_id": "id1"},
@@ -387,6 +399,7 @@ async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_ag
         assert caller_id_lookup["id1"] in resp_msg.text.lower()
 
         result = await send_message(
+            container,
             "I'm on my android phone now. What's this new number?",
             "test_agent.tools_test.output",
             msg_history=result.context.state.message_history,
@@ -400,6 +413,7 @@ async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_ag
         assert caller_id_lookup["id2"] in resp_msg.text.lower()
 
         result = await send_message(
+            container,
             "This is my google phone, please check this number.",
             "test_agent.tools_test.output",
             msg_history=result.context.state.message_history,
@@ -429,15 +443,16 @@ def deserialize_output(resp_parts: list[ContentPart]) -> StructuredOutput:
 
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_structured_output_agent(deploy_structured_agent):
-    prepare_worker()
+async def test_structured_output_agent(container, deploy_structured_agent):
+    prepare_worker(container)
 
-    broker = di_container.get(KafkaBroker)
-    gather_results = gather_factory()
+    broker = container.get(KafkaBroker)
+    gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.structured_output_test.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
         result = await send_message(
+            container,
             f"What's your name? My name is {user_name}",
             "test_agent.structured_output_test.output",
             "When responding, always direct responses to the recipient's name you would like to target.",
@@ -450,6 +465,7 @@ async def test_structured_output_agent(deploy_structured_agent):
         print(f"structured_output: {structured_output}")
 
         result = await send_message(
+            container,
             "Do you remember my name?",
             "test_agent.structured_output_test.output",
             "when responding, always direct responses to specific recipients you would like to target.",
@@ -463,6 +479,7 @@ async def test_structured_output_agent(deploy_structured_agent):
         print(f"structured_output: {structured_output}")
 
         result = await send_message(
+            container,
             "Please tell my friend Amy to remember to exercise today",
             "test_agent.structured_output_test.output",
             "when responding, always direct responses to specific recipients you would like to target.",
