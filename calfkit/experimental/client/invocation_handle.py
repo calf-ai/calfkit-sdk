@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from calfkit.experimental.base_models.envelope import Envelope
+from calfkit.experimental.base_models.envelope import Envelope
 
 
 @dataclass
@@ -13,7 +11,7 @@ class InvocationHandle:
     correlation_id: str
     topic: str
     reply_topic: str
-    _future: asyncio.Future[Envelope] = field(repr=False, compare=False, default=None)  # type: ignore[assignment]
+    _future: asyncio.Future[Envelope] = field(repr=False, compare=False)
 
     async def result(self, timeout: float | None = None) -> Envelope:
         """Await the invocation result.
