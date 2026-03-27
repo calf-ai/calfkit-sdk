@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import Generic
 
+from calfkit.experimental._types import OutputT
 from calfkit.experimental.base_models.envelope import Envelope
 
 
 @dataclass
-class InvocationHandle:
+class InvocationHandle(Generic[OutputT]):
     correlation_id: str
     topic: str
     reply_topic: str
