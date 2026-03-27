@@ -54,7 +54,7 @@ def read_mind():
 
 
 def get_users_name():
-    """Use this tool to get the user's name."""
+    """Use this tool to get the user's name. If you do not know the user's name, use this tool to get their name."""
     return user_name
 
 
@@ -339,7 +339,7 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
     gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
-        result = await send_message(container, "do you know my name? DO NOT tell me your name for now.", "test_agent.tools_test.output")
+        result = await send_message(container, "Do you know my name?", "test_agent.tools_test.output")
         resp_msg = result.context.state.message_history[-1]
 
         assert isinstance(resp_msg, ModelResponse)
