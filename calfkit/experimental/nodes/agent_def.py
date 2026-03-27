@@ -36,7 +36,7 @@ class BaseAgentNodeDef(
         publish_topic: str,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
-        final_output_type: OutputSpec[AgentOutputT] = str,
+        final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
