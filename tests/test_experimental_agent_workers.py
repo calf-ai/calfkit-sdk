@@ -1,17 +1,13 @@
 import os
 from dataclasses import dataclass
-from typing import Annotated, Any
 
 import pytest
-import uuid_utils
-from dishka import AnyOf, Container, Provider, Scope, WithParents, make_container, provide
+from dishka import AnyOf, Provider, Scope, WithParents, make_container, provide
 from dotenv import load_dotenv
-from faststream import Context
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import models
-from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
-from calfkit.experimental.base_models.envelope import Envelope
+from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit.experimental.client import Client
 from calfkit.experimental.data_model.payload import ContentPart
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
@@ -140,17 +136,9 @@ class WorkerProvider(Provider):
         return Worker(client, max_workers=1)
 
 
-class TestUtilsProvider(Provider):
-    scope = Scope.APP
-
-    @provide
-    def get_response_store(self) -> dict:
-        return dict()
-
-
 @pytest.fixture
 def container():
-    c = make_container(WorkerProvider(), ClientProvider(), AgentProvider(), TestUtilsProvider())
+    c = make_container(WorkerProvider(), ClientProvider(), AgentProvider())
     yield c
     c.close()
 
@@ -183,53 +171,21 @@ def deploy_caller_id_agent_tool(container):
     worker.add_nodes(tool)
 
 
-def gather_factory(container):
-    async def gather_results(
-        envelope: Envelope,
-        correlation_id: Annotated[str, Context()],
-    ):
-        # Access dishka container directly instead of FastStream's Depends,
-        # which passes the return value through Pydantic validation and
-        # shallow-copies bare types like `dict`.
-        resp_store = container.get(dict)
-        resp_store[correlation_id] = envelope
-
-    return gather_results
-
-
 def prepare_worker(container):
     worker = container.get(Worker)
     worker.prepare()
 
 
-async def send_message(
-    container: Container,
-    prompt: str,
-    callback_topic: str,
-    temp_instructions: str | None = None,
-    msg_history: list[ModelMessage] | None = None,
-    deps: dict[str, Any] | None = None,
-) -> Envelope:
-    corr_id = uuid_utils.uuid7().hex
-    client = container.get(Client)
-    await client.invoke_node(
-        prompt,
-        "test_agent.input",
-        reply_topic=callback_topic,
-        correlation_id=corr_id,
-        temp_instructions=temp_instructions,
-        message_history=msg_history,
-        deps=deps,
-    )
-    resp_store = container.get(dict)
-    assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
+def deserialize_output(resp_parts: list[ContentPart]) -> StructuredOutput:
+    data = None
+    text = None
+    for part in resp_parts:
+        if part.kind == "data" and isinstance(part.data, dict):
+            data = Response(**part.data)
+        if part.kind == "text":
+            text = part.text
 
-    response = resp_store[corr_id]
-
-    assert isinstance(response, Envelope)
-    assert isinstance(response.context.state.message_history[-1], (ModelResponse, ModelRequest))
-
-    return response
+    return StructuredOutput(text=text, data=data)
 
 
 @pytest.mark.asyncio
@@ -238,12 +194,10 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-
-    gather_results = gather_factory(container)
-    gather_results = broker.subscriber("test_agent.q_and_a.output")(gather_results)
+    client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        response = await send_message(container, "Hi, what's your name?", "test_agent.q_and_a.output")
+        response = await client.execute_node("Hi, what's your name?", "test_agent.input")
 
         assert isinstance(response.context.state.message_history[-1], ModelResponse)
         print()
@@ -261,10 +215,10 @@ async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_a
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    gather_results = gather_factory(container)
-    gather_results = broker.subscriber("test_agent.tool_test.output")(gather_results)
+    client = container.get(Client)
+
     async with TestKafkaBroker(broker) as _:
-        response = await send_message(container, "Hi, what's my birthday?", "test_agent.tool_test.output")
+        response = await client.execute_node("Hi, what's my birthday?", "test_agent.input")
 
         assert isinstance(response.context.state.message_history[-1], ModelResponse)
 
@@ -282,13 +236,12 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    gather_results = gather_factory(container)
-    gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
+    client = container.get(Client)
+
     async with TestKafkaBroker(broker) as _:
-        response = await send_message(
-            container,
+        response = await client.execute_node(
             "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?",
-            "test_agent.tools_test.output",
+            "test_agent.input",
         )
 
         assert isinstance(response.context.state.message_history[-1], ModelResponse)
@@ -311,19 +264,20 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    gather_results = gather_factory(container)
-    gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
+    client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await send_message(container, "Do you know my name?", "test_agent.tools_test.output")
+        result = await client.execute_node("Do you know my name?", "test_agent.input")
         resp_msg = result.context.state.message_history[-1]
 
         assert isinstance(resp_msg, ModelResponse)
         assert resp_msg.text is not None
         assert user_name.lower() in resp_msg.text.lower()
 
-        result = await send_message(
-            container, "And what's your name?", "test_agent.tools_test.output", msg_history=result.context.state.message_history
+        result = await client.execute_node(
+            "And what's your name?",
+            "test_agent.input",
+            message_history=result.context.state.message_history,
         )
 
         resp_msg = result.context.state.message_history[-1]
@@ -332,11 +286,10 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
         assert resp_msg.text is not None
         assert agent_name.lower() in resp_msg.text.lower()
 
-        result = await send_message(
-            container,
+        result = await client.execute_node(
             "What's the weather in vegas rn and what's my birthday?",
-            "test_agent.tools_test.output",
-            msg_history=result.context.state.message_history,
+            "test_agent.input",
+            message_history=result.context.state.message_history,
         )
 
         resp_msg = result.context.state.message_history[-1]
@@ -358,14 +311,12 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    gather_results = gather_factory(container)
-    gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
+    client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await send_message(
-            container,
+        result = await client.execute_node(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
-            "test_agent.tools_test.output",
+            "test_agent.input",
             deps={"ephemeral_id": "id1"},
         )
         resp_msg = result.context.state.message_history[-1]
@@ -374,11 +325,9 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
         assert resp_msg.text is not None
         assert caller_id_lookup["id1"] in resp_msg.text.lower()
 
-        result = await send_message(
-            container,
-            "I'm on my android phone now. What's this new number?",
-            "test_agent.tools_test.output",
-            msg_history=result.context.state.message_history,
+        result = await client.execute_node(
+            "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
+            "test_agent.input",
             deps={"ephemeral_id": "id2"},
         )
 
@@ -388,11 +337,9 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
         assert resp_msg.text is not None
         assert caller_id_lookup["id2"] in resp_msg.text.lower()
 
-        result = await send_message(
-            container,
-            "This is my google phone, please check this number.",
-            "test_agent.tools_test.output",
-            msg_history=result.context.state.message_history,
+        result = await client.execute_node(
+            "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
+            "test_agent.input",
             deps={"ephemeral_id": "id3"},
         )
 
@@ -405,33 +352,19 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
         print_message_history(result.context.state.message_history)
 
 
-def deserialize_output(resp_parts: list[ContentPart]) -> StructuredOutput:
-    data = None
-    text = None
-    for part in resp_parts:
-        if part.kind == "data" and isinstance(part.data, dict):
-            data = Response(**part.data)
-        if part.kind == "text":
-            text = part.text
-
-    return StructuredOutput(text=text, data=data)
-
-
 @pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_structured_output_agent(container, deploy_structured_agent):
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    gather_results = gather_factory(container)
-    gather_results = broker.subscriber("test_agent.structured_output_test.output")(gather_results)
+    client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await send_message(
-            container,
+        result = await client.execute_node(
             f"What's your name? My name is {user_name}",
-            "test_agent.structured_output_test.output",
-            "When responding, always direct responses to the recipient's name you would like to target.",
+            "test_agent.input",
+            temp_instructions="When responding, always direct responses to the recipient's name you would like to target.",
         )
         structured_output = deserialize_output(result.context.state.final_output_parts)
 
@@ -440,12 +373,11 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         assert agent_name.lower() in structured_output.data.response.lower()
         print(f"structured_output: {structured_output}")
 
-        result = await send_message(
-            container,
+        result = await client.execute_node(
             "Do you remember my name?",
-            "test_agent.structured_output_test.output",
-            "when responding, always direct responses to specific recipients you would like to target.",
-            msg_history=result.context.state.message_history,
+            "test_agent.input",
+            temp_instructions="when responding, always direct responses to specific recipients you would like to target.",
+            message_history=result.context.state.message_history,
         )
         structured_output = deserialize_output(result.context.state.final_output_parts)
 
@@ -454,12 +386,11 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         assert user_name.lower() in structured_output.data.response.lower()
         print(f"structured_output: {structured_output}")
 
-        result = await send_message(
-            container,
+        result = await client.execute_node(
             "Please tell my friend Amy to remember to exercise today",
-            "test_agent.structured_output_test.output",
-            "when responding, always direct responses to specific recipients you would like to target.",
-            msg_history=result.context.state.message_history,
+            "test_agent.input",
+            temp_instructions="when responding, always direct responses to specific recipients you would like to target.",
+            message_history=result.context.state.message_history,
         )
         structured_output = deserialize_output(result.context.state.final_output_parts)
         assert structured_output.data is not None
@@ -467,24 +398,3 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         print(f"structured_output: {structured_output}")
 
         print_message_history(result.context.state.message_history)
-
-
-@pytest.mark.asyncio
-@skip_if_no_openai_key
-async def test_execute_node_returns_result(container, deploy_agent):
-    """Verify that execute_node() returns the Envelope via the reply dispatcher."""
-    prepare_worker(container)
-
-    broker = container.get(KafkaBroker)
-    client = container.get(Client)
-
-    async with TestKafkaBroker(broker) as _:
-        result = await client.execute_node(
-            "Hi, what's your name?",
-            "test_agent.input",
-            timeout=30.0,
-        )
-        assert isinstance(result, Envelope)
-        assert isinstance(result.context.state.message_history[-1], ModelResponse)
-        print()
-        print(f"execute_node response: {result.context.state.message_history[-1].text}")
