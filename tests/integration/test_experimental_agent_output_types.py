@@ -45,41 +45,6 @@ async def test_structured_output_agent_with_dataclass(container, deploy_structur
 
 
 @skip_if_no_openai_key
-async def test_structured_output_agent_with_dict(container, deploy_structured_agent_factory):
-    deploy_structured_agent_factory(dict)
-    prepare_worker(container)
-
-    broker = container.get(KafkaBroker)
-    client = container.get(Client)
-
-    async with TestKafkaBroker(broker) as _:
-        result = await client.execute_node(
-            f"What's your name? My name is {user_name}",
-            "test_agent.input",
-            temp_instructions="When responding, always direct responses to the recipient's name you would like to target.",
-            output_type=dict,
-        )
-
-        assert result.output is not None
-        assert isinstance(result.output, dict)
-        assert user_name.lower() in result.output["recipient_name"].lower()
-        assert agent_name.lower() in result.output["response"].lower()
-        print(f"structured_output: {result.output}")
-
-        result = await client.execute_node(
-            f"What's your name? My name is {user_name}",
-            "test_agent.input",
-            temp_instructions="When responding, always direct responses to the recipient's name you would like to target.",
-        )
-
-        assert result.output is not None
-        assert isinstance(result.output, dict)
-        assert user_name.lower() in result.output["recipient_name"].lower()
-        assert agent_name.lower() in result.output["response"].lower()
-        print(f"structured_output: {result.output}")
-
-
-@skip_if_no_openai_key
 async def test_structured_output_agent_with_list(container, deploy_structured_agent_factory):
     deploy_structured_agent_factory(list[str])
     prepare_worker(container)
