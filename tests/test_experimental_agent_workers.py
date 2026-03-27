@@ -213,7 +213,13 @@ async def send_message(
     corr_id = uuid_utils.uuid7().hex
     client = container.get(Client)
     await client.invoke_node(
-        prompt, "test_agent.input", callback_topic, corr_id, temp_instructions=temp_instructions, message_history=msg_history, deps=deps
+        prompt,
+        "test_agent.input",
+        reply_topic=callback_topic,
+        correlation_id=corr_id,
+        temp_instructions=temp_instructions,
+        message_history=msg_history,
+        deps=deps,
     )
     resp_store = container.get(dict)
     assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
@@ -461,3 +467,24 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         print(f"structured_output: {structured_output}")
 
         print_message_history(result.context.state.message_history)
+
+
+@pytest.mark.asyncio
+@skip_if_no_openai_key
+async def test_execute_node_returns_result(container, deploy_agent):
+    """Verify that execute_node() returns the Envelope via the reply dispatcher."""
+    prepare_worker(container)
+
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    async with TestKafkaBroker(broker) as _:
+        result = await client.execute_node(
+            "Hi, what's your name?",
+            "test_agent.input",
+            timeout=30.0,
+        )
+        assert isinstance(result, Envelope)
+        assert isinstance(result.context.state.message_history[-1], ModelResponse)
+        print()
+        print(f"execute_node response: {result.context.state.message_history[-1].text}")
