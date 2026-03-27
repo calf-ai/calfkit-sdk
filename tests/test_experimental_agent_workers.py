@@ -9,7 +9,6 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit.experimental.client import Client
-from calfkit.experimental.data_model.payload import ContentPart
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
 from calfkit.experimental.nodes.tool_def import BaseToolNodeDef, ToolNodeDef, agent_tool
 from calfkit.experimental.worker.worker import Worker
@@ -28,12 +27,6 @@ models.ALLOW_MODEL_REQUESTS = True
 class Response:
     response: str
     recipient_name: str
-
-
-@dataclass
-class StructuredOutput:
-    text: str | None
-    data: Response | None
 
 
 SimpleAgent = BaseAgentNodeDef[str]
@@ -176,18 +169,6 @@ def prepare_worker(container):
     worker.prepare()
 
 
-def deserialize_output(resp_parts: list[ContentPart]) -> StructuredOutput:
-    data = None
-    text = None
-    for part in resp_parts:
-        if part.kind == "data" and isinstance(part.data, dict):
-            data = Response(**part.data)
-        if part.kind == "text":
-            text = part.text
-
-    return StructuredOutput(text=text, data=data)
-
-
 @pytest.mark.asyncio
 @skip_if_no_openai_key
 async def test_simple_agent_q_and_a(container, deploy_agent):
@@ -197,12 +178,11 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        response = await client.execute_node("Hi, what's your name?", "test_agent.input")
+        result = await client.execute_node("Hi, what's your name?", "test_agent.input")
 
-        output = deserialize_output(response.context.state.final_output_parts)
-        assert output.text is not None
+        assert result.output is not None
         print()
-        print(f"Response message: {output.text}")
+        print(f"Response message: {result.output}")
 
 
 @pytest.mark.asyncio
@@ -217,14 +197,13 @@ async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_a
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        response = await client.execute_node("Hi, what's my birthday?", "test_agent.input")
+        result = await client.execute_node("Hi, what's my birthday?", "test_agent.input")
 
-        output = deserialize_output(response.context.state.final_output_parts)
-        assert output.text is not None
+        assert result.output is not None
 
-        print_message_history(response.context.state.message_history)
+        print_message_history(result.message_history)
 
-        assert any(len(msg.tool_calls) > 0 for msg in response.context.state.message_history if isinstance(msg, ModelResponse))
+        assert any(len(msg.tool_calls) > 0 for msg in result.message_history if isinstance(msg, ModelResponse))
 
 
 @pytest.mark.asyncio
@@ -239,20 +218,18 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        response = await client.execute_node(
+        result = await client.execute_node(
             "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?",
             "test_agent.input",
         )
 
-        output = deserialize_output(response.context.state.final_output_parts)
+        print_message_history(result.message_history)
 
-        print_message_history(response.context.state.message_history)
-
-        assert sum(len(msg.tool_calls) for msg in response.context.state.message_history if isinstance(msg, ModelResponse)) > 1
-        assert output.text is not None
-        assert user_name.lower() in output.text.lower()
-        assert "1967" in output.text.lower()
-        assert "snow" in output.text.lower()
+        assert sum(len(msg.tool_calls) for msg in result.message_history if isinstance(msg, ModelResponse)) > 1
+        assert result.output is not None
+        assert user_name.lower() in result.output.lower()
+        assert "1967" in result.output.lower()
+        assert "snow" in result.output.lower()
 
 
 @pytest.mark.asyncio
@@ -268,33 +245,30 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
 
     async with TestKafkaBroker(broker) as _:
         result = await client.execute_node("Do you know my name?", "test_agent.input")
-        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert output.text is not None
-        assert user_name.lower() in output.text.lower()
+        assert result.output is not None
+        assert user_name.lower() in result.output.lower()
 
         result = await client.execute_node(
             "And what's your name?",
             "test_agent.input",
-            message_history=result.context.state.message_history,
+            message_history=result.message_history,
         )
-        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert output.text is not None
-        assert agent_name.lower() in output.text.lower()
+        assert result.output is not None
+        assert agent_name.lower() in result.output.lower()
 
         result = await client.execute_node(
             "What's the weather in vegas rn and what's my birthday?",
             "test_agent.input",
-            message_history=result.context.state.message_history,
+            message_history=result.message_history,
         )
-        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert output.text is not None
-        assert "1967" in output.text.lower()
-        assert "snow" in output.text.lower()
+        assert result.output is not None
+        assert "1967" in result.output.lower()
+        assert "snow" in result.output.lower()
 
-        print_message_history(result.context.state.message_history)
+        print_message_history(result.message_history)
 
 
 @pytest.mark.asyncio
@@ -314,32 +288,29 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
             "test_agent.input",
             deps={"ephemeral_id": "id1"},
         )
-        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert output.text is not None
-        assert caller_id_lookup["id1"] in output.text.lower()
+        assert result.output is not None
+        assert caller_id_lookup["id1"] in result.output.lower()
 
         result = await client.execute_node(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
             "test_agent.input",
             deps={"ephemeral_id": "id2"},
         )
-        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert output.text is not None
-        assert caller_id_lookup["id2"] in output.text.lower()
+        assert result.output is not None
+        assert caller_id_lookup["id2"] in result.output.lower()
 
         result = await client.execute_node(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
             "test_agent.input",
             deps={"ephemeral_id": "id3"},
         )
-        output = deserialize_output(result.context.state.final_output_parts)
 
-        assert output.text is not None
-        assert caller_id_lookup["id3"] in output.text.lower()
+        assert result.output is not None
+        assert caller_id_lookup["id3"] in result.output.lower()
 
-        print_message_history(result.context.state.message_history)
+        print_message_history(result.message_history)
 
 
 @pytest.mark.asyncio
@@ -354,37 +325,37 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         result = await client.execute_node(
             f"What's your name? My name is {user_name}",
             "test_agent.input",
+            output_type=Response,
             temp_instructions="When responding, always direct responses to the recipient's name you would like to target.",
         )
-        structured_output = deserialize_output(result.context.state.final_output_parts)
 
-        assert structured_output.data is not None
-        assert user_name.lower() in structured_output.data.recipient_name.lower()
-        assert agent_name.lower() in structured_output.data.response.lower()
-        print(f"structured_output: {structured_output}")
+        assert result.output is not None
+        assert user_name.lower() in result.output.recipient_name.lower()
+        assert agent_name.lower() in result.output.response.lower()
+        print(f"structured_output: {result.output}")
 
         result = await client.execute_node(
             "Do you remember my name?",
             "test_agent.input",
+            output_type=Response,
             temp_instructions="when responding, always direct responses to specific recipients you would like to target.",
-            message_history=result.context.state.message_history,
+            message_history=result.message_history,
         )
-        structured_output = deserialize_output(result.context.state.final_output_parts)
 
-        assert structured_output.data is not None
-        assert user_name.lower() in structured_output.data.recipient_name.lower()
-        assert user_name.lower() in structured_output.data.response.lower()
-        print(f"structured_output: {structured_output}")
+        assert result.output is not None
+        assert user_name.lower() in result.output.recipient_name.lower()
+        assert user_name.lower() in result.output.response.lower()
+        print(f"structured_output: {result.output}")
 
         result = await client.execute_node(
             "Please tell my friend Amy to remember to exercise today",
             "test_agent.input",
+            output_type=Response,
             temp_instructions="when responding, always direct responses to specific recipients you would like to target.",
-            message_history=result.context.state.message_history,
+            message_history=result.message_history,
         )
-        structured_output = deserialize_output(result.context.state.final_output_parts)
-        assert structured_output.data is not None
-        assert "amy" in structured_output.data.recipient_name.lower()
-        print(f"structured_output: {structured_output}")
+        assert result.output is not None
+        assert "amy" in result.output.recipient_name.lower()
+        print(f"structured_output: {result.output}")
 
-        print_message_history(result.context.state.message_history)
+        print_message_history(result.message_history)

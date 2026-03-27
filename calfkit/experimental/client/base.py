@@ -16,6 +16,7 @@ from calfkit.experimental.base_models.session_context import (
     SessionRunContext,
     WorkflowState,
 )
+from calfkit.experimental.client.deserialize import _UNSET
 from calfkit.experimental.client.invocation_handle import InvocationHandle
 from calfkit.experimental.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.experimental.data_model.state_deps import State
@@ -112,6 +113,7 @@ class BaseClient:
         state: State,
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
+        output_type: type[Any] = _UNSET,
     ) -> InvocationHandle:
         """Invoke the node asynchronously.
 
@@ -147,6 +149,7 @@ class BaseClient:
             topic=topic,
             reply_topic=reply_topic,
             _future=future,
+            _output_type=output_type,
         )
 
     async def close(self) -> None:
