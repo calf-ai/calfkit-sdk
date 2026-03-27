@@ -93,7 +93,7 @@ class AgentProvider(Provider):
     def get_simple_agent(self, model_client: PydanticModelClient) -> AnyOf[SimpleAgent, BaseAgentNodeDef]:
         return SimpleAgent(
             "test_simple_agent",
-            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}.",
+            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
             subscribe_topics="test_agent.input",
             publish_topic="test_agent.output",
             model_client=model_client,
@@ -103,7 +103,7 @@ class AgentProvider(Provider):
     def get_structured_agent(self, model_client: PydanticModelClient) -> StructuredAgent:
         return StructuredAgent(
             "test_structured_agent",
-            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}.",
+            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
             subscribe_topics="test_agent.input",
             publish_topic="test_agent.output",
             model_client=model_client,
