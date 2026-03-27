@@ -69,10 +69,7 @@ def _extract_auto(parts: list[Any]) -> Any:
     for part in parts:
         if isinstance(part, TextPart):
             return part.text
-    raise DeserializationError(
-        "No DataPart or TextPart found in final_output_parts; "
-        "cannot auto-detect output."
-    )
+    raise DeserializationError("No DataPart or TextPart found in final_output_parts; cannot auto-detect output.")
 
 
 def _extract_text(parts: list[Any]) -> str:
@@ -80,10 +77,7 @@ def _extract_text(parts: list[Any]) -> str:
     for part in parts:
         if isinstance(part, TextPart):
             return part.text
-    raise DeserializationError(
-        "No TextPart found in final_output_parts; "
-        "expected output_type=str."
-    )
+    raise DeserializationError("No TextPart found in final_output_parts; expected output_type=str.")
 
 
 def _extract_data(parts: list[Any], output_type: type[Any]) -> Any:
@@ -92,7 +86,4 @@ def _extract_data(parts: list[Any], output_type: type[Any]) -> Any:
         if isinstance(part, DataPart):
             adapter: TypeAdapter[Any] = TypeAdapter(output_type)
             return adapter.validate_python(part.data)
-    raise DeserializationError(
-        f"No DataPart found in final_output_parts; "
-        f"expected output_type={getattr(output_type, '__name__', str(output_type))}."
-    )
+    raise DeserializationError(f"No DataPart found in final_output_parts; expected output_type={getattr(output_type, '__name__', str(output_type))}.")
