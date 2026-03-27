@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 import pytest
 import uuid_utils
-from dishka import AnyOf, Provider, Scope, WithParents, make_container, provide
+from dishka import AnyOf, Container, Provider, Scope, WithParents, make_container, provide
 from dotenv import load_dotenv
 from faststream import Context
 from faststream.kafka import KafkaBroker, TestKafkaBroker
@@ -46,11 +46,12 @@ StructuredAgent = BaseAgentNodeDef[Response]
 
 user_name: str = "Conan"
 agent_name: str = "LeBron James III"
+birthday = "January 1, 1967"
 
 
-def read_mind():
-    """Use this tool and you'll have the ability to read the user's mind and thoughts."""
-    return "Gigantic Apple Pencils, and the Cars movie"
+def get_users_birthday():
+    """Use this tool to get the user's birthday."""
+    return birthday
 
 
 def get_users_name():
@@ -112,7 +113,7 @@ class AgentProvider(Provider):
 
     @provide
     def get_multiple_tools(self) -> AnyOf[list[BaseToolNodeDef], list[ToolNodeDef]]:
-        return [agent_tool(read_mind), agent_tool(get_users_name), agent_tool(weather)]
+        return [agent_tool(get_users_name), agent_tool(weather), agent_tool(get_users_birthday)]
 
     @provide
     def get_caller_id_tool(self) -> AnyOf[BaseToolNodeDef, ToolNodeDef]:
@@ -202,7 +203,7 @@ def prepare_worker(container):
 
 
 async def send_message(
-    container,
+    container: Container,
     prompt: str,
     callback_topic: str,
     temp_instructions: str | None = None,
@@ -231,22 +232,13 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    client = container.get(Client)
-    resp_store = container.get(dict)
 
     gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.q_and_a.output")(gather_results)
 
     async with TestKafkaBroker(broker) as _:
-        corr_id = uuid_utils.uuid7().hex
-        await client.invoke_node("Hi, what's your name?", "test_agent.input", "test_agent.q_and_a.output", corr_id)
+        response = await send_message(container, "Hi, what's your name?", "test_agent.q_and_a.output")
 
-        # TestKafkaBroker is synchronous — the entire handler chain completes
-        # inline during invoke_node(), so resp_store is already populated.
-        assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
-
-        response = resp_store[corr_id]
-        assert isinstance(response, Envelope)
         assert isinstance(response.context.state.message_history[-1], ModelResponse)
         print()
         print(f"Response message: {response.context.state.message_history[-1].text}")
@@ -259,25 +251,15 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
 async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_agent_tools):
     agent = container.get(SimpleAgent)
     tools = container.get(list[ToolNodeDef])
-    agent.add_tools(tools[0])
+    agent.add_tools(tools[2])
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    resp_store = container.get(dict)
-    client = container.get(Client)
     gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.tool_test.output")(gather_results)
     async with TestKafkaBroker(broker) as _:
-        corr_id = uuid_utils.uuid7().hex
-        await client.invoke_node("Hi, what am i thinking?", "test_agent.input", "test_agent.tool_test.output", corr_id)
+        response = await send_message(container, "Hi, what's my birthday?", "test_agent.tool_test.output")
 
-        # TestKafkaBroker is synchronous — the entire handler chain completes
-        # inline during invoke_node(), so resp_store is already populated.
-        assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
-
-        response = resp_store[corr_id]
-
-        assert isinstance(response, Envelope)
         assert isinstance(response.context.state.message_history[-1], ModelResponse)
 
         print_message_history(response.context.state.message_history)
@@ -294,27 +276,15 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)
-    resp_store = container.get(dict)
-    client = container.get(Client)
     gather_results = gather_factory(container)
     gather_results = broker.subscriber("test_agent.tools_test.output")(gather_results)
     async with TestKafkaBroker(broker) as _:
-        corr_id = uuid_utils.uuid7().hex
-        await client.invoke_node(
-            "Hi, do you know my name and the weather in Singapore rn? And what am I thinking?",
-            "test_agent.input",
+        response = await send_message(
+            container,
+            "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?",
             "test_agent.tools_test.output",
-            corr_id,
-            temp_instructions="You are able to read minds by using the appropriate tool.",
         )
 
-        # TestKafkaBroker is synchronous — the entire handler chain completes
-        # inline during invoke_node(), so resp_store is already populated.
-        assert corr_id in resp_store, f"Expected response for corr_id={corr_id[:8]}... but resp_store is empty"
-
-        response = resp_store[corr_id]
-
-        assert isinstance(response, Envelope)
         assert isinstance(response.context.state.message_history[-1], ModelResponse)
 
         print_message_history(response.context.state.message_history)
@@ -322,7 +292,7 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
         assert sum(len(msg.tool_calls) for msg in response.context.state.message_history if isinstance(msg, ModelResponse)) > 1
         assert response.context.state.message_history[-1].text is not None
         assert user_name.lower() in response.context.state.message_history[-1].text.lower()
-        assert "cars" in response.context.state.message_history[-1].text.lower()
+        assert "1967" in response.context.state.message_history[-1].text.lower()
         assert "snow" in response.context.state.message_history[-1].text.lower()
 
 
@@ -358,7 +328,7 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
 
         result = await send_message(
             container,
-            "What's the weather in vegas rn and read my mind pls.",
+            "What's the weather in vegas rn and what's my birthday?",
             "test_agent.tools_test.output",
             msg_history=result.context.state.message_history,
         )
@@ -367,7 +337,7 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
 
         assert isinstance(resp_msg, ModelResponse)
         assert resp_msg.text is not None
-        assert "cars" in resp_msg.text.lower()
+        assert "1967" in resp_msg.text.lower()
         assert "snow" in resp_msg.text.lower()
 
         print_message_history(result.context.state.message_history)
