@@ -9,7 +9,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit.experimental.client import Client
-from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
+from calfkit.experimental.nodes.agent_def import Agent, BaseAgentNodeDef
 from calfkit.experimental.nodes.tool_def import BaseToolNodeDef, ToolNodeDef, agent_tool
 from calfkit.experimental.worker.worker import Worker
 from calfkit.models.tool_context import ToolContext
@@ -29,9 +29,9 @@ class Response:
     recipient_name: str
 
 
-SimpleAgent = BaseAgentNodeDef[str]
+SimpleAgent = Agent[str]
 
-StructuredAgent = BaseAgentNodeDef[Response]
+StructuredAgent = Agent[Response]
 
 user_name: str = "Conan"
 agent_name: str = "LeBron James III"
@@ -334,6 +334,7 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         )
 
         assert result.output is not None
+        assert isinstance(result.output, Response)
         assert user_name.lower() in result.output.recipient_name.lower()
         assert agent_name.lower() in result.output.response.lower()
         print(f"structured_output: {result.output}")
@@ -347,6 +348,7 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         )
 
         assert result.output is not None
+        assert isinstance(result.output, Response)
         assert user_name.lower() in result.output.recipient_name.lower()
         assert user_name.lower() in result.output.response.lower()
         print(f"structured_output: {result.output}")
@@ -359,6 +361,7 @@ async def test_structured_output_agent(container, deploy_structured_agent):
             message_history=result.message_history,
         )
         assert result.output is not None
+        assert isinstance(result.output, Response)
         assert "amy" in result.output.recipient_name.lower()
         print(f"structured_output: {result.output}")
 
