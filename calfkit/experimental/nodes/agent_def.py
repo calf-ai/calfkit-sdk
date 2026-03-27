@@ -8,6 +8,7 @@ from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.experimental._types import AgentOutputT
 from calfkit.experimental.base_models.actions import Call, NodeResult, ReturnCall, TailCall
 from calfkit.experimental.base_models.session_context import SessionRunContext
+from calfkit.experimental.data_model.payload import DataPart, TextPart
 from calfkit.experimental.data_model.state_deps import State
 from calfkit.experimental.nodes.base import (
     BaseNodeDef,
@@ -159,6 +160,10 @@ class BaseAgentNodeDef(
         elif isinstance(result.output, self.final_output_type):
             logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.deps.correlation_id[:8], self.name)
             ctx.state.message_history.extend(result.new_messages())
+            if isinstance(result.output, str):
+                ctx.state.final_output_parts = [TextPart(text=result.output)]
+            else:
+                ctx.state.final_output_parts = [DataPart(data=result.output)]
             return ReturnCall[State](state=ctx.state)
 
         else:

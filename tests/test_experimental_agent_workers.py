@@ -10,9 +10,10 @@ from faststream import Context
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import models
-from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse
+from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 from calfkit.experimental.base_models.envelope import Envelope
 from calfkit.experimental.client import Client
+from calfkit.experimental.data_model.payload import ContentPart
 from calfkit.experimental.nodes.agent_def import BaseAgentNodeDef
 from calfkit.experimental.nodes.tool_def import BaseToolNodeDef, ToolNodeDef, agent_tool
 from calfkit.experimental.worker.worker import Worker
@@ -30,7 +31,13 @@ models.ALLOW_MODEL_REQUESTS = True
 @dataclass
 class Response:
     response: str
-    recipient_names: list[str]
+    recipient_name: str
+
+
+@dataclass
+class StructuredOutput:
+    text: str | None
+    data: Response | None
 
 
 SimpleAgent = BaseAgentNodeDef[str]
@@ -208,7 +215,7 @@ async def send_message(
     response = resp_store[corr_id]
 
     assert isinstance(response, Envelope)
-    assert isinstance(response.context.state.message_history[-1], ModelResponse)
+    assert isinstance(response.context.state.message_history[-1], (ModelResponse, ModelRequest))
 
     return response
 
@@ -408,13 +415,21 @@ async def test_simple_agent_with_injected_deps(deploy_agent, deploy_caller_id_ag
         print_message_history(result.context.state.message_history)
 
 
-# TODO: final output type needs to be deserialized client side as well. Need to review how structured outputs are sent to client. In ModelMessage?
+def deserialize_output(resp_parts: list[ContentPart]) -> StructuredOutput:
+    data = None
+    text = None
+    for part in resp_parts:
+        if part.kind == "data" and isinstance(part.data, dict):
+            data = Response(**part.data)
+        if part.kind == "text":
+            text = part.text
+
+    return StructuredOutput(text=text, data=data)
+
+
 @pytest.mark.asyncio
 @skip_if_no_openai_key
-async def test_structured_output_agent(deploy_structured_agent, deploy_multiple_agent_tools):
-    agent = di_container.get(StructuredAgent)
-    tools = di_container.get(list[ToolNodeDef])
-    agent.add_tools(*tools)
+async def test_structured_output_agent(deploy_structured_agent):
     prepare_worker()
 
     broker = di_container.get(KafkaBroker)
@@ -423,37 +438,39 @@ async def test_structured_output_agent(deploy_structured_agent, deploy_multiple_
 
     async with TestKafkaBroker(broker) as _:
         result = await send_message(
-            "do you know my name?",
+            f"What's your name? My name is {user_name}",
+            "test_agent.structured_output_test.output",
+            "When responding, always direct responses to the recipient's name you would like to target.",
+        )
+        structured_output = deserialize_output(result.context.state.final_output_parts)
+
+        assert structured_output.data is not None
+        assert user_name.lower() in structured_output.data.recipient_name.lower()
+        assert agent_name.lower() in structured_output.data.response.lower()
+        print(f"structured_output: {structured_output}")
+
+        result = await send_message(
+            "Do you remember my name?",
             "test_agent.structured_output_test.output",
             "when responding, always direct responses to specific recipients you would like to target.",
-        )
-        resp_msg = result.context.state.message_history[-1]
-
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert user_name.lower() in resp_msg.text.lower()
-
-        result = await send_message(
-            "And what's your name?", "test_agent.structured_output_test.output", msg_history=result.context.state.message_history
-        )
-
-        resp_msg = result.context.state.message_history[-1]
-
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert agent_name.lower() in resp_msg.text.lower()
-
-        result = await send_message(
-            "What's the weather in vegas rn and read my mind pls.",
-            "test_agent.structured_output_test.output",
             msg_history=result.context.state.message_history,
         )
+        structured_output = deserialize_output(result.context.state.final_output_parts)
 
-        resp_msg = result.context.state.message_history[-1]
+        assert structured_output.data is not None
+        assert user_name.lower() in structured_output.data.recipient_name.lower()
+        assert user_name.lower() in structured_output.data.response.lower()
+        print(f"structured_output: {structured_output}")
 
-        assert isinstance(resp_msg, ModelResponse)
-        assert resp_msg.text is not None
-        assert "cars" in resp_msg.text.lower()
-        assert "snow" in resp_msg.text.lower()
+        result = await send_message(
+            "Please tell my friend Amy to remember to exercise today",
+            "test_agent.structured_output_test.output",
+            "when responding, always direct responses to specific recipients you would like to target.",
+            msg_history=result.context.state.message_history,
+        )
+        structured_output = deserialize_output(result.context.state.final_output_parts)
+        assert structured_output.data is not None
+        assert "amy" in structured_output.data.recipient_name.lower()
+        print(f"structured_output: {structured_output}")
 
         print_message_history(result.context.state.message_history)
