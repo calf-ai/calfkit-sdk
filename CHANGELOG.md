@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.17](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.16...v0.1.17) (2026-03-27)
+
+
+### Features
+
+* (choreographed durable agents) replace reply-stack with call-stack workflow model and flatten State ([#101](https://github.com/calf-ai/calfkit-sdk/issues/101)) ([52f8989](https://github.com/calf-ai/calfkit-sdk/commit/52f898937ee4c4b801b246f79175914281890b86))
+* implement experimental choreography-based node definitions for durable agent and multi-agent workflows ([#96](https://github.com/calf-ai/calfkit-sdk/issues/96)) ([ec5c1ae](https://github.com/calf-ai/calfkit-sdk/commit/ec5c1ae3d4d67574185b3f640a1490f0faedcf13))
+* more features for experimental nodes, add client/worker, and structured logging ([#102](https://github.com/calf-ai/calfkit-sdk/issues/102)) ([738c7a4](https://github.com/calf-ai/calfkit-sdk/commit/738c7a48f5942f62e01bca10bd208965bee21398))
+* restructure state models, add per-invocation input injection, and TDD test coverage for experimental nodes  ([#98](https://github.com/calf-ai/calfkit-sdk/issues/98)) ([2ce6ea3](https://github.com/calf-ai/calfkit-sdk/commit/2ce6ea324b653379f0f38d858013d5ecd47902e8))
+* Simplify deps typing, add structured output support, and overhaul integration tests ([#103](https://github.com/calf-ai/calfkit-sdk/issues/103)) ([5067482](https://github.com/calf-ai/calfkit-sdk/commit/50674825e3cf8494dcf6558246a427fdebee8f9f))
+
 ## [0.1.16](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.15...v0.1.16) (2026-03-06)
 
 
