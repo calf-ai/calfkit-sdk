@@ -6,7 +6,6 @@ from pydantic import Field
 from calfkit._vendor.pydantic_ai import ModelMessage
 from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.models.delegation import DelegationFrame
-from calfkit.models.groupchat import GroupchatDataModel
 from calfkit.models.types import (
     CompactBaseModel,
     PayloadT,
@@ -35,9 +34,6 @@ class EnvelopeState(CompactBaseModel):
     # the response can be routed back to the correct caller.
     delegation_stack: list[DelegationFrame] = Field(default_factory=list)
 
-    # For holding groupchat data and config. Only to directly be accessed by the groupchat node.
-    groupchat_data: GroupchatDataModel | None = None
-
     # Per-request session config; set by router from RouterPayload, persists across tool-call cycles
     instructions: str | None = None
     agent_name: str | None = None
@@ -46,10 +42,6 @@ class EnvelopeState(CompactBaseModel):
     @property
     def latest_message_in_history(self) -> ModelMessage | None:
         return self.message_history[-1] if self.message_history else None
-
-    @property
-    def is_groupchat(self) -> bool:
-        return self.groupchat_data is not None
 
     @property
     def is_end_of_turn(self) -> bool:
@@ -73,8 +65,6 @@ class EnvelopeState(CompactBaseModel):
             message (ModelMessage): new message
         """
         self.uncommitted_messages.append(message)
-        if self.groupchat_data is not None:
-            self.groupchat_data.add_uncommitted_message_to_turn(message)
 
     def prepare_uncommitted_agent_messages(self, messages: list[ModelMessage]) -> None:
         """Prepare and set the agent-level uncommitted messages with provided messages.
@@ -92,7 +82,7 @@ class EnvelopeState(CompactBaseModel):
 
     def replace_uncommitted_with_turn_context(self) -> None:
         """Replace uncommitted messages with conversation context from the groupchat turns queue."""
-        self.uncommitted_messages = self.groupchat_data.flat_messages_from_turns_queue if self.groupchat_data is not None else []
+        self.uncommitted_messages = []
 
     def push_delegation_frame(self, frame: DelegationFrame) -> None:
         """Push a delegation frame onto the stack.

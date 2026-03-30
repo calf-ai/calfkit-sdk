@@ -6,16 +6,8 @@ import uuid_utils
 from pydantic import BaseModel, ConfigDict, Field
 
 from calfkit.experimental._types import DepsT, StackItemT, StateT, UserDepsT
-from calfkit.experimental.base_models.actions import Call, _Call
+from calfkit.experimental.base_models.actions import _Call
 from calfkit.experimental.data_model.state_deps import State
-
-
-@dataclass
-class CallFuture:
-    id: str
-    call_request_part: Call
-    # TODO: eventually extend a future to more than one call part so workflows can be further configured  # noqa: E501
-    call_finished: bool
 
 
 @dataclass
