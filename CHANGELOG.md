@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.17...v0.2.0) (2026-03-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove legacy SDK and promote experimental modules to stable top-level API ([#108](https://github.com/calf-ai/calfkit-sdk/issues/108))
+
+### Features
+
+* add shared reply dispatcher with correlation-based dispatch to experimental client ([#104](https://github.com/calf-ai/calfkit-sdk/issues/104)) ([ecd9e0e](https://github.com/calf-ai/calfkit-sdk/commit/ecd9e0e53000edb83e953109f8cf9ed2c973d642))
+* client side output type deserialization ([#106](https://github.com/calf-ai/calfkit-sdk/issues/106)) ([356b882](https://github.com/calf-ai/calfkit-sdk/commit/356b882fe08e4608201a5d904e54ac30286994ee))
+* remove legacy SDK and promote experimental modules to stable top-level API ([#108](https://github.com/calf-ai/calfkit-sdk/issues/108)) ([8d85661](https://github.com/calf-ai/calfkit-sdk/commit/8d85661009fbce548686122ee8fa4999ab71e5ee))
+
 ## [0.1.17](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.16...v0.1.17) (2026-03-27)
 
 
