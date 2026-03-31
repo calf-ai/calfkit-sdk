@@ -2,12 +2,12 @@ import asyncio
 import os
 import sys
 
-from dotenv import load_dotenv
-
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.chat_node import ChatNode
-from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.runners.service import NodesService
+from dotenv import load_dotenv
+
+from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 
 load_dotenv()
 

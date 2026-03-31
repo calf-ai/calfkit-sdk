@@ -3,7 +3,6 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit.client import Client
-from calfkit.nodes import ToolNodeDef
 from tests.integration.providers import (
     Response,
     agent_name,

@@ -5,11 +5,11 @@ import uuid
 from typing import Annotated
 
 import uuid_utils
-from faststream import Context
-
 from calfkit.broker.broker import BrokerClient
 from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
+from faststream import Context
+
 from tests.utils import wait_for_condition
 
 logging.disable(logging.CRITICAL)

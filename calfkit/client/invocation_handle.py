@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any, Generic
 
 from calfkit._types import OutputT
-from calfkit.client.node_result import NodeResult
 from calfkit.client.deserialize import _UNSET, deserialize_to_node_result
+from calfkit.client.node_result import NodeResult
 from calfkit.models.envelope import Envelope
 
 

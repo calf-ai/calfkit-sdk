@@ -7,8 +7,8 @@ import uuid_utils
 from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
-from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.deserialize import _UNSET
+from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.models import State
