@@ -42,7 +42,7 @@ class BaseNodeDef:
         node_id: str,
         *,
         subscribe_topics: str | list[str],
-        publish_topic: str,
+        publish_topic: str | None,
     ):
         self._node_id = node_id
         if isinstance(subscribe_topics, str):

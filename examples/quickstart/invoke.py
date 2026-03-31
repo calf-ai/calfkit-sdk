@@ -9,7 +9,7 @@ async def main():
     # Send a request and await the response
     result = await client.execute_node(
         "What's the weather in Tokyo?",
-        "agent.input",  # The topic the agent subscribes to
+        "weather_agent.input",  # The topic the agent subscribes to
     )
     print(f"Assistant: {result.output}")
 
