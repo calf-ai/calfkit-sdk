@@ -1,10 +1,12 @@
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic
 
 from typing_extensions import TypeAliasType, TypeVar
 
 from calfkit._types import StateT
+from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
+from calfkit.models.state import State
 
 
 @dataclass
@@ -116,7 +118,24 @@ _T = TypeVar("_T")
 
 NodeResult = TypeAliasType(
     "NodeResult",
-    Silent | Call[_T] | ReturnCall[_T] | TailCall[_T],
+    Silent | Call[_T] | list[Call[_T]] | ReturnCall[_T] | TailCall[_T],
     type_params=(_T,),
 )
 """All possible return types from a node's ``run`` method."""
+
+
+@dataclass
+class PendingToolBatch:
+    """Tracks an in-flight parallel tool call batch for one correlation chain."""
+
+    expected_tool_call_ids: frozenset[str]
+
+    # State snapshot at fan-out time, with tool_calls registered
+    base_state: State
+
+    # map of tool call IDs to tool call results
+    collected_results: dict[str, ToolCallResult | Any] = field(default_factory=dict)
+
+    @property
+    def is_complete(self) -> bool:
+        return self.expected_tool_call_ids == frozenset(self.collected_results.keys())
