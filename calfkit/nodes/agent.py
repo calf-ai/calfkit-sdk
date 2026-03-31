@@ -107,9 +107,7 @@ class BaseAgentNodeDef(
                     # Defensively dispatch remaining as parallel
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
                     return [
-                        Call[State](
-                            tools_registry[tc.tool_name].subscribe_topics[0], ctx.state.model_copy(deep=True), tc.tool_call_id, self.name
-                        )
+                        Call[State](tools_registry[tc.tool_name].subscribe_topics[0], ctx.state.model_copy(deep=True), tc.tool_call_id, self.name)
                         for tc in remaining
                     ]
 
