@@ -7,7 +7,7 @@
 
 The SDK to build AI agents as composable, orchestratable microservices.
 
-Calfkit lets you compose agents with independent services—chat, tools, routing—that communicate asynchronously. Add agent capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream listener. 
+Calfkit lets you compose agents with independent services—agents, tools, workflows—that communicate asynchronously. Add agent capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream listener. 
 
 Agents should work like real teams, with independent, distinct roles, async communication, and the ability to onboard new teammates or tools without restructuring the whole org. Build AI employees that integrate.
 
@@ -100,20 +100,19 @@ Define and deploy a tool as an independent service. Tools are not owned by or co
 # weather_tool.py
 import asyncio
 from calfkit.nodes import agent_tool
-from calfkit.broker import BrokerClient
-from calfkit.runners import NodesService
+from calfkit.client import Client
+from calfkit.worker import Worker
 
-# Example tool definition
+# Define a tool — the @agent_tool decorator turns any function into a deployable tool node
 @agent_tool
 def get_weather(location: str) -> str:
     """Get the current weather at a location"""
     return f"It's sunny in {location}"
 
 async def main():
-    broker_client = BrokerClient(bootstrap_servers="localhost:9092") # Connect to Kafka broker
-    service = NodesService(broker_client) # Initialize a service instance
-    service.register_node(get_weather) # Register the tool node in the service
-    await service.run() # (Blocking call) Deploy the service to start serving traffic
+    client = Client.connect("localhost:9092")  # Connect to Kafka broker
+    worker = Worker(client, nodes=[get_weather])  # Initialize a worker with the tool node
+    await worker.run()  # (Blocking call) Deploy the service to start serving traffic
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -127,25 +126,32 @@ python weather_tool.py
 
 <br>
 
-### 4. Deploy the Chat Node
+### 4. Deploy the Agent Node
 
-Deploy the LLM chat node as its own service.
+Deploy the agent as its own service. The `Agent` handles LLM chat, tool orchestration, and conversation management in a single node. Import the tool definition to register it with the agent—the tool definition is reusable and does not couple the agent to the tool's deployment.
 
 ```python
-# chat_service.py
+# agent_service.py
 import asyncio
-from calfkit.nodes import ChatNode
+from calfkit.nodes import Agent
 from calfkit.providers import OpenAIModelClient
-from calfkit.broker import BrokerClient
-from calfkit.runners import NodesService
+from calfkit.client import Client
+from calfkit.worker import Worker
+from weather_tool import get_weather  # Import the tool definition (reusable)
+
+agent = Agent(
+    "weather_agent",
+    system_prompt="You are a helpful assistant.",
+    subscribe_topics="agent.input",
+    publish_topic="agent.output",
+    model_client=OpenAIModelClient(model_name="gpt-5-nano"),
+    tools=[get_weather],  # Register tool definitions with the agent
+)
 
 async def main():
-    broker_client = BrokerClient(bootstrap_servers="localhost:9092") # Connect to Kafka broker
-    model_client = OpenAIModelClient(model_name="gpt-5-nano")
-    chat_node = ChatNode(model_client) # Inject a model client into the chat node definition so the chat deployment can perform LLM calls
-    service = NodesService(broker_client) # Initialize a service instance
-    service.register_node(chat_node) # Register the chat node in the service
-    await service.run() # (Blocking call) Deploy the service to start serving traffic
+    client = Client.connect("localhost:9092")  # Connect to Kafka broker
+    worker = Worker(client, nodes=[agent])  # Initialize a worker with the agent node
+    await worker.run()  # (Blocking call) Deploy the service to start serving traffic
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -157,75 +163,32 @@ Set your OpenAI API key:
 export OPENAI_API_KEY=sk-...
 ```
 
-Run the file to deploy the chat service:
+Run the file to deploy the agent service:
 
 ```shell
-python chat_service.py
+python agent_service.py
 ```
 
 <br>
 
-### 5. Deploy the Agent Router Node
+### 5. Invoke the Agent
 
-Deploy the agent router that orchestrates chat, tools, and conversation-level memory.
+Send a request and receive the response. The `Client` handles broker communication and request correlation automatically.
 
 ```python
-# agent_router_service.py
+# invoke.py
 import asyncio
-from calfkit.nodes import agent_tool, AgentRouterNode, ChatNode
-from calfkit.stores import InMemoryMessageHistoryStore
-from calfkit.broker import BrokerClient
-from calfkit.runners import NodesService
-from weather_tool import get_weather # Import the tool, the tool definition is reusable
+from calfkit.client import Client
 
 async def main():
-    broker_client = BrokerClient(bootstrap_servers="localhost:9092") # Connect to Kafka broker
-    router_node = AgentRouterNode(
-        chat_node=ChatNode(), # Provide the chat node definition for the router to orchestrate the nodes
-        tool_nodes=[get_weather],
-        system_prompt="You are a helpful assistant",
-        message_history_store=InMemoryMessageHistoryStore(), # Stores messages in-memory in the deployment runtime
+    client = Client.connect("localhost:9092")  # Connect to Kafka broker
+
+    # Send a request and await the response
+    result = await client.execute_node(
+        "What's the weather in Tokyo?",
+        "agent.input",  # The topic the agent subscribes to
     )
-    service = NodesService(broker_client) # Initialize a service instance
-    service.register_node(router_node) # Register the router node in the service
-    await service.run() # (Blocking call) Deploy the service to start serving traffic
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Run the file to deploy the agent router service:
-
-```shell
-python agent_router_service.py
-```
-
-<br>
-
-### 6. Invoke the Agent
-
-Send a request and receive the response.
-
-When invoking an already-deployed agent, use the `RouterServiceClient`. The node is just a configuration object, so you don't need to redefine the deployment parameters.
-
-```python
-# client.py
-import asyncio
-from calfkit.nodes import AgentRouterNode
-from calfkit.broker import BrokerClient
-from calfkit.runners import RouterServiceClient
-
-async def main():
-    broker_client = BrokerClient(bootstrap_servers="localhost:9092") # Connect to Kafka broker
-
-    # Thin client - no deployment parameters needed
-    router_node = AgentRouterNode()
-    client = RouterServiceClient(broker_client, router_node)
-
-    # Request and wait for response
-    response = await client.request(user_prompt="What's the weather in Tokyo?")
-    final_msg = await response.get_final_response()
-    print(f"Assistant: {final_msg.text}")
+    print(f"Assistant: {result.output}")
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -234,38 +197,84 @@ if __name__ == "__main__":
 Run the file to invoke the agent:
 
 ```shell
-python client.py
-```
-
-The `RouterServiceClient` handles ephemeral Kafka communication and cleanup automatically. You can also stream intermediate messages:
-
-```python
-response = await client.request(user_prompt="What's the weather in Tokyo?")
-
-# Stream all messages (tool calls, intermediate responses, etc.)
-async for message in response.messages_stream():
-    print(message)
+python invoke.py
 ```
 
 <br>
 
-### Runtime Injected System Prompts and Tools (Optional)
+### Structured Outputs (Optional)
 
-Clients can override the system prompt and restrict available tools at invocation time without redeploying:
+Agents can be deployed with a `final_output_type` to enforce structured output from the LLM. The output is type-safe and deserialized automatically on the client side.
 
 ```python
-from weather_tool import get_weather
+from dataclasses import dataclass
+from calfkit.nodes import Agent
+from calfkit.providers import OpenAIModelClient
 
-# Client with runtime patches
-router_node = AgentRouterNode(
-    system_prompt="You are an assistant with no tools :(",  # Override the deployed system prompt
-    tool_nodes=[],  # Patch in any subset of the deployed agent's set of tools
+@dataclass
+class WeatherReport:
+    location: str
+    summary: str
+
+agent = Agent(
+    "weather_agent",
+    system_prompt="You are a helpful assistant.",
+    subscribe_topics="agent.input",
+    publish_topic="agent.output",
+    model_client=OpenAIModelClient(model_name="gpt-5-nano"),
+    final_output_type=WeatherReport,  # Enforce structured output
 )
-client = RouterServiceClient(broker_client, router_node)
-response = await client.request(user_prompt="Weather in Tokyo?")
 ```
 
-This lets different clients customize agent behavior per-request. Tool patching is currently limited to subsets of tools configured in the deployed router.
+When invoking, pass the matching `output_type` to deserialize the response:
+
+```python
+result = await client.execute_node(
+    "What's the weather in Tokyo?",
+    "agent.input",
+    output_type=WeatherReport,
+)
+print(result.output.location)  # "Tokyo"
+print(result.output.summary)   # "It's sunny in Tokyo"
+```
+
+<br>
+
+### Client-Side Features (Optional)
+
+The `Client` supports multi-turn conversations, runtime dependency injection, and temporary instruction overrides—all without redeploying the agent.
+
+**Multi-turn conversations** — pass the message history from a previous result to maintain context:
+
+```python
+result = await client.execute_node("What's the weather in Tokyo?", "agent.input")
+
+# Continue the conversation with full context
+result = await client.execute_node(
+    "How about in Osaka?",
+    "agent.input",
+    message_history=result.message_history,
+)
+```
+
+**Runtime dependency injection** — pass runtime data to tools via the `deps` parameter:
+
+```python
+result = await client.execute_node(
+    "What's my phone number?",
+    "agent.input",
+    deps={"user_id": "usr_123"},  # Available to tools via ctx.deps.provided_deps
+)
+```
+
+**Temporary instructions** — temporarily add system-level instructions scoped per request:
+
+```python
+result = await client.execute_node(
+    "What's the weather in Tokyo?",
+    "agent.input",
+    temp_instructions="Always respond in Japanese.",
+)
 
 <br>
 

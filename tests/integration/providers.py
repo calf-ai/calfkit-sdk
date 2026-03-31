@@ -6,14 +6,13 @@ from dishka import AnyOf, Provider, Scope, WithParents, provide
 from dotenv import load_dotenv
 from faststream.kafka import KafkaBroker
 
-from calfkit.experimental._types import OutputT
-from calfkit.experimental.client import Client
-from calfkit.experimental.nodes.agent_def import Agent, BaseAgentNodeDef
-from calfkit.experimental.nodes.tool_def import BaseToolNodeDef, ToolNodeDef, agent_tool
-from calfkit.experimental.worker.worker import Worker
+from calfkit._types import OutputT
+from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
+from calfkit.nodes import Agent, BaseAgentNodeDef, BaseToolNodeDef, ToolNodeDef, agent_tool
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
+from calfkit.worker import Worker
 
 load_dotenv()
 
@@ -142,5 +141,5 @@ class WorkerProvider(Provider):
 
 
 def prepare_worker(container):
-    worker = container.get(Worker)
-    worker.prepare()
+    worker: Worker = container.get(Worker)
+    worker.register_handlers()
