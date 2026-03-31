@@ -3,10 +3,9 @@ from collections.abc import Callable
 import pytest
 from dishka import make_container
 
-from calfkit.experimental._types import OutputT
-from calfkit.experimental.nodes.agent_def import Agent
-from calfkit.experimental.nodes.tool_def import ToolNodeDef
-from calfkit.experimental.worker.worker import Worker
+from calfkit._types import OutputT
+from calfkit.nodes import Agent, ToolNodeDef
+from calfkit.worker import Worker
 from tests.integration.providers import (
     AgentProvider,
     ClientProvider,
