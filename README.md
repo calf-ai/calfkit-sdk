@@ -142,8 +142,7 @@ from weather_tool import get_weather  # Import the tool definition (reusable)
 agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
-    subscribe_topics="agent.input",
-    publish_topic="agent.output",
+    subscribe_topics="weather_agent.input",
     model_client=OpenAIModelClient(model_name="gpt-5-nano"),
     tools=[get_weather],  # Register tool definitions with the agent
 )
@@ -219,8 +218,7 @@ class WeatherReport:
 agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
-    subscribe_topics="agent.input",
-    publish_topic="agent.output",
+    subscribe_topics="weather_agent.input",
     model_client=OpenAIModelClient(model_name="gpt-5-nano"),
     final_output_type=WeatherReport,  # Enforce structured output
 )
@@ -231,7 +229,7 @@ When invoking, pass the matching `output_type` to deserialize the response:
 ```python
 result = await client.execute_node(
     "What's the weather in Tokyo?",
-    "agent.input",
+    "weather_agent.input",
     output_type=WeatherReport,
 )
 print(result.output.location)  # "Tokyo"

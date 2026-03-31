@@ -29,7 +29,7 @@ class BaseAgentNodeDef(
         *,
         system_prompt: str = "You are a helpful AI assistant.",
         subscribe_topics: str | list[str],
-        publish_topic: str,
+        publish_topic: str | None = None,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]

@@ -10,8 +10,7 @@ from calfkit.worker import Worker
 agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
-    subscribe_topics="agent.input",
-    publish_topic="agent.output",
+    subscribe_topics="weather_agent.input",
     model_client=OpenAIModelClient(model_name="gpt-5-nano"),
     tools=[get_weather],  # Register tool definitions with the agent
 )
