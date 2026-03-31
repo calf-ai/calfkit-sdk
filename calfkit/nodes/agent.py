@@ -102,14 +102,12 @@ class BaseAgentNodeDef(
                         self.name,
                     )
                 else:
-                    # Should not happen in parallel mode — state aggregation gate handles it
-                    logger.warning("Parallel mode: unexpected incomplete tool calls in run()")
-                    # Defensively dispatch remaining as parallel
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
-                    return [
-                        Call[State](tools_registry[tc.tool_name].subscribe_topics[0], ctx.state.model_copy(deep=True), tc.tool_call_id, self.name)
-                        for tc in remaining
-                    ]
+                    raise RuntimeError(
+                        f"[{ctx.deps.correlation_id[:8]}] Parallel mode reached incomplete tool calls outside aggregation gate. "
+                        f"node={self.name} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
+                        f"This indicates lost PendingToolBatch state (e.g. partition rebalance or process restart)."
+                    )
 
             tool_results = DeferredToolResults(calls={tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id) for tc in latest_tool_calls})
 
@@ -164,13 +162,15 @@ class BaseAgentNodeDef(
                     )
 
             if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):  # All tool calls were invalid, we need to retry.
-                # TODO: consider a node retry return type that doesn't require round trip to itself.
+                # TODO: maybe consider a node retry return type that doesn't require round trip to itself.
                 # Tailcall to itself is a roundtrip.
                 logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
                 return TailCall[State](target_topic=self.subscribe_topics[0], state=ctx.state)
 
-            if self.sequential_only_mode:
-                target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
+            pending_tool_calls = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
+
+            if self.sequential_only_mode or len(pending_tool_calls) == 1:
+                target_tool_call = pending_tool_calls[0]
                 logger.debug(
                     "[%s] routing new tool call=%s tool=%s node=%s",
                     ctx.deps.correlation_id[:8],
@@ -185,20 +185,16 @@ class BaseAgentNodeDef(
                     self.name,
                 )
             else:
-                parallel_tool_calls = list[Call[State]]()
-                launch_tool_call_ids = list[str]()
-                for call in latest_tool_calls:
-                    if call.tool_call_id in ctx.state.tool_results:
-                        continue
-                    parallel_tool_calls.append(
-                        Call[State](
-                            tools_registry[call.tool_name].subscribe_topics[0],
-                            ctx.state.model_copy(deep=True),
-                            call.tool_call_id,
-                            self.name,
-                        )
+                launch_tool_call_ids = [tc.tool_call_id for tc in pending_tool_calls]
+                parallel_tool_calls = [
+                    Call[State](
+                        tools_registry[tc.tool_name].subscribe_topics[0],
+                        ctx.state.model_copy(deep=True),
+                        tc.tool_call_id,
+                        self.name,
                     )
-                    launch_tool_call_ids.append(call.tool_call_id)
+                    for tc in pending_tool_calls
+                ]
 
                 self._pending_batches[ctx.deps.correlation_id] = PendingToolBatch(
                     expected_tool_call_ids=frozenset(launch_tool_call_ids),
