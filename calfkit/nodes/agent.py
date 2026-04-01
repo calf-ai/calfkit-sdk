@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Callable, Generic
+from collections.abc import Callable
+from typing import Any, Generic
 
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
