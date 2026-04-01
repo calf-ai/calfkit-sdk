@@ -121,16 +121,6 @@ class AgentProvider(Provider):
         return FunctionModel(call_all_tools_concurrently)
 
     @provide
-    def get_simple_agent(self, model_client: PydanticModelClient) -> AnyOf[SimpleAgent, BaseAgentNodeDef]:
-        return SimpleAgent(
-            "test_simple_agent",
-            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
-            subscribe_topics="test_agent.input",
-            publish_topic="test_agent.output",
-            model_client=model_client,
-        )
-
-    @provide
     def get_structured_agent_factory(self, model_client: PydanticModelClient, worker: Worker) -> Callable:
         def factory(output_type: type[OutputT]) -> Agent[OutputT]:
             agent = Agent[output_type](
