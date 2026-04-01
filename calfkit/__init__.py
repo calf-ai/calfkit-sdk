@@ -4,7 +4,6 @@ from calfkit.client import Client, InvocationHandle, NodeResult
 from calfkit.models import ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, NodeDef, ToolNodeDef, agent_tool
 from calfkit.providers import OpenAIModelClient
-from calfkit.stores import InMemoryMessageHistoryStore, MessageHistoryStore
 from calfkit.worker import Worker
 
 __version__ = version("calfkit")
@@ -24,9 +23,6 @@ __all__ = [
     "agent_tool",
     # providers
     "OpenAIModelClient",
-    # stores
-    "InMemoryMessageHistoryStore",
-    "MessageHistoryStore",
     # worker
     "Worker",
 ]
