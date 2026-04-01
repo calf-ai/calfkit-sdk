@@ -9,8 +9,9 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
-from calfkit.models.actions import PendingToolBatch, Silent
+from calfkit.models.actions import Silent
 from calfkit.models.session_context import SessionRunContext
+from calfkit.models.state import PendingToolBatch
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
