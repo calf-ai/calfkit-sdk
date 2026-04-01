@@ -5,7 +5,7 @@ from typing import Any, Generic
 import uuid_utils
 from pydantic import BaseModel, ConfigDict, Field
 
-from calfkit._types import DepsT, StackItemT, StateT, UserDepsT
+from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
 from calfkit.models.state import State
 
@@ -69,15 +69,12 @@ class WorkflowState(BaseModel):
         return self.call_stack.push(frame)
 
 
-class BaseDeps(BaseModel, Generic[UserDepsT]):
+class Deps(BaseModel):
     """immutable dependencies for agent executions"""
 
     model_config = ConfigDict(extra="ignore", frozen=True)
     correlation_id: str
-    provided_deps: UserDepsT = Field(description="user-provided agent dependencies")
-
-
-Deps = BaseDeps[dict[str, Any]]
+    provided_deps: dict[str, Any] = Field(description="user-provided agent dependencies")
 
 
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):

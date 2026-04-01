@@ -16,7 +16,6 @@ from calfkit.models.actions import (
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import ContentPart, DataPart, FilePart, Payload, TextPart, ToolCallPart
 from calfkit.models.session_context import (
-    BaseDeps,
     BaseSessionRunContext,
     CallFrame,
     CallFrameStack,
@@ -59,7 +58,6 @@ __all__ = [
     "TextPart",
     "ToolCallPart",
     # session_context
-    "BaseDeps",
     "BaseSessionRunContext",
     "CallFrame",
     "CallFrameStack",

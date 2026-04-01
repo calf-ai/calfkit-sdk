@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit.client import Client
-from tests.integration.providers import Response, agent_name, prepare_worker, user_name
+from tests.providers import Response, agent_name, prepare_worker, user_name
 from tests.utils import skip_if_no_openai_key
 
 # Ensure model requests are allowed for integration tests
