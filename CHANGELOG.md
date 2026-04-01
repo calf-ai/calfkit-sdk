@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.0...v0.2.1) (2026-04-01)
+
+
+### Features
+
+* add parallel tool call support for agents ([#112](https://github.com/calf-ai/calfkit-sdk/issues/112)) ([c93dfd9](https://github.com/calf-ai/calfkit-sdk/commit/c93dfd920ec0ef8d1a826164db25a54b35556b67))
+
+
+### Documentation
+
+* close python code block in readme ([#109](https://github.com/calf-ai/calfkit-sdk/issues/109)) ([34cb53a](https://github.com/calf-ai/calfkit-sdk/commit/34cb53a70cc503b4b001c2cda2f1901ad2533dc1))
+* update quickstart example ([#111](https://github.com/calf-ai/calfkit-sdk/issues/111)) ([bfec93c](https://github.com/calf-ai/calfkit-sdk/commit/bfec93c48168a96718384b463560e54cf1ac163f))
+
 ## [0.2.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.1.17...v0.2.0) (2026-03-31)
 
 
