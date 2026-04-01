@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.1...v0.2.2) (2026-04-01)
+
+
+### Bug Fixes
+
+* route temp_instructions to the model and expose [@agent](https://github.com/agent).instructions decorator ([#113](https://github.com/calf-ai/calfkit-sdk/issues/113)) ([cd3a4c4](https://github.com/calf-ai/calfkit-sdk/commit/cd3a4c41983dcaf2f957db5b49454f4a334a4a68))
+
 ## [0.2.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.0...v0.2.1) (2026-04-01)
 
 
