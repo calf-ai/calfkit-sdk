@@ -12,7 +12,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, Mod
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, BaseAgentNodeDef, BaseToolNodeDef, ToolNodeDef, agent_tool
+from calfkit.nodes import Agent, BaseToolNodeDef, ToolNodeDef, agent_tool
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.worker import Worker
