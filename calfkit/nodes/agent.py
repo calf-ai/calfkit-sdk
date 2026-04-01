@@ -50,6 +50,7 @@ class BaseAgentNodeDef(
             name=self.name,
             output_type=[final_output_type, DeferredToolRequests],
             deps_type=dict,
+            instructions=system_prompt
         )
 
     def _parallel_state_aggregation(self, ctx: SessionRunContext) -> None:
@@ -117,7 +118,7 @@ class BaseAgentNodeDef(
 
         result = await self._agent_loop.run(
             message_history=ctx.state.message_history,
-            instructions=self.system_prompt,
+            instructions=ctx.state.temp_instructions,
             toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
             deps=ctx.deps.provided_deps,  # None valid when AgentDepsT=NoneType
             deferred_tool_results=tool_results,

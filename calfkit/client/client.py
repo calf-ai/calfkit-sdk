@@ -99,8 +99,8 @@ class Client(BaseClient):
         if reply_topic is None:
             reply_topic = self._reply_topic
 
-        state = State(message_history=message_history or list())
-        state.stage_message(ModelRequest.user_text_prompt(user_prompt, instructions=temp_instructions))
+        state = State(message_history=message_history or list(), temp_instructions=temp_instructions)
+        state.stage_message(ModelRequest.user_text_prompt(user_prompt))
         return await self._invoke(
             topic=topic,
             reply_topic=reply_topic,

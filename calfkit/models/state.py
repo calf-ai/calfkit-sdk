@@ -26,6 +26,8 @@ class CoreMessageState(BaseAgentActivityState):
     message_history: list[ModelMessage] = Field(default_factory=list, description="Append-only message history list")
     final_output_parts: list[ContentPart] = Field(default_factory=list)
 
+    temp_instructions: str | None = None
+
     def latest_tool_calls(self) -> list[ToolCallPart]:
         pending_tool_calls = list()
         for msg in reversed(self.message_history):
