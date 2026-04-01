@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NewType
 
-from dishka import AnyOf, Provider, Scope, WithParents, provide
+from dishka import AnyOf, Provider, Scope, provide
 from dotenv import load_dotenv
 from faststream.kafka import KafkaBroker
 
