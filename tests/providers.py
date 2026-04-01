@@ -93,6 +93,14 @@ def get_random_city(ctx: ToolContext) -> str:
     return random_city
 
 
+INSTRUCTIONS_TEST_SYSTEM_PROMPT = "You are a test assistant."
+
+
+def echo_instructions(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """FunctionModel that returns the resolved instructions string as its text output."""
+    return ModelResponse(parts=[TextPart(content=info.instructions or "")])
+
+
 def call_all_tools_concurrently(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     last_msg = messages[-1]
     assert isinstance(last_msg, ModelRequest)

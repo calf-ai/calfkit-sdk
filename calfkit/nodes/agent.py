@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 from typing import Any, Generic
 
 from calfkit._types import AgentOutputT
@@ -46,10 +47,7 @@ class BaseAgentNodeDef(
         super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
 
         self._agent_loop: InternalAgentLoop[dict[str, Any], AgentOutputT | DeferredToolRequests] = InternalAgentLoop(
-            model_client,
-            name=self.name,
-            output_type=[final_output_type, DeferredToolRequests],
-            deps_type=dict,
+            model_client, name=self.name, output_type=[final_output_type, DeferredToolRequests], deps_type=dict, instructions=system_prompt
         )
 
     def _parallel_state_aggregation(self, ctx: SessionRunContext) -> None:
@@ -117,7 +115,7 @@ class BaseAgentNodeDef(
 
         result = await self._agent_loop.run(
             message_history=ctx.state.message_history,
-            instructions=self.system_prompt,
+            instructions=ctx.state.temp_instructions,
             toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
             deps=ctx.deps.provided_deps,  # None valid when AgentDepsT=NoneType
             deferred_tool_results=tool_results,
@@ -215,6 +213,10 @@ class BaseAgentNodeDef(
 
     def add_tools(self, *tools: ToolNodeDef) -> None:
         self.tools.extend(tools)
+
+    def instructions(self, func: Callable[..., str | None]) -> Callable[..., str | None]:
+        """Decorator to define dynamic instruction functions that can build instructions at runtime."""
+        return self._agent_loop.instructions(func)
 
 
 Agent = BaseAgentNodeDef
