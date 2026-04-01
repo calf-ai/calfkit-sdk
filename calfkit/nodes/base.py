@@ -79,24 +79,27 @@ class BaseNodeDef:
         ctx = envelope.context.model_copy(deep=True)
         return ctx
 
-    async def handler(
-        self,
-        envelope: Envelope,
-        correlation_id: Annotated[str, Context()],
-        broker: BrokerAnnotation,
-    ) -> Envelope:
-        logger.debug("[%s] handler entered node=%s", correlation_id[:8], self._node_id)
-        ctx = await self.prepare_context(envelope)
-        if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
-            output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
-        else:
-            output = await self.run(ctx)
-
-        logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self._node_id)
-
+    async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
         publish_envelope: Envelope
 
-        if isinstance(output, Call):
+        if isinstance(output, list) and all(isinstance(item, Call) for item in output):
+            # Parallel fan-out: publish each Call with independent workflow_state
+            for call in output:
+                wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
+                wf_copy.invoke_frame(call, self.subscribe_topics[0])
+                publish_envelope = Envelope(
+                    context=SessionRunContext(state=call.state, deps=envelope.context.deps),
+                    internal_workflow_state=wf_copy,
+                )
+                await broker.publish(
+                    publish_envelope,
+                    topic=wf_copy.current_frame.target_topic,
+                    correlation_id=correlation_id,
+                    key=correlation_id.encode(),
+                )
+            return envelope
+
+        elif isinstance(output, Call):
             # push to callstack and call the target topic
             envelope.internal_workflow_state.invoke_frame(output, self.subscribe_topics[0])
             publish_envelope = Envelope(
@@ -109,6 +112,7 @@ class BaseNodeDef:
                 publish_envelope,
                 topic=target_topic,
                 correlation_id=correlation_id,
+                key=correlation_id.encode(),
             )
         elif isinstance(output, ReturnCall):
             # unwind current frame and return to previous topic
@@ -122,6 +126,7 @@ class BaseNodeDef:
                 publish_envelope,
                 topic=frame.callback_topic,
                 correlation_id=correlation_id,
+                key=correlation_id.encode(),
             )
 
         elif isinstance(output, TailCall):
@@ -138,6 +143,7 @@ class BaseNodeDef:
                 publish_envelope,
                 topic=target_topic,
                 correlation_id=correlation_id,
+                key=correlation_id.encode(),
             )
 
         elif isinstance(output, Silent):
@@ -152,90 +158,22 @@ class BaseNodeDef:
 
         return publish_envelope
 
-        # elif isinstance(output, Reply):
-        #     if not envelope.reply_stack:
-        #         logger.warning(
-        #             "Node %s: Reply returned but reply_stack is empty — response dropped",
-        #             self._node_id,
-        #         )
-        #         return
-        #     topic = envelope.reply_stack[-1]
-        #     remaining_stack = envelope.reply_stack[:-1]
-        #     await broker.publish(
-        #         Envelope(
-        #             context=SessionRunContext(state=output.value, deps=envelope.context.deps),
-        #             reply_stack=remaining_stack,
-        #         ),
-        #         topic=topic,
-        #         correlation_id=correlation_id,
-        #     )
+    async def handler(
+        self,
+        envelope: Envelope,
+        correlation_id: Annotated[str, Context()],
+        broker: BrokerAnnotation,
+    ) -> Envelope:
+        logger.debug("[%s] handler entered node=%s", correlation_id[:8], self._node_id)
+        ctx = await self.prepare_context(envelope)
+        if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
+            output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
+        else:
+            output = await self.run(ctx)
 
-        # elif isinstance(output, Delegate):
-        #     new_stack = [*envelope.reply_stack, self._return_topic]
-        #     await broker.publish(
-        #         Envelope(
-        #             context=SessionRunContext(state=output.value, deps=envelope.context.deps),
-        #             reply_stack=new_stack,
-        #             input_args=output.input_args,
-        #         ),
-        #         topic=output.topic,
-        #         correlation_id=correlation_id,
-        #     )
+        logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self._node_id)
 
-        # elif isinstance(output, Emit):
-        #     await broker.publish(
-        #         SessionRunContext(state=output.value, deps=envelope.context.deps),
-        #         topic=output.topic,
-        #         correlation_id=correlation_id,
-        #     )
-
-        # elif isinstance(output, Parallel):
-        #     new_stack = [*envelope.reply_stack, self._return_topic]
-        #     for delegate in output.delegates:
-        #         await broker.publish(
-        #             Envelope(
-        #                 context=SessionRunContext(
-        #                     state=delegate.value, deps=envelope.context.deps
-        #                 ),
-        #                 reply_stack=new_stack,
-        #                 input_args=delegate.input_args,
-        #             ),
-        #             topic=delegate.topic,
-        #             correlation_id=correlation_id,
-        #         )
-
-        # elif isinstance(output, list) and output and all(isinstance(e, Emit) for e in output):
-        #     # mypy can't narrow list element types from all(isinstance(...))
-        #     for emit in output:
-        #         await broker.publish(
-        #             SessionRunContext(state=emit.value, deps=envelope.context.deps),
-        #             topic=emit.topic,
-        #             correlation_id=correlation_id,
-        #         )
-
-        # elif isinstance(output, list) and output and all(isinstance(d, Delegate) for d in output):
-        #     # Sequential multi-delegate: chain via reply_stack.
-        #     # Push self._return_topic (bottom), then remaining delegate
-        #     # topics in reverse, so popping goes:
-        #     #   first.topic → output[1].topic → ... → self._return_topic
-        #     remaining_topics = [d.topic for d in reversed(output[1:])]
-        #     new_stack = [
-        #         *envelope.reply_stack,
-        #         self._return_topic,
-        #         *remaining_topics,
-        #     ]
-        #     first = output[0]
-        #     if not isinstance(first, Delegate):  # just to silence the type checker
-        #         return
-        #     await broker.publish(
-        #         Envelope(
-        #             context=SessionRunContext(state=first.value, deps=envelope.context.deps),
-        #             reply_stack=new_stack,
-        #             input_args=first.input_args,
-        #         ),
-        #         topic=first.topic,
-        #         correlation_id=correlation_id,
-        #     )
+        return await self._publish_action(output, envelope, correlation_id, broker)
 
     @property
     def id(self) -> str:

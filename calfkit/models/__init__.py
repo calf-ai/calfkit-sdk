@@ -1,9 +1,20 @@
 # payload must be imported first — state.py imports ContentPart from this package
-from calfkit.models.actions import Call, Delegate, Emit, NodeResult, Parallel, Reply, ReturnCall, Sequential, Silent, TailCall, _Call
+from calfkit.models.actions import (
+    Call,
+    Delegate,
+    Emit,
+    NodeResult,
+    Parallel,
+    Reply,
+    ReturnCall,
+    Sequential,
+    Silent,
+    TailCall,
+    _Call,
+)
 from calfkit.models.envelope import Envelope
-from calfkit.models.payload import ContentPart, DataPart, FilePart, Payload, TextPart, ToolCallPart
+from calfkit.models.payload import ContentPart, DataPart, FilePart, TextPart, ToolCallPart
 from calfkit.models.session_context import (
-    BaseDeps,
     BaseSessionRunContext,
     CallFrame,
     CallFrameStack,
@@ -18,6 +29,7 @@ from calfkit.models.state import (
     InFlightToolsState,
     NodeConsumeState,
     PartialState,
+    PendingToolBatch,
     State,
 )
 from calfkit.models.tool_context import ToolContext
@@ -41,11 +53,9 @@ __all__ = [
     "ContentPart",
     "DataPart",
     "FilePart",
-    "Payload",
     "TextPart",
     "ToolCallPart",
     # session_context
-    "BaseDeps",
     "BaseSessionRunContext",
     "CallFrame",
     "CallFrameStack",
@@ -60,6 +70,7 @@ __all__ = [
     "NodeConsumeState",
     "PartialState",
     "State",
+    "PendingToolBatch",
     # tool_context
     "ToolContext",
 ]

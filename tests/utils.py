@@ -1,5 +1,6 @@
 import asyncio
 import os
+import textwrap
 import time
 from collections.abc import Callable
 
@@ -56,17 +57,24 @@ def print_message_history(message_history: list[ModelMessage]) -> None:
         if isinstance(message, ModelRequest):
             print(f"[{i}] REQUEST")
             for part in message.parts:
-                print(f"  [{part.part_kind}] {part!r}")
+                print(textwrap.indent(f"[{part.part_kind}] {part!r}", "  "))
 
         elif isinstance(message, ModelResponse):
             model = message.model_name or "unknown"
             print(f"[{i}] RESPONSE (model={model})")
             if message.text:
-                print(f"  [text] {message.text}")
+                print(textwrap.indent(f"[text] \n{message.text}", "  "))
             if message.thinking:
-                print(f"  [thinking] {message.thinking[:200]}")
+                print(textwrap.indent(f"[thinking] \n{message.thinking[:200]}", "  "))
             for tc in message.tool_calls:
-                print(f"  [tool-call] {tc.tool_name}(id={tc.tool_call_id})")
-                print(f"    args: {tc.args_as_json_str()[:300]}")
+                print(textwrap.indent(f"[tool-call] \n{tc.tool_name}(id={tc.tool_call_id})", "  "))
+                print(textwrap.indent(f"args: {tc.args_as_json_str()[:300]}", "    "))
 
     print(separator)
+
+
+def find_last_tool_call_message(messages: list[ModelMessage]) -> ModelResponse | None:
+    return next(
+        (m for m in reversed(messages) if isinstance(m, ModelResponse) and m.tool_calls),
+        None,
+    )

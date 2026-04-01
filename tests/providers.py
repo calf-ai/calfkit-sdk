@@ -1,15 +1,18 @@
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NewType
 
-from dishka import AnyOf, Provider, Scope, WithParents, provide
+from dishka import AnyOf, Provider, Scope, provide
 from dotenv import load_dotenv
 from faststream.kafka import KafkaBroker
 
 from calfkit._types import OutputT
+from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, BaseAgentNodeDef, BaseToolNodeDef, ToolNodeDef, agent_tool
+from calfkit.nodes import Agent, BaseToolNodeDef, ToolNodeDef, agent_tool
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.worker import Worker
@@ -66,22 +69,56 @@ def get_caller_id(ctx: ToolContext):
     return caller_id_lookup.get(ephemeral_id, "no number found")
 
 
+def get_random_number(ctx: ToolContext) -> int | str:
+    """Use this tool to get a random number."""
+    random_number: int = ctx.deps.provided_deps.get("random_number")  # pyright: ignore[reportAssignmentType]
+    if random_number is None:
+        return "unable to get a random number"
+    return random_number
+
+
+def get_random_string(ctx: ToolContext) -> str:
+    """Use this tool to get a random string."""
+    random_string: str = ctx.deps.provided_deps.get("random_string")  # pyright: ignore[reportAssignmentType]
+    if random_string is None:
+        return "unable to get a random string"
+    return random_string
+
+
+def get_random_city(ctx: ToolContext) -> str:
+    """Use this tool to get a random city."""
+    random_city: str = ctx.deps.provided_deps.get("random_city")  # pyright: ignore[reportAssignmentType]
+    if random_city is None:
+        return "unable to get a random city"
+    return random_city
+
+
+def call_all_tools_concurrently(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    last_msg = messages[-1]
+    assert isinstance(last_msg, ModelRequest)
+
+    if all(isinstance(part, ToolReturnPart) for part in last_msg.parts):
+        return ModelResponse(parts=[TextPart(f"{part.content}\n\n") for part in last_msg.parts])
+
+    tool_calls = list[ToolCallPart]()
+    for tool in info.function_tools:
+        tool_calls.append(ToolCallPart(tool.name))
+    return ModelResponse(parts=tool_calls)
+
+
+ContextualTool = NewType("ContextualTool", ToolNodeDef)
+
+
 class AgentProvider(Provider):
     scope = Scope.APP
 
     @provide
-    def get_model_client(self) -> WithParents[OpenAIModelClient]:
+    def get_model_client(self) -> PydanticModelClient:
         return OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
 
     @provide
-    def get_simple_agent(self, model_client: PydanticModelClient) -> AnyOf[SimpleAgent, BaseAgentNodeDef]:
-        return SimpleAgent(
-            "test_simple_agent",
-            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
-            subscribe_topics="test_agent.input",
-            publish_topic="test_agent.output",
-            model_client=model_client,
-        )
+    def get_function_model(self) -> FunctionModel:
+        return FunctionModel(call_all_tools_concurrently)
 
     @provide
     def get_structured_agent_factory(self, model_client: PydanticModelClient, worker: Worker) -> Callable:
@@ -114,6 +151,14 @@ class AgentProvider(Provider):
     @provide
     def get_multiple_tools(self) -> AnyOf[list[BaseToolNodeDef], list[ToolNodeDef]]:
         return [agent_tool(get_users_name), agent_tool(weather), agent_tool(get_users_birthday)]
+
+    @provide
+    def get_multiple_contextual_tools(self) -> list[ContextualTool]:
+        return [
+            ContextualTool(agent_tool(get_random_number)),
+            ContextualTool(agent_tool(get_random_city)),
+            ContextualTool(agent_tool(get_random_string)),
+        ]
 
     @provide
     def get_caller_id_tool(self) -> AnyOf[BaseToolNodeDef, ToolNodeDef]:

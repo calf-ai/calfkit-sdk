@@ -1,0 +1,21 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
+ignore:
+  - "calfkit/_vendor/**"
+  - "tests/**"
+  - "docs/**"
+  - "examples/**"
+
+comment:
+  layout: "diff, flags, files"
+  behavior: default
+  require_changes: false
