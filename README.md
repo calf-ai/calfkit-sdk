@@ -4,6 +4,7 @@
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/calfkit?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/calfkit)
 [![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
+[![codecov](https://codecov.io/gh/calf-ai/calf-sdk/branch/main/graph/badge.svg)](https://codecov.io/gh/calf-ai/calf-sdk)
 
 The SDK to build AI agents as composable, orchestratable microservices.
 
