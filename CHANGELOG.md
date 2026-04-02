@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.2...v0.2.3) (2026-04-02)
+
+
+### Bug Fixes
+
+* update vendored anthropic imports and add AnthropicModelClient ([#116](https://github.com/calf-ai/calfkit-sdk/issues/116)) ([06c3cc3](https://github.com/calf-ai/calfkit-sdk/commit/06c3cc3749ee9c620ddb91a4bc3dc7d7564842fb))
+
 ## [0.2.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.1...v0.2.2) (2026-04-01)
 
 
