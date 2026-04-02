@@ -33,7 +33,7 @@ dependencies = [
     "exceptiongroup>=1.2.2; python_version < '3.11'",
     # Provider SDKs
     "openai>=1.0.0",
-    "anthropic>=0.20.0",
+    "anthropic>=0.80.0",
     "typing-extensions>=4.15.0",
     "dishka>=1.9.1",
 ]

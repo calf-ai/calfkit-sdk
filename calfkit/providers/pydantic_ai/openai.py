@@ -56,7 +56,7 @@ class OpenAIModelClient(OpenAIChatModel, PydanticModelClient):
             settings_kwargs["extra_headers"] = extra_headers
         if extra_body is not None:
             settings_kwargs["extra_body"] = extra_body
-        model_settings: OpenAIChatModelSettings = OpenAIChatModelSettings(**settings_kwargs)  # type: ignore[typeddict-item]
+        model_settings: OpenAIChatModelSettings = OpenAIChatModelSettings(**settings_kwargs, **kwargs)  # type: ignore[typeddict-item]
 
         openai_client = OpenAIProvider(base_url=base_url, api_key=api_key)
         self.model_settings = model_settings

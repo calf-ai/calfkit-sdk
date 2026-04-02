@@ -11,3 +11,4 @@ pydantic-ai-slim==1.47.0  https://github.com/pydantic/pydantic-ai
 #   - _run_context.py: Made model/usage optional with defaults for ToolContext construction
 #   - _function_schema.py: _is_call_ctx() recognizes RunContext subclasses
 #   - messages.py: Added `retry_prompt` classmethod to ModelRequest
+#   - models/anthropic.py: UserLocation -> BetaUserLocationParam (anthropic SDK 0.80.0 rename)

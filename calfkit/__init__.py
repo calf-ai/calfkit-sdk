@@ -3,7 +3,7 @@ from importlib.metadata import version
 from calfkit.client import Client, InvocationHandle, NodeResult
 from calfkit.models import ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, NodeDef, ToolNodeDef, agent_tool
-from calfkit.providers import OpenAIModelClient
+from calfkit.providers import AnthropicModelClient, OpenAIModelClient
 from calfkit.worker import Worker
 
 __version__ = version("calfkit")
@@ -22,6 +22,7 @@ __all__ = [
     "ToolNodeDef",
     "agent_tool",
     # providers
+    "AnthropicModelClient",
     "OpenAIModelClient",
     # worker
     "Worker",
