@@ -120,41 +120,41 @@ ContextualTool = NewType("ContextualTool", ToolNodeDef)
 class AgentProvider(Provider):
     scope = Scope.APP
 
-    @provide
-    def get_model_client(self) -> PydanticModelClient:
-        return OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
+    # @provide
+    # def get_model_client(self) -> PydanticModelClient:
+    #     return OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
 
     @provide
     def get_function_model(self) -> FunctionModel:
         return FunctionModel(call_all_tools_concurrently)
 
-    @provide
-    def get_structured_agent_factory(self, model_client: PydanticModelClient, worker: Worker) -> Callable:
-        def factory(output_type: type[OutputT]) -> Agent[OutputT]:
-            agent = Agent[output_type](
-                "test_custom_structured_agent",
-                system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
-                subscribe_topics="test_agent.input",
-                publish_topic="test_agent.output",
-                model_client=model_client,
-                final_output_type=output_type,
-            )
-            worker.add_nodes(agent)
+    # @provide
+    # def get_structured_agent_factory(self, model_client: PydanticModelClient, worker: Worker) -> Callable:
+    #     def factory(output_type: type[OutputT]) -> Agent[OutputT]:
+    #         agent = Agent[output_type](
+    #             "test_custom_structured_agent",
+    #             system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
+    #             subscribe_topics="test_agent.input",
+    #             publish_topic="test_agent.output",
+    #             model_client=model_client,
+    #             final_output_type=output_type,
+    #         )
+    #         worker.add_nodes(agent)
 
-            return agent
+    #         return agent
 
-        return factory
+    #     return factory
 
-    @provide
-    def get_structured_agent(self, model_client: PydanticModelClient) -> StructuredAgent:
-        return StructuredAgent(
-            "test_structured_agent",
-            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
-            subscribe_topics="test_agent.input",
-            publish_topic="test_agent.output",
-            model_client=model_client,
-            final_output_type=Response,
-        )
+    # @provide
+    # def get_structured_agent(self, model_client: PydanticModelClient) -> StructuredAgent:
+    #     return StructuredAgent(
+    #         "test_structured_agent",
+    #         system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
+    #         subscribe_topics="test_agent.input",
+    #         publish_topic="test_agent.output",
+    #         model_client=model_client,
+    #         final_output_type=Response,
+    #     )
 
     @provide
     def get_multiple_tools(self) -> AnyOf[list[BaseToolNodeDef], list[ToolNodeDef]]:

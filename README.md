@@ -135,7 +135,7 @@ Deploy the agent as its own service. The `Agent` handles LLM chat, tool orchestr
 # agent_service.py
 import asyncio
 from calfkit.nodes import Agent
-from calfkit.providers import OpenAIModelClient
+from calfkit.providers import OpenAIResponsesModelClient
 from calfkit.client import Client
 from calfkit.worker import Worker
 from weather_tool import get_weather  # Import the tool definition (reusable)
@@ -144,7 +144,7 @@ agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
     subscribe_topics="weather_agent.input",
-    model_client=OpenAIModelClient(model_name="gpt-5-nano"),
+    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
     tools=[get_weather],  # Register tool definitions with the agent
 )
 
@@ -209,7 +209,7 @@ Agents can be deployed with a `final_output_type` to enforce structured output f
 ```python
 from dataclasses import dataclass
 from calfkit.nodes import Agent
-from calfkit.providers import OpenAIModelClient
+from calfkit.providers import OpenAIResponsesModelClient
 
 @dataclass
 class WeatherReport:
@@ -220,7 +220,7 @@ agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
     subscribe_topics="weather_agent.input",
-    model_client=OpenAIModelClient(model_name="gpt-5-nano"),
+    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
     final_output_type=WeatherReport,  # Enforce structured output
 )
 ```
