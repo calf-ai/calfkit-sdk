@@ -54,7 +54,7 @@ def agent_constructor_args_model_client(request) -> dict[str, Any]:
 
 
 @pytest.fixture
-def deploy_agent(agent_constructor_args_sequential_modes, agent_constructor_args_model_client, container) -> SimpleAgent:
+def deploy_agent(agent_constructor_args_model_client, container) -> SimpleAgent:
     worker = container.get(Worker)
     agent = SimpleAgent(
         "test_simple_agent",
@@ -62,7 +62,6 @@ def deploy_agent(agent_constructor_args_sequential_modes, agent_constructor_args
         subscribe_topics="test_agent.input",
         publish_topic="test_agent.output",
         **agent_constructor_args_model_client,
-        **agent_constructor_args_sequential_modes,
     )
     worker.add_nodes(agent)
     return agent
@@ -86,7 +85,7 @@ def deploy_function_agent(agent_constructor_args_sequential_modes, container) ->
 
 
 @pytest.fixture
-def deploy_structured_agent(agent_constructor_args_sequential_modes, agent_constructor_args_model_client, container) -> StructuredAgent:
+def deploy_structured_agent(agent_constructor_args_model_client, container) -> StructuredAgent:
     worker = container.get(Worker)
     agent = StructuredAgent(
         "test_structured_agent",
@@ -95,16 +94,13 @@ def deploy_structured_agent(agent_constructor_args_sequential_modes, agent_const
         publish_topic="test_agent.output",
         final_output_type=Response,
         **agent_constructor_args_model_client,
-        **agent_constructor_args_sequential_modes,
     )
     worker.add_nodes(agent)
     return agent
 
 
 @pytest.fixture
-def deploy_structured_agent_factory(
-    agent_constructor_args_sequential_modes, agent_constructor_args_model_client, container
-) -> Callable[..., Agent[OutputT]]:
+def deploy_structured_agent_factory(agent_constructor_args_model_client, container) -> Callable[..., Agent[OutputT]]:
     worker = container.get(Worker)
 
     def agent_factory(output_type: type[OutputT]) -> Agent[OutputT]:
@@ -115,7 +111,6 @@ def deploy_structured_agent_factory(
             publish_topic="test_agent.output",
             final_output_type=output_type,
             **agent_constructor_args_model_client,
-            **agent_constructor_args_sequential_modes,
         )
         worker.add_nodes(agent)
         return agent
