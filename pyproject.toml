@@ -1,6 +1,6 @@
 [project]
 name = "calfkit"
-version = "0.2.3"
+version = "0.2.4"
 description = "Build AI workflows and agents as fully-distributed and event-driven microservices."
 readme = "README.md"
 license = "Apache-2.0"
