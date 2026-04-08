@@ -1,5 +1,3 @@
-import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NewType
 
@@ -7,14 +5,11 @@ from dishka import AnyOf, Provider, Scope, provide
 from dotenv import load_dotenv
 from faststream.kafka import KafkaBroker
 
-from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, BaseToolNodeDef, ToolNodeDef, agent_tool
-from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
-from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.worker import Worker
 
 load_dotenv()

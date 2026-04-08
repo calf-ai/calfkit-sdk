@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.models.function import FunctionModel
 from calfkit.nodes import Agent, ToolNodeDef
-from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.worker import Worker
 from tests.providers import (
@@ -53,6 +52,7 @@ def agent_constructor_args_model_client(request) -> dict[str, Any]:
     else:
         raise RuntimeError(f"Invalid model client: {model_type}")
 
+
 @pytest.fixture
 def deploy_agent(agent_constructor_args_sequential_modes, agent_constructor_args_model_client, container) -> SimpleAgent:
     worker = container.get(Worker)
@@ -66,6 +66,7 @@ def deploy_agent(agent_constructor_args_sequential_modes, agent_constructor_args
     )
     worker.add_nodes(agent)
     return agent
+
 
 @pytest.fixture
 def deploy_function_agent(agent_constructor_args_sequential_modes, container) -> Agent:
