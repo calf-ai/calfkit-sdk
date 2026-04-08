@@ -1,5 +1,3 @@
-import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NewType
 
@@ -7,14 +5,11 @@ from dishka import AnyOf, Provider, Scope, provide
 from dotenv import load_dotenv
 from faststream.kafka import KafkaBroker
 
-from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, BaseToolNodeDef, ToolNodeDef, agent_tool
-from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
-from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.worker import Worker
 
 load_dotenv()
@@ -121,40 +116,8 @@ class AgentProvider(Provider):
     scope = Scope.APP
 
     @provide
-    def get_model_client(self) -> PydanticModelClient:
-        return OpenAIModelClient(os.environ["TEST_LLM_MODEL_NAME"], reasoning_effort=os.getenv("TEST_REASONING_EFFORT"))
-
-    @provide
     def get_function_model(self) -> FunctionModel:
         return FunctionModel(call_all_tools_concurrently)
-
-    @provide
-    def get_structured_agent_factory(self, model_client: PydanticModelClient, worker: Worker) -> Callable:
-        def factory(output_type: type[OutputT]) -> Agent[OutputT]:
-            agent = Agent[output_type](
-                "test_custom_structured_agent",
-                system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
-                subscribe_topics="test_agent.input",
-                publish_topic="test_agent.output",
-                model_client=model_client,
-                final_output_type=output_type,
-            )
-            worker.add_nodes(agent)
-
-            return agent
-
-        return factory
-
-    @provide
-    def get_structured_agent(self, model_client: PydanticModelClient) -> StructuredAgent:
-        return StructuredAgent(
-            "test_structured_agent",
-            system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
-            subscribe_topics="test_agent.input",
-            publish_topic="test_agent.output",
-            model_client=model_client,
-            final_output_type=Response,
-        )
 
     @provide
     def get_multiple_tools(self) -> AnyOf[list[BaseToolNodeDef], list[ToolNodeDef]]:

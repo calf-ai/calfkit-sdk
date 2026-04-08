@@ -1,5 +1,5 @@
 """Calf LLM Provider System."""
 
-from calfkit.providers.pydantic_ai import AnthropicModelClient, OpenAIModelClient
+from calfkit.providers.pydantic_ai import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 
-__all__ = ["AnthropicModelClient", "OpenAIModelClient"]
+__all__ = ["AnthropicModelClient", "OpenAIModelClient", "OpenAIResponsesModelClient"]

@@ -4,14 +4,14 @@ from weather_tool import get_weather  # Import the tool definition (reusable)
 
 from calfkit.client import Client
 from calfkit.nodes import Agent
-from calfkit.providers import OpenAIModelClient
+from calfkit.providers import OpenAIResponsesModelClient
 from calfkit.worker import Worker
 
 agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
     subscribe_topics="weather_agent.input",
-    model_client=OpenAIModelClient(model_name="gpt-5-nano"),
+    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
     tools=[get_weather],  # Register tool definitions with the agent
 )
 
