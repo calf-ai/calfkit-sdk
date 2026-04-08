@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.3...v0.2.4) (2026-04-08)
+
+
+### Features
+
+* add OpenAI Responses API support  ([#119](https://github.com/calf-ai/calfkit-sdk/issues/119)) ([fa1c1a7](https://github.com/calf-ai/calfkit-sdk/commit/fa1c1a7336014a1da3a40de0a1651fdeee722fe4))
+
 ## [0.2.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.2...v0.2.3) (2026-04-02)
 
 
