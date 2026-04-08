@@ -1,4 +1,4 @@
 from calfkit.providers.pydantic_ai.anthropic import AnthropicModelClient
-from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
+from calfkit.providers.pydantic_ai.openai import OpenAIModelClient, OpenAIResponsesModelClient
 
-__all__ = ["AnthropicModelClient", "OpenAIModelClient"]
+__all__ = ["AnthropicModelClient", "OpenAIModelClient", "OpenAIResponsesModelClient"]
