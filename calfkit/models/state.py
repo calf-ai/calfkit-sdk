@@ -11,11 +11,19 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
 )
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
+from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.payload import ContentPart
 
 
 class BaseAgentActivityState(BaseModel):
     model_config = ConfigDict(extra="ignore")
+
+
+class OverridesState(BaseAgentActivityState):
+    """State for storing any override objects"""
+
+    model_config = ConfigDict(extra="ignore")
+    override_agent_tools: list[BaseToolNodeSchema] | None = None
 
 
 class CoreMessageState(BaseAgentActivityState):
@@ -90,6 +98,7 @@ class State(CoreMessageState, InFlightToolsState):
         default=None,
         description="Additional data that can be accessed programmatically by the application but is not sent to the LLM.",  # noqa: E501
     )
+    overrides: OverridesState | None = None
 
 
 # class State(BaseModel):

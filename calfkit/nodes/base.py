@@ -17,6 +17,7 @@ from calfkit.models import (
     TailCall,
 )
 from calfkit.models.envelope import Envelope
+from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.session_context import SessionRunContext
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef:
+class BaseNodeDef(BaseNodeSchema):
     _run_accepts_input: bool
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -36,21 +37,6 @@ class BaseNodeDef:
         # Unbound method signature includes self, so self + ctx = 2 params.
         # If > 2, the subclass declared an input parameter (any name).
         cls._run_accepts_input = len(sig.parameters) > 2
-
-    def __init__(
-        self,
-        node_id: str,
-        *,
-        subscribe_topics: str | list[str],
-        publish_topic: str | None,
-    ):
-        self._node_id = node_id
-        if isinstance(subscribe_topics, str):
-            self.subscribe_topics = [subscribe_topics]
-        elif subscribe_topics is not None:
-            self.subscribe_topics = list(subscribe_topics)
-        self.publish_topic = publish_topic
-        self._return_topic = f"{node_id}.private.return"
 
     # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
     # like a delgation or emit. So the communication-specific handler can properly handle it
@@ -77,6 +63,8 @@ class BaseNodeDef:
 
     async def prepare_context(self, envelope: Envelope) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
+        if envelope.internal_workflow_state.current_frame.overrides:
+            ctx.state.overrides = envelope.internal_workflow_state.current_frame.overrides
         return ctx
 
     async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
@@ -107,7 +95,7 @@ class BaseNodeDef:
                 internal_workflow_state=envelope.internal_workflow_state,
             )
             target_topic = envelope.internal_workflow_state.current_frame.target_topic
-            logger.debug("[%s] Call target=%s frame_pushed node=%s", correlation_id[:8], target_topic, self._node_id)
+            logger.debug("[%s] Call target=%s frame_pushed node=%s", correlation_id[:8], target_topic, self.node_id)
             await broker.publish(
                 publish_envelope,
                 topic=target_topic,
@@ -121,7 +109,7 @@ class BaseNodeDef:
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
             )
-            logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self._node_id)
+            logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self.node_id)
             await broker.publish(
                 publish_envelope,
                 topic=frame.callback_topic,
@@ -138,7 +126,7 @@ class BaseNodeDef:
                 internal_workflow_state=envelope.internal_workflow_state,
             )
             target_topic = envelope.internal_workflow_state.current_frame.target_topic
-            logger.debug("[%s] TailCall target=%s node=%s", correlation_id[:8], target_topic, self._node_id)
+            logger.debug("[%s] TailCall target=%s node=%s", correlation_id[:8], target_topic, self.node_id)
             await broker.publish(
                 publish_envelope,
                 topic=target_topic,
@@ -164,21 +152,25 @@ class BaseNodeDef:
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> Envelope:
-        logger.debug("[%s] handler entered node=%s", correlation_id[:8], self._node_id)
+        logger.debug("[%s] handler entered node=%s", correlation_id[:8], self.node_id)
         ctx = await self.prepare_context(envelope)
         if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
             output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
         else:
             output = await self.run(ctx)
 
-        logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self._node_id)
+        logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
 
         return await self._publish_action(output, envelope, correlation_id, broker)
 
     @property
     def id(self) -> str:
-        return self._node_id
+        return self.node_id
 
     @property
     def name(self) -> str:
-        return self._node_id
+        return self.node_id
+
+    @property
+    def _return_topic(self) -> str:
+        return f"{self.node_id}.private.return"

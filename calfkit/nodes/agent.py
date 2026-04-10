@@ -11,10 +11,11 @@ from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
+from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import PendingToolBatch
 from calfkit.nodes.base import BaseNodeDef
-from calfkit.nodes.tool import ToolNodeDef
+from calfkit.nodes.tool import BaseToolNodeDef, ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,11 @@ class BaseAgentNodeDef(
                 del self._pending_batches[ctx.deps.correlation_id]
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
-        tools_registry = {tool.tool_schema.name: tool for tool in self.tools} if self.tools else dict[str, ToolNodeDef]()
+        tools_registry = dict[str, BaseToolNodeSchema]()
+        if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
+            tools_registry = {tool.tool_schema.name: tool for tool in ctx.state.overrides.override_agent_tools}
+        elif self.tools:
+            tools_registry = {tool.tool_schema.name: tool for tool in self.tools}
 
         logger.debug(
             "[%s] agent run entered node=%s pending_tool_calls=%d history_len=%d",
