@@ -10,7 +10,7 @@ class BaseNodeSchema:
     subscribe_topics: list[str]
     publish_topic: str | None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isinstance(self.subscribe_topics, (list, tuple)):
             self.subscribe_topics = [self.subscribe_topics]
 

@@ -15,7 +15,7 @@ from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import PendingToolBatch
 from calfkit.nodes.base import BaseNodeDef
-from calfkit.nodes.tool import BaseToolNodeDef, ToolNodeDef
+from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,9 @@ class BaseAgentNodeDef(
         self.tools = tools or list()
         self.sequential_only_mode = sequential_only_mode
         self._pending_batches: dict[str, PendingToolBatch] = dict()
+
+        if not isinstance(subscribe_topics, (list, tuple)):
+            subscribe_topics = [subscribe_topics]
 
         super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
 

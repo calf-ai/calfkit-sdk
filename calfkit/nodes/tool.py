@@ -3,6 +3,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from typing_extensions import Self
+
 from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models import SessionRunContext, Silent, State, ToolContext
@@ -20,7 +22,7 @@ class BaseToolNodeDef(BaseToolNodeSchema, BaseNodeDef):
 
 class ToolNodeDef(BaseToolNodeDef):
     @classmethod
-    def create_tool_node(cls, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str):
+    def create_tool_node(cls, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str) -> Self:
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
         tool = Tool(func)
