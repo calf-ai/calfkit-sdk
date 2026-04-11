@@ -23,7 +23,7 @@ class OverridesState(BaseAgentActivityState):
     """State for storing any override objects"""
 
     model_config = ConfigDict(extra="ignore")
-    override_agent_tools: list[BaseToolNodeSchema] | None = None
+    override_agent_tools: list[BaseToolNodeSchema] | None
 
 
 class CoreMessageState(BaseAgentActivityState):
