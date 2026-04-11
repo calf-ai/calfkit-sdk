@@ -12,6 +12,8 @@ from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.node_result import NodeResult
 from calfkit.models import State
+from calfkit.models.node_schema import BaseToolNodeSchema
+from calfkit.models.state import OverridesState
 
 
 class Client(BaseClient):
@@ -30,6 +32,7 @@ class Client(BaseClient):
         topic: str,
         *,
         output_type: type[OutputT],
+        tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -44,6 +47,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -57,6 +61,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        tool_overrides: list[BaseToolNodeSchema] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
         correlation_id: str | None = None,
@@ -74,6 +79,7 @@ class Client(BaseClient):
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
+            tool_overrides: Runtime agent tool overrides.
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used (``DataPart`` →
                 ``TextPart`` fallback).
@@ -82,7 +88,7 @@ class Client(BaseClient):
             correlation_id: Unique identifier to correlate this request with its
                 reply. Auto-generated (uuid7) when ``None``.
             temp_instructions: Optional system-level instructions injected into
-                the user prompt as a one-shot override.
+                the user prompt as a temporary prompt addition.
             message_history: Prior conversation messages to include for
                 multi-turn context. Defaults to an empty history.
             run_args: Positional arguments forwarded to the node's ``run()``
@@ -107,6 +113,7 @@ class Client(BaseClient):
             correlation_id=correlation_id,
             run_args=run_args,
             state=state,
+            overrides=OverridesState(override_agent_tools=tool_overrides) if tool_overrides is not None else None,
             deps=deps,
             output_type=output_type,
         )
@@ -118,6 +125,7 @@ class Client(BaseClient):
         topic: str,
         *,
         output_type: type[OutputT],
+        tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -133,6 +141,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -147,6 +156,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        tool_overrides: list[BaseToolNodeSchema] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
         correlation_id: str | None = None,
@@ -168,6 +178,7 @@ class Client(BaseClient):
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
+            tool_overrides: Runtime agent tool overrides.
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used.
             reply_topic: Topic the node should publish its reply to.
@@ -175,7 +186,7 @@ class Client(BaseClient):
             correlation_id: Unique identifier to correlate this request with its
                 reply. Auto-generated (uuid7) when ``None``.
             temp_instructions: Optional system-level instructions injected into
-                the user prompt as a one-shot override.
+                the user prompt as a temporary prompt addition.
             message_history: Prior conversation messages to include for
                 multi-turn context. Defaults to an empty history.
             run_args: Positional arguments forwarded to the node's ``run()``
@@ -195,6 +206,7 @@ class Client(BaseClient):
         handle = await self.invoke_node(
             user_prompt,
             topic,
+            tool_overrides=tool_overrides,
             output_type=output_type,
             reply_topic=reply_topic,
             correlation_id=correlation_id,

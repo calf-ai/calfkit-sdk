@@ -20,6 +20,7 @@ from calfkit.models.session_context import (
     SessionRunContext,
     WorkflowState,
 )
+from calfkit.models.state import OverridesState
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ class BaseClient:
         reply_topic: str,
         correlation_id: str,
         state: State,
+        overrides: OverridesState | None = None,
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         output_type: type[Any] = _UNSET,
@@ -136,7 +138,7 @@ class BaseClient:
             await self._connection.start()
 
         call_stack = CallFrameStack()
-        call_stack.push(CallFrame(target_topic=topic, callback_topic=reply_topic, input_args=run_args))
+        call_stack.push(CallFrame(target_topic=topic, callback_topic=reply_topic, input_args=run_args, overrides=overrides))
 
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),

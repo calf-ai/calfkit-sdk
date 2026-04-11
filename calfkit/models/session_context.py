@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
-from calfkit.models.state import State
+from calfkit.models.state import OverridesState, State
 
 
 @dataclass
@@ -36,6 +36,7 @@ class CallFrame:
     callback_topic: str  # return address
     input_args: Sequence[Any] | None = field(default=None)
     frame_id: str = field(default_factory=lambda: uuid_utils.uuid7().hex)
+    overrides: OverridesState | None = field(default=None)
 
 
 CallFrameStack = Stack[CallFrame]

@@ -1,30 +1,37 @@
 import logging
-from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any
 
-from calfkit._vendor.pydantic_ai import Tool, ToolDefinition
+from typing_extensions import Self
+
+from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models import SessionRunContext, Silent, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
+from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.nodes.base import BaseNodeDef
 
 logger = logging.getLogger(__name__)
 
 
-class BaseToolNodeDef(BaseNodeDef, ABC):
-    @property
-    @abstractmethod
-    def tool_schema(self) -> ToolDefinition: ...
+@dataclass
+class BaseToolNodeDef(BaseToolNodeSchema, BaseNodeDef):
+    _tool: Tool
 
 
 class ToolNodeDef(BaseToolNodeDef):
-    def __init__(self, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str):
-        self._tool = Tool(func)
-        super().__init__(
+    @classmethod
+    def create_tool_node(cls, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str) -> Self:
+        if not isinstance(subscribe_topics, (list, tuple)):
+            subscribe_topics = [subscribe_topics]
+        tool = Tool(func)
+        return cls(
             node_id=f"tool_{func.__name__}",
+            tool_schema=tool.tool_def,
             subscribe_topics=subscribe_topics,
             publish_topic=publish_topic,
+            _tool=tool,
         )
 
     async def run(self, ctx: SessionRunContext, tool_call_id: str, source_node_name: str) -> NodeResult[State]:
@@ -78,15 +85,11 @@ class ToolNodeDef(BaseToolNodeDef):
         logger.debug("[%s] tool completed tool=%s", ctx.deps.correlation_id[:8], self.name)
         return ReturnCall[State](state=ctx.state)
 
-    @property
-    def tool_schema(self) -> ToolDefinition:
-        return cast(ToolDefinition, self._tool.tool_def)
-
 
 def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> ToolNodeDef:
     """Decorator to turn a function into a deployable tool node that agents can call"""
     subscribe_topic = f"tool.{func.__name__}.input"
     publish_topic = f"tool.{func.__name__}.output"
-    tool_node = ToolNodeDef(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic)
+    tool_node = ToolNodeDef.create_tool_node(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic)
 
     return tool_node
