@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.4...v0.2.5) (2026-04-11)
+
+
+### Features
+
+* add serializable node schemas and runtime tool overrides ([#121](https://github.com/calf-ai/calfkit-sdk/issues/121)) ([e464c08](https://github.com/calf-ai/calfkit-sdk/commit/e464c08e4f179e0cd622789a067718fdbd043c1f))
+
 ## [0.2.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.3...v0.2.4) (2026-04-08)
 
 
