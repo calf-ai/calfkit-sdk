@@ -90,6 +90,8 @@ def get_random_city(ctx: ToolContext) -> str:
 
 INSTRUCTIONS_TEST_SYSTEM_PROMPT = "You are a test assistant."
 
+NO_TOOLS_RESPONSE_TEXT = "There are no tools."
+
 
 def echo_instructions(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     """FunctionModel that returns the resolved instructions string as its text output."""
@@ -101,7 +103,10 @@ def call_all_tools_concurrently(messages: list[ModelMessage], info: AgentInfo) -
     assert isinstance(last_msg, ModelRequest)
 
     if all(isinstance(part, ToolReturnPart) for part in last_msg.parts):
-        return ModelResponse(parts=[TextPart(f"{part.content}\n\n") for part in last_msg.parts])
+        return ModelResponse(parts=[TextPart(f"{part.tool_name}: {part.content}\n\n") for part in last_msg.parts])  # pyright: ignore[reportAttributeAccessIssue]
+
+    if not info.function_tools:
+        return ModelResponse(parts=[TextPart(NO_TOOLS_RESPONSE_TEXT)])
 
     tool_calls = list[ToolCallPart]()
     for tool in info.function_tools:
@@ -110,6 +115,8 @@ def call_all_tools_concurrently(messages: list[ModelMessage], info: AgentInfo) -
 
 
 ContextualTool = NewType("ContextualTool", ToolNodeDef)
+
+NoArgTool = NewType("NoArgTool", ToolNodeDef)
 
 
 class AgentProvider(Provider):
@@ -122,6 +129,10 @@ class AgentProvider(Provider):
     @provide
     def get_multiple_tools(self) -> AnyOf[list[BaseToolNodeDef], list[ToolNodeDef]]:
         return [agent_tool(get_users_name), agent_tool(weather), agent_tool(get_users_birthday)]
+
+    @provide
+    def get_no_arg_tools(self) -> list[NoArgTool]:
+        return [NoArgTool(agent_tool(get_users_name)), NoArgTool(agent_tool(get_users_birthday))]
 
     @provide
     def get_multiple_contextual_tools(self) -> list[ContextualTool]:

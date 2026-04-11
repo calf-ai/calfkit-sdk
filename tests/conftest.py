@@ -26,6 +26,7 @@ from tests.providers import (
     AgentProvider,
     ClientProvider,
     ContextualTool,
+    NoArgTool,
     Response,
     SimpleAgent,
     StructuredAgent,
@@ -133,6 +134,14 @@ def deploy_structured_agent_factory(agent_constructor_args_model_client, contain
 @pytest.fixture
 def deploy_multiple_agent_tools(container) -> list[ToolNodeDef]:
     tools = container.get(list[ToolNodeDef])
+    worker = container.get(Worker)
+    worker.add_nodes(*tools)
+    return tools
+
+
+@pytest.fixture
+def deploy_no_arg_tools(container) -> list[NoArgTool]:
+    tools = container.get(list[NoArgTool])
     worker = container.get(Worker)
     worker.add_nodes(*tools)
     return tools
