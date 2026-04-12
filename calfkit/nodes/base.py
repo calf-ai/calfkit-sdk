@@ -1,6 +1,8 @@
 import inspect
 import logging
 from abc import abstractmethod
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from faststream import Context
@@ -18,7 +20,7 @@ from calfkit.models import (
 )
 from calfkit.models.envelope import Envelope
 from calfkit.models.node_schema import BaseNodeSchema
-from calfkit.models.session_context import SessionRunContext
+from calfkit.models.session_context import CallFrame, SessionRunContext
 
 logger = logging.getLogger(__name__)
 
@@ -152,16 +154,23 @@ class BaseNodeDef(BaseNodeSchema):
         correlation_id: Annotated[str, Context()],
         broker: BrokerAnnotation,
     ) -> Envelope:
-        logger.debug("[%s] handler entered node=%s", correlation_id[:8], self.node_id)
-        ctx = await self.prepare_context(envelope)
-        if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
-            output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
-        else:
-            output = await self.run(ctx)
+        token = _activity_context.set(
+            ActivityContext(activity_broker=broker, correlation_id=correlation_id, envelope=envelope, source_topic=self.subscribe_topics[0])
+        )
+        try:
+            logger.debug("[%s] handler entered node=%s", correlation_id[:8], self.node_id)
 
-        logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
+            ctx = await self.prepare_context(envelope)
+            if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
+                output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
+            else:
+                output = await self.run(ctx)
 
-        return await self._publish_action(output, envelope, correlation_id, broker)
+            logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
+
+            return await self._publish_action(output, envelope, correlation_id, broker)
+        finally:
+            _activity_context.reset(token)
 
     @property
     def id(self) -> str:
@@ -174,3 +183,43 @@ class BaseNodeDef(BaseNodeSchema):
     @property
     def _return_topic(self) -> str:
         return f"{self.node_id}.private.return"
+
+
+@dataclass
+class ActivityContext:
+    activity_broker: BrokerAnnotation
+    correlation_id: str
+    envelope: Envelope
+    source_topic: str
+
+
+_activity_context: ContextVar[ActivityContext] = ContextVar("activity_context")
+
+
+class ActivityActions:
+    async def invoke_activity(self, target_topic: str, **activity_kwargs):
+        activity_ctx = _activity_context.get()
+        envelope = activity_ctx.envelope
+        callback_topic = activity_ctx.source_topic
+        broker = activity_ctx.activity_broker
+        correlation_id = activity_ctx.correlation_id
+
+        wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
+        frame = CallFrame(
+            target_topic=target_topic,
+            callback_topic=callback_topic,
+        )
+        wf_copy.call_stack.push(frame)
+        publish_envelope = Envelope(
+            context=SessionRunContext(state=envelope.context.state, deps=envelope.context.deps),
+            internal_workflow_state=wf_copy,
+        )
+        await broker.publish(
+            publish_envelope,
+            topic=wf_copy.current_frame.target_topic,
+            correlation_id=correlation_id,
+            key=correlation_id.encode(),
+        )
+
+
+activity = ActivityActions()
