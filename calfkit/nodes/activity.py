@@ -1,11 +1,7 @@
-import functools
 import logging
 from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
-from dataclasses import dataclass
 from typing import Any
 
-from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
 from calfkit._vendor.pydantic_ai import Tool
