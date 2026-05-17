@@ -6,11 +6,9 @@
 [![codecov](https://codecov.io/gh/calf-ai/calfkit-sdk/graph/badge.svg?token=ZUP383PSK7)](https://codecov.io/gh/calf-ai/calfkit-sdk)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
-The SDK to build AI agents as composable, orchestratable microservices.
+The SDK to build AI agents as orchestratable, event-driven microservices.
 
-Calfkit lets you compose agents with independent services—agents, tools, workflows—that communicate asynchronously. Add agent capabilities without coordination. Scale each component independently. Stream agent outputs to any downstream listener. 
-
-Agents should work like real teams, with independent, distinct roles, async communication, and the ability to onboard new teammates or tools without restructuring the whole org. Build AI employees that integrate.
+Calfkit lets you compose agents as decoupled microservices–agents, tools, workflows–that communicate asynchronously. Add agents to teams without hardcoding any orchestration logic, scale each component independently, and stream agent outputs to any downstream listener. 
 
 ```bash
 pip install calfkit
