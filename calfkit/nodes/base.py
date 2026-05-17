@@ -1,6 +1,7 @@
 import inspect
 import logging
 from abc import abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
 from faststream import Context
@@ -23,6 +24,15 @@ from calfkit.models.session_context import SessionRunContext
 logger = logging.getLogger(__name__)
 
 
+GateFunction = Callable[[SessionRunContext], bool | Awaitable[bool]]
+"""A predicate evaluated in ``handler()`` before ``run()``. Sync or async; must return ``bool``.
+
+Returning ``False`` (or raising, or returning a non-bool) skips ``run()`` and returns the
+envelope unchanged. Gates stack with AND semantics in registration order and short-circuit
+on the first rejection.
+"""
+
+
 # ---------------------------------------------------------------------------
 # Base node definition
 # ---------------------------------------------------------------------------
@@ -37,6 +47,73 @@ class BaseNodeDef(BaseNodeSchema):
         # Unbound method signature includes self, so self + ctx = 2 params.
         # If > 2, the subclass declared an input parameter (any name).
         cls._run_accepts_input = len(sig.parameters) > 2
+
+    def __init__(
+        self,
+        *,
+        node_id: str,
+        subscribe_topics: list[str],
+        publish_topic: str | None = None,
+        gates: list[GateFunction] | None = None,
+    ) -> None:
+        """Initialize a node definition.
+
+        Args:
+            node_id: Unique identifier for the node.
+            subscribe_topics: One or more topics the node consumes from.
+            publish_topic: Optional default topic to publish results to.
+            gates: Optional list of predicates evaluated in ``handler()`` before
+                ``run()``. Stack with AND semantics in registration order;
+                short-circuits on the first ``False``, exception, or non-bool.
+                Returning anything other than ``True`` rejects the message:
+                ``run()`` is skipped and the envelope is returned unchanged.
+        """
+        super().__init__(
+            node_id=node_id,
+            subscribe_topics=subscribe_topics,
+            publish_topic=publish_topic,
+        )
+        self.gates: list[GateFunction] = list(gates) if gates else []
+
+    def gate(self, fn: GateFunction) -> GateFunction:
+        """Register a gate predicate. Usable as a decorator. Repeatable.
+
+        Multiple gates evaluate in registration order with AND semantics
+        (short-circuit on the first ``False``, exception, or non-bool return).
+        Returns ``fn`` unchanged so it remains callable.
+        """
+        self.gates.append(fn)
+        return fn
+
+    async def _evaluate_gates(self, ctx: SessionRunContext, correlation_id: str) -> bool:
+        for i, gate in enumerate(self.gates):
+            try:
+                result = gate(ctx)
+                if inspect.isawaitable(result):
+                    result = await result
+                if not isinstance(result, bool):
+                    raise TypeError(
+                        f"gate[{i}] {getattr(gate, '__name__', repr(gate))} for node={self.node_id} returned {type(result).__name__}; expected bool"
+                    )
+                if not result:
+                    logger.debug(
+                        "[%s] gate[%d]=%s rejected node=%s",
+                        correlation_id[:8],
+                        i,
+                        getattr(gate, "__name__", "?"),
+                        self.node_id,
+                    )
+                    return False
+            except Exception:
+                logger.exception(
+                    "[%s] gate[%d]=%s raised for node=%s; treating as reject",
+                    correlation_id[:8],
+                    i,
+                    getattr(gate, "__name__", "?"),
+                    self.node_id,
+                )
+                return False
+        return True
 
     # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
     # like a delgation or emit. So the communication-specific handler can properly handle it
@@ -154,6 +231,10 @@ class BaseNodeDef(BaseNodeSchema):
     ) -> Envelope:
         logger.debug("[%s] handler entered node=%s", correlation_id[:8], self.node_id)
         ctx = await self.prepare_context(envelope)
+
+        if not await self._evaluate_gates(ctx, correlation_id):
+            return envelope
+
         if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
             output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
         else:

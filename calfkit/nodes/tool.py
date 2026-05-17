@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from typing_extensions import Self
@@ -10,7 +10,7 @@ from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models import SessionRunContext, Silent, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
 from calfkit.models.node_schema import BaseToolNodeSchema
-from calfkit.nodes.base import BaseNodeDef
+from calfkit.nodes.base import BaseNodeDef, GateFunction
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,18 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BaseToolNodeDef(BaseToolNodeSchema, BaseNodeDef):
     _tool: Tool
+    gates: list[GateFunction] = field(default_factory=list)
 
 
 class ToolNodeDef(BaseToolNodeDef):
     @classmethod
-    def create_tool_node(cls, func: Callable[..., Any], subscribe_topics: str | list[str], publish_topic: str) -> Self:
+    def create_tool_node(
+        cls,
+        func: Callable[..., Any],
+        subscribe_topics: str | list[str],
+        publish_topic: str,
+        gates: list[GateFunction] | None = None,
+    ) -> Self:
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
         tool = Tool(func)
@@ -32,6 +39,7 @@ class ToolNodeDef(BaseToolNodeDef):
             subscribe_topics=subscribe_topics,
             publish_topic=publish_topic,
             _tool=tool,
+            gates=list(gates) if gates else [],
         )
 
     async def run(self, ctx: SessionRunContext, tool_call_id: str, source_node_name: str) -> NodeResult[State]:

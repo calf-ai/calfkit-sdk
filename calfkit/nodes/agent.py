@@ -14,7 +14,7 @@ from calfkit.models.actions import Silent
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import PendingToolBatch
-from calfkit.nodes.base import BaseNodeDef
+from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
@@ -34,6 +34,7 @@ class BaseAgentNodeDef(
         system_prompt: str = "You are a helpful AI assistant.",
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
+        gates: list[GateFunction] | None = None,
         tools: list[ToolNodeDef] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
@@ -48,7 +49,7 @@ class BaseAgentNodeDef(
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
 
-        super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic)
+        super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic, gates=gates)
 
         self._agent_loop: InternalAgentLoop[dict[str, Any], AgentOutputT | DeferredToolRequests] = InternalAgentLoop(
             model_client, name=self.name, output_type=[final_output_type, DeferredToolRequests], deps_type=dict, instructions=system_prompt
