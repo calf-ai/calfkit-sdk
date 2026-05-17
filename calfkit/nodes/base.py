@@ -24,7 +24,7 @@ from calfkit.models.session_context import SessionRunContext
 logger = logging.getLogger(__name__)
 
 
-GateFunction = Callable[[SessionRunContext], "bool | Awaitable[bool]"]
+GateFunction = Callable[[SessionRunContext], bool | Awaitable[bool]]
 """A predicate evaluated in ``handler()`` before ``run()``. Sync or async; must return ``bool``.
 
 Returning ``False`` (or raising, or returning a non-bool) skips ``run()`` and returns the
