@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.5...v0.2.6) (2026-05-17)
+
+
+### Features
+
+* add gates to BaseNodeDef for pre-run event filtering ([#127](https://github.com/calf-ai/calfkit-sdk/issues/127)) ([9fbdbd0](https://github.com/calf-ai/calfkit-sdk/commit/9fbdbd072a4de4335c3774efa8775c0e8b43b2bd))
+
 ## [0.2.5](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.4...v0.2.5) (2026-04-11)
 
 
