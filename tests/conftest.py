@@ -98,6 +98,26 @@ def deploy_function_agent(agent_constructor_args_sequential_modes, container) ->
 
 
 @pytest.fixture
+def deploy_gated_function_agent(container) -> Callable[..., Agent]:
+    worker = container.get(Worker)
+    model = container.get(FunctionModel)
+
+    def _factory(*, gates: list | None = None) -> Agent:
+        agent = Agent(
+            "test_gated_agent",
+            system_prompt="You are a helpful AI assistant.",
+            subscribe_topics="test_gated_agent.input",
+            publish_topic="test_gated_agent.output",
+            model_client=model,
+            gates=gates,
+        )
+        worker.add_nodes(agent)
+        return agent
+
+    return _factory
+
+
+@pytest.fixture
 def deploy_structured_agent(agent_constructor_args_model_client, container) -> StructuredAgent:
     worker = container.get(Worker)
     agent = StructuredAgent(
