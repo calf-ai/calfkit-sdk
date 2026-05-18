@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.6...v0.3.0) (2026-05-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* track per-hop event emitter via Kafka headers ([#133](https://github.com/calf-ai/calfkit-sdk/issues/133))
+
+### Features
+
+* track per-hop event emitter via Kafka headers ([#133](https://github.com/calf-ai/calfkit-sdk/issues/133)) ([fad6acb](https://github.com/calf-ai/calfkit-sdk/commit/fad6acb2d581261b9407d278a6ae66448ddc456d))
+
+
+### Documentation
+
+* Update README.md ([#130](https://github.com/calf-ai/calfkit-sdk/issues/130)) ([1a9b8b2](https://github.com/calf-ai/calfkit-sdk/commit/1a9b8b280a9a74b2160904647138941ea11f7e7b))
+
 ## [0.2.6](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.5...v0.2.6) (2026-05-17)
 
 
