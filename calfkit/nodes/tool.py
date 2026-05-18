@@ -1,10 +1,11 @@
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from typing_extensions import Self
 
+from calfkit._protocol import NodeKind
 from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models import SessionRunContext, Silent, State, ToolContext
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BaseToolNodeDef(BaseToolNodeSchema, BaseNodeDef):
+    _node_kind: ClassVar[NodeKind] = "tool"
     _tool: Tool
     gates: list[GateFunction] = field(default_factory=list)
 
@@ -42,13 +44,13 @@ class ToolNodeDef(BaseToolNodeDef):
             gates=list(gates) if gates else [],
         )
 
-    async def run(self, ctx: SessionRunContext, tool_call_id: str, source_node_name: str) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext, tool_call_id: str) -> NodeResult[State]:
         logger.debug(
-            "[%s] tool run entered tool=%s tool_call_id=%s source=%s",
+            "[%s] tool run entered tool=%s tool_call_id=%s emitter=%s",
             ctx.deps.correlation_id[:8],
             self.name,
             tool_call_id,
-            source_node_name,
+            ctx.emitter_node_id,
         )
         tool_call_part = ctx.state.get_tool_call(tool_call_id)
         if tool_call_part is None:
@@ -60,7 +62,7 @@ class ToolNodeDef(BaseToolNodeDef):
 
         tool_call_ctx = ToolContext(
             deps=ctx.deps,
-            agent_name=source_node_name,
+            agent_name=ctx.emitter_node_id,
             tool_call_id=tool_call_part.tool_call_id,
             tool_name=tool_call_part.tool_name,
             messages=ctx.state.message_history,

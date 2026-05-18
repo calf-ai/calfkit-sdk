@@ -49,6 +49,8 @@ def deserialize_to_node_result(
         message_history=message_history,
         metadata=metadata,
         correlation_id=correlation_id,
+        emitter_node_id=envelope.context.emitter_node_id,
+        emitter_node_kind=envelope.context.emitter_node_kind,
     )
 
 

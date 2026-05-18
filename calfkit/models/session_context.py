@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic
 
 import uuid_utils
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
@@ -79,13 +79,36 @@ class Deps(BaseModel):
 
 
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
-    """Base generic context for a session — just state + deps."""
+    """Base generic context for a session — state, deps, and per-hop emitter."""
 
     state: StateT
     """The app state. Mutable."""
 
     deps: DepsT
     """Dependencies for the execution. Immutable."""
+
+    _emitter_node_id: str | None = PrivateAttr(default=None)
+    _emitter_node_kind: str | None = PrivateAttr(default=None)
+
+    @property
+    def emitter_node_id(self) -> str | None:
+        """Node id of the most-recent publisher of this event (the immediate hop sender).
+
+        Set by ``BaseNodeDef.prepare_context`` (server side) or the client's reply
+        dispatcher (client side) from the inbound ``x-calf-emitter`` Kafka header.
+        Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be
+        spoofed via the model constructor.
+        """
+        return self._emitter_node_id
+
+    @property
+    def emitter_node_kind(self) -> str | None:
+        """Coarse classification of the emitter (one of ``NodeKind``).
+
+        Companion to :attr:`emitter_node_id`, sourced from the inbound
+        ``x-calf-emitter-kind`` Kafka header.
+        """
+        return self._emitter_node_kind
 
 
 SessionRunContext = BaseSessionRunContext[State, Deps]

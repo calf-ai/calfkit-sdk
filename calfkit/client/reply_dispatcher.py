@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from faststream import Context
 from faststream.kafka import KafkaBroker
 
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, decode_header_str
 from calfkit.models.envelope import Envelope
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,13 @@ class _ReplyDispatcher:
         async def _handle_reply(
             envelope: Envelope,
             correlation_id: Annotated[str, Context()],
+            headers: Annotated[dict[str, Any], Context("message.headers")],
         ) -> None:
+            # Stash the inbound emitter so deserialize_to_node_result can surface it
+            # via NodeResult.emitter_node_id / emitter_node_kind.
+            envelope.context._emitter_node_id = decode_header_str(headers.get(HDR_EMITTER))
+            envelope.context._emitter_node_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
+
             future = self._pending.pop(correlation_id, None)
             if future is None:
                 logger.warning("[%s] reply received but no pending future", correlation_id[:8])
