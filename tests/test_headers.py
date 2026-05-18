@@ -29,7 +29,6 @@ from calfkit.nodes import Agent, agent_tool
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
-
 # ---------------------------------------------------------------------------
 # Smoke test: TestKafkaBroker must preserve custom Kafka headers in-memory.
 # Without this, the rest of these tests would be meaningless.
