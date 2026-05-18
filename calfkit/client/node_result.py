@@ -30,3 +30,11 @@ class NodeResult(Generic[OutputT]):
 
     correlation_id: str
     """The correlation ID that ties this result to its invocation."""
+
+    emitter_node_id: str | None = None
+    """Node id of the node that emitted this reply (sourced from the
+    ``x-calf-emitter`` Kafka header on the inbound callback message)."""
+
+    emitter_node_kind: str | None = None
+    """Coarse classification of the emitter (one of ``NodeKind``), sourced
+    from the ``x-calf-emitter-kind`` Kafka header."""

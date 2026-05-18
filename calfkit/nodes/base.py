@@ -2,13 +2,14 @@ import inspect
 import logging
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, ClassVar
 
-from faststream import Context
+from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
 
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, NodeKind, decode_header_str
 from calfkit.models import (
     Call,
     NodeResult,
@@ -40,6 +41,12 @@ on the first rejection.
 
 class BaseNodeDef(BaseNodeSchema):
     _run_accepts_input: bool
+    _node_kind: ClassVar[NodeKind] = "node"
+    """Coarse classification of this node, stamped onto every outbound publish as the
+    ``x-calf-emitter-kind`` Kafka header. Subclasses override to one of the values in
+    :data:`~calfkit._protocol.NodeKind`. The ``"client"`` kind is reserved for the
+    :class:`~calfkit.client.base.BaseClient` and is not a valid subclass override.
+    """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -138,11 +145,21 @@ class BaseNodeDef(BaseNodeSchema):
         """
         raise NotImplementedError()
 
-    async def prepare_context(self, envelope: Envelope) -> SessionRunContext:
+    async def prepare_context(
+        self,
+        envelope: Envelope,
+        emitter_node_id: str | None = None,
+        emitter_node_kind: str | None = None,
+    ) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
         if envelope.internal_workflow_state.current_frame.overrides:
             ctx.state.overrides = envelope.internal_workflow_state.current_frame.overrides
+        ctx._emitter_node_id = emitter_node_id
+        ctx._emitter_node_kind = emitter_node_kind
         return ctx
+
+    def _emitter_headers(self) -> dict[str, str]:
+        return {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind}
 
     async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
         publish_envelope: Envelope
@@ -161,6 +178,7 @@ class BaseNodeDef(BaseNodeSchema):
                     topic=wf_copy.current_frame.target_topic,
                     correlation_id=correlation_id,
                     key=correlation_id.encode(),
+                    headers=self._emitter_headers(),
                 )
             return envelope
 
@@ -178,6 +196,7 @@ class BaseNodeDef(BaseNodeSchema):
                 topic=target_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
+                headers=self._emitter_headers(),
             )
         elif isinstance(output, ReturnCall):
             # unwind current frame and return to previous topic
@@ -192,6 +211,7 @@ class BaseNodeDef(BaseNodeSchema):
                 topic=frame.callback_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
+                headers=self._emitter_headers(),
             )
 
         elif isinstance(output, TailCall):
@@ -209,6 +229,7 @@ class BaseNodeDef(BaseNodeSchema):
                 topic=target_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
+                headers=self._emitter_headers(),
             )
 
         elif isinstance(output, Silent):
@@ -227,22 +248,34 @@ class BaseNodeDef(BaseNodeSchema):
         self,
         envelope: Envelope,
         correlation_id: Annotated[str, Context()],
+        headers: Annotated[dict[str, Any], Context("message.headers")],
         broker: BrokerAnnotation,
-    ) -> Envelope:
-        logger.debug("[%s] handler entered node=%s", correlation_id[:8], self.node_id)
-        ctx = await self.prepare_context(envelope)
+    ) -> Response:
+        raw_emitter = headers.get(HDR_EMITTER)
+        emitter = decode_header_str(raw_emitter)
+        if emitter is None:
+            logger.warning(
+                "[%s] inbound to node=%s has no usable %s header (got %s); emitter unknown",
+                correlation_id[:8],
+                self.node_id,
+                HDR_EMITTER,
+                "None" if raw_emitter is None else type(raw_emitter).__name__,
+            )
+        emitter_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
+        logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, emitter_kind)
+        ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind)
 
         if not await self._evaluate_gates(ctx, correlation_id):
-            return envelope
-
-        if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
-            output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
+            body: Envelope = envelope
         else:
-            output = await self.run(ctx)
+            if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
+                output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
+            else:
+                output = await self.run(ctx)
+            logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
+            body = await self._publish_action(output, envelope, correlation_id, broker)
 
-        logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
-
-        return await self._publish_action(output, envelope, correlation_id, broker)
+        return Response(body, headers=self._emitter_headers())
 
     @property
     def id(self) -> str:

@@ -7,6 +7,7 @@ import uuid_utils
 from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.middleware import ContextInjectionMiddleware
@@ -25,6 +26,14 @@ from calfkit.models.state import OverridesState
 logger = logging.getLogger(__name__)
 
 
+def _new_client_emitter_id(client_id: str | None = None) -> str:
+    """Return a stable ``client.<uuid7-hex>`` emitter id used as the ``x-calf-emitter``
+    header on every client publish. Pass *client_id* to reuse an existing hex id
+    (e.g. the one used for the reply topic) instead of minting a fresh one.
+    """
+    return f"client.{client_id if client_id is not None else uuid_utils.uuid7().hex}"
+
+
 class BaseClient:
     """Base client for communicating with Calf agent nodes over Kafka.
 
@@ -38,7 +47,7 @@ class BaseClient:
             result = await client.execute_node(...)
     """
 
-    def __init__(self, connection: KafkaBroker, reply_topic: str, dispatcher: _ReplyDispatcher) -> None:
+    def __init__(self, connection: KafkaBroker, reply_topic: str, dispatcher: _ReplyDispatcher, emitter_id: str | None = None) -> None:
         """Initialize the client with pre-configured components.
 
         Prefer :meth:`connect` for constructing a fully wired client instance.
@@ -48,10 +57,16 @@ class BaseClient:
             reply_topic: The Kafka topic this client listens on for replies.
             dispatcher: The reply dispatcher that routes incoming envelopes
                 to their corresponding futures by ``correlation_id``.
+            emitter_id: Stable identifier stamped onto every outbound message as
+                the ``x-calf-emitter`` Kafka header. When ``None``, a random
+                uuid7-based id is generated.
         """
+        if emitter_id is not None and not emitter_id.strip():
+            raise ValueError("emitter_id must be a non-empty string or None")
         self._connection = connection
         self._reply_topic = reply_topic
         self._dispatcher = dispatcher
+        self._emitter_id = emitter_id if emitter_id is not None else _new_client_emitter_id()
 
     @classmethod
     def connect(
@@ -94,7 +109,7 @@ class BaseClient:
         dispatcher = _ReplyDispatcher()
         dispatcher.register(broker_connection, reply_topic, group_id)
 
-        return cls(broker_connection, reply_topic, dispatcher)
+        return cls(broker_connection, reply_topic, dispatcher, emitter_id=_new_client_emitter_id(client_id))
 
     @property
     def broker(self) -> KafkaBroker:
@@ -138,13 +153,25 @@ class BaseClient:
             await self._connection.start()
 
         call_stack = CallFrameStack()
-        call_stack.push(CallFrame(target_topic=topic, callback_topic=reply_topic, input_args=run_args, overrides=overrides))
+        call_stack.push(
+            CallFrame(
+                target_topic=topic,
+                callback_topic=reply_topic,
+                input_args=run_args,
+                overrides=overrides,
+            )
+        )
 
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps=Deps(correlation_id=correlation_id, provided_deps=deps or dict())),
         )
-        await self._connection.publish(envelope, topic=topic, correlation_id=correlation_id)
+        await self._connection.publish(
+            envelope,
+            topic=topic,
+            correlation_id=correlation_id,
+            headers={HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND},
+        )
 
         return InvocationHandle(
             correlation_id=correlation_id,

@@ -1,7 +1,8 @@
 import logging
 from collections.abc import Callable
-from typing import Any, Generic
+from typing import Any, ClassVar, Generic
 
+from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
@@ -27,6 +28,8 @@ class BaseAgentNodeDef(
     Generic[AgentOutputT],
     BaseNodeDef,
 ):
+    _node_kind: ClassVar[NodeKind] = "agent"
+
     def __init__(
         self,
         node_id: str,
@@ -107,7 +110,6 @@ class BaseAgentNodeDef(
                         tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                         ctx.state,
                         target_tool_call.tool_call_id,
-                        self.name,
                     )
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
@@ -190,7 +192,6 @@ class BaseAgentNodeDef(
                     tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                     ctx.state,
                     target_tool_call.tool_call_id,
-                    self.name,
                 )
             else:
                 launch_tool_call_ids = [tc.tool_call_id for tc in pending_tool_calls]
@@ -199,7 +200,6 @@ class BaseAgentNodeDef(
                         tools_registry[tc.tool_name].subscribe_topics[0],
                         ctx.state.model_copy(deep=True),
                         tc.tool_call_id,
-                        self.name,
                     )
                     for tc in pending_tool_calls
                 ]
