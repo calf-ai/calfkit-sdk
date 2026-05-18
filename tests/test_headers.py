@@ -25,7 +25,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models import SessionRunContext
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import Agent, BaseToolNodeDef, agent_tool
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -336,3 +336,14 @@ async def test_client_node_result_carries_reply_emitter(container, deploy_gated_
 
     assert result.emitter_node_id == agent.node_id
     assert result.emitter_node_kind == "agent"
+
+
+# ---------------------------------------------------------------------------
+# Regression guard: subclasses of BaseToolNodeDef must inherit kind="tool",
+# not the BaseNodeDef default "node". Without the ClassVar on BaseToolNodeDef
+# itself, user-defined tool subclasses silently mis-stamp the emitter kind.
+# ---------------------------------------------------------------------------
+
+
+def test_base_tool_node_kind_is_tool():
+    assert BaseToolNodeDef._node_kind == "tool"

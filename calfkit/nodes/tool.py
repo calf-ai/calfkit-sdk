@@ -18,13 +18,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BaseToolNodeDef(BaseToolNodeSchema, BaseNodeDef):
+    _node_kind: ClassVar[NodeKind] = "tool"
     _tool: Tool
     gates: list[GateFunction] = field(default_factory=list)
 
 
 class ToolNodeDef(BaseToolNodeDef):
-    _node_kind: ClassVar[NodeKind] = "tool"
-
     @classmethod
     def create_tool_node(
         cls,
