@@ -1,5 +1,6 @@
 import logging
 import time
+import warnings
 from collections.abc import Callable
 from typing import Annotated, Any, ClassVar, Generic, cast
 
@@ -62,6 +63,16 @@ class BaseAgentNodeDef(
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
         self.tools = tools or list()
+        if sequential_only_mode:
+            warnings.warn(
+                "sequential_only_mode=True is deprecated and will be removed in a future "
+                "release. The durable FanOutAggregator handles parallel fan-out correctly "
+                "across worker restarts and partition rebalances; sequential routing is no "
+                "longer necessary as a correctness workaround. If you have a use case that "
+                "requires strictly sequential tool routing, file an issue.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.sequential_only_mode = sequential_only_mode
         # The aggregator owns the durable join-state for parallel tool fan-out.
         # An instance is always present so the Worker can wire it up at startup;
