@@ -66,6 +66,34 @@ class _InFlightBatch:
             tracestate=state.tracestate,
         )
 
+    def with_received(
+        self,
+        received: dict[str, Any],
+        *,
+        last_updated_ms: int,
+    ) -> _InFlightBatch:
+        """Return a new batch with ``received`` and ``last_updated_ms`` replaced.
+
+        The aggregator handler uses this to build the post-merge batch
+        BEFORE the durable publish, so a failed publish leaves the cached
+        batch unchanged (and FastStream's redelivery re-merges the return
+        cleanly). Mutating ``self.received`` in place would couple the
+        cache to the in-flight modification and let a publish failure
+        produce a phantom-merged result that no record reflects.
+        """
+        return _InFlightBatch(
+            correlation_id=self.correlation_id,
+            fan_out_id=self.fan_out_id,
+            expected_tool_call_ids=self.expected_tool_call_ids,
+            base_state=self.base_state,
+            received=received,
+            started_at_ms=self.started_at_ms,
+            last_updated_ms=last_updated_ms,
+            agent_topic=self.agent_topic,
+            traceparent=self.traceparent,
+            tracestate=self.tracestate,
+        )
+
 
 class _TtlSet:
     """A set with per-entry TTL expiry, using a configurable monotonic clock.

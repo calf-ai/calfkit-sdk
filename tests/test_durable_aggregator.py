@@ -559,6 +559,51 @@ async def test_first_time_dispatch_persists_initial_batch(
     assert first_topic == "test_agent.fanout-state"
 
 
+async def test_publish_failure_leaves_cache_unchanged(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """A failed durable publish during a merge must NOT mutate the cached
+    batch. FastStream redelivers on raise; the redelivered handler must
+    see the un-merged batch so the merge re-attempts (otherwise the
+    in-memory dedup would skip the tcid and the merge is silently lost)."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+
+    key = ("corr-pubfail", "fan-pubfail")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-pubfail",
+        fan_out_id="fan-pubfail",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    broker.publish.side_effect = RuntimeError("simulated broker outage")
+
+    envelope = _make_envelope(
+        "corr-pubfail",
+        state=_state_with_results({"t1": "result-1"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-pubfail"}
+
+    with pytest.raises(RuntimeError, match="simulated broker outage"):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-pubfail",
+            headers=headers,
+            broker=broker,
+        )
+
+    # The cache must still reflect the pre-merge state. If we'd mutated
+    # batch.received before publishing, this would fail and the next
+    # delivery's dedup would mistakenly skip t1.
+    cached = state_store._cache[key]
+    assert cached.received == {}, "received must NOT contain t1 after publish failure"
+
+
 async def test_redispatch_with_drifted_tool_call_ids_overwrites(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:

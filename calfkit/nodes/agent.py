@@ -500,13 +500,18 @@ class BaseAgentNodeDef(
             )
             return Response(envelope, headers=self._emitter_headers())
 
-        # 4. Merge into the in-memory batch.
-        for tcid in new_ids:
-            batch.received[tcid] = incoming_results[tcid]
-        batch.last_updated_ms = int(time.time() * 1000)
+        # 4. Build the merged batch as a new instance. Mutating the cached
+        #    batch before the durable publish would let a publish failure
+        #    produce a phantom-merged cache state that no record reflects —
+        #    FastStream's redelivery would then see the new tcid as
+        #    "already merged" via the dedup check and skip it forever.
+        updated_received = {**batch.received, **{tcid: incoming_results[tcid] for tcid in new_ids}}
+        updated_batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
 
-        # 5. Durable write — publish to state topic, then update cache.
-        await state_store.put(key, batch, partition=partition)
+        # 5. Durable write first — state_store.put publishes then updates
+        #    cache (on raise the cache stays pinned to the old batch).
+        await state_store.put(key, updated_batch, partition=partition)
+        batch = updated_batch
 
         # 6. on_partial hook.
         view = self.aggregator._batch_view(batch)
