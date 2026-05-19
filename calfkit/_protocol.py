@@ -24,6 +24,24 @@ HDR_EMITTER = "x-calf-emitter"
 HDR_EMITTER_KIND = "x-calf-emitter-kind"
 """Kafka header carrying the emitting node's :data:`NodeKind`."""
 
+HDR_FRAME_ID = "x-calf-frame-id"
+"""Kafka header carrying the ``CallFrame.frame_id`` of the message's current invocation frame.
+
+Stable cross-hop identifier (uuid7); useful as a dedup key for at-least-once
+delivery and for downstream consumers that need to correlate events without
+parsing the envelope body.
+"""
+
+HDR_FANOUT_ID = "x-calf-fanout-id"
+"""Kafka header carrying the fan-out batch id for messages dispatched as part of
+a parallel tool fan-out.
+
+Derived deterministically from the agent's inbound ``frame_id`` so redelivered
+inbounds produce the same fan-out id (idempotent dispatch). Receivers use it
+together with ``correlation_id`` and ``tool_call_id`` as the dedup triple for
+durable aggregation.
+"""
+
 
 def decode_header_str(value: Any) -> str | None:
     """Coerce an inbound Kafka header value to ``str | None``.
