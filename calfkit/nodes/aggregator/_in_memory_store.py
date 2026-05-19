@@ -2,8 +2,8 @@
 
 Internal — used directly by :class:`~calfkit.nodes.aggregator.testing.InMemoryAggregator`
 for unit-test fixtures, and indirectly by the production
-:class:`_KafkaStateStore` (PR 4) which wraps the same in-memory data
-structures with Kafka-backed durability.
+:class:`_KafkaStateStore` which wraps the same in-memory data structures
+with Kafka-backed durability.
 """
 
 from __future__ import annotations
@@ -102,15 +102,25 @@ class _TtlSet:
     late returns arriving after completion can be distinguished from orphan
     returns. Tests inject a fake clock via the ``clock`` argument for
     deterministic TTL tests.
+
+    Entries are swept on every membership check (``__contains__``) and
+    periodically during ``add`` so a steady stream of writes without
+    interleaved reads cannot grow the set unboundedly between sweeps.
     """
+
+    _SWEEP_EVERY_N_ADDS = 64
 
     def __init__(self, ttl_seconds: float, clock: Callable[[], float] | None = None) -> None:
         self._ttl_seconds = ttl_seconds
         self._clock: Callable[[], float] = clock if clock is not None else time.monotonic
         self._entries: dict[Any, float] = {}
+        self._adds_since_sweep = 0
 
     def add(self, key: Any) -> None:
         self._entries[key] = self._clock() + self._ttl_seconds
+        self._adds_since_sweep += 1
+        if self._adds_since_sweep >= self._SWEEP_EVERY_N_ADDS:
+            self._sweep()
 
     def __contains__(self, key: Any) -> bool:
         self._sweep()
@@ -121,12 +131,14 @@ class _TtlSet:
 
     def clear(self) -> None:
         self._entries.clear()
+        self._adds_since_sweep = 0
 
     def _sweep(self) -> None:
         now = self._clock()
         expired = [k for k, exp in self._entries.items() if exp <= now]
         for k in expired:
             del self._entries[k]
+        self._adds_since_sweep = 0
 
 
 class _InMemoryStateStore:

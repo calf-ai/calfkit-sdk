@@ -25,7 +25,7 @@ from typing import Any, cast
 from calfkit.models.state import State
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch, _InMemoryStateStore
 from calfkit.nodes.aggregator.aggregator import FanOutAggregator, MergeErrorPolicy
-from calfkit.nodes.aggregator.errors import AggregatorMergeError
+from calfkit.nodes.aggregator.errors import AggregatorMergeError, RestartSimulatedError
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
     AggregatorBatch,
@@ -85,8 +85,11 @@ class InMemoryAggregator(FanOutAggregator):
             completion_ttl_seconds=completion_ttl_seconds,
             clock=self._clock,
         )
-        self._completion_events: dict[tuple[str, str], asyncio.Event] = {}
-        self._partial_state_events: dict[tuple[str, str], list[tuple[int, asyncio.Event]]] = {}
+        # Use Futures rather than Events so simulate_restart can deliver
+        # a RestartSimulated exception to waiters instead of letting them
+        # hang on a wiped Event reference.
+        self._completion_events: dict[tuple[str, str], asyncio.Future[None]] = {}
+        self._partial_state_events: dict[tuple[str, str], list[tuple[int, asyncio.Future[None]]]] = {}
 
         if self.persist_to_disk and self._disk_path is not None:
             self.rehydrate_from_disk()
@@ -114,7 +117,23 @@ class InMemoryAggregator(FanOutAggregator):
 
         Models the real worker-restart flow: process memory is gone, durable
         log survives, restart replays the log to rebuild local state.
+
+        Any task currently awaiting :meth:`wait_for_completion` or
+        :meth:`wait_for_partial_state` will receive
+        :class:`RestartSimulatedError` so the test fails clearly rather than
+        hanging on the wiped event objects.
         """
+        # Cancel current waiters before clearing the event dicts; without
+        # this the awaiters hold references to the OLD asyncio.Event
+        # objects which will never be set, hanging the test forever.
+        for fut in self._completion_events.values():
+            if not fut.done():
+                fut.set_exception(RestartSimulatedError("simulate_restart() fired while a completion waiter was active"))
+        for waiters in self._partial_state_events.values():
+            for _needed_n, fut in waiters:
+                if not fut.done():
+                    fut.set_exception(RestartSimulatedError("simulate_restart() fired while a partial-state waiter was active"))
+
         self._store = _InMemoryStateStore(
             completion_ttl_seconds=self._completion_ttl_seconds,
             clock=self._clock,
@@ -263,7 +282,9 @@ class InMemoryAggregator(FanOutAggregator):
             self._store.tombstone(key)
             self._persist_tombstone(key)
             if key in self._completion_events:
-                self._completion_events[key].set()
+                fut = self._completion_events[key]
+                if not fut.done():
+                    fut.set_result(None)
             return merged
 
         return None
@@ -303,12 +324,13 @@ class InMemoryAggregator(FanOutAggregator):
     def _fire_partial_state_waiters(self, key: tuple[str, str], batch: _InFlightBatch) -> None:
         if key not in self._partial_state_events:
             return
-        remaining: list[tuple[int, asyncio.Event]] = []
-        for needed_n, event in self._partial_state_events[key]:
+        remaining: list[tuple[int, asyncio.Future[None]]] = []
+        for needed_n, fut in self._partial_state_events[key]:
             if len(batch.received) >= needed_n:
-                event.set()
+                if not fut.done():
+                    fut.set_result(None)
             else:
-                remaining.append((needed_n, event))
+                remaining.append((needed_n, fut))
         self._partial_state_events[key] = remaining
 
     # ------------------------------------------------------------------
@@ -319,12 +341,16 @@ class InMemoryAggregator(FanOutAggregator):
         """Async wait until the batch identified by ``key`` tombstones.
 
         Useful for tests that submit returns from a background task and want
-        to assert completion ordering without polling.
+        to assert completion ordering without polling. Raises
+        :class:`RestartSimulatedError` if :meth:`simulate_restart` fires while
+        the await is pending.
         """
         if self._store.was_recently_completed(key):
             return
-        event = self._completion_events.setdefault(key, asyncio.Event())
-        await asyncio.wait_for(event.wait(), timeout=timeout)
+        if key not in self._completion_events:
+            self._completion_events[key] = asyncio.get_running_loop().create_future()
+        future = self._completion_events[key]
+        await asyncio.wait_for(future, timeout=timeout)
 
     async def wait_for_partial_state(
         self,
@@ -333,13 +359,15 @@ class InMemoryAggregator(FanOutAggregator):
         timeout: float = 5.0,
     ) -> None:
         """Async wait until at least ``n`` tool results have been received for
-        the batch identified by ``key``."""
+        the batch identified by ``key``. Raises :class:`RestartSimulatedError`
+        if :meth:`simulate_restart` fires while the await is pending.
+        """
         existing = self._store.get(key)
         if existing is not None and len(existing.received) >= n:
             return
-        event = asyncio.Event()
-        self._partial_state_events.setdefault(key, []).append((n, event))
-        await asyncio.wait_for(event.wait(), timeout=timeout)
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._partial_state_events.setdefault(key, []).append((n, future))
+        await asyncio.wait_for(future, timeout=timeout)
 
     # ------------------------------------------------------------------
     # Subclass wrapping

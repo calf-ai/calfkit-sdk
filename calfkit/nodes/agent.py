@@ -486,13 +486,13 @@ class BaseAgentNodeDef(
             )
             return Response(envelope, headers=self._emitter_headers())
 
+        # Late returns / orphan returns / duplicate returns all drop silently;
+        # only new tool_call_ids advance the batch. The cache write is
+        # deferred until the durable publish acks so a publish failure can be
+        # retried by FastStream redelivery without a phantom-merged state.
         key = (correlation_id, fan_out_id)
-        # _ensure_aggregator_ready guarantees the runtime is set; this
-        # access raises AggregatorStateStoreError if a test path bypasses
-        # the lazy setup somehow.
         state_store = self.aggregator.runtime.state_store
 
-        # 1. Reject late returns for already-completed batches.
         if state_store.was_recently_completed(key):
             logger.info(
                 "[%s] late return after completion key=%s; dropping",
@@ -501,7 +501,6 @@ class BaseAgentNodeDef(
             )
             return Response(envelope, headers=self._emitter_headers())
 
-        # 2. Look up the in-flight batch in the cache.
         batch = state_store.get(key)
         if batch is None:
             logger.warning(
@@ -511,7 +510,6 @@ class BaseAgentNodeDef(
             )
             return Response(envelope, headers=self._emitter_headers())
 
-        # 3. Determine which tool_call_id is newly returned (diff vs batch.received).
         incoming_results = envelope.context.state.tool_results
         new_ids = {tcid for tcid in incoming_results if tcid in batch.expected_tool_call_ids and tcid not in batch.received}
         if not new_ids:
@@ -522,27 +520,18 @@ class BaseAgentNodeDef(
             )
             return Response(envelope, headers=self._emitter_headers())
 
-        # 4. Build the merged batch as a new instance. Mutating the cached
-        #    batch before the durable publish would let a publish failure
-        #    produce a phantom-merged cache state that no record reflects —
-        #    FastStream's redelivery would then see the new tcid as
-        #    "already merged" via the dedup check and skip it forever.
         updated_received: dict[ToolCallId, Any] = {
             **batch.received,
             **{ToolCallId(tcid): incoming_results[tcid] for tcid in new_ids},
         }
         updated_batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
 
-        # 5. Durable write first — state_store.put publishes then updates
-        #    cache (on raise the cache stays pinned to the old batch).
         await state_store.put(key, updated_batch, partition=partition)
         batch = updated_batch
 
-        # 6. on_partial hook.
         view = self.aggregator._batch_view(batch)
         await self.aggregator.on_partial(view, frozenset({ToolCallId(tcid) for tcid in new_ids}))
 
-        # 7. Completion check + merge + publish aggregated result.
         if await self.aggregator.should_complete(view):
             merged: AggregatedReturn
             try:

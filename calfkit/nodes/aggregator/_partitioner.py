@@ -107,8 +107,6 @@ def has_composite_delimiter(value: str | bytes) -> bool:
     return _COMPOSITE_KEY_DELIMITER_STR in value
 
 
-# Re-export Iterable so this module can be imported without pulling typing in
-# downstream tests; otherwise unused.
 __all__ = [
     "FanOutAggregatorPartitioner",
     "build_composite_key",

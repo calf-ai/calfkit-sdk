@@ -58,3 +58,15 @@ class AggregatorStateStoreError(AggregatorError):
     ) -> None:
         super().__init__(message)
         self.state_topic = state_topic
+
+
+class RestartSimulatedError(AggregatorError):
+    """Raised by :class:`~calfkit.nodes.aggregator.testing.InMemoryAggregator`'s
+    async waiters when :meth:`InMemoryAggregator.simulate_restart` fires
+    while a test was awaiting :meth:`wait_for_completion` or
+    :meth:`wait_for_partial_state`.
+
+    Tests that expect simulate_restart to fire mid-await should catch
+    this; tests that don't expect it will see the exception propagate
+    and fail clearly instead of hanging forever on a wiped event.
+    """

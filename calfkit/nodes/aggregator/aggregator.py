@@ -9,8 +9,8 @@ zero user code beyond constructing the agent.
 
 The Kafka mechanics (per-agent state and returns topics, compacted-topic
 durability, partition-scoped in-memory cache, rebalance-driven rehydration)
-are entirely framework-managed by the production state store wired up in
-PR 4 / PR 5. This module exposes only the behaviour surface.
+are entirely framework-managed. This module exposes only the behaviour
+surface; the framework runtime lives on :attr:`FanOutAggregator._runtime`.
 
 The aggregator is **process-local**. State held in ``__init__`` (e.g., an LLM
 client used by :meth:`merge`) is per-process; cross-process coordination

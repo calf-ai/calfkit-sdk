@@ -311,3 +311,44 @@ async def test_wait_for_partial_state_returns_after_n_returns() -> None:
     batch = agg._store.get(("c1", "f1"))
     assert batch is not None
     assert len(batch.received) == 2
+
+
+async def test_simulate_restart_cancels_pending_completion_waiter() -> None:
+    """If simulate_restart fires while a test is awaiting completion,
+    the waiter must wake up with RestartSimulatedError rather than
+    hang forever on the wiped event reference."""
+    import pytest
+
+    from calfkit.nodes.aggregator.errors import RestartSimulatedError
+
+    agg = InMemoryAggregator(persist_to_disk=False)
+    await _init_batch(agg, expected=frozenset({"t1"}))
+
+    async def restart_after_delay() -> None:
+        await asyncio.sleep(0.01)
+        agg.simulate_restart()
+
+    restart_task = asyncio.create_task(restart_after_delay())
+    with pytest.raises(RestartSimulatedError):
+        await agg.wait_for_completion(("c1", "f1"), timeout=1.0)
+    await restart_task
+
+
+async def test_simulate_restart_cancels_pending_partial_state_waiter() -> None:
+    """Same guarantee for wait_for_partial_state — restart must surface
+    as a typed exception, not a hang."""
+    import pytest
+
+    from calfkit.nodes.aggregator.errors import RestartSimulatedError
+
+    agg = InMemoryAggregator(persist_to_disk=False)
+    await _init_batch(agg)
+
+    async def restart_after_delay() -> None:
+        await asyncio.sleep(0.01)
+        agg.simulate_restart()
+
+    restart_task = asyncio.create_task(restart_after_delay())
+    with pytest.raises(RestartSimulatedError):
+        await agg.wait_for_partial_state(("c1", "f1"), 2, timeout=1.0)
+    await restart_task
