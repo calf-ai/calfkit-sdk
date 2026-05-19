@@ -219,6 +219,100 @@ async def test_rehydrate_raises_on_stalled_poll() -> None:
     mock_consumer.stop.assert_awaited()
 
 
+# ---------------------------------------------------------------------------
+# _apply_record: poison-record handling
+# ---------------------------------------------------------------------------
+
+
+def test_apply_record_skips_null_key(caplog: pytest.LogCaptureFixture) -> None:
+    """Null-key records on the state topic are unexpected (the aggregator
+    always writes composite keys). Log loudly but don't raise — these are
+    stray records from elsewhere, not corrupt aggregator state."""
+    import logging
+
+    store, _ = _make_store()
+
+    with caplog.at_level(logging.ERROR):
+        store._apply_record(partition=0, key_bytes=None, value_bytes=b"any")
+
+    assert any("null key" in r.message for r in caplog.records)
+    assert store._cache == {}
+
+
+def test_apply_record_skips_malformed_key(caplog: pytest.LogCaptureFixture) -> None:
+    """Malformed (non-composite) keys are unrecoverable for the
+    aggregator (no key to associate state with). Log ERROR and skip."""
+    import logging
+
+    store, _ = _make_store()
+
+    with caplog.at_level(logging.ERROR):
+        # No "|" delimiter → parse_composite_key raises ValueError.
+        store._apply_record(partition=0, key_bytes=b"no-delim", value_bytes=b"{}")
+
+    assert any("malformed key" in r.message for r in caplog.records)
+    assert store._cache == {}
+
+
+def test_apply_record_raises_on_malformed_value() -> None:
+    """Poison FanOutState records for a KNOWN key signal corrupt durable
+    state. Raising aborts partition activation via the rebalance
+    listener's error guard — far better than silently losing the batch
+    (returns would arrive as 'orphans' and get dropped)."""
+    store, _ = _make_store()
+
+    with pytest.raises(AggregatorStateStoreError, match="failed to parse FanOutState"):
+        store._apply_record(
+            partition=0,
+            key_bytes=b"c1|f1",
+            value_bytes=b"not-valid-json",
+        )
+
+
+def test_apply_record_tombstone_drops_cache_entry() -> None:
+    """A value=None record (Kafka tombstone) removes the key from the
+    cache and marks it recently-completed."""
+    store, _ = _make_store()
+    # Seed an in-flight batch.
+    batch = _make_batch()
+    store._cache[("c1", "f1")] = batch
+    store._by_partition[0] = {("c1", "f1")}
+
+    store._apply_record(partition=0, key_bytes=b"c1|f1", value_bytes=None)
+
+    assert ("c1", "f1") not in store._cache
+    assert store.was_recently_completed(("c1", "f1"))
+
+
+def test_apply_record_valid_state_populates_cache() -> None:
+    """A well-formed FanOutState record rebuilds the in-memory batch."""
+    store, _ = _make_store()
+
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    state = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={"t1": "r1"},
+        started_at_ms=1000,
+        last_updated_ms=1500,
+        agent_topic="agent.in",
+    )
+
+    store._apply_record(
+        partition=0,
+        key_bytes=b"c1|f1",
+        value_bytes=state.model_dump_json().encode(),
+    )
+
+    batch = store.get(("c1", "f1"))
+    assert batch is not None
+    assert batch.received == {"t1": "r1"}
+    assert batch.expected_tool_call_ids == frozenset({"t1", "t2"})
+
+
 async def test_rehydrate_skips_empty_partitions() -> None:
     """Partitions with end_offset == 0 have nothing to read; they should
     be marked owned immediately without polling. This regression-checks

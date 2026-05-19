@@ -306,18 +306,26 @@ class _KafkaStateStore:
         recently-completed). Otherwise parse as :class:`FanOutState` JSON.
         """
         if key_bytes is None:
-            logger.warning(
-                "state-topic record with null key on partition=%d; skipping",
+            # Null-key records on the state topic should never come from
+            # this aggregator. Skip with a loud ERROR so the operator sees
+            # the anomaly without aborting partition activation for an
+            # unrelated stray record.
+            logger.error(
+                "state-topic record with null key on partition=%d; skipping "
+                "(unexpected: aggregator writes always have composite keys)",
                 partition,
             )
             return
         try:
             key = parse_composite_key(key_bytes)
         except ValueError as exc:
-            logger.warning(
-                "state-topic record with malformed key %r: %s",
+            logger.error(
+                "state-topic record with malformed key %r on partition=%d: %s; "
+                "skipping (no aggregator state can be tied to this record)",
                 key_bytes,
+                partition,
                 exc,
+                exc_info=exc,
             )
             return
 
@@ -331,13 +339,15 @@ class _KafkaStateStore:
         try:
             state = FanOutState.model_validate_json(value_bytes)
         except Exception as exc:
-            logger.warning(
-                "failed to parse FanOutState on partition=%d key=%r: %s",
-                partition,
-                key,
-                exc,
-            )
-            return
+            # Poison record for a known key: we cannot recover the in-flight
+            # batch state. Activating the partition would silently lose the
+            # batch (returns for it would arrive as 'orphans' and be dropped).
+            # Raise so the rebalance listener evicts and re-raises, surfacing
+            # the corruption to the operator.
+            raise AggregatorStateStoreError(
+                f"failed to parse FanOutState on partition={partition} key={key!r}: {exc}. "
+                f"Refusing to activate partition with corrupt durable state."
+            ) from exc
 
         batch = _InFlightBatch.from_fanout_state(state)
         self._cache[key] = batch
