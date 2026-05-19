@@ -3,16 +3,20 @@
 The store's read/write API (get / put / tombstone / evict_partitions /
 was_recently_completed) is mock-tested with a fake broker. Rehydration via
 real AIOKafkaConsumer requires Kafka; that path lands in the testcontainers
-integration milestone.
+integration milestone — except for the stalled-poll error branch, which
+is unit-testable against a mocked consumer.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from calfkit.models.state import State
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
 from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
+from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
 
 
 def _make_store(clock=None) -> tuple[_KafkaStateStore, MagicMock]:
@@ -169,3 +173,76 @@ async def test_mark_completed_adds_to_recently_completed_set() -> None:
 def test_get_returns_none_for_unknown_key() -> None:
     store, _ = _make_store()
     assert store.get(("nope", "nope")) is None
+
+
+# ---------------------------------------------------------------------------
+# Rehydration: stalled-poll error branch
+# ---------------------------------------------------------------------------
+
+
+async def test_rehydrate_raises_on_stalled_poll() -> None:
+    """When the broker returns no records for MAX_EMPTY_POLLS consecutive
+    polls while offsets remain outstanding, rehydration must raise rather
+    than silently activate the partition with partial state.
+
+    Stubs aiokafka's AIOKafkaConsumer so this test runs without a real
+    broker — the failure mode under test is the framework's response to
+    a broker stalled at startup, not the broker's I/O behaviour.
+    """
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+
+    from aiokafka import TopicPartition
+
+    # End offsets show the partition has records, but every getmany call
+    # returns an empty dict — simulating a stalled broker.
+    mock_consumer.end_offsets = AsyncMock(return_value={TopicPartition("agent.fanout-state", 0): 5})
+    mock_consumer.getmany = AsyncMock(return_value={})
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        with pytest.raises(AggregatorStateStoreError, match="rehydration stalled"):
+            await store.rehydrate_partitions({0})
+
+    # The store must NOT have activated partition 0 — owned_partitions
+    # is updated only AFTER successful drain.
+    assert 0 not in store.owned_partitions
+    # Consumer was cleaned up via the finally block.
+    mock_consumer.stop.assert_awaited()
+
+
+async def test_rehydrate_skips_empty_partitions() -> None:
+    """Partitions with end_offset == 0 have nothing to read; they should
+    be marked owned immediately without polling. This regression-checks
+    that the bounded-retry logic doesn't accidentally raise for empty
+    partitions."""
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+
+    from aiokafka import TopicPartition
+
+    mock_consumer.end_offsets = AsyncMock(return_value={TopicPartition("agent.fanout-state", 0): 0})
+    mock_consumer.getmany = AsyncMock(return_value={})
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        await store.rehydrate_partitions({0})
+
+    assert 0 in store.owned_partitions
+    mock_consumer.getmany.assert_not_awaited()

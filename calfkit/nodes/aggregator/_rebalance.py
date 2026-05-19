@@ -62,7 +62,22 @@ class _StateStoreRebalanceListener(ConsumerRebalanceListener):  # type: ignore[m
         if not partition_ids:
             return
         logger.info("aggregator partitions assigned: %s", sorted(partition_ids))
-        await self._state_store.rehydrate_partitions(partition_ids)
+        try:
+            await self._state_store.rehydrate_partitions(partition_ids)
+        except Exception:
+            # Rehydration may have populated _cache with some keys before
+            # raising; without eviction those keys would float in the cache
+            # while _owned_partitions doesn't include them, leading to
+            # inconsistent reads on subsequent partition activations. Evict
+            # everything we touched and re-raise so aiokafka surfaces the
+            # rebalance failure to the operator.
+            logger.exception(
+                "aggregator rehydration failed for partitions=%s; evicting "
+                "partially-loaded keys and aborting partition activation",
+                sorted(partition_ids),
+            )
+            self._state_store.evict_partitions(partition_ids)
+            raise
 
     async def on_partitions_revoked(self, revoked: set[TopicPartition]) -> None:
         partition_ids = {tp.partition for tp in revoked if tp.topic == self._returns_topic}

@@ -17,12 +17,15 @@ from calfkit.nodes.aggregator._rebalance import _StateStoreRebalanceListener
 class _StubStateStore:
     """Records calls for test assertions."""
 
-    def __init__(self) -> None:
+    def __init__(self, rehydrate_raises: Exception | None = None) -> None:
         self.rehydrate_calls: list[set[int]] = []
         self.evict_calls: list[set[int]] = []
+        self._rehydrate_raises = rehydrate_raises
 
     async def rehydrate_partitions(self, partition_ids: set[int]) -> None:
         self.rehydrate_calls.append(set(partition_ids))
+        if self._rehydrate_raises is not None:
+            raise self._rehydrate_raises
 
     def evict_partitions(self, partition_ids: set[int]) -> None:
         self.evict_calls.append(set(partition_ids))
@@ -123,3 +126,26 @@ async def test_on_partitions_revoked_with_empty_set_is_noop(
 
     assert store.evict_calls == []
     assert store.rehydrate_calls == []
+
+
+async def test_assigned_evicts_partial_state_when_rehydrate_raises() -> None:
+    """If rehydration partially populates the cache then raises, the
+    listener must evict any touched partitions and re-raise so aiokafka
+    surfaces the rebalance failure. Activating the partition with partial
+    state would corrupt the durability invariant."""
+    raising_store = _StubStateStore(rehydrate_raises=RuntimeError("broker stalled"))
+    listener = _StateStoreRebalanceListener(
+        state_store=raising_store, returns_topic="agent.fanout-returns"
+    )
+
+    assigned = {
+        TopicPartition("agent.fanout-returns", 0),
+        TopicPartition("agent.fanout-returns", 1),
+    }
+
+    with pytest.raises(RuntimeError, match="broker stalled"):
+        await listener.on_partitions_assigned(assigned)
+
+    # rehydrate was attempted, then evict was called with the same set.
+    assert raising_store.rehydrate_calls == [{0, 1}]
+    assert raising_store.evict_calls == [{0, 1}]

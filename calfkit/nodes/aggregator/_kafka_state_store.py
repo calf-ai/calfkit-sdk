@@ -25,6 +25,7 @@ from faststream.kafka import KafkaBroker
 
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch, _TtlSet
 from calfkit.nodes.aggregator._partitioner import build_composite_key, parse_composite_key
+from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
 from calfkit.nodes.aggregator.state import FanOutState
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,12 @@ class _KafkaStateStore:
     partitions it currently owns. :meth:`evict_partitions` drops entries
     on revoke; :meth:`rehydrate_partitions` rebuilds them on assignment.
     """
+
+    # Rehydration retry budget. Each empty getmany poll waits 1s; after
+    # this many consecutive empty polls with offsets still outstanding,
+    # rehydrate_partitions raises rather than silently activating the
+    # partition with partial state.
+    _REHYDRATE_MAX_EMPTY_POLLS: int = 5
 
     def __init__(
         self,
@@ -237,6 +244,7 @@ class _KafkaStateStore:
             # Empty partitions (end_offset == 0) have nothing to read.
             remaining: dict[TopicPartition, int] = {tp: end_offsets[tp] for tp in tps if end_offsets[tp] > 0}
 
+            empty_polls = 0
             while remaining:
                 batch_records = await consumer.getmany(timeout_ms=1000, max_records=500)
                 progressed = False
@@ -246,15 +254,17 @@ class _KafkaStateStore:
                         if record.offset + 1 >= remaining.get(tp, 0):
                             remaining.pop(tp, None)
                         progressed = True
-                if not progressed:
-                    # No records arrived in the polling window — partitions
-                    # may have grown since we snapshotted end_offsets, but
-                    # we've drained everything that existed at start.
-                    logger.debug(
-                        "rehydrate: empty poll with %d partitions still pending; finishing",
-                        len(remaining),
-                    )
-                    break
+                if progressed:
+                    empty_polls = 0
+                else:
+                    empty_polls += 1
+                    if empty_polls >= self._REHYDRATE_MAX_EMPTY_POLLS:
+                        raise AggregatorStateStoreError(
+                            f"rehydration stalled after {empty_polls}s on state-topic "
+                            f"partitions={sorted(tp.partition for tp in remaining)}; "
+                            f"broker may be unhealthy or partition leadership in flux. "
+                            f"Refusing to activate partition assignment with partial state."
+                        )
         finally:
             await consumer.stop()
 
