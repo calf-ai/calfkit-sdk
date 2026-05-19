@@ -12,12 +12,14 @@
 
 Calfkit 1.0 is a clean break from the 0.x series. **It is a two-layer SDK.**
 
-- **The user-facing primary surface** is an Agent SDK in the modern Pydantic-AI / OpenAI-Agents / LangGraph idiom: declarative `Agent(name=..., model=..., system_prompt=..., tools=[...], output_type=...)` classes, registered with a Worker in one line (`worker.add(agent)`). This is what 80%+ of users author. They never write a Handler, never see an Action, never touch a topic name unless they want to.
+- **The user-facing primary surface** is an Agent SDK in the modern Pydantic-AI / OpenAI-Agents idiom: a small declarative `Agent(name=..., model=..., instructions=..., tools=[...], output_type=...)` class plus a handful of instance methods on it (`agent.handoffs_to(...)`, `@agent.output_validator`, `@agent.interrupt_when(...)`). Tools are first-class Kafka services authored at module scope (`@tool`, `Tool.external(...)`, `Tool.from_agent(...)`) and attached to one or more agents via `tools=[...]`. Registered with a Worker in one line (`worker.add(agent)`). This is what 80%+ of users author. They never write a Handler, never see an Action, never touch a topic name unless they want to.
 - **The runtime primitive layer** — five concepts: **Handler, Action, Run, State, Worker** — is what the Agent SDK compiles down to. It is the surface for tool authors, advanced orchestration (custom nodes that aren't agents), Extension authors, and the SDK itself. Always documented, always accessible.
 
-The unique value of calfkit is the *combination*: you author your agent at the Pydantic-AI tier of ergonomics, and the SDK deploys it as a distributed, Kafka-native, multi-language-tool-capable, durable, replayable service — with no wiring code from the user. **Both orchestration and choreography are first-class.** Agents may be invoked directly (request/reply over Kafka), wired into hierarchies (handoff, sub-agents, parallel fan-out — see §11.A), *and* subscribed to event streams from other agents or arbitrary Kafka topics (linear pipelines, pub/sub fan-out, schema-typed event reactions — see §11.B). The wiring is declarative and can live either inside an `Agent(...)` declaration or outside it via `worker.wire(...)`, so the same agent can be reused across topologies. If a developer can get the same result by stuffing Pydantic AI inside a Temporal activity, calfkit has no reason to exist. The Agent SDK is the answer to that question. See §4 for the two-layer surface and a head-to-head ergonomics comparison against "Temporal + Pydantic AI."
+The unique value of calfkit is the *combination*: you author your agent at the Pydantic-AI tier of ergonomics, and the SDK deploys it as a distributed, Kafka-native, multi-language-tool-capable, durable, replayable service — with no wiring code from the user. **Both orchestration and choreography are first-class.** Agents may be invoked directly (request/reply over Kafka), wired into hierarchies (handoff, sub-agents, parallel fan-out — see §11.A), *and* subscribed to event streams from other agents or arbitrary Kafka topics (linear pipelines, pub/sub fan-out, schema-typed event reactions — see §11.B). **Choreography wiring lives on the Worker, not on the Agent**: an `Agent(...)` declaration is portable across deployments, and the deployment-time `worker.wire(source=..., target=..., payload=...)` is the canonical place that topology lives. If a developer can get the same result by stuffing Pydantic AI inside a Temporal activity, calfkit has no reason to exist. The Agent SDK is the answer to that question. See §4 for the two-layer surface and a head-to-head ergonomics comparison against "Temporal + Pydantic AI."
 
-The runtime layer ships an Action algebra as the single side-effect channel for all Kafka traffic. Durability comes from Kafka alone: an at-least-once log plus two compacted topics (runs-state, fan-out aggregator) replace the in-process `_pending_batches` dict at `calfkit/nodes/agent.py:50`, which is the canonical bug class this version is designed to eliminate. Tools become first-class Kafka topics (cross-language by construction), the agent loop stops being a `BaseAgentNodeDef.run()` god-method, and the FastStream coupling is replaced by direct `aiokafka` so the runtime can own rebalance, header typing, and the fan-out aggregator. Extensions get exactly three primitives (`around_invoke`, `around_publish`, `on_event`) — the named-sugar hierarchy proposed in `docs/hooks-design.md` is rejected because it lies about cross-process boundaries. The doc below specifies the wire format, the lifecycle events, the testing harness, and a five-milestone path from empty repo to feature parity.
+The runtime layer ships an Action algebra as the single side-effect channel for all Kafka traffic. Durability comes from Kafka alone: an at-least-once log plus two compacted topics (runs-state, fan-out aggregator) replace the in-process `_pending_batches` dict (§9.1) — the canonical bug class this version is designed to eliminate. Tools become first-class Kafka topics (cross-language by construction), the agent loop stops being a `BaseAgentNodeDef.run()` god-method, and the FastStream coupling is replaced by direct `aiokafka` so the runtime can own rebalance, header typing, and the fan-out aggregator. Extensions get exactly three primitives (`around_invoke`, `around_publish`, `on_event`) — the named-sugar hierarchy proposed in `docs/hooks-design.md` is rejected because it lies about cross-process boundaries.
+
+**One distinguishing constraint, stated up front.** Calfkit ships no `agent.run(input)` in-process invocation. Pydantic AI and OpenAI Agents put `.run()` on the agent because they *are* in-process libraries — the agent IS the runtime. Calfkit's agent is a declaration that gets executed by a Worker over a transport. Local development, REPL exploration, and unit tests use `InMemoryWorker` — a transport variant whose backing is an in-process queue rather than a Kafka broker. Same runtime code, same Action interpreter, same Extension chain; different transport. This is the Starlette / FastAPI / httpx test-client pattern. See §4.2 hello-world and §17 testing for the idiom. The cost is one extra line of test setup; the win is that local-dev behavior is a real subset of production behavior — no parallel "in-process path" to drift.
 
 ---
 
@@ -57,19 +59,17 @@ The runtime layer ships an Action algebra as the single side-effect channel for 
 
 The 0.x branch has shipped real value — `@agent_tool`, the Kafka-backed agent loop, gating — but it carries three fundamental shape problems that cannot be patched without breaking every public surface:
 
-1. **The agent loop is one god-method.** `BaseAgentNodeDef.run()` at `calfkit/nodes/agent.py:74-221` is ~150 lines mixing tool-registry resolution, parallel aggregation, model invocation, branch on `DeferredToolRequests`, and `Call`/`TailCall`/`ReturnCall` selection. Every cross-cutting concern (retry, tracing, audit, tool filtering) wants to interpose somewhere inside that method, but it has no seams.
+1. **The agent loop is one god-method.** `BaseAgentNodeDef.run()` at `calfkit/nodes/agent.py:74-221` is ~150 lines mixing tool-registry resolution, parallel aggregation, model invocation, and `Call`/`TailCall`/`ReturnCall` selection. Every cross-cutting concern (retry, tracing, audit, tool filtering) wants to interpose, but it has no seams.
 
-2. **Durability is half-Kafka, half-Python-dict.** `BaseAgentNodeDef._pending_batches: dict[str, PendingToolBatch]` at `calfkit/nodes/agent.py:50` is the durability story for parallel tool fan-out. It is lost on process restart, lost on consumer-group rebalance, and not replicated across worker processes. The agent itself catches this at `agent.py:117-120` with a `RuntimeError` whose message literally says *"This indicates lost PendingToolBatch state."* Any non-trivial production deployment will eventually hit this.
+2. **Durability is half-Kafka, half-Python-dict.** Parallel tool fan-out state lives in an in-process dict lost on restart and rebalance (§9.1 has the failure mode). Any non-trivial production deployment will eventually hit this.
 
-3. **Extension is structurally impossible.** Today the only extension points are `gates` (bool predicates at `nodes/base.py:85-93`) and overriding `run()` itself. Cross-cutting concerns (retry, OTel, audit, rate limiting, tool filtering, header propagation) cannot be expressed without forking the SDK. The `docs/hooks-design.md` two-layer middleware proposal acknowledges the gap but introduces named-sugar methods (`before_agent_run`/`after_agent_run`) that fire in *different Kafka handler invocations* — i.e., different Python processes — without that fact being visible in the API. That design lies about distributed reality.
+3. **Extension is structurally impossible.** Today's only extension points are `gates` and overriding `run()`. The `docs/hooks-design.md` middleware proposal introduces named-sugar methods (`before_agent_run`/`after_agent_run`) that fire in *different Kafka handler invocations* — different Python processes — without that fact being visible in the API. That design lies about distributed reality.
 
 A refactor that fixes (1) breaks public surface. A refactor that fixes (2) requires a new wire field, a new compacted topic, and runtime-owned aggregator code none of which the current `BaseNodeDef` knows about. A refactor that fixes (3) introduces a competing middleware API that conflicts with `gates`. Three concurrent breaking refactors is a 1.0 rewrite.
 
 ### 1.2 What problem the SDK solves and for whom
 
-**Problem:** Engineers building production AI agent systems want both (a) the Pydantic-AI / OpenAI-Agents tier of authoring ergonomics for the agent itself — declarative class, system prompt, typed tools, typed output — and (b) event-driven decoupling for deployment (independent scaling, replayability, cross-team integration, polyglot tools, durability). The dominant agent frameworks (LangGraph, Pydantic AI, OpenAI Agents, AutoGen, CrewAI) deliver (a) but are in-process Python — they fail at (b). The durable-execution platforms (Temporal, Restate, Inngest) deliver (b) but offer no agent-specific authoring surface — users stitch together a Pydantic AI agent inside a Temporal Activity, write an HTTP gateway for cross-language tools, and maintain that glue themselves. Calfkit's reason to exist is to deliver both (a) and (b) in a single SDK with no manual stitching.
-
-The instant you need *"the email-classifier team owns the classify-tool, the trading team owns the trading-agent, both deploy independently"*, the in-process frameworks force you into RPC-shaped duct tape. The instant you need *"replay this agent run from yesterday for debugging"*, they force you onto Temporal or roll-your-own. Calfkit collapses both forcing functions: the agent author writes Pydantic-AI-shaped code; the platform delivers Kafka-native distribution. See §4.10 for the head-to-head against "Temporal + Pydantic AI."
+**Problem:** Engineers building production AI agent systems want both (a) Pydantic-AI / OpenAI-Agents-tier authoring ergonomics (declarative class, typed tools, typed output) *and* (b) event-driven decoupling for deployment (independent scaling, replayability, cross-team integration, polyglot tools, durability). In-process agent frameworks (LangGraph, Pydantic AI, OpenAI Agents, AutoGen, CrewAI) deliver (a) but fail at (b). Durable-execution platforms (Temporal, Restate, Inngest) deliver (b) but offer no agent-specific authoring surface — users stitch a Pydantic AI agent inside a Temporal Activity, write an HTTP gateway for cross-language tools, and maintain that glue. Calfkit delivers both in a single SDK with no manual stitching. See §4.10 for the head-to-head.
 
 **For whom:**
 - Application engineers who want to author agents at the Pydantic-AI / OpenAI-Agents tier of DX *and* deploy them as decoupled, Kafka-native services without writing transport glue.
@@ -94,12 +94,12 @@ The instant you need *"the email-classifier team owns the classify-tool, the tra
 
 **Calfkit's distinctive position:** the only SDK in this space that delivers durable, multi-language, microservice-shaped agents on top of *a broker the team likely already runs*. The closest peer is Temporal — but Temporal requires adopting their proprietary cluster, and Temporal's "Activity" model maps poorly to "tool that an LLM picks dynamically." Calfkit trades Temporal's stronger determinism guarantees for Kafka-native shape and zero extra infrastructure.
 
-**The DX target, separately:** the *authoring* surface of calfkit (the Agent SDK, §4) targets the same ergonomics as Pydantic AI, OpenAI Agents SDK, and (parts of) LangGraph. A user authoring `Agent(name=..., model=..., tools=[...], output_type=...)` should not be able to distinguish calfkit from Pydantic AI on first inspection — that is intentional. Calfkit's differentiator is what happens *after* `worker.add(agent)`: the agent runs distributed over Kafka, its tools may live in other languages, its runs are durable, its fan-outs survive restart. The in-process SDKs cannot offer that combination; the durable-execution platforms (Temporal, Restate) cannot offer Pydantic-AI-class authoring ergonomics on top of the same runtime. Calfkit's value is precisely this intersection. §4.10 walks through the head-to-head ergonomics comparison.
+**The DX target, separately:** the Agent SDK (§4) targets Pydantic-AI-class authoring ergonomics — an `Agent(name=..., model=..., instructions=..., tools=[...], output_type=...)` constructor that a Pydantic AI user would not distinguish from theirs on first inspection. The deliberate divergence is G13: no `agent.run(input)` callable. Calfkit's value sits at the intersection — in-process SDKs cannot offer durability or polyglot tools; Temporal/Restate cannot offer Pydantic-AI-class authoring. §4.10 walks through the head-to-head.
 
 ### 1.4 Goals (explicit)
 
-- **G0.** **The user-facing primary authoring surface is the Agent SDK** (§4) — a declarative `Agent(name=..., model=..., system_prompt=..., tools=[...], output_type=...)` API at the same DX tier as Pydantic AI and the OpenAI Agents SDK. A new user authoring a hello-world distributed agent should write `Agent(...) ; worker.add(agent) ; worker.run()` and nothing else. The runtime primitives (G1) are the layer *below*; users only see them when they want to.
-- **G1.** Five-concept runtime model — Handler, Action, Run, State, Worker — is the underlying primitive layer. Every recipe (the Agent SDK itself, agent loop, handoff, fan-out, HITL) is expressible in those five. The Agent SDK compiles down to them.
+- **G0.** **The primary authoring surface is the Agent SDK** (§4) — a small declarative `Agent(name=..., model=..., instructions=..., tools=[...], output_type=...)` at the Pydantic-AI / OpenAI-Agents DX tier, plus a few instance methods (`agent.handoffs_to(...)`, `@agent.output_validator`, `@agent.interrupt_when(...)`). Tools are first-class Kafka services authored at module scope (`@tool`, `Tool.external(...)`, `Tool.from_agent(...)`), never owned by an Agent (§10). Hello-world is `Agent(...); worker.add(agent); asyncio.run(worker.run())` — nothing else. Runtime primitives (G1) live below.
+- **G1.** Five-concept runtime model — Handler, Action, Run, State, Worker — is the underlying primitive layer. The Agent SDK compiles down to them. See §2.
 - **G2.** Durability comes from Kafka log + compacted topics. No proprietary cluster, no Postgres dependency.
 - **G3.** Parallel fan-out is durable across restart and rebalance. The 0.x `_pending_batches` hole is closed.
 - **G4.** Tools are Kafka topics. A Go tool can serve a Python agent without an FFI layer.
@@ -108,9 +108,11 @@ The instant you need *"the email-classifier team owns the classify-tool, the tra
 - **G7.** No `dict[str, Any]` on the wire. Discriminated unions or typed payloads only.
 - **G8.** Async-only. No sync handler support.
 - **G9.** Multi-tenancy via a tenant header by default; topic-per-tenant is opt-in.
-- **G10.** HITL via `Interrupt`/`Resume` actions backed by the runs-state compacted topic.
-- **G11.** Testing has three honest layers: pure handler unit, in-memory dispatcher, real Kafka.
+- **G10.** HITL via `Interrupt`/`Resume` actions backed by the runs-state compacted topic. Agent SDK surface is `@tool(requires_approval=True, ...)` (per-tool gating) and `@agent.interrupt_when(...)` (per-output gating). See §4.5.
+- **G11.** Testing has three honest layers: pure handler unit, `InMemoryWorker` (in-process queue transport), real Kafka via testcontainers.
 - **G12.** OTel-native observability by default.
+- **G13. The transport is never bypassed.** No `agent.run(input)` in-process shortcut. `InMemoryWorker` is the local-dev / REPL / test idiom — a transport variant (in-process queue) of the same runtime as production Kafka, not a parallel code path. An `Agent` is a declaration the Worker executes, not a callable. See §17.2.
+- **G14. Topic naming is a deployment decision, not a definition decision (at Layer A).** Layer A declarations (`Agent`, `@tool`) carry identity (`name=` / function name); topics auto-derive from it. Overrides happen at registration (`worker.add(thing, topic="...")`). The honest exceptions — `Tool.external` and Layer B `@handler` — are explicit topic contracts with peer systems. See §10.1.
 
 ### 1.5 Non-goals (explicit)
 
@@ -129,14 +131,14 @@ The instant you need *"the email-classifier team owns the classify-tool, the tra
 
 This section is the heart of the doc. Every other section is an unfolding of these five concepts.
 
-**A note before diving in.** The five concepts in this section are the *runtime* primitives. They are what the SDK executes, what Extensions hook into, what the wire format encodes. They are NOT the primary authoring surface for agent developers — that is the Agent SDK described in §4, which is a recipe layer over these five. Read this section to understand what the SDK does; read §4 to understand what users write. Tool authors, Extension authors, and users building non-agent orchestration nodes write at this level directly.
+These five concepts are the *runtime* primitives — what the SDK executes, what Extensions hook into, what the wire format encodes. They are NOT the primary authoring surface for agent developers (that is the Agent SDK in §4). Read this section to understand what the SDK does; read §4 to understand what users write.
 
 ### 2.1 Handler
 
 A **Handler** is an `async` function from `(Context, Message) -> Action`. It is the atomic unit of *runtime* user code in calfkit — meaning, it is what the SDK dispatcher invokes on each Kafka message. Most agent authors do not write Handlers directly; they write `Agent(...)` declarations (§4) and the SDK synthesizes the Handler. But Handlers are first-class, fully documented, and used by tool authors, custom-orchestration users, and SDK internals.
 
 ```python
-async def my_handler(ctx: Context[Deps, State], msg: InputMsg) -> Action:
+async def my_handler(ctx: Context[Deps], msg: InputMsg) -> Action:
     ...
 ```
 
@@ -206,7 +208,7 @@ class MyState(BaseModel):
 ```
 
 - **User-typed.** The SDK does not impose a state shape. (The 0.x `State` class at `calfkit/models/state.py:92` mixes message history, tool results, overrides, and metadata into one god-model — v1 unbundles this.)
-- **Opaque bytes on the wire.** The runtime sees `state: bytes` on the Envelope. Serialization is the Handler's concern (the `Context[Deps, State]` generic is parameterized on the user's state type; deserialization happens at the SDK boundary, not in the user's Handler body).
+- **Opaque bytes on the wire.** The runtime sees `state: bytes` on the Envelope. Serialization is the Handler's concern; `ctx.state` is exposed typed via signature inference from the Handler (or as `Any` if not declared). State is *not* a generic parameter on `Context` — the `Context[Deps]` single-parameter generic matches Pydantic AI / OpenAI Agents.
 - **Versioned.** A `state_schema_version: str` field on the Envelope lets a Handler reject incompatible states or migrate them.
 - **Has explicit scopes.** See [Section 7](#7-state-model) for run-scoped vs frame-scoped vs long-term.
 
@@ -214,22 +216,26 @@ The critical motivation for opaque-bytes: today, `State` extends `BaseModel` wit
 
 ### 2.5 Worker
 
-A **Worker** is the process that hosts handlers, consumes from their topics, and runs the SDK runtime.
+A **Worker** is the process that hosts handlers, consumes from their topics, and runs the SDK runtime. The constructor accepts only transport identity; all composition is done via methods so the constructor stays small and discoverable.
 
 ```python
-worker = Worker(
-    bootstrap_servers="kafka:9092",
-    handlers=[order_classifier, fraud_checker, decision_agent],
-    extensions=[OTelExtension(), RetryExtension(max=3)],
+worker = (
+    Worker(bootstrap_servers="kafka:9092", group_id_prefix="myapp-prod")
+    .use(OTelExtension(), RetryExtension(max=3))
+    .deps_from(create_deps)
+    .add(order_classifier, fraud_checker, decision_agent)
 )
 await worker.run()
 ```
 
-- **Hosts ≥1 Handler.** Each Handler maps to one Kafka consumer subscription.
+- **Hosts ≥1 Handler or Agent.** `worker.add(*items)` registers Agents (which compile to Handlers, plus tool Handlers) and bare `@handler`-decorated functions. Each registered Handler maps to one Kafka consumer subscription.
 - **Owns the runtime.** Deserializing envelopes, dispatching to Handlers, interpreting Actions, running the Extension chain, owning the fan-out aggregator, publishing on behalf of the Handler.
 - **Scales horizontally** via Kafka consumer groups. Adding a Worker process to the same group increases parallelism on the same topics.
 - **Owns the rebalance listener** (a key reason for direct aiokafka). On partition revocation, the Worker checkpoints any pending aggregator state to the compacted topic before releasing the partition.
 - **Owns lifecycle hooks** (graceful shutdown, signal handling, draining).
+- **Owns the deployment topology.** Choreography wiring lives on the Worker (`worker.wire(...)`, `worker.publish(...)`, `worker.subscribe(...)`), not on the Agent. Agents are portable across deployments; the Worker is the place where "this deployment of these agents" is described.
+
+Each method returns `self`, so the fluent builder reads top-to-bottom. The trio of internal-topic overrides (`runs_state_topic`, `fanout_topic`, `dlq_topic_pattern`) — which 99% of users should never touch — live on `worker.runtime(...)`, not in the constructor.
 
 What a Worker **is not**:
 - It is not a router. There is no central router process. Routing is implicit in topic wiring.
@@ -279,25 +285,16 @@ This section enumerates every Action. Anything *not* in this list is not first-c
 | `Interrupt`  | `Interrupt(reason: str, resume_topic: str, payload: M \| None=None)` | Checkpoint write to runs-state | `(run_id, interrupt_id)` | Halt the Run. Persist state. Wait for `Resume`. |
 | `Resume`     | (client-side) `client.resume(run_id, payload)`           | One publish to `resume_topic` | `(run_id, interrupt_id)` | Resume a paused Run. Strictly speaking *not* a Handler-returned Action — see §3.3 below. |
 | `Continue`   | `Continue(state: M)`                                     | No                     | n/a (in-process)       | "Re-dispatch myself with this updated state" — used by Extensions to short-circuit a Handler invocation with a transformed state. Internal-leaning. |
-| `Done`       | `Done()`                                                 | No                     | n/a                    | Terminate this hop. No publish. Marks the Run as complete if there's no parent frame. Equivalent to today's `Silent` but with explicit terminal semantics. |
+| `Done`       | `Done()`                                                 | No                     | n/a                    | Terminate this hop. No publish. Marks the Run as complete if there's no parent frame. Equivalent to today's `Silent` but with explicit terminal semantics. **Registration-time check:** the SDK rejects a Handler that can return `Done()` *and* is reachable via `Call` (a caller awaiting `Reply` would hang forever). The Agent SDK never emits `Done` from a Call-reachable agent topic. |
 | `Fail`       | `Fail(error: ErrorPayload, retry: RetryHint = AUTO)`     | DLQ publish (or retry topic) | `(run_id, frame_id, attempt)` | Explicit failure. Differs from raising an exception: gives the runtime a typed error and retry hint. |
 
 ### 3.2 First-class vs recipe
 
-| First-class                                       | Recipe                                                                                  |
-|---------------------------------------------------|-----------------------------------------------------------------------------------------|
-| `Emit`, `Call`, `Reply`, `Fan`, `Interrupt`, `Done`, `Fail`, `Continue` | "Agent loop" = Handler that returns `Call` to tool topic, re-enters on `ReturnCall`-style |
-|                                                   | "Handoff" = `Call` to another agent's topic; `Reply` from that agent pops back          |
-|                                                   | "Supervisor-worker" = `Fan` of `Call`s, aggregator collects `Reply`s                    |
-|                                                   | "Sequential pipeline (orchestration)" = Handler chain via `Call`/`Reply` with no branching |
-|                                                   | "Linear choreography" = `Emit` from agent A; agent B `subscribes_to` A's event topic (see §11.B) |
-|                                                   | "Pub/sub fan-out" = `Emit` from a single producer; N agents independently `subscribes_to` the same topic |
-|                                                   | "TailCall" (in 0.x) = `Call` + `Done` semantically; absorbed                            |
-|                                                   | "Sequential" (in 0.x) = a list of `Emit`s with state threading; not first-class         |
+**First-class Actions:** `Emit`, `Call`, `Reply`, `Fan`, `Interrupt`, `Done`, `Fail`, `Continue`, `TailCall`.
 
-The 0.x `Sequential`, `Delegate`, `Parallel`, `TailCall` types (at `calfkit/models/actions.py:73-108`) collapse into the simpler set above. `TailCall` in particular is `Call` with a hint to swap the current frame rather than push — implemented as an Action variant or, if we want to remove it entirely, the user just emits `Call`+`Done` and the runtime collapses the frame.
+**Recipes** (expressed in the above): agent loop (`Call` to tool topic, re-enter on Reply); handoff (`Call` peer agent's topic); supervisor-worker (`Fan` over `Call`s); sequential pipeline (`Call`/`Reply` chain); linear choreography (`Emit` + subscription, see §11.B); pub/sub fan-out (`Emit` + N subscribers).
 
-**Recommended decision:** keep `TailCall` as a first-class Action because the partial-state-aggregation pattern (today at `agent.py:174-178`) benefits from explicit frame-replacement semantics. The doc above counts seven Actions; promoting `TailCall` makes eight. Going forward I treat `Done` as the strict terminator and `TailCall` as an Action variant for the "this hop = a re-dispatch of myself" pattern.
+The 0.x `Sequential`, `Delegate`, `Parallel` collapse into this set. `TailCall` is promoted to first-class because partial-state-aggregation benefits from explicit frame-replacement semantics; `Done` remains the strict terminator.
 
 ### 3.3 Why `Resume` is not in the Handler-returned set
 
@@ -348,16 +345,32 @@ The crucial invariant: **step (5) — offset commit — happens after step (3) s
 
 ## 4. The two-layer authoring API
 
-This is the most important section in the doc for the SDK's value proposition. Calfkit is a **two-layer SDK**. The primary user-facing surface is the Agent SDK — a declarative class API that looks and feels like Pydantic AI or the OpenAI Agents SDK. Under it, a runtime layer of Handler / Action / Run / State / Worker (specified in §2 and §3) does the actual Kafka work. The two layers are not optional alternatives — they are stacked. The Agent SDK *compiles* into Handlers and Actions. A user who never wants to know that exists, doesn't have to. A user who wants escape hatches, can drop one level and write a Handler directly. Tool authors and Extension authors naturally work at the runtime tier.
+This is the most important section in the doc for the SDK's value proposition. Calfkit is a **two-layer SDK**: a Pydantic-AI-shaped Agent SDK on top, the runtime primitives of §2-§3 underneath. The Agent SDK *compiles* into Handlers and Actions — users who want stay at the top layer; users who need escape hatches drop one level.
 
 ### 4.1 The two layers — what they are, and what each is for
 
 | Layer                  | Surface                                                        | Who writes it                                                                                  | Concepts they touch                                                                                  |
 |------------------------|----------------------------------------------------------------|------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
-| **Layer A: Agent SDK** | Declarative classes: `Agent`, `tool`, `output_type`, `handoff`, `Sub`, `worker.add(agent)` | Agent developers (the 80%+ case). The "I want to ship an agent over Kafka" audience.            | `Agent`, `tool`, `output_type`, `output_validator`, `system_prompt`, `instructions`, `handoff_to`, `Sub` (sub-agent), `Interrupt` (HITL), `Deps`, `Worker.add` |
-| **Layer B: Runtime**   | `@handler` + Action algebra: `@handler`, `@tool`, `Emit`/`Call`/`Reply`/`Fan`/`Interrupt`/`Done`/`Fail`/`TailCall`, `Extension` | Tool authors. Authors of custom orchestration nodes that aren't agents. Extension authors. SDK internals. | All five from §2 plus the Action algebra from §3.                                                    |
+| **Layer A: Agent SDK** | The `Agent` class with a narrow constructor and agent-instance methods/decorators (LLM-output and routing only): `@agent.interrupt_when(...)`, `@agent.output_validator`, `agent.handoffs_to(...)`. Tools live at module scope: `@tool`, `@tool(requires_approval=True)`, `Tool.external(...)`, `Tool.from_agent(...)`, attached via `tools=[...]`. Plus deployment-side: `worker.add(agent)`, `worker.wire(...)`, `worker.publish(...)`, `worker.subscribe(...)`. | Agent developers (the 80%+ case). The "I want to ship an agent over Kafka" audience.            | `Agent`, `Tool`, `Context[Deps]`, `Worker`, `Client`. Optionally `Subscription` for power users wiring choreography declaratively (most users use `worker.wire(...)` kwargs instead). |
+| **Layer B: Runtime**   | `@handler` + Action algebra: `@handler`, the `Action` types from `calfkit.actions` (`Emit`/`Call`/`Reply`/`Fan`/`Interrupt`/`Done`/`Fail`/`TailCall`/`Continue`), `Extension` from `calfkit.extensions`. | Tool authors. Authors of custom orchestration nodes that aren't agents. Extension authors. SDK internals. | All five from §2 plus the Action algebra from §3.                                                    |
 
 The defining property: **every Layer A construct is a recipe over Layer B**. There is nothing in the Agent SDK that requires a wire-format change, a new Action variant, or a runtime concept that doesn't already exist for Layer B. The Agent SDK is purely an authoring-time compiler that materializes a `BaseAgentRecipe`-driven Handler at registration time. If a user inspects what `worker.add(agent)` produced, they see a normal Handler registered against a normal topic, with the agent's behavior implemented via the standard `Call`/`Reply` agent loop, just as they could have written by hand.
+
+**The constructor stays narrow on purpose** — it accepts only fields that describe *what the agent is*, not *how it is deployed* or *what it reacts to*. The signature is fixed at six fields:
+
+```python
+Agent(
+    name: str,
+    *,
+    model: str | Model,
+    instructions: str | Callable[[Context[Deps]], str | Awaitable[str]] | None = None,
+    output_type: type[Any] = str,
+    deps_type: type[Deps] = NoneType,
+    tools: Sequence[Tool] = (),
+)
+```
+
+Everything else moves to instance methods or decorators (see §4.9 surface map). Topology lives on the Worker; HITL lives on the tool decorator.
 
 ### 4.2 Hello world — the user-facing primary surface
 
@@ -365,7 +378,8 @@ This is what 80%+ of users write. Every line is calfkit; no Pydantic AI under th
 
 ```python
 # weather_agent.py
-from calfkit import Agent, Worker, tool
+import asyncio
+from calfkit import Agent, Context, InMemoryWorker, Worker, tool
 from pydantic import BaseModel
 
 class WeatherReport(BaseModel):
@@ -374,40 +388,48 @@ class WeatherReport(BaseModel):
     temperature_c: float
 
 @tool
-async def get_weather(location: str) -> dict:
+async def get_weather(ctx: Context, location: str) -> dict:
     """Fetch current weather for a location."""
     ...
 
 @tool
-async def get_forecast(location: str, days: int = 1) -> list[dict]:
+async def get_forecast(ctx: Context, location: str, days: int = 1) -> list[dict]:
     """Fetch a weather forecast for the next N days."""
     ...
 
 weather_agent = Agent(
     name="weather-bot",
     model="openai:gpt-5.4",
-    system_prompt="You help users find current weather and short-term forecasts.",
-    tools=[get_weather, get_forecast],
+    instructions="You help users find current weather and short-term forecasts.",
     output_type=WeatherReport,
+    tools=[get_weather, get_forecast],
 )
 
+
+async def main() -> None:
+    # Production — over Kafka
+    worker = Worker(bootstrap_servers="kafka:9092").add(weather_agent)
+    await worker.run()
+
+
 if __name__ == "__main__":
-    worker = Worker(bootstrap_servers="kafka:9092")
-    worker.add(weather_agent)
-    worker.run_blocking()
+    asyncio.run(main())
 ```
 
-That's the whole file. No `@handler`. No `Action`. No topic strings hand-written by the user. No wiring code. The user authored an agent at the Pydantic-AI tier and deployed it as a Kafka-native service.
+That's the whole file. No `@handler`, no `Action`, no hand-written topic strings. Each `@tool` is its own Kafka service (its own topic, consumer group, scale unit); multiple agents may attach the same tool by referencing it in their `tools=[...]`.
 
-What `worker.add(weather_agent)` does, mechanically (§4.7 expands):
-1. Derives the agent's input topic from `name`: `agent.weather-bot.in` (override via `Agent(topic=...)`).
-2. Derives each tool's topic from the tool's name: `tool.get_weather`, `tool.get_forecast`.
-3. Synthesizes the agent's input/output Pydantic models for the Envelope payload schema.
-4. Generates a Handler from the agent recipe (system prompt + tools + output_type + model = an agent loop). The Handler returns `Call` to tool topics on each LLM tool selection, `Reply` with `WeatherReport` on final output.
-5. Registers a tool-Handler for each `@tool` (each tool is itself a Handler subscribed to its tool topic).
-6. Wires the agent's `Call`-receipt back into itself for the next-turn re-entry.
+**Local-dev / REPL / unit test — same agent, in-process transport.** Calfkit does not ship an `agent.run(input)` shortcut: an agent is a declaration, not a callable. To exercise it without a Kafka broker, use `InMemoryWorker`, which is the same `Worker` runtime with an in-process queue transport instead of Kafka. The idiom is one extra line:
 
-The user sees none of this unless they ask (`worker.inspect()` prints the materialized topology). They can override any of it via `Agent(...)` parameters or by escaping to Layer B (§4.6).
+```python
+async def smoke_test() -> None:
+    wrk = InMemoryWorker.testing(weather_agent)
+    result = await wrk.invoke(weather_agent, "What's the weather in Berlin?")
+    assert result.output.location == "Berlin"
+```
+
+Same code path as production; only the transport is swapped (Starlette-TestClient / httpx-MockTransport pattern). See §17.2 for the InMemoryWorker reference.
+
+`worker.add(weather_agent)` derives topics from identity (`agent.weather-bot.in`, `tool.get_weather`, ...), synthesizes the Handler from the agent recipe, and registers one Handler per agent and per referenced tool. Topology is overridable at registration (`worker.add(thing, topic=...)`) or by dropping to Layer B (§4.6). See §4.7 for the full lifecycle.
 
 ### 4.3 Agent with cross-language tools — the calfkit moat
 
@@ -415,7 +437,8 @@ This is calfkit's structural differentiator vs Pydantic AI / OpenAI Agents / Lan
 
 ```python
 # trading_agent.py
-from calfkit import Agent, Worker, tool, external_tool
+import asyncio
+from calfkit import Agent, Context, Tool, Worker, tool
 from pydantic import BaseModel
 from decimal import Decimal
 
@@ -430,77 +453,75 @@ class TradeResult(BaseModel):
     qty: int
     fill_price: Decimal
 
-# Python tools — implementation lives here
+# Cross-language tool — DECLARED here, IMPLEMENTED in a Go service.
+# Tool.external accepts topic= (unlike @tool) because there is no function
+# to derive from — the topic IS the wire contract with the peer. See §10.1.
+execute_trade = Tool.external(
+    name="execute_trade",
+    description="Submit a buy or sell order; returns confirmation id and fill price.",
+    input=BuyOrSellOrder,
+    output=TradeConfirmation,
+    # topic= defaults to f"tool.{name}"; override if the peer expects a different topic.
+)
+
+# Python tools — module-level @tool decorator; standalone Kafka services
 @tool
-async def fetch_quote(symbol: str) -> dict:
+async def fetch_quote(ctx: Context, symbol: str) -> dict:
     """Get the latest market quote for a symbol."""
     ...
 
 @tool
-async def fetch_portfolio(user_id: str) -> dict:
+async def fetch_portfolio(ctx: Context, user_id: str) -> dict:
     """Get the user's current portfolio."""
     ...
-
-# Cross-language tool — DECLARED here, IMPLEMENTED in a Go service.
-# The Go service subscribes to topic "tool.execute_trade" using the
-# calfkit-go SDK and publishes Replies in the same Envelope format.
-execute_trade = external_tool(
-    name="execute_trade",
-    description="Submit a buy or sell order; returns confirmation id and fill price.",
-    input=BuyOrSellOrder,   # Pydantic model used to synthesize the JSON schema for the LLM
-    output=TradeConfirmation,
-    # topic is derived: "tool.execute_trade"
-)
 
 trading_agent = Agent(
     name="trader",
     model="openai:gpt-5.4",
-    system_prompt="You execute trades on behalf of users. Always confirm risk before placing orders.",
-    tools=[fetch_quote, fetch_portfolio, execute_trade],
+    instructions="You execute trades on behalf of users. Always confirm risk before placing orders.",
     output_type=TradeResult,
+    tools=[execute_trade, fetch_quote, fetch_portfolio],   # all tools attach via tools=[...]
 )
 
+
+async def main() -> None:
+    worker = Worker(bootstrap_servers="kafka:9092").add(trading_agent)
+    await worker.run()
+
+
 if __name__ == "__main__":
-    worker = Worker(bootstrap_servers="kafka:9092")
-    worker.add(trading_agent)
-    worker.run_blocking()
+    asyncio.run(main())
 ```
 
-From the Python agent's perspective, `execute_trade` is just a tool. The LLM picks it; the Agent SDK turns it into a `Call` to `tool.execute_trade`; some other process — possibly written in Go, possibly running in another data center, possibly owned by a different team — receives that Kafka message and Replies. None of the existing in-process agent SDKs can do this without a transport layer the user has to build by hand. Calfkit makes it the default.
+From the Python agent's perspective, `execute_trade` is just a tool. The LLM picks it; the Agent SDK turns it into a `Call` to `tool.execute_trade`; some other process — possibly Go, possibly in another data center, possibly owned by another team — receives that Kafka message and Replies. None of the in-process agent SDKs offer this without a hand-built transport layer.
 
-The Go side, sketched in calfkit-go (eventual; v1.x roadmap):
+**One unified `Tool` concept** with three construction paths — `@tool` (Python in-codebase), `Tool.external(...)` (cross-language stub), `Tool.from_agent(other_agent, ...)` (sub-agent as tool). All three produce the same on-the-wire shape: a Handler addressable by topic. See §10 for the full Tool model and §10.1 for "never owned by an Agent."
 
-```go
-// execute_trade.go — Go service implementing the tool
-package main
-
-import "github.com/calfkit/calfkit-go"
-
-func main() {
-    w := calfkit.NewWorker("kafka:9092")
-    w.AddTool("execute_trade", executeTrade)
-    w.Run()
-}
-
-func executeTrade(ctx calfkit.Context, req BuyOrSellOrder) (TradeConfirmation, error) {
-    // ... place the order via the exchange API ...
-    return TradeConfirmation{ConfirmationId: id, ...}, nil
-}
-```
-
-Same wire format; same Envelope; same headers. The Python agent doesn't know or care it's a Go tool.
+The Go-side sketch lives in §4.10 as part of the head-to-head ergonomics comparison. The Python agent doesn't know or care it's a Go tool — same wire format, same Envelope, same headers.
 
 ### 4.4 Multi-agent: handoff, sub-agents, parallel sub-agents
 
-This is where the Agent SDK absorbs the patterns that LangGraph / OpenAI Agents express via graph nodes or `Handoff` types. All of them compile to `Call`/`Reply`/`Fan` Actions under the hood.
+The Agent SDK absorbs the patterns LangGraph / OpenAI Agents express via graph nodes or `Handoff` types. All compile to `Call`/`Reply`/`Fan`. The Agent constructor stays narrow; topology lives on instance methods or on the Worker.
 
-**Handoff (OpenAI Agents-style):** an agent decides which other agent to route to next.
+**Handoff (OpenAI Agents-style):** an agent decides which peer to route to next. Peers are attached after construction via an instance method.
 
 ```python
+@tool
+async def lookup_invoice(ctx: Context, invoice_id: str) -> dict: ...
+
+@tool
+async def issue_refund(ctx: Context, charge_id: str, amount: Decimal) -> dict: ...
+
+@tool
+async def run_diagnostics(ctx: Context, account_id: str) -> dict: ...
+
+@tool
+async def fetch_logs(ctx: Context, account_id: str, since: datetime) -> list[dict]: ...
+
 billing_agent = Agent(
     name="billing-agent",
     model="openai:gpt-5.4",
-    system_prompt="You handle billing questions.",
+    instructions="You handle billing questions.",
     output_type=BillingAnswer,
     tools=[lookup_invoice, issue_refund],
 )
@@ -508,7 +529,7 @@ billing_agent = Agent(
 tech_agent = Agent(
     name="tech-agent",
     model="openai:gpt-5.4",
-    system_prompt="You handle technical support questions.",
+    instructions="You handle technical support questions.",
     output_type=TechAnswer,
     tools=[run_diagnostics, fetch_logs],
 )
@@ -516,25 +537,29 @@ tech_agent = Agent(
 triage_agent = Agent(
     name="triage",
     model="openai:gpt-5.4",
-    system_prompt="Route user requests to the right specialist.",
-    handoffs=[billing_agent, tech_agent],
+    instructions="Route user requests to the right specialist.",
     output_type=str,  # if no handoff, give a direct answer
 )
+triage_agent.handoffs_to(billing_agent, tech_agent)  # method, not constructor kwarg
 
-worker.add(triage_agent)
-worker.add(billing_agent)
-worker.add(tech_agent)
+worker = Worker(bootstrap_servers="kafka:9092").add(billing_agent, tech_agent, triage_agent)
 ```
 
-`handoffs=[...]` is a recipe over `Call`. The triage agent's compiled Handler, when the LLM picks a handoff target, returns `Call(topic="agent.billing-agent.in", payload=...)`. The called agent's `Reply` flows back to the original client via the frame stack. No new wire concepts.
+`agent.handoffs_to(*peers)` is a recipe over `Call`. When the LLM picks a handoff target, the compiled Handler returns `Call(topic="agent.billing-agent.in", payload=...)`. The called agent's `Reply` flows back to the original client via the frame stack. The handoff list is inspectable via `triage_agent.handoffs`. See §11 intro for the principled distinction between handoffs (orchestration, on the agent) and subscriptions (choreography, on the Worker).
 
-**Sub-agents (Pydantic AI / LangGraph-style):** an agent invokes another agent as a synchronous-feeling helper inside its own reasoning. The sub-agent's output is returned to the parent's LLM as a tool result.
+**Sub-agents (Pydantic AI / LangGraph-style):** an agent invokes another agent as a synchronous-feeling helper inside its own reasoning. Sub-agent output flows back to the parent's LLM as a tool result. Exposing one agent as a tool to another is a factory call on `Tool`: `Tool.from_agent(other_agent, name=...)`, paralleling `Tool.external(...)`. There is no `@agent.tool` or `agent.as_tool()` — see §10.1.
 
 ```python
+@tool
+async def web_search(ctx: Context, query: str) -> list[dict]: ...
+
+@tool
+async def read_url(ctx: Context, url: str) -> str: ...
+
 research_agent = Agent(
     name="researcher",
     model="openai:gpt-5.4",
-    system_prompt="You research a topic deeply.",
+    instructions="You research a topic deeply.",
     output_type=ResearchReport,
     tools=[web_search, read_url],
 )
@@ -542,89 +567,89 @@ research_agent = Agent(
 writer_agent = Agent(
     name="writer",
     model="openai:gpt-5.4",
-    system_prompt="You write an article based on the research provided.",
+    instructions="You write an article based on the research provided.",
     output_type=Article,
-    tools=[
-        Sub(research_agent, as_tool="research_topic"),  # research_agent appears as a tool
-    ],
+    tools=[Tool.from_agent(research_agent, name="research_topic")],   # sub-agent as tool
 )
 
-worker.add(research_agent)
-worker.add(writer_agent)
+worker.add(research_agent, writer_agent)
 ```
 
-`Sub(research_agent, as_tool="research_topic")` is sugar that wraps the sub-agent as a tool from the parent's perspective. Under the hood, `writer_agent`'s LLM sees a tool named `research_topic` with input/output schemas synthesized from the sub-agent's input/output types. When the LLM picks that tool, the writer agent emits `Call(topic="agent.researcher.in", payload=...)` — i.e., a normal agent-to-agent Call. The sub-agent's `Reply` (a `ResearchReport`) is returned to the writer's LLM as a tool result, exactly as if it had been a regular tool. The two agents may run on different Worker processes, scale independently, even be written in different languages (if the sub-agent is `external`).
+`Tool.from_agent(research_agent, name="research_topic")` returns a `Tool` value backed by the research agent's request topic. Under the hood, `writer_agent`'s LLM sees a tool named `research_topic` with input/output schemas synthesized from the sub-agent's input/output types. When the LLM picks that tool, the writer agent emits `Call(topic="agent.researcher.in", payload=...)` — i.e., a normal agent-to-agent Call. The sub-agent's `Reply` (a `ResearchReport`) is returned to the writer's LLM as a tool result, exactly as if it had been a regular tool. The two agents may run on different Worker processes, scale independently, even be written in different languages (if the sub-agent is `external`).
 
-**Parallel sub-agents (LangGraph fan-out style):** invoke multiple sub-agents concurrently and aggregate.
+**Parallel sub-agents (LangGraph fan-out style):** sub-agents are tools (via `Tool.from_agent(...)`), so parallel sub-agents are just multiple tools. The LLM's own parallel-tool-call behavior drives the fan-out; the Agent recipe emits `Fan` and the aggregator (§9) collects the Replies. See §4.8 for the no-`parallel_tools=` rationale.
 
 ```python
 aggregator_agent = Agent(
     name="aggregator",
     model="openai:gpt-5.4",
-    system_prompt="Synthesize answers from multiple specialists.",
+    instructions=(
+        "Synthesize answers from multiple specialists. "
+        "When the question requires multiple perspectives, query the specialists in parallel."
+    ),
     output_type=ConsensusAnswer,
-    parallel_tools=[
-        Sub(specialist_a, as_tool="ask_specialist_a"),
-        Sub(specialist_b, as_tool="ask_specialist_b"),
-        Sub(specialist_c, as_tool="ask_specialist_c"),
+    tools=[
+        Tool.from_agent(specialist_a, name="ask_specialist_a"),
+        Tool.from_agent(specialist_b, name="ask_specialist_b"),
+        Tool.from_agent(specialist_c, name="ask_specialist_c"),
     ],
-    # When the LLM picks 2+ parallel_tools in one turn, the SDK emits Fan instead of Call.
 )
 ```
 
-`parallel_tools` is the agent-level signal that "if the LLM selects multiple of these in a single turn, dispatch them in parallel." The Agent recipe inspects the LLM's tool-selection output: 1 tool selected → `Call`; multiple selected → `Fan`. The fan-out aggregator (§9) collects the Replies and re-enters the agent with all results visible to the LLM's next turn. The user never touches the aggregator topic, never thinks about `fan_id`, never writes the partial-failure handler unless they want to.
+The Agent recipe inspects the LLM's tool-selection each turn: one tool → `Call`; multiple → `Fan`. The user never touches the aggregator topic, `fan_id`, or partial-failure handlers unless they want to. Tuning via runtime config or `worker.add(...)` overrides — not constructor kwargs.
 
 ### 4.4.B Choreography — agents that subscribe to event streams
 
 Everything in §4.4 is **orchestration**: an agent explicitly invokes another agent (handoff, sub-agent, parallel sub-agents). The caller knows the callee exists. The caller initiates.
 
-**Choreography is the opposite shape.** An agent publishes events. Other agents subscribe to those events and react. The producer does not know the consumers exist. The wiring is declared at deployment time, not in the producer's code. This is the canonical Kafka pattern, and calfkit treats it as first-class — the full §11.B describes the model, this subsection shows the Layer A surface.
+**Choreography is the opposite shape.** An agent's output is published as an event stream; other agents subscribe and react. The producer does not know consumers exist; wiring is declared at deployment time, not in the producer's code. §11.B describes the full model; this subsection shows the Layer A surface.
+
+**Choreography wiring lives on the Worker, not on the Agent.** An `Agent(...)` declaration describes *what the agent is*, not what topics it publishes to or reacts to. Two deployments may reuse the same `Agent` declaration with different choreography topologies (the FastAPI pattern: portable routes, app-level middleware).
+
+The three Worker-side methods that compose a choreography topology:
+
+| Method | Purpose |
+|---|---|
+| `worker.publish(agent, as_event=EventType)` | After this agent's Runs terminate, also `Emit` the output to `agent.<name>.events`. |
+| `worker.wire(source, target, payload, ...)` | Subscribe `target` (an Agent) to `source`'s events; trigger a new Run per event. |
+| `worker.subscribe(target, topic, payload, ...)` | Subscribe `target` (an Agent) to an arbitrary Kafka topic; trigger a new Run per event. |
+
+`worker.wire(...)` and `worker.subscribe(...)` accept the kwargs that used to live in a `Subscription(...)` dataclass (`filter`, `react`, `group_id`, `start_from`, `max_concurrency`, `cross_tenant`). A `Subscription(...)` dataclass still exists for power users who want to declare a subscription as a value and pass it around (see §11.B.7), but the common path is method calls on the Worker.
 
 **Linear choreography (B always reads A's output stream).** A classifier emits `Classified` events; an enricher reacts to each one.
 
 ```python
-from calfkit import Agent, Worker, Subscription
-from pydantic import BaseModel
-
-class RawInput(BaseModel):
-    text: str
-
-class Classified(BaseModel):
-    text: str
-    label: str
-    confidence: float
-
-class Enriched(BaseModel):
-    text: str
-    label: str
-    geo: dict
-
+# Authoring — Agent declarations are portable, no choreography wiring
 classifier = Agent(
     name="classifier",
     model="openai:gpt-5.4",
-    system_prompt="Classify the input. Emit a Classified event.",
+    instructions="Classify the input.",
     output_type=Classified,
-    publishes=Classified,           # NEW — after final Reply, also Emit to agent.classifier.events
 )
 
 enricher = Agent(
     name="enricher",
     model="openai:gpt-5.4",
-    system_prompt="Enrich the classified record with geo data.",
+    instructions="Enrich the classified record with geo data.",
     output_type=Enriched,
-    subscribes_to=[                 # NEW — reactive entrypoints, separate from agent.enricher.in
-        Subscription(source=classifier, payload=Classified),
-    ],
 )
 
+# Deployment — topology lives on the Worker
+async def main() -> None:
+    worker = (
+        Worker(bootstrap_servers="kafka:9092")
+        .add(classifier, enricher)
+    )
+    worker.publish(classifier, as_event=Classified)
+    worker.wire(source=classifier, target=enricher, payload=Classified)
+    await worker.run()
+
+
 if __name__ == "__main__":
-    worker = Worker(bootstrap_servers="kafka:9092")
-    worker.add(classifier)
-    worker.add(enricher)
-    worker.run_blocking()
+    asyncio.run(main())
 ```
 
-The classifier does not import `enricher`, never names its topic, and is unchanged whether 0, 1, or N consumers subscribe to its events. The enricher is unchanged whether the classifier exists yet or not (the topic auto-creates). This is choreography.
+The classifier does not import `enricher`, never names its topic, and is unchanged whether 0, 1, or N consumers subscribe to its events. The enricher is unchanged whether the classifier exists yet or not (the topic auto-creates). This is choreography. Critically, both `classifier` and `enricher` are pure declarations — they can live in a shared library and be reused across deployments with different wiring.
 
 **Pub/sub fan-out (one producer, N independent consumers).** A news-watcher emits `NewsArticle` events; three independent agents react in parallel.
 
@@ -638,43 +663,39 @@ class NewsArticle(BaseModel):
 watcher = Agent(
     name="news-watcher",
     model="openai:gpt-5.4",
-    system_prompt="Identify the most relevant new articles and emit them.",
+    instructions="Identify the most relevant new articles and emit them.",
     output_type=NewsArticle,
-    publishes=NewsArticle,
 )
 
-summarizer = Agent(
-    name="summarizer",
-    model="openai:gpt-5.4",
-    system_prompt="Produce a 1-paragraph summary of the article.",
-    output_type=Summary,
-    subscribes_to=[Subscription(source=watcher, payload=NewsArticle)],
-)
+summarizer = Agent(name="summarizer", model="openai:gpt-5.4",
+    instructions="Produce a 1-paragraph summary of the article.",
+    output_type=Summary)
 
-sentiment = Agent(
-    name="sentiment",
-    model="openai:gpt-5.4",
-    system_prompt="Score the sentiment of the article.",
-    output_type=Sentiment,
-    subscribes_to=[Subscription(source=watcher, payload=NewsArticle)],
-)
+sentiment = Agent(name="sentiment", model="openai:gpt-5.4",
+    instructions="Score the sentiment of the article.",
+    output_type=Sentiment)
 
-alerter = Agent(
-    name="alerter",
-    model="openai:gpt-5.4",
-    system_prompt="Send an alert for urgent articles.",
-    output_type=AlertSent,
-    subscribes_to=[
-        Subscription(
-            source=watcher,
-            payload=NewsArticle,
-            filter=lambda ev: ev.urgency >= 4,   # predicate; only urgent articles
-        ),
-    ],
+alerter = Agent(name="alerter", model="openai:gpt-5.4",
+    instructions="Send an alert for urgent articles.",
+    output_type=AlertSent)
+
+# Deployment topology — all wiring in one place
+worker = (
+    Worker(bootstrap_servers="kafka:9092")
+    .add(watcher, summarizer, sentiment, alerter)
+)
+worker.publish(watcher, as_event=NewsArticle)
+worker.wire(source=watcher, target=summarizer, payload=NewsArticle)
+worker.wire(source=watcher, target=sentiment,  payload=NewsArticle)
+worker.wire(
+    source=watcher,
+    target=alerter,
+    payload=NewsArticle,
+    filter=lambda ev: ev.urgency >= 4,   # predicate; only urgent articles
 )
 ```
 
-Three agents independently subscribe to `agent.news-watcher.events`. Each runs in its own consumer group (`{group_prefix}.agent.<consumer-name>.sub.<source>`), so each receives every message. Filters run *before* the LLM is invoked — non-matching events are acknowledged and skipped without LLM cost.
+Three agents independently subscribe to `agent.news-watcher.events`. Each runs in its own consumer group (`{group_prefix}.agent.<consumer-name>.sub.<source>`), so each receives every message. Filters run *before* the LLM is invoked — non-matching events are acknowledged and skipped without LLM cost. Adding a fourth observer is one new `Agent(...)` declaration + one new `worker.wire(...)` line; the watcher is unchanged.
 
 **Subscribing to arbitrary Kafka topics (not just other agents' streams).** Calfkit doesn't require the producer to be a calfkit agent. Subscribe to any Kafka topic whose payload deserializes into a Pydantic model:
 
@@ -682,105 +703,118 @@ Three agents independently subscribe to `agent.news-watcher.events`. Each runs i
 audit_agent = Agent(
     name="audit",
     model="openai:gpt-5.4",
-    system_prompt="Summarize completed transactions for the audit log.",
+    instructions="Summarize completed transactions for the audit log.",
     output_type=AuditEntry,
-    subscribes_to=[
-        Subscription(
-            topic="events.transactions.completed",    # raw Kafka topic string
-            payload=TransactionCompleted,             # Pydantic model the SDK uses to decode
-        ),
-    ],
+)
+
+worker.add(audit_agent)
+worker.subscribe(
+    audit_agent,
+    topic="events.transactions.completed",    # raw Kafka topic string
+    payload=TransactionCompleted,             # Pydantic model the SDK uses to decode
 )
 ```
 
-This is how calfkit integrates with non-calfkit producers — a transactions service in Java that publishes Avro to `events.transactions.completed` can drive a calfkit agent without any calfkit-side wiring (Avro mode requires Schema Registry config; see §6.3).
+This is how calfkit integrates with non-calfkit producers — a transactions service in Java that publishes Avro to `events.transactions.completed` can drive a calfkit agent without any calfkit-side wiring (Avro mode requires Schema Registry config; see §6.3). The `audit_agent` declaration is identical to one that doesn't subscribe to anything; only the deployment-side `worker.subscribe(...)` call changes.
 
-**Deployment-time wiring (no producer / consumer coupling at authoring time).** Reusable agents shouldn't know which producer their events come from. The Subscription can be declared at the worker level instead:
+**Why no `subscribes_to=` / `publishes=` on the Agent constructor.** Topology on the constructor breaks reusable agent libraries (cross-package import coupling), creates a two-way-to-do-it surface, and conflates "what the agent is" with "what reacts to it." See §11.B.6 for the full rationale. The `Subscription(...)` dataclass (§11.B.7) exists for power users — passed to `worker.wire(subscription=...)`, not to the Agent constructor.
 
-```python
-# In a shared library — the agents are reusable units
-classifier = Agent(name="classifier", ..., publishes=Classified)
-enricher   = Agent(name="enricher",   ...)           # no subscribes_to
-geo_tagger = Agent(name="geo-tagger", ...)           # no subscribes_to
-
-# In a deployment-specific main — wire the topology here
-worker = Worker(bootstrap_servers="kafka:9092")
-worker.add(classifier)
-worker.add(enricher)
-worker.add(geo_tagger)
-
-# Wire the choreography topology outside the agent definitions
-worker.wire(source=classifier, target=enricher,   payload=Classified)
-worker.wire(source=classifier, target=geo_tagger, payload=Classified)
-
-worker.run_blocking()
-```
-
-`worker.wire(...)` is sugar for "attach this Subscription to that agent at registration time." It's how a team builds reusable agent libraries and composes them per deployment. Either the in-Agent `subscribes_to=[...]` form *or* the `worker.wire(...)` form may be used; the underlying mechanism is identical.
-
-**Mixed orchestration + choreography (the realistic case).** An agent may have request input AND event subscriptions AND handoffs AND tools — all at once. This is normal.
+**Mixed orchestration + choreography (the realistic case).** An agent may have request input AND tool calls AND handoffs — at the Agent level — AND be wired into event subscriptions AND publish events — at the Worker level. This is normal.
 
 ```python
+@tool
+async def lookup_user(ctx: Context, user_id: str) -> dict: ...
+
+@tool
+async def fetch_history(ctx: Context, user_id: str) -> list[dict]: ...
+
 support_agent = Agent(
     name="support-bot",
     model="openai:gpt-5.4",
-    system_prompt="Handle support inquiries. For billing issues, hand off to billing.",
-    tools=[lookup_user, fetch_history],            # tools (orchestration: agent calls them)
-    handoffs=[billing_agent],                       # handoff (orchestration: agent picks)
-    subscribes_to=[                                 # choreography: agent reacts to events
-        Subscription(topic="events.customer.churn-risk", payload=ChurnRisk),
-    ],
+    instructions="Handle support inquiries. For billing issues, hand off to billing.",
     output_type=SupportResponse,
-    publishes=SupportResponse,                      # this agent also emits an event stream
+    tools=[lookup_user, fetch_history],
 )
+support_agent.handoffs_to(billing_agent)
+
+# Deployment — wire choreography in
+worker.add(support_agent)
+worker.subscribe(
+    support_agent,
+    topic="events.customer.churn-risk",
+    payload=ChurnRisk,
+)
+worker.publish(support_agent, as_event=SupportResponse)
 ```
 
-This agent can be invoked directly (`client.invoke("agent.support-bot.in", req)`), reacts to churn-risk events from elsewhere in the company, can hand off to billing mid-conversation, uses tools to answer, and emits a `SupportResponse` event for any downstream consumer (analytics, summarization, archival) — none of which it needs to know about.
+This agent can be invoked directly (`client.invoke(support_agent, req)`), reacts to churn-risk events from elsewhere in the company, can hand off to billing mid-conversation, uses tools to answer, and emits a `SupportResponse` event for any downstream consumer (analytics, summarization, archival) — none of which it needs to know about. The agent declaration is portable; the deployment-side wiring composes it into the topology.
 
-**What about consumer semantics in the LLM loop?** When an event arrives, the agent's LLM is invoked with the event as its input message, the agent's normal `system_prompt`, and the tools the agent has. The event payload becomes the user-role content. From the LLM's perspective, an event-triggered run is identical to a request-triggered run — same system prompt, same tools, same output type. What differs is purely external: an event-triggered run has no caller waiting for `Reply`, so the final answer is published to the agent's event stream (if `publishes=...` is set) and the run terminates without a `Reply` publish. See §11.B for the full semantics and the alternatives considered.
+**Consumer semantics in the LLM loop:** an event-triggered run looks identical to a request-triggered run from the LLM's perspective (same instructions, same tools, same output type). Externally it differs only in that there's no caller waiting for `Reply` — the run terminates with an `Emit` to the agent's events topic if `worker.publish(...)` is set. See §11.B.8.
 
 ### 4.5 Human-in-the-loop on the Agent SDK
+
+Calfkit exposes HITL through two shapes. **Tool-level approval is the primary form** — for "the LLM picked an action that needs a human's OK." **Output-type interrupts** are secondary, for the rarer case of "the LLM's output itself needs review."
+
+**Form A (primary) — `@tool(requires_approval=True)`.** The gate is a property of the *tool* (the side effect being gated), not the agent. Every agent that references the tool inherits the gate. When the LLM picks the tool, the runtime emits `Interrupt` *before* the body runs, persists state, and waits for a `Resume` carrying a typed approval payload.
+
+```python
+from calfkit import Agent, Context, Worker, tool
+from pydantic import BaseModel
+
+class HumanDecision(BaseModel):
+    approved: bool
+    notes: str = ""
+
+@tool(requires_approval=True, resume_with=HumanDecision)
+async def execute_trade(ctx: Context, order: BuyOrSellOrder) -> TradeConfirmation:
+    """Place the order via the exchange."""
+    ...  # runs only after the human approves
+
+trading_agent = Agent(
+    name="trader",
+    model="openai:gpt-5.4",
+    instructions="You execute trades on behalf of users. Always confirm risk before placing orders.",
+    output_type=TradeResult,
+    tools=[execute_trade],
+)
+
+# Client-side
+handle = await client.invoke(trading_agent, TradeRequest(...))
+state = await handle.wait_for_interrupt()      # blocks until Interrupted or Completed
+if state.kind == "interrupted":
+    decision = await ui.show_approval_modal(state.pending_tool_call)
+    await client.resume(state.run_id, decision)
+result = await handle.result()
+```
+
+The LLM mental model is "this is a tool the agent can call." The HITL gate is invisible to the LLM (the tool advertises the same schema either way); it's the runtime that pauses before invocation. On `client.resume(state.run_id, HumanDecision(approved=True, ...))`, the runtime checks the decision: if approved, the tool runs and `Reply`s; if not, the LLM sees a "the human declined this action" tool-result and continues reasoning.
+
+**Per-agent override of a tool's gate is out of scope for v1.** The tool author owns the gate. If two policies are needed, declare two tools (`execute_trade` gated, `execute_trade_unattended` ungated) and assign each agent the right one — explicit, no hidden override surface.
+
+**Form B (secondary) — `@agent.interrupt_when(...)`.** For the rare case where the LLM output itself signals "I want a human to look at this," declare a decorator that runs after each LLM turn:
 
 ```python
 class ApprovalRequired(BaseModel):
     proposed_action: str
     risk_score: float
 
-class HumanDecision(BaseModel):
-    approved: bool
-    notes: str = ""
-
-approval_agent = Agent(
-    name="approver",
-    model="openai:gpt-5.4",
-    system_prompt="Decide whether the proposed action needs human approval.",
-    output_type=str,
-    tools=[lookup_policy],
-    interrupts={
-        "human_approval": Interrupt(
-            when=lambda output: isinstance(output, ApprovalRequired),
-            resume_with=HumanDecision,
-        ),
-    },
-)
-
-# Client-side
-handle = await client.invoke("agent.approver.in", req)
-state = await handle.wait_for_interrupt()  # blocks until interrupted (or completed)
-if state.kind == "interrupted":
-    decision = await ui.show_approval_modal(state.payload)  # user input
-    await client.resume(state.run_id, HumanDecision(approved=True))
-result = await handle.result()
+@trading_agent.interrupt_when(output_type=ApprovalRequired, resume_with=HumanDecision)
+async def needs_review(ctx: Context, output: ApprovalRequired) -> bool:
+    """Decide whether to pause for human input based on the LLM's structured output."""
+    return output.risk_score > 0.5
 ```
 
-`interrupts={...}` is a recipe over the `Interrupt` Action. The agent recipe inspects the LLM output each turn; if it matches the `when` predicate, it emits `Interrupt`, persists state to the runs-state topic, and exits. On `client.resume(...)`, the agent re-enters with the human's input visible in `ctx` and continues. The user does not write Handler code; the recipe handles it.
+Form B matches *by output type* (or typed predicate) — not an arbitrary lambda over LLM output. Lambdas over free-text are non-deterministic across at-least-once replays; typed predicates on the output schema are deterministic. `resume_with=` declares the type the caller sends via `client.resume(...)`.
+
+**Rejected: `interrupts={"name": Interrupt(when=lambda ...)}` dict on the constructor.** The name was never used; the lambda was a replay footgun; and HITL belongs on the tool (the action being gated) or the output validator (the LLM's claim), not an opaque rule-list. Both Form A and Form B compile to `Interrupt` (§3.1); see §4.11 for the Layer B sketch.
 
 ### 4.6 Escape hatch: dropping to Layer B (the runtime API)
 
 A handful of advanced cases need to step outside the Agent recipe — custom orchestration nodes that aren't agents (a router, a saga coordinator, a translator between two agents with incompatible schemas), tool authors implementing tools directly, or users who want full control over an unusual flow. For these, write a Handler.
 
 ```python
-from calfkit import handler, Context, Reply, Call, Done
+from calfkit import Context, Worker, handler
+from calfkit.actions import Call, Done, Reply
 
 @handler(topic="ingest.csv.row")
 async def csv_ingester(ctx: Context, row: CSVRow) -> Reply[Ack] | Call:
@@ -793,14 +827,10 @@ async def csv_ingester(ctx: Context, row: CSVRow) -> Reply[Ack] | Call:
     return Call(topic="agent.normal-processor.in", payload=enriched)
 
 # Register at Layer B alongside agents:
-worker.add(csv_ingester)
-worker.add(fraud_detector_agent)  # An Agent
-worker.add(normal_processor_agent)  # An Agent
+worker.add(csv_ingester, fraud_detector_agent, normal_processor_agent)
 ```
 
-Layer A and Layer B coexist in the same Worker. `worker.add(...)` accepts both an `Agent` instance and a `@handler`-decorated function. Most users will use Layer A everywhere; advanced users will mix the two.
-
-This composability is the reason the runtime layer remains first-class. It is not deprecated, not hidden, not labeled "internal." It is the canonical low-level surface, and the Agent SDK is layered on top of it.
+Layer A and Layer B coexist in the same Worker. `worker.add(...)` accepts `Agent` instances, `@handler`-decorated functions, and `Tool` values via one varargs entrypoint. Namespace split: Action types live under `calfkit.actions`; the primary surface (`Agent`, `Worker`, `Context`, `Tool`, `Client`, `InMemoryWorker`, `Subscription`) lives at `calfkit`. The runtime layer is not internal — it is the canonical low-level surface.
 
 ### 4.7 `worker.add(agent)` — the full lifecycle, demystified
 
@@ -809,27 +839,26 @@ What happens when a user calls `worker.add(agent)`? This subsection unpacks the 
 **Step-by-step, with concrete artifacts:**
 
 ```python
+@tool
+async def get_weather(ctx: Context, location: str) -> dict: ...
+
+@tool
+async def get_forecast(ctx: Context, location: str, days: int = 1) -> list[dict]: ...
+
 weather_agent = Agent(
     name="weather-bot",
     model="openai:gpt-5.4",
-    system_prompt="...",
-    tools=[get_weather, get_forecast],
+    instructions="...",
     output_type=WeatherReport,
+    tools=[get_weather, get_forecast],
 )
+
 worker.add(weather_agent)
 ```
 
-1. **Topic derivation.**
-   - Agent *request* input topic: `f"agent.{agent.name}.in"` → `"agent.weather-bot.in"`. This is where direct `client.invoke(...)` requests land. Override via `Agent(topic=...)`.
-   - Agent *event* output topic (only if `publishes=EventType` is set): `f"agent.{agent.name}.events"`. This is the choreography output stream — consumers `subscribes_to` this topic. Override via `Agent(events_topic=...)`.
-   - Agent *event* subscription topics (one per Subscription in `subscribes_to=[...]`): derived from the Subscription's `source` agent (its events topic) or from a user-supplied `topic="..."` string. Each subscription is a separate Kafka consumer subscription under the agent's identity.
-   - Tool input topics: `f"tool.{tool.name}"` → `"tool.get_weather"`, `"tool.get_forecast"`. Override per-tool via `@tool(topic=...)`.
-   - Tool reply topic: by default, replies route back via the frame stack (no separate "tool reply topic" — the runtime tracks reply destinations on the Envelope).
+1. **Topic derivation.** Agent input: `f"agent.{agent.name}.in"` (override via `worker.add(agent, topic=...)`). Agent events: `f"agent.{agent.name}.events"` (only when `worker.publish(agent, as_event=...)` is set). Tool input: `f"tool.{fn.__name__}"` (override at registration; `@tool` never accepts `topic=` — see §10.1). Subscriptions add one consumer subscription per `worker.wire(...)`/`worker.subscribe(...)` call. Reply routing rides the Envelope, not a fixed topic.
 
-2. **Schema synthesis.**
-   - The agent's input model: the Agent SDK inspects the agent's signature (or the user-supplied `input_type=...`) and registers the Pydantic model for inbound envelope decoding.
-   - The agent's output model: `output_type=WeatherReport` is registered for outbound `Reply` envelopes.
-   - Each tool's JSON schema (for the LLM): synthesized from the tool function's signature — parameter types become input properties, the docstring becomes the description. The output type becomes the tool-result schema.
+2. **Schema synthesis.** The agent's input/output Pydantic models register for envelope encode/decode. Each tool's JSON schema for the LLM is synthesized from its signature — parameter types become input properties, the docstring becomes the description, `ctx: Context` is dropped.
 
 3. **Handler synthesis.** The Agent SDK constructs a Handler equivalent to:
    ```python
@@ -841,132 +870,149 @@ worker.add(weather_agent)
            agent=weather_agent,  # the Agent declaration
            request=req,
            # The recipe internally:
-           #   1. Calls the LLM with system_prompt, history, tool schemas, user msg.
+           #   1. Calls the LLM with instructions, history, tool schemas, user msg.
            #   2. If LLM selected a tool: returns Call(topic=tool_topic, payload=tool_args).
+           #      - If the tool was marked `requires_approval=True`, return Interrupt instead.
            #   3. If LLM produced a final answer: returns Reply(output_type(answer)).
+           #      - If `@agent.interrupt_when(...)` matches, return Interrupt instead.
            #   4. On Reply re-entry (tool result back): appends to history, loops back to (1).
        )
    ```
    This Handler is registered with the runtime exactly as if the user had written it. From the runtime's perspective, there is no difference between a "synthesized agent handler" and a hand-written `@handler`.
 
-4. **Tool Handler registration.** Each `@tool` registers a runtime `@handler` for its tool topic. A tool is a Handler whose input is the tool args and output is the tool result. The runtime decodes/encodes, dispatches the tool function, and Replies.
+4. **Tool Handler registration.** Each `Tool` value referenced by an agent (whether produced by `@tool`, `Tool.external(...)`, or `Tool.from_agent(...)`) registers a runtime `@handler` for its tool topic — if it isn't already registered. A tool is a Handler whose input is the tool args and output is the tool result. The runtime decodes/encodes, dispatches the tool function, and Replies. `Tool.external(...)` registers no Python body — the deployment expects another service (possibly in another language) to consume the tool topic. `Tool.from_agent(...)` doesn't add a new Handler — the agent already has its request-topic Handler registered; the factory just wraps the reference. Multiple agents referencing the same tool register the Handler exactly once: tools are shared services, not per-agent copies.
 
 5. **Consumer subscriptions wired.** The Worker now subscribes to:
    - `agent.weather-bot.in` (consumer group: `{group_prefix}.agent.weather-bot`) — the request entrypoint.
-   - One additional consumer subscription per `Subscription` in `subscribes_to=[...]` (consumer group: `{group_prefix}.agent.weather-bot.sub.<source-or-topic>`) — each event subscription is its own subscription so consumer groups are distinct (this is what gives independent fan-out: agent B and agent C subscribing to agent A's events each see every message).
+   - One additional consumer subscription per `worker.wire(...)` / `worker.subscribe(...)` targeting this agent (consumer group: `{group_prefix}.agent.weather-bot.sub.<source-or-topic>`) — each subscription is its own consumer group so an agent's reactions don't compete with other consumers of the same source events.
    - `tool.get_weather` (consumer group: `{group_prefix}.tool.get_weather`)
    - `tool.get_forecast` (consumer group: `{group_prefix}.tool.get_forecast`)
    - The shared runtime topics: `calf.fanout-agg`, `calf.runs-state` (if needed).
 
-6. **Inspection.** Users can introspect the materialized topology:
-   ```python
-   worker.inspect()
-   # Prints:
-   #   Agent "weather-bot":
-   #     Input topic: agent.weather-bot.in
-   #     Output type: WeatherReport
-   #     Tools (2):
-   #       get_weather -> tool.get_weather (input: {"location": "str"}, output: dict)
-   #       get_forecast -> tool.get_forecast (input: {"location": "str", "days": "int"}, output: list[dict])
-   #     Extensions applied: [OTelExtension, RetryExtension(max=3)]
-   ```
+6. **Inspection.** `worker.inspect(format=...)` renders the materialized topology in text/dict/dot formats — a meaningful DX moment for production deployments.
 
-7. **Overrides.** Every default is overridable. Users who want fine control can specify:
+7. **Overrides at registration time.** Defaults are overridden on `worker.add(...)` — the Agent declaration itself stays portable.
    ```python
-   weather_agent = Agent(
-       name="weather-bot",
-       topic="custom.weather.in",          # override topic
-       group_id="custom-weather-group",     # override consumer group
-       reply_topic="custom.weather.out",    # override reply destination
-       model="openai:gpt-5.4",
-       system_prompt="...",
-       tools=[get_weather, get_forecast],
-       output_type=WeatherReport,
-       max_turns=10,                        # cap on LLM iterations
-       output_validators=[validate_no_pii], # post-output checks (Pydantic-AI style)
-       deps_type=WeatherDeps,               # Pydantic-AI style typed deps
-       on_tool_error="continue",            # or "fail" or a callable
+   worker.add(
+       weather_agent,
+       topic="custom.weather.in",          # override request topic
+       group_id="custom-weather-group",    # override consumer group
+       max_turns=10,                       # cap on LLM iterations
+       on_tool_error="continue",           # "continue" | "fail" | callable
    )
    ```
 
-The agent-level options that map cleanly to Pydantic AI conventions are listed in §4.9. The point is that *defaults* deliver Pydantic-AI-class ergonomics for the simple case, and *escape hatches* are uniformly available.
+   Agent-level behaviors that ride with the agent (output validators, dynamic instructions, interrupts) attach via instance decorators on the agent itself — the Pydantic-AI shape — not as constructor kwargs:
+
+   ```python
+   @weather_agent.output_validator
+   async def validate_no_pii(ctx: Context, output: WeatherReport) -> WeatherReport:
+       """Reject outputs that leak user PII; raise ModelRetry to let the LLM try again."""
+       ...
+   ```
+
+   Workers carry deps via `worker.deps_from(create_deps)`; per-call deps don't survive replays and are an anti-pattern (§13).
+
+See §4.9 for the full agent-level / worker-level surface map. Defaults deliver Pydantic-AI-class ergonomics; escape hatches are uniformly available — each on the right object (deployment on Worker, behavior on Agent, topology on Worker).
 
 ### 4.8 Real-time fan-out via Agent SDK — the user never sees `Fan`
 
 ```python
+@tool
+async def fetch_profile(ctx: Context, user_id: str) -> dict: ...
+
+@tool
+async def fetch_risk(ctx: Context, user_id: str) -> dict: ...
+
+@tool
+async def fetch_history(ctx: Context, user_id: str) -> dict: ...
+
 enrichment_agent = Agent(
     name="enricher",
     model="openai:gpt-5.4",
-    system_prompt="Enrich the user record with profile, risk, and history data.",
+    instructions=(
+        "Enrich the user record with profile, risk, and history data. "
+        "Query all three sources in parallel when possible."
+    ),
     output_type=EnrichedRecord,
-    parallel_tools=[fetch_profile, fetch_risk, fetch_history],
+    tools=[fetch_profile, fetch_risk, fetch_history],
 )
+
 worker.add(enrichment_agent)
 ```
 
-If the LLM picks all three tools in one turn (or the system_prompt instructs it to), the Agent recipe emits `Fan` automatically. The aggregator (§9) collects the Replies, re-enters the agent with all three tool results visible in the next-turn LLM call. The user never wrote `Fan`. They never touched a `fan_id`. They never had to reason about the compacted aggregator topic. The Layer B power is preserved (an Extension author can intercept the `FanDispatched` event for telemetry); the Layer A user is shielded.
+If the LLM picks all three tools in one turn (its native parallel-tool-call behavior + prompt instructions), the Agent recipe emits `Fan` automatically. The aggregator (§9) collects Replies and re-enters the agent with all three results visible to the next LLM turn. The user never writes `Fan`, never touches `fan_id`. Layer B power is preserved (an Extension can intercept `FanDispatched` for telemetry); Layer A users are shielded.
+
+No `parallel_tools=` constructor kwarg: parallel selection is a property of the LLM and the prompt, not the tools. A uniform on/off bit doesn't match how OpenAI / Anthropic expose the dispatch shape.
 
 ### 4.9 Surface map — Pydantic AI → calfkit Agent SDK
 
-Calfkit's Agent SDK adopts the Pydantic AI conventions where they fit. The intent is that a Pydantic AI user can re-author their agent in calfkit without learning a new mental model — only learning what changes when the agent runs distributed.
+A Pydantic AI user re-authoring in calfkit learns only what changes when the agent runs distributed.
 
 | Pydantic AI                          | Calfkit Agent SDK                                | Notes                                                                                              |
 |--------------------------------------|--------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| `Agent(model=..., system_prompt=...)`| `Agent(model=..., system_prompt=...)`            | Identical surface.                                                                                |
-| `@agent.tool`                        | `@tool` (module-level) + `Agent(tools=[...])`    | Tools are module-level so they can be shared across agents and exposed as topics.                  |
-| `RunContext[Deps]`                   | `Context[Deps, State]`                           | Same idea; `State` is the per-Run user-typed state surviving across hops.                          |
-| `output_type=MyModel`                | `output_type=MyModel`                            | Identical; the recipe synthesizes the output schema.                                              |
-| `output_validators=[fn]`             | `output_validators=[fn]`                         | Run after LLM produces output; can request a retry by raising `ModelRetry`.                        |
-| `agent.system_prompt(dynamic_fn)`    | `Agent(system_prompt=dynamic_fn)`                | Function form for dynamic prompt construction; receives `Context`.                                |
-| `Agent.run(...)` (in-process call)   | `client.invoke("agent.<name>.in", req)` (Kafka)  | The big difference: calfkit dispatches over Kafka. The in-process equivalent for tests is `worker.invoke(...)` (§17.2). |
-| Per-call `deps=`                     | `worker.add(agent, deps=...)` (Worker-scoped)    | Per-call deps are an anti-pattern under at-least-once redelivery. Deps live at Worker scope.       |
-| Streaming output (`agent.run_stream`)| Not in v1.0                                      | Streaming tokens is out of scope for v1.0; see §1.5.                                              |
-| Tool-call retry via `ModelRetry`     | `Agent(on_tool_error="retry")` + `RetryExtension`| Calfkit makes retry an explicit policy at agent level + an SDK-wide Extension.                     |
-| Multi-agent (Pydantic AI `delegate`) | `Sub(other_agent, as_tool="...")`                | Sub-agent runs as a separate Kafka-deployed agent; calls become `Call`s to its topic.              |
+| `Agent(model=..., instructions=...)` | `Agent(model=..., instructions=..., tools=[...])` | `system_prompt=` is a deprecated alias. Tools attach via `tools=[...]`, never via an instance decorator. |
+| `@agent.tool` / `@agent.tool_plain` (in-process registry) | `@tool` (module-level only) — see §10              | Deliberate divergence — calfkit tools are standalone Kafka services, not agent-bound. See §10.1. |
+| `RunContext[Deps]`                   | `Context[Deps]`                                  | Single generic parameter, matching Pydantic AI and OpenAI Agents. State surfaces as `ctx.state` (typed via inference, or `Any` if not declared). |
+| `output_type=MyModel`                | `output_type=MyModel`                            | Identical surface; behavior differs by type — see the §4.9 note below. |
+| `@agent.output_validator`            | `@agent.output_validator`                        | Decorator on the agent instance. Raises `ModelRetry` to retry. Agent-bound — operates on the agent's LLM output. |
+| `agent.instructions(dynamic_fn)` / dynamic callable | `Agent(instructions=dynamic_fn)` where `dynamic_fn: (ctx: Context[Deps]) -> str \| Awaitable[str]` | Matches Pydantic AI's single-arg shape (rejecting OpenAI Agents' two-arg form). |
+| `Agent.run(input)` (in-process call) | **Not provided.** Use `InMemoryWorker.testing(agent)` for tests/REPL or `client.invoke(agent, req)` for production. | See G13 / §17.2. |
+| `Runner.run(agent, input)` (OpenAI Agents) | `client.invoke(agent, req)` (Kafka) or `wrk.invoke(agent, req)` (InMemoryWorker) | Caller passes an agent reference; topic-string is the escape hatch (`ClientAgentRef`, §4.11). |
+| Per-call `deps=`                     | `worker.deps_from(factory)` (Worker-scoped)      | Per-call deps don't survive replays; Worker-scoped is the canonical form. |
+| Streaming output (`agent.run_stream`)| Not in v1.0                                      | Streaming tokens is out of scope for v1.0; see §1.5. |
+| Tool-call retry via `ModelRetry`     | `ModelRetry` + RetryExtension | `ModelRetry` for LLM-retry-on-validation; RetryExtension for transport-level (exception, network). |
+| Sub-agent as a tool (`agent.as_tool(...)`) | `Tool.from_agent(other_agent, name=...)`         | Factory paralleling `Tool.external(...)`. No `agent.as_tool()` — see §10.1. |
+| `handoffs=[...]` (OpenAI Agents kwarg) | `agent.handoffs_to(*peers)` method               | Method instead of kwarg keeps the constructor narrow. |
+| HITL via `requires_approval` on tool | `@tool(requires_approval=True, resume_with=DecisionT)` (primary); `@agent.interrupt_when(output_type=..., resume_with=...)` (secondary) | See §4.5. |
+| `model="openai:gpt-5.4"`             | `model: Model \| KnownModelName \| str` | Adopts Pydantic AI's `KnownModelName` `Literal[...]` for IDE autocomplete; raw `str` is the escape hatch. |
 
-A user familiar with Pydantic AI should read this table and feel that calfkit's Agent SDK is "Pydantic AI for distributed deployments" — not a different framework.
+**Behavior note on `output_type`.** `output_type=str` (default) lets the LLM produce free text; `output_type=MyPydanticModel` forces structured output via provider-native enforcement (OpenAI's structured outputs, Anthropic's tool-use). Discriminated unions (`Foo | Bar`) are supported per Pydantic AI's pattern. Migration guide should call out this LLM-API shape change prominently.
+
+**What's on the Agent instance** (methods/decorators after construction):
+
+| Method / decorator | Purpose |
+|---|---|
+| `@agent.output_validator` | Post-output validator on the agent's LLM output; raises `ModelRetry` to retry. |
+| `@agent.interrupt_when(output_type=..., resume_with=...)` | Output-type-based HITL gate on the agent's LLM output. |
+| `agent.handoffs_to(*peers)` | Register handoff peers. |
+
+Notably absent: any `@agent.tool` or `agent.as_tool()`. See §10.1.
+
+**Module-level decorators and factories for tools:**
+
+| Decorator / factory | Purpose |
+|---|---|
+| `@tool` / `@tool(requires_approval=..., resume_with=...)` | Author a Python tool as a standalone Kafka service. Topic auto-derives from the function name. |
+| `Tool.external(name=..., input=..., output=...)` | Declare a tool implemented in another service/language. |
+| `Tool.from_agent(agent, name=..., description=...)` | Wrap an agent as a tool for another agent (sub-agent pattern). |
+
+**What's on the Worker instance** (deployment-time methods):
+
+| Method | Purpose |
+|---|---|
+| `worker.add(*items, topic=None, group_id=None, max_turns=None, on_tool_error=None)` | Register agents, handlers, and tools. `topic=`/`group_id=` are the canonical deployment-side topology overrides (G14). |
+| `worker.use(*extensions)` | Attach extensions (onion order). |
+| `worker.deps_from(factory)` | Set the deps factory (called once at startup). |
+| `worker.publish(agent, as_event=EventType)` | Mark this agent's output as a published event stream. |
+| `worker.wire(source, target, payload, *, filter=None, react=None, group_id=None, start_from='latest', max_concurrency=None, cross_tenant=False)` | Subscribe `target` to `source`'s events. |
+| `worker.subscribe(target, topic, payload, **kwargs)` | Subscribe `target` to an arbitrary Kafka topic. |
+| `worker.runtime(...)` | Internal-topic and dedup overrides; 99% of users skip this. |
+| `worker.inspect(format='text' \| 'dict' \| 'dot')` | Print/return materialized topology. |
+| `worker.run()` (async) | Main loop. Use `asyncio.run(worker.run())` to block. |
+| `worker.drain()` | Stop consuming new messages; finish in-flight. |
 
 ### 4.10 Head-to-head — "Temporal + Pydantic AI" vs Calfkit
 
-This is the comparison the rest of the doc was missing. If a developer can get the same outcome by running Pydantic AI inside a Temporal activity, calfkit has no reason to exist. Below is what each looks like, and why calfkit's surface is materially smaller for the *same* set of features.
+If a developer can get the same outcome by running Pydantic AI inside a Temporal activity, calfkit has no reason to exist. Below is what each looks like, and why calfkit's surface is materially smaller for the *same* feature set.
 
 **Goal:** ship an agent with three tools, one of which is implemented in Go, that produces durable, replayable runs, scales horizontally, and supports human-in-the-loop approval.
 
 **Approach 1 — Temporal + Pydantic AI.**
 
+The workflow file (~30 lines): a `@workflow.defn` class with `execute_activity(run_pydantic_ai_agent, ...)`, a `@workflow.signal` for HITL approval, plus `workflow.wait_condition(...)` to gate the second activity. The worker file (~15 lines): `Client.connect(...)` + `Worker(client, task_queue=..., workflows=[...], activities=[...])`. The core code is in activities and the cross-language service:
+
 ```python
-# workflow.py (Python — Temporal workflow)
-from temporalio import workflow
-from temporalio.common import RetryPolicy
-from datetime import timedelta
-
-@workflow.defn
-class TradingWorkflow:
-    @workflow.run
-    async def run(self, req: TradeRequest) -> TradeResult:
-        # Pydantic AI agent must run as an activity (workflow code must be deterministic).
-        agent_output = await workflow.execute_activity(
-            run_pydantic_ai_agent,
-            req,
-            start_to_close_timeout=timedelta(minutes=10),
-            retry_policy=RetryPolicy(maximum_attempts=3),
-        )
-
-        if agent_output.requires_approval:
-            # HITL: signal-based wait
-            approval = await workflow.wait_condition(lambda: self._approval is not None)
-            agent_output = await workflow.execute_activity(
-                continue_agent_with_approval, agent_output, self._approval,
-                start_to_close_timeout=timedelta(minutes=5),
-            )
-
-        return agent_output.result
-
-    @workflow.signal
-    def submit_approval(self, decision: HumanDecision):
-        self._approval = decision
-
-
 # activities.py (Python — Pydantic AI agent + Python tools)
 from temporalio import activity
 from pydantic_ai import Agent, RunContext
@@ -1010,27 +1056,9 @@ func main() {
 func handleExecute(w http.ResponseWriter, r *http.Request) {
     // Parse JSON, call exchange API, return JSON. Manual transport.
 }
-
-
-# worker.py (Python — Temporal worker)
-from temporalio.client import Client
-from temporalio.worker import Worker
-
-async def main():
-    client = await Client.connect("temporal:7233", namespace="trading")
-    worker = Worker(
-        client,
-        task_queue="trading-workflows",
-        workflows=[TradingWorkflow],
-        activities=[run_pydantic_ai_agent, continue_agent_with_approval],
-    )
-    await worker.run()
-
-# Plus: Temporal cluster (3-5 nodes), Temporal UI, Temporal namespace setup,
-# Postgres or Cassandra backing for Temporal, plus the Go service deployed
-# separately with its own HTTP server, plus a Kafka or HTTP-mesh between the
-# Python service and the Go service.
 ```
+
+Plus a Temporal cluster (3-5 nodes), Temporal UI, Postgres/Cassandra backing Temporal, and the Go service deployed separately with its own HTTP server.
 
 **Count:**
 - Python LOC (workflow + activities + worker + agent): **~80 lines** of orchestration code, **plus** the tool implementations.
@@ -1043,7 +1071,8 @@ async def main():
 
 ```python
 # trading_agent.py (Python — calfkit)
-from calfkit import Agent, Worker, tool, external_tool, Interrupt
+import asyncio
+from calfkit import Agent, Context, Tool, Worker, tool
 from pydantic import BaseModel
 
 class TradeRequest(BaseModel):
@@ -1057,41 +1086,41 @@ class TradeResult(BaseModel):
 class HumanDecision(BaseModel):
     approved: bool
 
-@tool
-async def fetch_quote(symbol: str) -> dict:
-    """Get the latest market quote."""
-    ...
-
-@tool
-async def fetch_portfolio(user_id: str) -> dict:
-    """Get the user's portfolio."""
-    ...
-
-execute_trade = external_tool(
+execute_trade = Tool.external(
     name="execute_trade",
     description="Submit a buy or sell order.",
     input=BuyOrSellOrder,
     output=TradeConfirmation,
+    requires_approval=True,         # the external tool is HITL-gated
+    resume_with=HumanDecision,
 )
+
+@tool
+async def fetch_quote(ctx: Context, symbol: str) -> dict:
+    """Get the latest market quote."""
+    ...
+
+@tool
+async def fetch_portfolio(ctx: Context, user_id: str) -> dict:
+    """Get the user's portfolio."""
+    ...
 
 trading_agent = Agent(
     name="trader",
     model="openai:gpt-5.4",
-    system_prompt="You execute trades on behalf of users.",
-    tools=[fetch_quote, fetch_portfolio, execute_trade],
+    instructions="You execute trades on behalf of users.",
     output_type=TradeResult,
-    interrupts={
-        "approval": Interrupt(
-            when=lambda o: o.requires_approval,
-            resume_with=HumanDecision,
-        ),
-    },
+    tools=[execute_trade, fetch_quote, fetch_portfolio],
 )
 
+
+async def main() -> None:
+    worker = Worker(bootstrap_servers="kafka:9092").add(trading_agent)
+    await worker.run()
+
+
 if __name__ == "__main__":
-    worker = Worker(bootstrap_servers="kafka:9092")
-    worker.add(trading_agent)
-    worker.run_blocking()
+    asyncio.run(main())
 ```
 
 ```go
@@ -1112,9 +1141,9 @@ func executeTrade(ctx calfkit.Context, req BuyOrSellOrder) (TradeConfirmation, e
 ```
 
 **Count:**
-- Python LOC: **~35 lines**, including the Agent declaration, tools, and worker bootstrap.
+- Python LOC: **~40 lines**, including the Agent declaration, three tools (one with HITL), one external tool, and worker bootstrap.
 - Go LOC: **~12 lines** (no HTTP server, no JSON marshaling — calfkit-go handles transport and serialization).
-- Concepts the developer must learn: Agent, tool, external_tool, Worker, Interrupt. That's it for a hello-world distributed agent. (Five concepts at Layer A; the Layer B concepts are not required for this example.)
+- Concepts the developer must learn: Agent, `@tool`, `Tool.external`, Worker, `requires_approval`. That's it for a hello-world distributed agent. (Five concepts at Layer A; the Layer B concepts are not required for this example.)
 - Infrastructure components: Kafka (likely already deployed). No Temporal cluster. No HTTP service mesh. No Postgres for the SDK.
 - "Wiring code" the developer writes: zero.
 
@@ -1125,35 +1154,31 @@ func executeTrade(ctx calfkit.Context, req BuyOrSellOrder) (TradeConfirmation, e
 - HITL is one config block on the Agent, not a Workflow signal + Activity dispatch round-trip.
 - Replay/durability is implicit in Kafka. The runs-state topic is the audit log; you don't query Temporal's history.
 
-**Where Temporal still wins:**
-- **Strong determinism.** Temporal workflows are deterministic by construction; calfkit does not impose this constraint. For workflows where you need to *guarantee* "this exact sequence of decisions, given the same inputs," Temporal is structurally stronger.
-- **Mature operational tooling.** Temporal UI for time-travel debugging is excellent. Calfkit's debugging story leans on Kafka topic inspection + OTel; less polished today.
-- **Maturity.** Temporal has been in production at scale for years. Calfkit v1.0 will not have that track record on day one.
+**Where Temporal still wins:** strong determinism (workflows deterministic by construction); mature operational tooling (time-travel debugging UI); track record at scale.
 
-**The thesis:** calfkit's reason to exist is the *combination* of (a) Pydantic-AI-tier authoring ergonomics, (b) Kafka-native distributed deployment, (c) cross-language tools as a wire-format primitive, (d) durability that piggybacks on the broker the team already runs. No other system in this space offers that combination. The Agent SDK is the surface that makes (a) true; the runtime layer (§2, §3) is what makes (b)(c)(d) true; the two layers exist together by design.
+**The thesis:** calfkit's reason to exist is the *combination* of (a) Pydantic-AI-tier authoring ergonomics, (b) Kafka-native distributed deployment, (c) cross-language tools as a wire-format primitive, (d) broker-native durability. No other system in this space offers that combination.
 
 ### 4.11 Layer B reference examples — what the runtime surface looks like
 
-These are illustrative sketches at Layer B (the runtime primitive layer). They are NOT what most users write — for normal agent authoring, see §4.2-§4.5. These exist so that (a) Extension authors and tool authors can see the surface they target, (b) advanced users with non-agent orchestration can see the primitive shape, (c) the Agent SDK's compilation target is visible to anyone curious about what `worker.add(agent)` materializes.
-
-**A handoff at Layer B** — what the Agent SDK's `handoffs=[...]` synthesizes:
+Illustrative Layer B sketches — what the Agent SDK compiles down to. Most users do not author at this level; these exist for Extension/tool authors and the curious. §11 has the deeper orchestration/choreography patterns.
 
 ```python
-from calfkit import handler, Context, Reply, Call
+from calfkit import Context, handler
+from calfkit.actions import Call, Fan, Interrupt, Reply
+```
 
+**Handoff** (what `agent.handoffs_to(...)` synthesizes — `Call` to the peer agent's topic; its `Reply` flows back via the frame stack):
+
+```python
 @handler(topic="agent.triage.in", reply=str)
 async def triage(ctx: Context, req: UserReq) -> Reply[str] | Call:
     intent = await classify(req.text)
     if intent == "billing":
         return Call(topic="agent.billing.in", payload=BillingReq(text=req.text))
-    elif intent == "tech":
-        return Call(topic="agent.tech.in", payload=TechReq(text=req.text))
     return Reply("I'm not sure how to help with that.")
 ```
 
-A handoff is `Call`. The called agent's `Reply` flows back through the call stack. The Agent SDK generates an equivalent Handler when given `handoffs=[billing_agent, tech_agent]`.
-
-**A parallel fan-out at Layer B** — what `parallel_tools=[...]` synthesizes when the LLM selects multiple in one turn:
+**Parallel fan-out** (what the Agent recipe synthesizes for multi-tool LLM turns — first entry returns `Fan`; aggregator re-enters with populated `ctx.fan_results`):
 
 ```python
 @handler(topic="enrich.in", reply=EnrichResp)
@@ -1163,36 +1188,36 @@ async def enrich(ctx: Context, req: EnrichReq) -> Fan | Reply[EnrichResp]:
             calls=[
                 Call(topic="lookup.profile.in", payload=ProfileReq(req.user_id), key=b"profile"),
                 Call(topic="lookup.risk.in",    payload=RiskReq(req.user_id),    key=b"risk"),
-                Call(topic="lookup.history.in", payload=HistoryReq(req.user_id), key=b"history"),
             ],
             aggregator=AggregatorSpec(timeout=timedelta(seconds=30), on_partial="error"),
         )
-    return Reply(EnrichResp(
-        profile=ctx.fan_results[b"profile"],
-        risk=ctx.fan_results[b"risk"],
-        history=ctx.fan_results[b"history"],
-    ))
+    return Reply(EnrichResp(profile=ctx.fan_results[b"profile"], risk=ctx.fan_results[b"risk"]))
 ```
 
-`ctx.fan_results` is `None` on first entry, populated dict on second (the aggregator re-entry). The user never touches the aggregator state directly.
-
-**HITL at Layer B** — what `Agent(interrupts={...})` synthesizes:
+**HITL** (what `@tool(requires_approval=True)` and `@agent.interrupt_when(...)` synthesize — first entry returns `Interrupt`; resume populates `ctx.resume_payload`):
 
 ```python
 @handler(topic="approval.agent.in", reply=ApproveResp)
-async def approval_agent(ctx, req: ApproveReq) -> Reply[ApproveResp] | Interrupt:
+async def approval_agent(ctx: Context, req: ApproveReq) -> Reply[ApproveResp] | Interrupt:
     if not ctx.resume_payload:
-        return Interrupt(
-            reason=f"awaiting approval of: {req.proposed_action}",
-            resume_topic="approval.agent.resume",
-        )
+        return Interrupt(reason=f"awaiting approval of: {req.proposed_action}",
+                         resume_topic="approval.agent.resume")
     decision: HumanDecision = ctx.resume_payload
     return Reply(ApproveResp(approved=decision.approved, notes=decision.notes))
 ```
 
-`ctx.resume_payload` is `None` on first entry, populated on resume. The Handler re-runs from the top on resume; `ctx.once()` (§16) is the escape hatch for non-idempotent side effects that must not duplicate across the resume.
+The Handler re-runs from the top on resume; `ctx.once()` (§16) gates non-idempotent side effects. Custom Extensions are in §12; in-memory dispatcher tests are in §17.2.
 
-**A custom Extension** is documented in §12 alongside the Extension API. **In-memory dispatcher tests** are documented in §17.2 alongside the testing strategy. Both apply equally to Agent SDK-authored code and Layer B handlers.
+**Client refs.** When the client doesn't import the Agent (typical distributed deployment — client is a web service in another repo), use a `ClientAgentRef`:
+
+```python
+from calfkit import ClientAgentRef
+
+trader_ref = ClientAgentRef(name="trader", input_type=TradeRequest, output_type=TradeResult)
+handle = await client.invoke(trader_ref, req)
+```
+
+The proxy resolves to `agent.trader.in`. A bare-topic-string form (`client.invoke_topic(...)`) is the escape hatch for ad-hoc tooling.
 
 ---
 
@@ -1251,12 +1276,7 @@ async def approval_agent(ctx, req: ApproveReq) -> Reply[ApproveResp] | Interrupt
 
 **Layer 4 (User Code)**
 
-This layer has two sub-tiers (see §4 for the full discussion):
-
-- **Layer 4A — Agent SDK (the default for most users).** Declarative `Agent(...)` classes, `@tool` decorators, `external_tool(...)` stubs, registered via `worker.add(agent)`. Users at this tier never write a Handler, never see an Action, never name a topic by hand.
-- **Layer 4B — Runtime primitives (escape hatch + tool/Extension authors).** Handlers that take `(Context, Msg) -> Action`, Extensions, custom orchestration nodes that aren't agents, raw tool authors. Same surface that the Agent SDK compiles down to.
-
-Both sub-tiers share the same contract with Layer 3:
+Two sub-tiers — Layer 4A (Agent SDK, the default) and Layer 4B (runtime primitives, the escape hatch) — see §4 for the full discussion. Both share the same contract with Layer 3:
 - Provides Deps via Worker config.
 - Does *not* call `broker.publish`. Does *not* serialize/deserialize Envelopes. Does *not* touch `correlation_id` directly.
 
@@ -1267,7 +1287,7 @@ Both sub-tiers share the same contract with Layer 3:
 - Interprets returned Action via the `around_publish` Extension chain.
 - Writes to runs-state on `Interrupt`/`RunStarted`/`RunCompleted`.
 - Owns the fan-out aggregator entirely. User Handlers never touch aggregator topics.
-- **If the Agent declared `publishes=EventType`**: after a Run terminates via `Reply`, the runtime additionally `Emit`s the payload to `agent.<name>.events`. For event-triggered Runs (no waiting caller), this is the sole final-publish; for request-triggered Runs, both the `Reply` to the caller and the `Emit` to the events topic happen, deduped by `(run_id, action_id)`.
+- **If the deployment registered `worker.publish(agent, as_event=EventType)`**: after a Run terminates via `Reply`, the runtime additionally `Emit`s the payload to `agent.<name>.events`. For event-triggered Runs (no waiting caller), this is the sole final-publish; for request-triggered Runs, both the `Reply` to the caller and the `Emit` to the events topic happen, deduped by `(run_id, action_id)`.
 - Emits OTel spans and `on_event` lifecycle events.
 - Commits Kafka offset only after Action is fully resolved.
 
@@ -1282,15 +1302,11 @@ Both sub-tiers share the same contract with Layer 3:
 
 ### 5.2 What's user-visible vs internal
 
-| Visible at Layer A (Agent SDK) | Visible at Layer B (Runtime) | Internal |
-|---------------------------------|------------------------------|----------|
-| `Agent`, `tool`, `external_tool`, `Sub`, `handoffs`, `parallel_tools`, `interrupts`, `output_validators`, `publishes`, `subscribes_to=[Subscription(...)]` | `Handler`, `Action`, `Run`, `State`, `Worker` | `Envelope` shape (we may evolve) |
-| `worker.add(agent)`, `worker.wire(source=..., target=..., payload=...)`, `worker.inspect()`, `worker.run()` | `@handler` decorator, Action algebra return types | Frame stack, aggregator topic names |
-| `Context` API (`ctx.state`, `ctx.deps`, `ctx.run_id`, `ctx.fan_results`, `ctx.resume_payload`, `ctx.trigger`, `ctx.once()`) — shared across tiers | Same `Context` API | Idempotency table |
-| Agent-level errors and validators (`ModelRetry`, `output_validators`) | `Extension` base class with three primitives | Header decoding |
-| `client.invoke("agent.<name>.in", req)` / `client.publish_event(topic, payload)` / `client.resume` | `LifecycleEvent` discriminated union | Rebalance listener |
-| `InMemoryWorker.invoke(agent_name, req)` / `InMemoryWorker.publish_event(topic, payload)` for testing | `InMemoryWorker` accepting raw handlers | Consumer-group naming convention |
-| Kafka header *names* (a stable list of reserved `x-calf-*`) | Kafka header names | aiokafka |
+**User-visible** (Layer A and B — see §4.9 for the full surface map):
+- `Agent`, `@tool`/`Tool.external`/`Tool.from_agent`, `Worker`, `Client`, `InMemoryWorker`, `Subscription`, `Context[Deps]`, `Handler`, `Action` algebra, `Extension` with three primitives, `LifecycleEvent`, `ClientAgentRef`, `ModelRetry`, the reserved `x-calf-*` header names.
+
+**Internal** (subject to change):
+- `Envelope` shape, frame stack, aggregator topic names, idempotency table, header decoding, rebalance listener, consumer-group naming convention, aiokafka usage.
 
 ---
 
@@ -1303,11 +1319,7 @@ class Envelope(BaseModel):
     """Wire format. Stable across calfkit versions starting at v1.0."""
     schema_version: Literal["1.0"]
     action_kind: Literal["call", "reply", "emit", "tailcall", "fan_child"]
-    # ^ The Action that produced this envelope. "fan_child" = a single Call within a Fan.
-    # ^ "emit" is the choreography envelope — fire-and-forget; no caller awaits a Reply.
-    #   Whether a subscribing consumer treats it as "a new request" or "a tap to observe"
-    #   is the *subscriber's* concern (subscription configuration), not the publisher's.
-    #   Producers do not need to know that subscribers exist.
+    # "fan_child" = one Call within a Fan; "emit" = choreography (no caller awaits).
 
     run_id: str             # uuid7 hex; durable run aggregate key
     correlation_id: str     # per-hop request/reply joining key
@@ -1404,7 +1416,7 @@ The `Envelope.schema_version` is bumped only on breaking envelope-level changes.
 
 ### 6.5 Example envelopes (lenient JSON)
 
-**Call:**
+**Call** (the canonical shape; other variants are diffs against this):
 
 ```json
 {
@@ -1425,63 +1437,11 @@ The `Envelope.schema_version` is bumped only on breaking envelope-level changes.
 }
 ```
 
-**Reply (with state propagated back):**
+**Reply** (state propagates back): same envelope as the originating Call, with `action_kind: "reply"`, an updated `state`/`payload` reflecting the result, and `call_stack: []` (frame popped).
 
-```json
-{
-  "schema_version": "1.0",
-  "action_kind": "reply",
-  "run_id": "01933a2c-...",
-  "correlation_id": "01933a2c-...",
-  "frame_id": "01933a2d-...",
-  "parent_frame_id": null,
-  "state_schema": "myapp.OrderState",
-  "state": "eyJ1c2VyX2lkIjoidTEiLCJjbGFzc2lmaWNhdGlvbiI6InNwYW0ifQ==",
-  "payload_schema": "myapp.ClassifyResp",
-  "payload": "eyJsYWJlbCI6InNwYW0ifQ==",
-  "call_stack": []
-}
-```
+**Event** (`Emit` from an Agent registered with `worker.publish(watcher, as_event=NewsArticle)`): same envelope, with `action_kind: "emit"`, `state_schema: null` and `state: ""` (no caller state), `call_stack: []`. Headers carry `x-calf-event-type=myapp.events.NewsArticle` and `x-calf-producer-agent=news-watcher` for cheap broker-level inspection. Subscribers receive the envelope and create their own Run; the original `run_id` is propagated as `parent_run_id` on the new Run (see §11.B for lineage).
 
-**Event (`Emit` from an Agent with `publishes=NewsArticle`):**
-
-```json
-{
-  "schema_version": "1.0",
-  "action_kind": "emit",
-  "run_id": "01933a2c-...",
-  "correlation_id": "01933a2c-...",
-  "frame_id": "01933a31-...",
-  "parent_frame_id": null,
-  "state_schema": null,
-  "state": "",
-  "payload_schema": "myapp.events.NewsArticle",
-  "payload": "eyJpZCI6IjEyMyIsImhlYWRsaW5lIjoiLi4uIn0=",
-  "call_stack": []
-}
-```
-
-Note `call_stack: []` — an event has no caller, so there is no frame to pop on completion. The headers carry `x-calf-event-type=myapp.events.NewsArticle` and `x-calf-producer-agent=news-watcher` for cheap broker-level inspection. Subscribers receive this envelope and create their own Run when reacting; the original `run_id` is propagated as `parent_run_id` on the new Run (see §11.B for the full lineage model).
-
-**Fan child (one of N children of a Fan):**
-
-```json
-{
-  "schema_version": "1.0",
-  "action_kind": "fan_child",
-  "run_id": "01933a2c-...",
-  "correlation_id": "01933a2e-...",
-  "frame_id": "01933a2f-...",
-  "fan_id": "01933a30-...",
-  "fan_index": 0,
-  "fan_total": 3,
-  "fan_aggregator_topic": "calf.fanout-agg.enrich",
-  "payload_schema": "myapp.ProfileReq",
-  "payload": "..."
-}
-```
-
-The aggregator topic is in the envelope so the reply target knows where to send its Reply (the aggregator subscribes to that topic, indexed by fan_id).
+**Fan child**: same envelope with `action_kind: "fan_child"` plus the fan-only fields `fan_id`, `fan_index`, `fan_total`, and `fan_aggregator_topic` (the aggregator subscribes to that topic, indexed by `fan_id`).
 
 ---
 
@@ -1668,11 +1628,11 @@ Failure mode:
 | B. Dedicated aggregator service | A separate process the user deploys | Reject — extra deployment burden |
 | **C. Per-Worker, partition-affine** | Each Worker subscribes to `calf.fanout-agg` only for partitions assigned to it, keyed by `fan_id`. The same Worker that dispatched the Fan owns the aggregation. | **Pick this** |
 
-Justification for (C): the partitioner sends the Fan's child publishes with key=`run_id`, and the aggregator subscription uses key=`fan_id`. We need `fan_id`-keyed delivery for aggregation, so the aggregator topic is partitioned by `fan_id`. The dispatching Worker subscribes to all partitions of `calf.fanout-agg` it doesn't yet own (lazy). Actually, the cleaner design is:
+Concretely:
 
-- The aggregator topic is its own topic, with its own partitioning (key=`fan_id`).
-- Every Worker process subscribes to it, in a single consumer group `calf-fanout-agg-<cluster-id>`.
-- Each Worker handles whichever partitions it gets assigned by Kafka — the dispatching Worker is *not* guaranteed to be the one that aggregates. That's fine because the aggregator is stateless beyond what's in the topic — the message stream is the state.
+- The aggregator topic has its own partitioning (key=`fan_id`).
+- Every Worker process subscribes to it in a single consumer group `calf-fanout-agg-<cluster-id>`.
+- Each Worker handles whichever partitions Kafka assigns it — the dispatching Worker is *not* guaranteed to be the one that aggregates. That's fine because the message stream is the state; the aggregator is stateless beyond it.
 
 On Reply collection complete, the aggregator publishes a re-entry envelope back to the **parent Handler's topic**, carrying:
 - The original parent's frame state (carried through the Fan envelopes)
@@ -1791,54 +1751,94 @@ If W2 crashes between Hop 3b and Hop 3c, Kafka reassigns calf.fanout-agg's parti
 
 ## 10. Tool model
 
-### 10.1 Tools are Kafka topics
+### 10.1 Tools are first-class Kafka services — never owned by an Agent
+
+A **Tool** is a single concept — a standalone Handler addressable by its own Kafka topic, with a synthesized JSON schema for the LLM. **Tools are never owned by an Agent.** Tool decorators/factories live at module scope; an Agent references tools via `tools=[...]`.
+
+This is calfkit's structural divergence from Pydantic AI. Pydantic AI's `@agent.tool` decorator binds tools to an in-process `tool_registry` — appropriate because its tools execute inside the agent's Python process. Calfkit's tools execute as their own Kafka consumers: distinct services with their own topic, consumer group, scale unit, possibly their own language. The benefit is significant: one tool serves N agents without duplication; cross-language tools (§10.2) are a natural construction path, not an exception.
+
+Three construction paths — one decorator and two factory classmethods — all producing the same `Tool` value:
+
+**Form 1 (primary): `@tool` — the module-level Python tool.** Authored independently of any agent. Attached to N agents via `tools=[fn]`.
 
 ```python
-# The natural form — what 90% of tool authors write
+from calfkit import tool, Context
+
 @tool
-async def fetch_quote(symbol: str) -> dict:
+async def get_weather(ctx: Context, location: str) -> dict:
+    """Fetch current weather for a location."""
+    ...
+
+@tool
+async def fetch_quote(ctx: Context, symbol: str) -> dict:
     """Fetch the latest market quote for a symbol."""
     ...
+
+# Multiple agents can call the same tool — same Kafka topic, same consumer group, shared scale unit
+weather_agent = Agent(name="weather-bot", ..., tools=[get_weather])
+trading_agent = Agent(name="trader",      ..., tools=[fetch_quote, get_weather])
 ```
 
-The decorator derives everything from the function:
-- Topic: `tool.fetch_quote` (from the function name; override via `@tool(topic=...)`).
-- LLM-facing name and description: function name + docstring.
-- Input JSON schema: synthesized from parameter types (Pydantic-AI-style).
-- Output JSON schema: synthesized from the return type.
+- **Topic is auto-derived** from the function name: `f"tool.{fn.__name__}"` → `"tool.get_weather"`. The `@tool` decorator does NOT accept a `topic=` kwarg. Explicit topic overrides — for cross-language interop with an existing topic convention, or for legacy compatibility — happen at deployment time: `worker.add(get_weather, topic="tool.weather.v2")`. See "Topic naming is a deployment decision" below.
+- **LLM-facing name and description** come from the function name and docstring.
+- **Input JSON schema** is synthesized from parameter types (Pydantic-AI-style). If the first parameter is annotated `ctx: Context` (or any parameter is typed as `Context`/`Context[Deps]`), it is dropped from the LLM-visible schema and injected by the runtime. Tools that don't need `ctx` simply omit it from the signature.
+- **Output JSON schema** is synthesized from the return type.
+- **HITL:** pass `requires_approval=True, resume_with=DecisionT` to gate execution behind human approval (§4.5). The gate is a property of the tool itself, not of the agent that calls it — if `execute_trade` needs human approval, every agent that uses it is gated. (HITL is intrinsic to the tool — see "Why `requires_approval=` IS on `@tool`" below.)
+- **Bare-vs-call syntax:** `@tool` without parens is the common case (`@tool` then `async def fn(...)`). Use `@tool(...)` with parens when supplying `requires_approval=`, `resume_with=`, or other intrinsic tool options.
 
-For explicit control, the long form is available:
-
-```python
-@tool(topic="tool.fetch_quote", description="Fetch live quote", input=QuoteReq, output=QuoteResp)
-async def fetch_quote(ctx: Context, req: QuoteReq) -> Reply[QuoteResp]:
-    ...
-```
-
-A Tool is a Handler with two extra things:
-1. **A JSON schema** for the LLM (auto-synthesized from parameter types + docstring + name).
-2. **Discoverability** — the SDK can register the tool with a tool catalog (an SDK-provided component or external service like a tool registry topic).
-
-Tools are normal Handlers under the hood. They live in a Worker, subscribed to their input topic, and they `Reply` with their output. The short and long forms produce identical runtime behavior; the long form simply exposes the knobs.
-
-**Tools are orchestration-only.** A tool exists to be called by an agent (`Call` → `Reply`). Tools are not subscribers — they do not have `subscribes_to=`. If you want a long-running reactive component (e.g., "every time a transaction is completed, run this function"), use an Agent with `subscribes_to=[...]` and `react=` (§11.B.7), not a tool. The distinction: tools satisfy the LLM's tool-call request; choreography subscribers react to events the LLM never asked about.
-
-### 10.2 Cross-language tools
+**Form 2 (external / cross-language): `Tool.external(...)`.** No Python body. The implementation lives in another service or language.
 
 ```python
-# Declare a tool that lives in another service/language
-execute_trade = external_tool(
+execute_trade = Tool.external(
     name="execute_trade",
     description="Submit a buy or sell order; returns confirmation id.",
-    input=BuyOrSellOrder,    # Pydantic model — schema synthesized for the LLM
+    input=BuyOrSellOrder,
     output=TradeConfirmation,
-    # topic is derived: "tool.execute_trade" (override via topic=...)
+    requires_approval=True,           # HITL gate, optional
+    resume_with=HumanDecision,
+    # topic= defaults to f"tool.{name}"; override for an existing peer topic.
+)
+
+trading_agent = Agent(name="trader", ..., tools=[execute_trade])
+```
+
+The Pydantic models drive schema synthesis on both sides; the wire format is shared across calfkit's language SDKs. A Go service subscribed to `tool.execute_trade` with the calfkit-go SDK (eventual; v1.x roadmap) publishes Replies in the same Envelope format. The Python agent never knows or cares it was a Go tool. For users who'd rather not import Pydantic models from a shared contracts package, raw JSON schemas are also accepted: `Tool.external(name=..., input_schema={...}, output_schema={...})`.
+
+**Sub-agents-as-tools: `Tool.from_agent(...)`.** An agent is already a Kafka service on its own request topic. To expose one agent as a tool to another, wrap it at the call site via a factory classmethod that parallels `Tool.external(...)`:
+
+```python
+research_agent = Agent(name="researcher", ..., output_type=ResearchReport)
+
+writer_agent = Agent(
+    name="writer",
+    model="openai:gpt-5.4",
+    instructions="You write articles from research material.",
+    output_type=Article,
+    tools=[Tool.from_agent(research_agent, name="research_topic")],
 )
 ```
 
-There's no Python body. The Pydantic models on both sides drive schema synthesis; the wire format is shared across calfkit's language SDKs. A Go service subscribed to `tool.execute_trade` with the calfkit-go SDK (eventual; v1.x roadmap) publishes Replies in the same Envelope format. The Python agent never knows or cares it was a Go tool. For users who'd rather not import Pydantic models from a shared contracts package, raw JSON schemas are also accepted: `external_tool(name=..., input_schema={...}, output_schema={...})`.
+`Tool.from_agent(...)` produces a `Tool` value whose underlying topic is the source agent's request topic (`agent.researcher.in`). The LLM in `writer_agent` sees a tool named `research_topic` with input/output schemas drawn from `research_agent`'s input/output types. When the LLM picks it, the writer agent emits `Call(topic="agent.researcher.in", payload=...)`, exactly as if it had called any other tool. The two agents may run on different Workers, scale independently, even be written in different languages.
 
-This is the **moat** vs in-process SDKs (LangGraph, Pydantic AI, OpenAI Agents). They cannot do this without an FFI layer or an HTTP gateway. See §4.3 for a worked example and §4.10 for the head-to-head against "Temporal + Pydantic AI" where this cross-language story is concrete.
+The factory shape — `Tool.external(...)` for cross-language, `Tool.from_agent(...)` for sub-agent — is deliberate: both produce a `Tool` value at the call site, both reuse the `tools=[...]` attachment point, neither requires a special instance method on `Agent`. There is no `agent.as_tool()` — that would imply the agent "owns" the tool, which contradicts the model.
+
+**One `Tool` concept, three construction paths.** The user's mental model is "a tool is a callable thing the LLM can invoke." That maps to a single `Tool` class; construction paths map to user intent (Python here / external service / sub-agent). No `external_tool(...)` function, no `@function_tool` alias, no `agent.as_tool()` method. No `@agent.tool` either — Pydantic AI's `@agent.tool` reflects an in-process tool_registry dict, which calfkit doesn't have; a calfkit `@agent.tool` would lie about where the tool runs.
+
+**Tools are orchestration-only.** A tool exists to be called by an agent (`Call` → `Reply`); tools are not subscribers. For "every time X happens, run Y," use an Agent wired via `worker.subscribe(...)` — not a tool. Tools satisfy LLM tool-call requests; choreography subscribers react to events the LLM never asked about.
+
+**Topic naming is a deployment decision (G14).** Applied symmetrically to Layer A:
+
+- `Agent(...)` declares identity via `name=`; topic auto-derives (`agent.<name>.in`). No `topic=`/`reply_topic=`/`events_topic=`/`group_id=` on the constructor.
+- `@tool`-decorated functions declare identity via the function name; topic auto-derives (`tool.<function_name>`). No `topic=` on the decorator.
+- Overrides at deployment registration: `worker.add(thing, topic="...")` for both Agents and Tools.
+- `Tool.external(name=..., topic=...)` is the one Layer A spot `topic=` appears on a definition — there is no Python function to derive from, so the topic IS the wire contract with the peer.
+- **Layer B `@handler(topic="...")` is the escape hatch.** Layer B handlers bind to topics dictated by external systems, so the topic IS the declaration's purpose.
+
+**Why `requires_approval=` lives on `@tool` (not `worker.add(...)`)**. The gate is a property of the side effect, not the deployment. If `execute_trade` needs approval, every deployment that imports it inherits the gate. A deployment-time form would create a footgun (forget it once → silently ungated). `resume_with=DecisionT` is the typed payload shape, also intrinsic.
+
+### 10.2 Cross-language tools — the moat
+
+See `Tool.external(...)` in §10.1. This is the **moat** vs in-process SDKs (LangGraph, Pydantic AI, OpenAI Agents). They cannot do this without an FFI layer or an HTTP gateway. See §4.3 for a worked example and §4.10 for the head-to-head against "Temporal + Pydantic AI" where this cross-language story is concrete.
 
 ### 10.3 Tool catalog and discovery
 
@@ -1850,19 +1850,19 @@ For v1.1+: a topic-based catalog where tools publish their schema to `calf.tools
 
 ```python
 # From this:
-@tool(topic="tool.fetch_quote")
-async def fetch_quote(ctx: Context, req: QuoteReq) -> Reply[QuoteResp]:
+@tool
+async def fetch_quote(ctx: Context, symbol: str) -> dict:
     """Fetch the latest market quote for a symbol."""
 
 # Synthesize this for the LLM (OpenAI function-calling format):
 {
   "name": "fetch_quote",
   "description": "Fetch the latest market quote for a symbol.",
-  "parameters": <JSON Schema of QuoteReq>
+  "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}
 }
 ```
 
-`ctx` is dropped — invisible to the model, populated by the SDK.
+`ctx` is dropped — invisible to the model, populated by the SDK. `@tool`, `Tool.external(...)`, and `Tool.from_agent(...)` all synthesize the same LLM-facing schema shape; the difference is purely where the implementation runs (this process, another service, or another agent).
 
 ### 10.5 Tool retries and DLQ
 
@@ -1885,13 +1885,13 @@ Multi-agent systems split into two structurally distinct shapes. Calfkit support
 
 | Dimension                | Orchestration (§11.A)                     | Choreography (§11.B)                                 |
 |--------------------------|-------------------------------------------|------------------------------------------------------|
-| **Producer knows consumer?** | Yes — caller names the callee's topic   | No — producer emits; subscribers wire themselves    |
-| **Wiring location**      | Inside the caller's `Agent(handoffs=[...], tools=[Sub(...)], parallel_tools=[...])` | Inside the consumer's `Agent(subscribes_to=[...])` or at `worker.wire(...)` |
+| **Producer knows consumer?** | Yes — caller names the callee (via `agent.handoffs_to(...)`, `Tool.from_agent(...)` in `tools=[...]`, or a Layer B `Call`) | No — producer emits; subscribers are wired on the Worker |
+| **Wiring location**      | On the Agent (handoffs, sub-agents-as-tools) | On the Worker (`worker.publish(...)`, `worker.wire(...)`, `worker.subscribe(...)`) |
 | **Reply expected?**      | Yes — `Reply` flows back through the call stack | No — `Emit` is fire-and-forget; consumers may emit their own events downstream |
 | **Coupling**             | Strong — caller breaks if callee is renamed / removed | Loose — producer doesn't know consumers; topic is the contract |
 | **Run lineage**          | Single Run across all hops (sub-Runs are explicit opt-in) | Each consumer reaction starts a new Run with `parent_run_id` set |
 | **Failure containment**  | A failed callee fails the parent's frame; bubbles to caller | A failed consumer fails only that consumer's Run; producer is unaffected |
-| **Adding a consumer**    | Requires editing the caller / Worker     | Add a new agent with `subscribes_to=[...]`; no producer change |
+| **Adding a consumer**    | Requires editing the caller / Worker     | Add a new agent and one `worker.wire(...)` line; no producer change |
 | **Canonical Action**     | `Call` / `Reply` / `Fan`                 | `Emit` + Subscription                                |
 | **When to use**          | "I need an answer from B to continue."   | "Whenever X happens, run B (and C and D) independently." |
 
@@ -1905,53 +1905,23 @@ In all of these, the caller explicitly names the callee. Replies flow back throu
 
 ### 11.A.1 Handoff (OpenAI Agents-style)
 
-```python
-# Layer A — what users write
-triage_agent = Agent(
-    name="triage",
-    model="openai:gpt-5.4",
-    system_prompt="Route to the right specialist.",
-    handoffs=[billing_agent, tech_agent],
-    output_type=str,  # default: direct answer if no handoff
-)
+The Layer A surface (`triage_agent.handoffs_to(billing_agent, tech_agent)`) compiles to a `Call` to the chosen peer's topic; the peer's `Reply` flows back through the stack. See §4.11 for the Layer B sketch.
 
-# Layer B — what this compiles to (illustrative)
-@handler(topic="agent.triage.in", reply=str)
-async def _triage_synth(ctx, req) -> Reply[str] | Call:
-    if needs_billing(req):
-        return Call(topic="agent.billing-agent.in", payload=req)
-    return Reply("...")
-```
+### 11.A.2 Supervisor-Worker and parallel sub-agents
 
-A handoff is `Call`. The called agent's `Reply` flows back through the stack to the original publisher. No special "Handoff" type needed.
-
-### 11.A.2 Supervisor-Worker
+Both are `Fan` over Calls to sub-agent topics. Sub-agents are exposed as tools via `Tool.from_agent(other_agent, name=...)`. When the LLM picks multiple in one turn (its native parallel-tool-call behavior), the Agent recipe emits `Fan`; the aggregator (§9) collects Replies and re-enters with `ctx.fan_results` populated. Sub-agents may recursively fan out.
 
 ```python
-# Layer A
 supervisor_agent = Agent(
     name="supervisor",
     model="openai:gpt-5.4",
-    parallel_tools=[Sub(worker_a, as_tool="ask_a"), Sub(worker_b, as_tool="ask_b")],
+    instructions="When you need multiple perspectives, query workers in parallel.",
     output_type=Summary,
+    tools=[Tool.from_agent(worker_a, name="ask_a"), Tool.from_agent(worker_b, name="ask_b")],
 )
-
-# Layer B — what this compiles to (illustrative)
-@handler(topic="agent.supervisor.in", reply=Summary)
-async def _supervisor_synth(ctx, req) -> Fan | Reply[Summary]:
-    if ctx.fan_results is None:
-        return Fan(calls=[Call("agent.worker-a.in", req, key=b"a"),
-                          Call("agent.worker-b.in", req, key=b"b")])
-    return Reply(combine(ctx.fan_results[b"a"], ctx.fan_results[b"b"]))
 ```
 
-Supervisor = an Agent (or Handler) that fans out and aggregates. The aggregator (§9) does the heavy lifting.
-
-### 11.A.3 Parallel sub-agents
-
-Same shape as supervisor — `Fan` over Calls to sub-agent topics. Sub-agents may recursively fan out. Expressed as `parallel_tools=[...]` in the Agent SDK.
-
-### 11.A.4 Pipeline (sequential orchestration)
+### 11.A.3 Pipeline (sequential orchestration)
 
 For a pure data pipeline that isn't agent-shaped (no LLM in the steps), drop to Layer B. This is orchestration because each stage explicitly names the next:
 
@@ -1969,117 +1939,53 @@ async def stage3(ctx, req) -> Reply:
     return Reply(final(req))
 ```
 
-Each stage `Call`s the next. The `Reply` from stage3 unwinds through stage2, stage1, back to the client. For one-way pipelines that don't need replies, use `Emit` instead of `Call`.
+Each stage `Call`s the next; the `Reply` from stage3 unwinds back to the client. For one-way pipelines, use `Emit` instead of `Call`. Pure-data pipelines are the canonical Layer B case — no LLM, no tool catalog, so `@handler` is natural. For the same shape under choreography semantics, see §11.B.1.
 
-Pure-data pipelines are the canonical Layer B case: there's no LLM, no tool catalog, no system_prompt — `@handler` is the natural surface, not `Agent`. For the same shape under choreography semantics — where each stage emits an event and the next stage subscribes — see §11.B.1.
+### 11.A.4 Hybrid: hierarchical with handoffs and fan-outs
 
-### 11.A.5 Hybrid: hierarchical with handoffs and fan-outs
-
-Combine the above. A triage Agent handoffs to a workflow Agent that uses `parallel_tools` to a set of validator sub-agents whose Replies flow back through the chain. No new primitives required; just declarative Agent composition (or, equivalently, topic wiring at Layer B).
+Combine the above — handoffs into agents that themselves fan out over `Tool.from_agent(...)` sub-agents. No new primitives.
 
 ---
 
 ## 11.B Choreography patterns
 
-In choreography, producers don't know who consumes their events. Consumers declare subscriptions, optionally with filters and schema typing. The wiring lives outside the producer.
-
-This is the canonical Kafka pattern. Calfkit exposes it through three Layer A constructs and one Layer B equivalent:
+In choreography, producers don't know who consumes their events. Consumers are wired on the Worker, outside the producer's Agent declaration. The canonical Kafka pattern — exposed through three deployment-side Worker methods and one Layer B equivalent:
 
 | Construct                                  | Layer | Purpose                                                                                   |
 |--------------------------------------------|-------|-------------------------------------------------------------------------------------------|
-| `Agent(publishes=EventType)`               | A     | Declares the agent's *output event stream*. After a Run terminates, the runtime emits the final payload to `agent.<name>.events`. |
-| `Agent(subscribes_to=[Subscription(...)])` | A     | Declares the agent's *reactive entrypoints*. Each Subscription is an independent Kafka subscription that triggers a new Run. |
-| `worker.wire(source=..., target=..., payload=...)` | A     | Deployment-time choreography wiring — attaches a Subscription to a target agent without modifying its declaration. |
+| `worker.publish(agent, as_event=EventType)` | A     | Declares the agent's *output event stream*. After a Run terminates, the runtime emits the final payload to `agent.<name>.events`. |
+| `worker.wire(source, target, payload, **opts)` | A     | Subscribe `target` (an Agent) to `source`'s event stream. Each call creates an independent Kafka subscription that triggers a new Run on each event. |
+| `worker.subscribe(target, topic, payload, **opts)` | A     | Subscribe `target` (an Agent) to an arbitrary Kafka topic (not necessarily produced by a calfkit agent). |
 | `Emit(topic=..., payload=...)` + `@handler(topic=...)` | B     | The bare-bones Layer B equivalent — produce events with `Emit`, consume by registering a handler on the topic. |
+
+A `Subscription(...)` dataclass exists (§11.B.7) as a power-user value type — you can build a Subscription and pass it to `worker.wire(subscription=...)` — but the common path is `worker.wire(...)` / `worker.subscribe(...)` kwargs.
 
 ### 11.B.1 Linear choreography — B always consumes A's output stream
 
-The simplest pattern. Identical reach to a sequential pipeline, but the wiring is at the consumer side. Adding agent C as another consumer of A doesn't touch A.
+The simplest pattern — three agents chained classifier → enricher → scorer via `worker.publish(...)` + `worker.wire(...)`. See §4.4.B for the worked example. Each agent owns its own Run lifecycle, retry policy, observability. The producer is mute — `classifier` doesn't know `enricher` exists, so adding `scorer` is one new `worker.wire(...)` line.
 
-```python
-classifier = Agent(
-    name="classifier",
-    model="openai:gpt-5.4",
-    system_prompt="Classify the input.",
-    output_type=Classified,
-    publishes=Classified,
-)
-
-enricher = Agent(
-    name="enricher",
-    model="openai:gpt-5.4",
-    system_prompt="Enrich the classified record with external data.",
-    output_type=Enriched,
-    subscribes_to=[Subscription(source=classifier, payload=Classified)],
-    publishes=Enriched,            # forms a chain — anyone else can subscribe to enricher
-)
-
-scorer = Agent(
-    name="scorer",
-    model="openai:gpt-5.4",
-    system_prompt="Score the enriched record's risk.",
-    output_type=Scored,
-    subscribes_to=[Subscription(source=enricher, payload=Enriched)],
-)
-```
-
-Three agents, three independent Runs per input. Each agent owns its own Run lifecycle, retry policy, observability. The producer side is mute — `classifier` doesn't know `enricher` exists.
-
-**Layer B equivalent** (illustrative; this is what the Agent SDK compiles to under the hood):
-
-```python
-# Producer side — emit on terminal Reply
-@handler(topic="agent.classifier.in", reply=Classified)
-async def _classifier_synth(ctx, req) -> Reply[Classified]:
-    out = await classifier_recipe.run(ctx, req)
-    # The Reply also produces an Emit to agent.classifier.events because publishes=Classified.
-    return Reply(out)
-
-# Consumer side — subscribed handler
-@handler(topic="agent.classifier.events", reply=None)
-async def _enricher_event_handler(ctx, event: Classified) -> Emit:
-    out = await enricher_recipe.run(ctx, event)
-    return Emit(topic="agent.enricher.events", payload=out)
-```
-
-Note the Layer B form makes the trade-off visible: the consumer's handler returns `Emit` instead of `Reply` because there is no caller awaiting. Layer A hides this — the user just sets `publishes=`.
+At Layer B, the producer side returns `Reply` (the runtime additionally `Emit`s to the events topic when `worker.publish(...)` is set); the consumer side is a `@handler(topic="agent.X.events")` that returns `Emit` to its own events topic instead of `Reply` (no caller is awaiting). Layer A hides this asymmetry.
 
 ### 11.B.2 Pub/sub fan-out — N independent consumers of one producer
 
-One producer, N reactive consumers, each with their own consumer group (so each sees every event).
+One producer, N reactive consumers, each with its own consumer group (every consumer sees every event). The shape (see §4.4.B for the worked example): one `worker.publish(producer, as_event=...)` plus N `worker.wire(source=producer, target=consumer_i, payload=...)` calls.
 
-```python
-watcher = Agent(name="news-watcher", ..., publishes=NewsArticle)
-
-summarizer = Agent(name="summarizer", ...,
-    subscribes_to=[Subscription(source=watcher, payload=NewsArticle)])
-
-sentiment = Agent(name="sentiment", ...,
-    subscribes_to=[Subscription(source=watcher, payload=NewsArticle)])
-
-archiver = Agent(name="archiver", ...,
-    subscribes_to=[Subscription(source=watcher, payload=NewsArticle)])
-```
-
-Three independent consumer groups on `agent.news-watcher.events`. Each agent independently scales (`num_partitions × num_consumers`); a slow `summarizer` does not back-pressure `sentiment` or `archiver`. Adding a fourth consumer is a new file, a new Worker entry, zero producer changes.
+Each agent independently scales (`num_partitions × num_consumers`); a slow consumer does not back-pressure peers. Adding consumer N+1 is one new `Agent(...)` + one `worker.wire(...)` — zero producer changes.
 
 ### 11.B.3 Filtered subscription
 
 Filters run *before* the LLM is invoked. Non-matching events are acknowledged and skipped without LLM cost. The filter must be pure (no I/O — the runtime calls it synchronously inside the dispatch path).
 
 ```python
-alerter = Agent(
-    name="alerter",
-    model="openai:gpt-5.4",
-    system_prompt="Compose and send an alert for an urgent article.",
-    output_type=AlertSent,
-    subscribes_to=[
-        Subscription(
-            source=watcher,
-            payload=NewsArticle,
-            filter=lambda ev: ev.urgency >= 4,
-        ),
-    ],
+alerter = Agent(name="alerter", model="openai:gpt-5.4",
+    instructions="Compose and send an alert for an urgent article.",
+    output_type=AlertSent)
+
+worker.wire(
+    source=watcher,
+    target=alerter,
+    payload=NewsArticle,
+    filter=lambda ev: ev.urgency >= 4,
 )
 ```
 
@@ -2096,15 +2002,14 @@ class TransactionCompleted(BaseModel):
     amount: Decimal
     completed_at: datetime
 
-audit_agent = Agent(
-    name="audit",
-    subscribes_to=[
-        Subscription(
-            topic="events.transactions.completed",
-            payload=TransactionCompleted,
-        ),
-    ],
-    output_type=AuditEntry,
+audit_agent = Agent(name="audit", model="openai:gpt-5.4",
+    instructions="...", output_type=AuditEntry)
+
+worker.add(audit_agent)
+worker.subscribe(
+    audit_agent,
+    topic="events.transactions.completed",
+    payload=TransactionCompleted,
 )
 ```
 
@@ -2122,76 +2027,78 @@ class NewsArticle(BaseModel):
     id: str
     headline: str
 
-alerter = Agent(
-    name="alerter",
-    subscribes_to=[Subscription(payload=NewsArticle)],   # no topic needed
-)
+# Type-only subscription — the worker resolves the topic from NewsArticle
+worker.subscribe(alerter, payload=NewsArticle)
 ```
 
 Reasonable convention for the implicit form: `event.<module>.<TypeName>`. We don't recommend this for v1.0 because cross-package import cycles get awkward; explicit `topic=` or `source=` is clearer. The schema-only form is documented but not the default.
 
-### 11.B.6 Deployment-time wiring (`worker.wire(...)`)
+### 11.B.6 Deployment-time wiring as the canonical form
 
-Agents that should be reusable across deployments shouldn't hard-code their subscriptions. Use `worker.wire(...)` to attach Subscriptions at the deployment site:
+All choreography wiring is deployment-time. Agents are pure declarations; wiring lives on the Worker. This is the *only* form — there is no in-Agent `subscribes_to=` or `publishes=` alternative.
 
 ```python
 # shared_agents.py — library, no deployment specifics
-classifier = Agent(name="classifier", ..., publishes=Classified)
-enricher   = Agent(name="enricher",   ...)
-archiver   = Agent(name="archiver",   ...)
+classifier = Agent(name="classifier", model="openai:gpt-5.4", instructions="...", output_type=Classified)
+enricher   = Agent(name="enricher",   model="openai:gpt-5.4", instructions="...", output_type=Enriched)
+archiver   = Agent(name="archiver",   model="openai:gpt-5.4", instructions="...", output_type=ArchivedRef)
 
 # main.py — deployment composition
-worker = Worker(...)
-worker.add(classifier)
-worker.add(enricher)
-worker.add(archiver)
+worker = Worker(...).add(classifier, enricher, archiver)
+worker.publish(classifier, as_event=Classified)
+worker.publish(enricher,   as_event=Enriched)
 
 worker.wire(source=classifier, target=enricher, payload=Classified)
 worker.wire(source=classifier, target=archiver, payload=Classified)
 worker.wire(source=enricher,   target=archiver, payload=Enriched, filter=lambda e: e.flagged)
 
-worker.run_blocking()
+asyncio.run(worker.run())
 ```
 
-`worker.wire(...)` is **the canonical form for production deployments** — it puts choreography topology in one inspectable place rather than scattered across N agent files. The in-agent `subscribes_to=[...]` form is fine for hello-world and tightly-coupled agents, but the `worker.wire` form scales.
-
-`worker.inspect()` prints the wired topology so users can confirm the deployment looks how they expect.
+This puts the choreography topology in one inspectable place rather than scattered across N agent files, and keeps each `Agent(...)` declaration portable across deployments. `worker.inspect()` prints the wired topology so users can confirm the deployment looks how they expect.
 
 ### 11.B.7 The `Subscription` declaration in full
+
+`Subscription` is a power-user value type. The common case uses `worker.wire(...)` / `worker.subscribe(...)` kwargs directly. `Subscription` exists so users composing reusable wiring fragments can build a value, pass it around, and apply it via `worker.wire(subscription=sub)`.
 
 ```python
 @dataclass
 class Subscription:
-    # Source — exactly one of:
-    source: Agent | None = None             # subscribe to this agent's events topic
-    topic: str | None = None                # subscribe to this raw Kafka topic
-    # (Implicit: the topic = source.events_topic if source is set.)
+    # Source — exactly one of source= or topic= (implicit: topic = source.events_topic).
+    source: Agent | None = None
+    topic: str | None = None
 
-    payload: type[BaseModel]                # Pydantic model for decoding the envelope payload
+    payload: type[BaseModel]                # decode the envelope payload
 
-    # Optional reaction shape (default: each event starts a new Agent Run):
+    # Reaction shape (default: each event starts a new Agent Run).
+    # If react= is set, the SDK calls it instead of running the LLM loop;
+    # return any Action (Call/Emit/Done/Fail/etc.). Use Done() to skip.
     react: Callable[[Context, Payload], Awaitable[Action]] | None = None
-    # ^ If set, the SDK calls this function instead of running the Agent's LLM loop.
-    #   Return value is a normal Action: Call/Emit/Done/Fail/etc. Use Done() to skip the event.
-    #   This is the escape hatch for "react to events without invoking the LLM."
 
-    # Optional pure filter (predicate; runs before react/LLM):
+    # Pure synchronous predicate; runs before react/LLM.
     filter: Callable[[Payload], bool] | None = None
 
-    # Optional Subscription overrides:
-    group_id: str | None = None             # override consumer group naming
-    start_from: Literal["latest", "earliest"] = "latest"
-    # ^ At Subscription registration, where to start reading. Default "latest" (most agents
-    #   only care about new events). "earliest" replays history — useful for archivers and
-    #   backfill agents.
-    max_concurrency: int | None = None      # per-Subscription concurrency cap
+    # Overrides: consumer group naming, start offset, concurrency cap.
+    group_id: str | None = None
+    start_from: Literal["latest", "earliest"] = "latest"   # "earliest" replays history
+    max_concurrency: int | None = None
 
-    # Optional cross-tenant escape:
-    cross_tenant: bool = False              # if True, drop the default tenant filter
-                                            # (see §11.B.9)
+    # If True, drop the default tenant filter (see §11.B.10).
+    cross_tenant: bool = False
 ```
 
-This is the full Subscription shape. Common cases use only `source` + `payload`; advanced cases use the rest.
+Usage:
+
+```python
+# Common path — kwargs on worker.wire(...) / worker.subscribe(...)
+worker.wire(source=watcher, target=alerter, payload=NewsArticle, filter=urgent_filter)
+
+# Power-user path — Subscription value passed in
+news_to_alerter = Subscription(source=watcher, payload=NewsArticle, filter=urgent_filter)
+worker.wire(target=alerter, subscription=news_to_alerter)
+```
+
+The two forms are equivalent. Most users use the first; library authors composing reusable wiring may prefer the second.
 
 ### 11.B.8 Consumer-loop semantics — what does the LLM see?
 
@@ -2199,15 +2106,11 @@ When an event arrives on a subscription, three things can happen, in order of ev
 
 1. **Filter (if any) is evaluated.** Pure synchronous predicate. If False → ack, skip, emit `EventSkipped` lifecycle event. No LLM call.
 2. **`react=` function (if any) is called.** Async function, returns an Action. The user can do anything — call the LLM via `ctx.llm(...)`, return `Done()` to ack-and-skip, return `Call(topic=...)` to invoke a tool or another agent, return `Emit(topic=...)` to publish a derived event. The LLM is NOT invoked unless the react function calls it.
-3. **Default (no react): the agent's LLM is invoked with the event as the user-message.** The agent's `system_prompt`, `tools`, and `output_type` are used identically to a request-triggered run. The event payload becomes the LLM's user-role content. The final answer is published to `agent.<name>.events` (if `publishes=` set), and the Run terminates without a `Reply`.
+3. **Default (no react): the agent's LLM is invoked with the event as the user-message.** The agent's `instructions`, `tools`, and `output_type` are used identically to a request-triggered run. The event payload becomes the LLM's user-role content. The final answer is published to `agent.<name>.events` (if `worker.publish(...)` was called for that agent), and the Run terminates without a `Reply`.
 
-**Three alternatives I considered and rejected for v1:**
+**Rejected alternatives**: per-subscription system prompts (bloats the model; "different prompt per source" is really a different agent); event-as-tool-result (a tool result is a response to a Call; events are unsolicited); raw-react only (pushes the common case into user code).
 
-- **"Each Subscription has its own system prompt."** Rejected — bloats the Subscription model and incentivizes users to write subscription-specific prompts that diverge from the agent's primary purpose. If you need a fundamentally different prompt per source, that's a different agent.
-- **"The event is treated as a tool result."** Rejected — a tool result is semantically a response to a Call the agent made. An incoming event was not solicited; pretending it's a tool result confuses the LLM and breaks the message-history shape.
-- **"Subscriptions only do raw reactions; never invoke the LLM."** Rejected — that pushes "agent reacts to an event by running its agent loop" (the common case) into user code, which defeats the Agent SDK's reason to exist. Default to LLM invocation; offer `react=` for the escape hatch.
-
-The chosen model: **events default to invoking the LLM like a user message; `react=` is the escape hatch.** This is what users expect from an "Agent that subscribes to X" — they get an agent reacting to X.
+The chosen model: **events default to invoking the LLM like a user message; `react=` is the escape hatch.**
 
 `ctx.trigger` exposes the origin to user code that needs it: `ctx.trigger.kind in {"request", "event", "resume"}`; for events, `ctx.trigger.source_topic`, `ctx.trigger.source_agent`, `ctx.trigger.event_type` are populated. Extensions and `on_event` observers can use this for cardinality-safe OTel attributes.
 
@@ -2219,22 +2122,13 @@ When an event from one agent triggers another agent's Run, the two Runs are *dis
 - When the consumer's Worker dispatches the event, it mints a new `RunId = Y` for the consumer's Run, and sets `parent_run_id = X` on the new Run.
 - Observability tooling (OTel, runs-state UI) can roll up child Runs under the parent.
 
-**Why distinct Runs, not a continuation of the producer's Run:**
-- The producer's Run terminates when it `Reply`s (or `Emit`s, in choreography). The consumer reacts asynchronously — possibly much later, possibly never. There is no single end-to-end Run that "completes" only after every downstream consumer is done.
-- Fault isolation: a failed consumer must not retroactively fail the producer's Run.
-- Fan-out semantics: with N consumers, "the Run" is ambiguous. Distinct Runs with parent linkage scales to N consumers cleanly.
-
-This is the **opposite** of orchestration's `Call` semantics, where the same RunId carries through every hop. The Run-lineage choice is what makes orchestration vs choreography structurally distinct.
+**Why distinct Runs, not a continuation:** the producer's Run terminates on `Reply`/`Emit`; consumers react asynchronously (possibly never), so there is no single end-to-end Run. Fault isolation prevents a failed consumer from retroactively failing the producer; distinct Runs with parent linkage scale to N consumers cleanly. This is the **opposite** of orchestration's `Call`, where the same RunId carries through every hop — the Run-lineage choice is what makes orchestration vs choreography structurally distinct.
 
 ### 11.B.10 Multi-tenancy and cross-tenant subscriptions
 
-By default, an event subscription is **tenant-scoped**: a calfkit consumer only reacts to events that carry the same `x-calf-tenant-id` as the consumer's Worker (the Worker has a default tenant ID; or, in multi-tenant deployments, the consumer is registered per-tenant). Cross-tenant events are filtered at the dispatch layer before the filter/react/LLM stages.
+By default, subscriptions are **tenant-scoped**: consumers only react to events carrying the same `x-calf-tenant-id` as the Worker. Cross-tenant events are filtered at the dispatch layer before filter/react/LLM. This safe default prevents accidental cross-tenant data flow.
 
-This is the safe default. It prevents accidental cross-tenant data flow when a developer builds a Subscription against an internal topic and forgets that the topic carries multi-tenant traffic.
-
-**Opting in to cross-tenant subscriptions:** `Subscription(..., cross_tenant=True)`. The agent receives events from all tenants and is responsible for handling that — typically by sharding by `ctx.trigger.tenant_id` or by being explicitly tenant-agnostic (an audit agent that logs every tenant's events).
-
-When the producer and consumer are in different tenants but the same calfkit deployment (rare), this is the only escape hatch.
+**Opt-in:** `Subscription(..., cross_tenant=True)`. The agent receives events from all tenants and shards by `ctx.trigger.tenant_id` (or is explicitly tenant-agnostic, e.g. an audit agent).
 
 ### 11.B.11 Failure modes specific to choreography
 
@@ -2254,38 +2148,50 @@ The recurring theme: **choreography decouples failure domains**. A producer fail
 A realistic production topology often combines both shapes. Here, a customer-support workflow uses orchestration for the in-conversation tool/handoff dispatch and choreography for the post-conversation analytics/archival:
 
 ```python
-# Orchestration: caller → triage → billing/tech
-billing_agent = Agent(name="billing", ..., output_type=BillingAnswer,
-                      publishes=BillingAnswer)   # also emits an event stream
-tech_agent    = Agent(name="tech",    ..., output_type=TechAnswer,
-                      publishes=TechAnswer)
-triage_agent  = Agent(name="triage",  ...,
-                      handoffs=[billing_agent, tech_agent])
+# Authoring — pure Agent declarations, no topology
+billing_agent = Agent(name="billing", model="openai:gpt-5.4", instructions="...", output_type=BillingAnswer)
+tech_agent    = Agent(name="tech",    model="openai:gpt-5.4", instructions="...", output_type=TechAnswer)
+triage_agent  = Agent(name="triage",  model="openai:gpt-5.4", instructions="...", output_type=str)
+triage_agent.handoffs_to(billing_agent, tech_agent)            # orchestration: handoffs
 
-# Choreography: analytics and archive react to every answer
-analytics = Agent(
-    name="analytics",
-    system_prompt="Score the quality of the support answer.",
-    output_type=QualityScore,
-    subscribes_to=[
-        Subscription(source=billing_agent, payload=BillingAnswer),
-        Subscription(source=tech_agent,    payload=TechAnswer),
-    ],
+analytics = Agent(name="analytics", model="openai:gpt-5.4",
+    instructions="Score the quality of the support answer.", output_type=QualityScore)
+
+archive = Agent(name="archive", model="openai:gpt-5.4",
+    instructions="Persist the answer to the archive.", output_type=ArchivedRef)
+
+
+# Deployment — wire the topology
+worker = Worker(bootstrap_servers="kafka:9092").add(
+    triage_agent, billing_agent, tech_agent, analytics, archive
 )
 
-archive = Agent(
-    name="archive",
-    react=lambda ctx, ev: Emit(topic="archive.s3.dump", payload=ev),  # no LLM call
-    subscribes_to=[
-        Subscription(source=billing_agent, payload=BillingAnswer),
-        Subscription(source=tech_agent,    payload=TechAnswer),
-    ],
+# Orchestration is already in the Agent declarations via handoffs_to.
+# Choreography lives here:
+worker.publish(billing_agent, as_event=BillingAnswer)
+worker.publish(tech_agent,    as_event=TechAnswer)
+
+worker.wire(source=billing_agent, target=analytics, payload=BillingAnswer)
+worker.wire(source=tech_agent,    target=analytics, payload=TechAnswer)
+
+# Archive uses a pure react function (no LLM) — pass via the react= kwarg
+worker.wire(
+    source=billing_agent,
+    target=archive,
+    payload=BillingAnswer,
+    react=lambda ctx, ev: Emit(topic="archive.s3.dump", payload=ev),
+)
+worker.wire(
+    source=tech_agent,
+    target=archive,
+    payload=TechAnswer,
+    react=lambda ctx, ev: Emit(topic="archive.s3.dump", payload=ev),
 )
 ```
 
-The customer-facing path is orchestration (triage handoff to billing/tech is synchronous request/reply over Kafka). The post-conversation analytics and archival pipelines are choreography — they react to every answer without the triage agent knowing they exist. Adding a fourth observer (a fraud-detection agent that runs on billing answers only) is one new file with no changes to the support path.
+The customer-facing path is orchestration (triage handoff to billing/tech is synchronous request/reply over Kafka). The post-conversation analytics and archival pipelines are choreography — they react to every answer without the triage agent knowing they exist. Adding a fourth observer (a fraud-detection agent that runs on billing answers only) is one new file with one new `Agent(...)` declaration plus one `worker.wire(...)` line — zero changes to the support path.
 
-This is the realistic mixed shape calfkit is designed for. Pure orchestration is a subset (no `publishes`, no `subscribes_to`). Pure choreography is a subset (no `handoffs`, no `tools` with `Sub(...)`).
+This is the realistic mixed shape calfkit is designed for. Pure orchestration is a subset (no `worker.publish(...)` or `worker.wire(...)` / `worker.subscribe(...)` calls). Pure choreography is a subset (no `agent.handoffs_to(...)`, no sub-agent-as-tools).
 
 ---
 
@@ -2295,13 +2201,13 @@ This section supersedes `docs/hooks-design.md`.
 
 ### 12.1 Why three primitives, not a hierarchy
 
-The previous proposal in `docs/hooks-design.md` (sections 5.2 and below) introduced `NodeMiddleware` + `AgentMiddleware` with named-sugar methods: `before_handler`, `after_handler`, `before_model`, `after_model`, `on_tool_dispatch`, `on_tool_return`, `before_agent_run`, `after_agent_run`. That design has three structural problems:
+The previous proposal in `docs/hooks-design.md` (sections 5.2 and below) introduced `NodeMiddleware` + `AgentMiddleware` with named-sugar methods (`before_handler`/`after_handler`/`before_agent_run`/`after_agent_run`/etc.). Three structural problems:
 
-1. **It lies about cross-process boundaries.** `before_agent_run` and `after_agent_run` fire in *different Handler invocations*. In calfkit, that means different Kafka messages, possibly different Worker processes, definitely different Python interpreter instances. A user writing one class with both methods naturally assumes Python state survives between them — `self.start_time = time.time()` in `before_agent_run`, `elapsed = time.time() - self.start_time` in `after_agent_run` — but the *second invocation* of the middleware class is a fresh instance in a fresh process. The named-sugar API doesn't make this visible.
+1. **It lies about cross-process boundaries.** `before_agent_run` and `after_agent_run` fire in *different Handler invocations* — different Kafka messages, possibly different Worker processes, definitely different Python interpreter instances. A user writing one class with both methods naturally assumes Python state survives between them (`self.start_time = time.time()` in `before_agent_run`, `elapsed = time.time() - self.start_time` in `after_agent_run`), but the *second invocation* is a fresh instance in a fresh process. The API doesn't make this visible.
 
-2. **It conflates two distinct boundaries** (`on_tool_dispatch` in-process vs `on_tool_return` cross-process) under one mental model.
+2. It conflates in-process boundaries (`on_tool_dispatch`) with cross-process ones (`on_tool_return`) under one mental model.
 
-3. **It has registration-order subtleties.** `before_*` runs in forward order, `after_*` in reverse order, `on_error` in reverse order. Multiple rules to remember.
+3. It has registration-order subtleties: `before_*` forward, `after_*`/`on_error` reverse — multiple rules to remember.
 
 The v1 design rejects this. Three primitives:
 
@@ -2410,21 +2316,22 @@ The "named sugar isn't shorter in practice" point from prior feedback memory app
 ### 12.5 Registration model
 
 ```python
-worker = Worker(
-    handlers=[h1, h2, h3],
-    extensions=[
+worker = (
+    Worker(bootstrap_servers="kafka:9092")
+    .use(
         OTelExtension(),         # outermost
         RetryExtension(max=3),
         RateLimitExtension(qps=100),
         AuditExtension(topic="audit.events"),  # innermost
-    ],
+    )
+    .add(h1, h2, h3)
 )
 
-# Or per-handler:
-worker.attach(handler=h1, extensions=[H1OnlyExtension()])
+# Or per-handler at registration:
+worker.add(h1, extensions=[H1OnlyExtension()])
 ```
 
-Worker-level extensions wrap every Handler. Per-Handler extensions wrap only that Handler, inside the Worker-level chain. (Order: worker-outer → worker-inner → handler-outer → handler-inner → user code, then back out.)
+Worker-level extensions wrap every Handler. Per-Handler extensions (passed via `worker.add(..., extensions=[...])`) wrap only that Handler, inside the Worker-level chain. (Order: worker-outer → worker-inner → handler-outer → handler-inner → user code, then back out.)
 
 ### 12.6 Composition rules
 
@@ -2496,38 +2403,17 @@ class RetryExtension(Extension):
             raise
 ```
 
-**Audit extension:**
-
-```python
-class AuditExtension(Extension):
-    def __init__(self, topic: str): self.topic = topic
-
-    async def on_event(self, event):
-        # Emit one audit record per event, idempotent at the audit consumer
-        await self._publish_audit(self.topic, asdict(event))
-```
-
-**Rate limiting:** see §4.6.
-
-**Tool filtering** (the LangGraph `wrap_tool_call` equivalent):
-
-```python
-class ToolFilter(Extension):
-    def __init__(self, allow: set[str]): self.allow = allow
-
-    async def around_publish(self, req, call_next):
-        if req.action_kind == "call" and req.target_topic.startswith("tool."):
-            tool_name = req.target_topic.removeprefix("tool.")
-            if tool_name not in self.allow:
-                raise ToolNotAllowed(tool_name)
-        return await call_next(req)
-```
+**Rate limiting** (see §4.6) and **audit** (`on_event` + idempotent publish to an audit topic) follow the same shape as the Tracing extension. **Tool filtering** (the LangGraph `wrap_tool_call` equivalent) inspects `req.target_topic` in `around_publish` and raises `ToolNotAllowed` if the topic doesn't match an allowlist.
 
 ### 12.9 Testing extensions
 
 ```python
 async def test_rate_limit_blocks_overage():
-    wrk = InMemoryWorker(handlers=[my_handler], extensions=[RateLimit({"my.in": 1.0})])
+    wrk = (
+        InMemoryWorker(group_id_prefix="test")
+        .use(RateLimit({"my.in": 1.0}))
+        .add(my_handler)
+    )
     # First call: OK
     await wrk.invoke("my.in", Req())
     # Second within the second: rejected
@@ -2550,34 +2436,51 @@ class TradingDeps(BaseModel):
     feature_flags: dict[str, bool]
 
 @handler(topic="trade.in", reply=str, deps=TradingDeps)
-async def trade(ctx: Context[TradingDeps, MyState], req: TradeReq) -> Reply[str]:
+async def trade(ctx: Context[TradingDeps], req: TradeReq) -> Reply[str]:
     quote = await ctx.deps.coinbase.get_quote(req.symbol)
     ...
 ```
 
-The Handler is parameterized on `Context[DepsT, StateT]`. The Worker is configured with the actual deps:
+`Context` is parameterized on a single type parameter, `Deps`, matching Pydantic AI's `RunContext[Deps]` and OpenAI Agents' `RunContextWrapper[T]`. State surfaces as `ctx.state` typed via inference from the Handler's signature (or as `Any` if not declared); it does not appear as a second generic parameter on `Context`. The Worker is configured with the actual deps via the `deps_from(factory)` builder method:
 
 ```python
-worker = Worker(
-    handlers=[trade],
-    deps=TradingDeps(
+worker = (
+    Worker(bootstrap_servers="kafka:9092")
+    .deps_from(create_deps)
+    .add(trade)
+)
+
+def create_deps() -> TradingDeps:
+    return TradingDeps(
         db=session_factory(),
         coinbase=CoinbaseClient(key=os.getenv("CB_KEY")),
         feature_flags=load_flags(),
-    ),
+    )
+```
+
+For Agents, the `Deps` type is declared on the constructor:
+
+```python
+trading_agent = Agent(
+    name="trader",
+    model="openai:gpt-5.4",
+    instructions="...",
+    output_type=TradeResult,
+    deps_type=TradingDeps,   # IDE/mypy will type-check ctx.deps inside @tool callbacks the agent uses
 )
 ```
 
 ### 13.2 Lifecycle
 
-- Deps are **instantiated at Worker startup** (synchronous or async via `Worker.deps_factory`).
+- Deps are **instantiated at Worker startup** (synchronous or async via `worker.deps_from(factory)`).
 - Deps are **scoped to the Worker process**, not per-Handler-invocation. (Per-invocation deps are an anti-pattern — they don't survive replays.)
 - For per-invocation context (current Run's tenant, current user_id), use the State, not Deps.
 
 ```python
-worker = Worker(
-    handlers=[...],
-    deps_factory=lambda: TradingDeps(db=await create_pool()),
+worker = (
+    Worker(bootstrap_servers="kafka:9092")
+    .deps_from(lambda: TradingDeps(db=await create_pool()))
+    .add(...)
 )
 ```
 
@@ -2585,16 +2488,20 @@ worker = Worker(
 
 ```python
 async def test_trade_with_mock_coinbase():
-    wrk = InMemoryWorker(handlers=[trade], deps=TradingDeps(
-        db=mock_db(),
-        coinbase=MockCoinbase(),
-        feature_flags={},
-    ))
+    wrk = (
+        InMemoryWorker(group_id_prefix="test")
+        .deps_from(lambda: TradingDeps(
+            db=mock_db(),
+            coinbase=MockCoinbase(),
+            feature_flags={},
+        ))
+        .add(trade)
+    )
     result = await wrk.invoke("trade.in", TradeReq(...))
     assert result.output == "..."
 ```
 
-Deps swap is trivial because the Handler signature is generic on `DepsT`. The Worker just passes whichever Deps it was constructed with.
+Deps swap is trivial because the Handler signature is generic on `Deps`. The Worker just passes whichever Deps the configured factory produced. For tests where you need the simpler shape, `InMemoryWorker.testing(trade, deps=mock_deps)` is the shortcut (the `testing` factory accepts an optional `deps=` kwarg as a deps_factory shortcut).
 
 ### 13.4 What about secrets?
 
@@ -2756,6 +2663,34 @@ The `AggregatorSpec.on_partial` enum encodes user intent:
 - `"use_partial"`: parent re-entry has `ctx.fan_results = {only_what_was_collected}`. User decides.
 - `"continue"`: parent re-entry has `ctx.fan_results = None` regardless. User can poll the aggregator topic via `ctx.deps.fanout_view(fan_id)` for live data, or use it as a fire-and-forget signal.
 
+### 15.6 Exception hierarchy
+
+All SDK-defined exceptions live under `calfkit.errors` with a clear inheritance tree:
+
+```
+calfkit.errors.CalfkitError              # base
+    .ConfigError                          # bad worker config
+    .TransportError                       # Kafka unavailable
+    .EnvelopeDecodeError                  # bad envelope
+    .HandlerError                         # base for handler-side errors
+        .RetryableError                   # explicit "retry me"
+        .ToolError                        # tool failure
+            .ToolTimeoutError
+            .ToolNotAllowedError          # used by ToolFilter Extension
+        .ModelRetry                       # output validation retry signal
+    .RunError                             # run-level
+        .RunFailedError
+        .RunInterruptedError
+        .RunNotFoundError
+    .ChoreographyError                    # subscription-level
+        .OrphanedSubscriptionError
+    .FanTimeoutError                      # aggregator timeout (used in ctx.fan_error)
+    .CircuitOpen                          # circuit breaker (v1.x)
+    .RateLimitExceeded                    # rate limiter
+```
+
+User code should catch `RetryableError` for explicit retry signals; transport, runtime, and SDK-internal errors share `CalfkitError` so a single `except CalfkitError` catches them all. Exception chaining (`raise ... from e`) is used throughout — the original cause is always preserved.
+
 ---
 
 ## 16. Idempotency contract
@@ -2816,7 +2751,7 @@ Three layers. Each tests something the other can't.
 
 ### 17.1 Layer 1 — Pure Handler unit tests
 
-Test a Handler in pure isolation: no Kafka, no broker, no Extensions, no runtime.
+Test a Handler in pure isolation — no Kafka, no broker, no Extensions, no runtime. Appropriate for Layer B handlers. For Agent SDK code, prefer L2 (the agent's behavior depends on the LLM loop recipe, which lives in the runtime).
 
 ```python
 async def test_classifier_handler_pure():
@@ -2833,41 +2768,74 @@ async def test_classifier_handler_pure():
 **What it tests:** the function shape. The user's logic.
 **What it doesn't:** anything about Kafka, the Extension chain, retries, the aggregator. This is just a pure function call.
 
-### 17.2 Layer 2 — In-memory dispatcher
+### 17.2 Layer 2 — InMemoryWorker (in-process queue transport)
 
-`InMemoryWorker` simulates the full Worker runtime without a broker. Topics become in-process queues; the Extension chain runs; the aggregator works; the idempotency table works (in-memory backing).
+`InMemoryWorker` is the canonical local-dev / REPL / test idiom and the substitute for `agent.run(input)` (G13). It is the **same `Worker` runtime class** as production, with the Kafka transport adapter (`KafkaTransport`) replaced by an in-process queue (`MemoryTransport`). The full Action interpreter, Extension chain, fan-out aggregator, and idempotency table run unchanged — the in-memory path is a real subset of production behavior, not a parallel implementation.
+
+```python
+from calfkit import InMemoryWorker
+
+async def test_weather_agent():
+    wrk = InMemoryWorker.testing(weather_agent)
+    result = await wrk.invoke(weather_agent, "What's the weather in Berlin?")
+    assert result.output.location == "Berlin"
+    assert wrk.assert_published("tool.get_weather", count=1)
+```
+
+For multi-agent integration:
 
 ```python
 async def test_multi_agent_pipeline_in_memory():
-    wrk = InMemoryWorker(
-        handlers=[triage, billing, tech],
-        extensions=[OTelExtension(), RetryExtension(max=2)],
+    wrk = (
+        InMemoryWorker(group_id_prefix="test")
+        .use(OTelExtension(), RetryExtension(max=2))
+        .add(triage_agent, billing_agent, tech_agent)
     )
-    result = await wrk.execute("triage.in", UserReq(text="my bill is wrong"))
+    result = await wrk.invoke(triage_agent, UserReq(text="my bill is wrong"))
     assert result.output.startswith("I'll help you")
-    assert wrk.published("billing.in", count=1)
-    assert wrk.published("tech.in", count=0)
+    assert wrk.assert_published("agent.billing-agent.in", count=1)
+    assert wrk.assert_published("agent.tech-agent.in", count=0)
 ```
 
-**What it tests:** multi-handler integration. Extension chain composition. Fan-out aggregation. Idempotency. Run lifecycle events. Most assertions about wiring.
+**The InMemoryWorker surface (mirrors `Worker` exactly plus three test-helper methods):**
+
+| Method | Purpose |
+|---|---|
+| `InMemoryWorker.testing(*agents)` | Ergonomic factory: registers agents, no run loop required. |
+| `InMemoryWorker(...)` | Full builder matching `Worker(...)`; for Extensions, deps, custom group_id. |
+| `wrk.invoke(agent_or_ref_or_topic, payload)` | Synchronous request/reply via the in-process queue. Matches `client.invoke(...)`. |
+| `wrk.emit(topic, payload)` | Publish a choreography event so subscribers fire. |
+| `wrk.assert_published(topic, count=None)` | Count envelopes landed on a topic during the test. |
+| `wrk.published_envelopes(topic=None)` | Return published envelopes (useful for snapshot testing). |
+| `wrk.runs_for_agent(name)` | Count Runs the named agent processed. |
+| `wrk.drain()` | Wait for all triggered Runs to complete. |
 
 **Choreography testing pattern** — assert that a published event triggers a subscribed Agent:
 
 ```python
 async def test_pubsub_fanout_in_memory():
-    wrk = InMemoryWorker(handlers=[summarizer, sentiment, archiver])
+    wrk = (
+        InMemoryWorker(group_id_prefix="test")
+        .add(watcher, summarizer, sentiment, archiver)
+    )
+    wrk.publish(watcher, as_event=NewsArticle)
+    wrk.wire(source=watcher, target=summarizer, payload=NewsArticle)
+    wrk.wire(source=watcher, target=sentiment,  payload=NewsArticle)
+    wrk.wire(source=watcher, target=archiver,   payload=NewsArticle)
+
     article = NewsArticle(id="1", headline="Test", body="...", urgency=4)
-    await wrk.publish_event("agent.news-watcher.events", article)
-    await wrk.drain()  # let all triggered runs complete
+    await wrk.emit("agent.news-watcher.events", article)
+    await wrk.drain()
+
     assert wrk.runs_for_agent("summarizer") == 1
     assert wrk.runs_for_agent("sentiment") == 1
     assert wrk.runs_for_agent("archiver") == 1
     # Each consumer saw the event independently (pub/sub fan-out).
 ```
 
-**What it doesn't:** real Kafka behavior — partition rebalances, broker downtime, consumer-group dynamics, real-network latency, real serialization (it uses Python objects directly, optionally with a flag to force round-trip).
+**What it tests:** multi-handler integration. Extension chain composition. Fan-out aggregation. Idempotency. Run lifecycle events. Most assertions about wiring.
 
-**Critical design choice:** `InMemoryWorker` IS the same runtime class as `Worker`. The difference is the transport adapter — `KafkaTransport` vs `MemoryTransport`. This means the in-memory path is a real subset of production behavior, not a parallel implementation.
+**What it doesn't:** real Kafka behavior — partition rebalances, broker downtime, consumer-group dynamics, real-network latency, real serialization (it uses Python objects directly by default).
 
 `MemoryTransport.force_serialize=True` opts into bytes round-trip, catching serialization bugs without a broker.
 
@@ -2892,11 +2860,11 @@ async def test_rebalance_during_fanout(kafka):
 
 The 0.x test pattern (`TestKafkaBroker` for FastStream) is one layer. It conflates "unit-ish" with "integration-ish" — fast but not the same as production. v1 separates:
 
-- **L1** for "did I write this Handler correctly?" — sub-millisecond.
-- **L2** for "do my Handlers, Extensions, and Actions compose?" — single-digit milliseconds.
+- **L1** for "did I write this Handler correctly?" — sub-millisecond. Layer B authors mostly.
+- **L2** for "do my agents, tools, Extensions, and Actions compose?" — single-digit milliseconds. **This is where most Agent SDK tests live.**
 - **L3** for "does this survive Kafka shenanigans?" — testcontainers, multi-second.
 
-CI runs all three. Pre-commit runs L1+L2.
+CI runs all three. Pre-commit runs L1+L2. Any drift between `InMemoryWorker` and `Worker` is a defect, not a design choice.
 
 ---
 
@@ -2906,41 +2874,58 @@ CI runs all three. Pre-commit runs L1+L2.
 
 ```python
 # worker_main.py
+import asyncio
+import os
 from calfkit import Worker
-from myapp.handlers import triage, billing, tech
-from myapp.extensions import OTelExtension, RetryExtension
+from calfkit.extensions import OTelExtension, RetryExtension
+from myapp.agents import triage, billing, tech, analytics, archive
+from myapp.deps import create_deps
 
-async def main():
-    wrk = Worker(
-        bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"],
-        handlers=[triage, billing, tech],
-        extensions=[
+async def main() -> None:
+    worker = (
+        Worker(
+            bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"],
+            group_id_prefix="myapp-prod",
+        )
+        .use(
             OTelExtension(endpoint=os.environ["OTEL_ENDPOINT"]),
             RetryExtension(max=3),
-        ],
-        deps_factory=create_deps,
-        group_id_prefix="myapp-prod",
-        # Optional config:
-        partition_strategy="run_id",
-        dedup="on",
-        runs_state_topic="calf.runs-state",
-        fanout_topic="calf.fanout-agg",
-        dlq_topic_pattern="calf.dlq.{source}",
+        )
+        .deps_from(create_deps)
+        .add(triage, billing, tech, analytics, archive)
     )
-    await wrk.run()  # blocks until SIGTERM
+
+    # Choreography topology
+    worker.publish(billing, as_event=BillingAnswer)
+    worker.publish(tech,    as_event=TechAnswer)
+    worker.wire(source=billing, target=analytics, payload=BillingAnswer)
+    worker.wire(source=tech,    target=analytics, payload=TechAnswer)
+
+    # Internal-topic overrides — almost never needed
+    # worker.runtime(
+    #     runs_state_topic="calf.runs-state",
+    #     fanout_topic="calf.fanout-agg",
+    #     dlq_topic_pattern="calf.dlq.{source}",
+    #     dedup="on",
+    #     partition_strategy="run_id",
+    # )
+
+    await worker.run()  # blocks until SIGTERM
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+Constructor takes two kwargs (transport identity and group prefix). Everything else attaches via methods. The runtime-overrides trio that 99% of users never touch (`runs_state_topic`, `fanout_topic`, `dlq_topic_pattern`) lives behind `worker.runtime(...)`, discoverable but out of the way.
+
 ### 18.2 Configuration
 
 Three layers, in precedence order:
-1. **Programmatic** (`Worker(...)` kwargs)
-2. **Environment variables** (`CALFKIT_KAFKA_BOOTSTRAP`, `CALFKIT_OTEL_ENDPOINT`, etc.)
-3. **Config file** (`calfkit.yaml`, opt-in)
+1. **Programmatic** (`Worker(...)` constructor + method calls)
+2. **Environment variables** (`CALFKIT_KAFKA_BOOTSTRAP`, `CALFKIT_OTEL_ENDPOINT`, etc.; the env-var prefix is `CALFKIT_`)
+3. **Config file** (`calfkit.yaml`, opt-in via `CALFKIT_CONFIG_FILE`)
 
-The SDK ships a `WorkerConfig` Pydantic model that's the source-of-truth schema; env vars and config file map to it. Programmatic args override.
+The SDK ships a `WorkerSettings(BaseSettings)` Pydantic model (`pydantic_settings.BaseSettings`) that is the source-of-truth schema; env vars and config file map to it. Programmatic args override.
 
 ### 18.3 Horizontal scaling
 
@@ -2964,7 +2949,7 @@ COPY . .
 CMD ["uv", "run", "python", "worker_main.py"]
 ```
 
-Health check endpoint optional via `Worker(health_check_port=8080)`. By default, the Worker has no HTTP surface — it's pure Kafka.
+Health check endpoint optional via `worker.health_check(port=8080)` (a builder method, on by `worker.runtime(...)` for advanced overrides). By default, the Worker has no HTTP surface — it's pure Kafka.
 
 ### 18.5 Operational concerns
 
@@ -3062,7 +3047,7 @@ There is no migration story. v1 is a clean break. The 0.x code stays on 0.x for 
 
 - `BaseAgentNodeDef` subclass → `@handler` + agent_loop recipe
 - `BaseNodeDef` subclass → `@handler`
-- `agent_tool` → `@tool`
+- `agent_tool` → `@tool` (module-level), `Tool.external(...)` (cross-language), or `Tool.from_agent(...)` (sub-agent as tool)
 - `Worker(client, nodes=[...])` → `Worker(bootstrap_servers=..., handlers=[...])`
 - `Client.execute_node(...)` → `Client.execute(topic, req)`
 
@@ -3078,7 +3063,7 @@ A precise list. Each entry includes the file:line and the v1 replacement.
 |---|---|---|
 | `BaseNodeDef` class hierarchy | `calfkit/nodes/base.py:42` | `@handler` function decorator |
 | `BaseAgentNodeDef` god-method | `calfkit/nodes/agent.py:27` | `agent_loop` recipe over `@handler` |
-| `ToolNodeDef` | `calfkit/nodes/tool.py:26` | `@tool` decorator |
+| `ToolNodeDef` | `calfkit/nodes/tool.py:26` | Unified `Tool` class — `@tool`, `Tool.external(...)`, `Tool.from_agent(...)` (§10.1) |
 | `NodeDef` (empty stub) | `calfkit/nodes/node.py:7` | Removed; not needed |
 | `_pending_batches: dict[str, PendingToolBatch]` | `agent.py:50` | Compacted topic + runtime aggregator (§9) |
 | `_parallel_state_aggregation()` | `agent.py:61` | Runtime-owned, not Handler-owned |
@@ -3099,7 +3084,7 @@ A precise list. Each entry includes the file:line and the v1 replacement.
 | `_emitter_headers()` returning fixed dict | `nodes/base.py:161` | Comprehensive header set emitted by runtime |
 | `_publish_action()` dispatch | `nodes/base.py:164` | Runtime's Action interpreter (§3.5) |
 | `tools_topic_registry` ambiguity (per user memory: returns *first* private topic) | (Project memory) | Each Handler has exactly one topic; no ambiguity |
-| `ToolContext(RunContext[Deps])` from vendored pydantic_ai | `models/tool_context.py:8` | `Context[Deps, State]` SDK-owned, no vendored dependency |
+| `ToolContext(RunContext[Deps])` from vendored pydantic_ai | `models/tool_context.py:8` | `Context[Deps]` SDK-owned (single generic param), no vendored dependency |
 | Vendored `pydantic_ai` subset | `calfkit/_vendor/pydantic_ai/` | Either un-vendor (depend on upstream) or shrink to a tiny interface |
 
 Two notes:
@@ -3124,7 +3109,7 @@ Two notes:
 
 | Dimension                | Calfkit v1.0                | LangGraph                    | Temporal                       | Restate                          | OpenAI Agents SDK         | Pydantic AI               | Inngest                       |
 |--------------------------|------------------------------|------------------------------|---------------------------------|-----------------------------------|----------------------------|----------------------------|--------------------------------|
-| **Primary authoring surface** | `Agent(name, model, system_prompt, tools, output_type, ...)` — Pydantic-AI-class DX. Handler/Action is the runtime layer below. | Graph DSL (`add_node`/`add_edge`) | `@workflow.defn` + `execute_activity` (must be deterministic) | Service handlers (`@restate.service`) | `Agent(...)` (in-process) | `Agent(...)` (in-process) | `step.run(...)` |
+| **Primary authoring surface** | `Agent(...)` + `handoffs_to`; tools at module scope (`@tool` / `Tool.external` / `Tool.from_agent`). Pydantic-AI-shaped; tools are Kafka services, not agent-owned. | Graph DSL (`add_node`/`add_edge`) | `@workflow.defn` + `execute_activity` (deterministic) | Service handlers (`@restate.service`) | `Agent(...)` in-process | `Agent(...)` in-process | `step.run(...)` |
 | **Execution shape**      | Distributed, one Node per Kafka hop | In-process graph | Workflow + Activity (distributed via SDK) | Distributed handlers (durable invocation) | In-process agent | In-process agent | Function steps (cloud or self-host) |
 | **Durable execution**    | Yes (Kafka log + compacted topics) | Optional Postgres checkpointer | Yes (Temporal cluster) | Yes (Restate runtime) | No | No | Yes (Inngest store) |
 | **Required runtime infra** | Kafka only | None (or Postgres) | Temporal cluster | Restate runtime | None | None | Inngest service (or self-host) |
@@ -3133,19 +3118,15 @@ Two notes:
 | **Tool model**           | First-class Kafka topic; cross-language native | In-process Python function | Activity (cross-language via SDK) | Service handler | In-process Python | In-process Python | In-process |
 | **Cross-language tools** | Yes, by construction         | No                            | Yes via SDKs                   | Yes via SDKs                     | No                         | No                         | TS-focused; some other-lang   |
 | **Multi-tenancy**        | Header default, topic opt-in | App-level                    | App-level + namespaces          | App-level                        | App-level                  | App-level                  | App-level                     |
-| **Orchestration**        | Yes (`handoffs`, `Sub`, `parallel_tools`) | Yes (`add_edge` / `add_node`) | Yes (`execute_activity`, child workflows) | Yes (handler calls)        | Yes (handoffs)             | Yes (delegate)             | Yes (`step.invoke`)            |
-| **Choreography (pub/sub agents)** | **First-class** (`publishes=`, `subscribes_to=`, `worker.wire`) — see §11.B | App-level (no native pub/sub of agent outputs) | App-level (signals are point-to-point, not topic-broadcast) | App-level                        | App-level                  | App-level                  | App-level (events feature, but no agent-output streams) |
-| **Type safety**          | Pydantic generics (`Context[Deps, State]`) | TypedDicts | Per-SDK | Per-SDK | Pydantic | Pydantic | TS                |
-| **Determinism constraint** | None (any Python in handlers) | None | Strict (workflows must be deterministic) | None | None | None | Steps must be idempotent |
-| **HITL**                 | Native (`Interrupt`/`Resume`)| Some support (interrupts, breakpoints) | Native (Signal, query) | Native (awakeable) | Limited                   | Limited                   | Native (`step.waitForEvent`) |
+| **Orchestration**        | `handoffs_to(...)` + `Tool.from_agent(...)` | `add_edge`/`add_node` | `execute_activity` | Handler calls | Handoffs | Delegate | `step.invoke` |
+| **Choreography (pub/sub agents)** | **First-class** (§11.B) | App-level | App-level (point-to-point signals) | App-level | App-level | App-level | App-level (events, not agent streams) |
+| **Type safety**          | Pydantic generics (`Context[Deps]`, `Agent[Deps, Output]`) | TypedDicts | Per-SDK | Per-SDK | Pydantic | Pydantic | TS |
+| **Determinism constraint** | None | None | Strict (deterministic workflows) | None | None | None | Idempotent steps |
+| **HITL**                 | Native — `@tool(requires_approval=True)`, `@agent.interrupt_when(...)`, `Interrupt`/`Resume` | Interrupts, breakpoints | Signal, query | Awakeable | Limited | Limited | `step.waitForEvent` |
 | **Deployment**           | Worker = Kafka consumer process | Run anywhere                  | Worker + Temporal cluster      | Worker + Restate runtime         | Inline                     | Inline                     | Inngest functions             |
 | **Open source runtime**  | Yes (Kafka is OSS)           | Yes (lib only)                | Yes                            | Yes                              | Yes (lib only)             | Yes (lib only)             | Open client, server is closed (or partial) |
 
-**Where Calfkit wins:** Pydantic-AI-class authoring DX *combined with* durable, multi-language, zero-extra-cluster deployment (Kafka is likely already present), *combined with* first-class choreography (agents subscribe to event streams from other agents or arbitrary Kafka topics — see §11.B). No other system in this matrix offers that triple. The in-process SDKs (Pydantic AI, OpenAI Agents, LangGraph) cannot do durable + multi-language. The durable-execution platforms (Temporal, Restate, Inngest) treat agent flows as orchestration only — they have no native concept of "subscribe an agent to a topic the way Kafka subscribers do." Calfkit is the only SDK in the space whose primary abstraction is "an agent is a Kafka consumer," which makes choreography the natural shape, not a bolted-on capability.
-
-**Where Calfkit loses:** in-process simplicity for non-distributed agents (LangGraph, Pydantic AI), strong determinism (Temporal), TS-native (Inngest/Trigger), operational maturity / time-travel debugging UI (Temporal).
-
-The pitch: "Author your agent in Pydantic AI's idiom. Deploy it over Kafka as a distributed service with cross-language tools, durable runs, and zero wiring code. If you have Kafka, this is the only SDK in this space that gives you both ergonomics tiers in one package." See §4.10 for the head-to-head against "Temporal + Pydantic AI."
+**Where Calfkit wins:** Pydantic-AI-class authoring DX + durable, multi-language, zero-extra-cluster deployment + first-class choreography. No other system in this matrix offers that triple. **Where Calfkit loses:** in-process simplicity (LangGraph, Pydantic AI), strong determinism (Temporal), TS-native (Inngest), operational maturity (Temporal). See §4.10 for the head-to-head.
 
 ---
 
@@ -3209,44 +3190,51 @@ Suggested validation: chaos-testing via testcontainers with deliberately-injecte
 
 ### Milestone M5 — HITL and Interrupt/Resume (1.5 weeks)
 
-- `Interrupt` Action.
+- `Interrupt` Action at Layer B (used directly via `@handler` for power users).
 - Runs-state checkpoint on Interrupt.
 - `client.resume(run_id, payload)` and the resume topic.
 - Worker recovery path: on startup, no special action; resume is just a normal publish.
-- L2 test for round-trip Interrupt/Resume.
+- Layer A surface: `@tool(requires_approval=True, resume_with=DecisionT)` — gates a specific tool invocation behind approval. Declared on the module-level tool decorator itself (the gate is a property of the tool, not the calling agent). The agent recipe emits `Interrupt` before invoking the tool body when the LLM picks the tool; on resume, if the approval payload says approved, the tool runs; if denied, the LLM sees a "human declined" tool-result and continues reasoning.
+- Layer A surface: `@agent.interrupt_when(output_type=..., resume_with=...)` — gates a specific LLM output shape behind approval. The agent recipe inspects the final-output type each turn; if it matches, emits `Interrupt`. Rejected the prior dict-of-named-rules / lambda-over-output approach (§4.5 rationale).
+- L2 test: round-trip Interrupt/Resume via `InMemoryWorker.testing(agent)` — invoke, assert interrupted, resume, assert completed.
 - L3 test for crash-during-Interrupt.
 
-**Risk:** medium. Less critical than M4 but novel.
+**Risk:** medium. Less critical than M4 but novel. The Layer A HITL ergonomics need to match Pydantic AI's `requires_approval=True` shape; if they don't, the §1.3 "Pydantic-AI-class authoring DX" claim weakens.
 
 ### Milestone M6 — Tool model and cross-language scaffolding (1 week)
 
-- `@tool` decorator.
-- `external_tool` declaration.
-- LLM schema synthesis from `input` Pydantic model.
-- Tool registry per Worker.
+- Unified `Tool` class.
+- `@tool` module-level decorator (the only Python-tool authoring form; with-parens variant accepts `requires_approval=`, `resume_with=`, and other intrinsic tool options — but **never** `topic=`, per G14). Topic auto-derives from the function name; overrides happen at `worker.add(fn, topic="...")`. No `@agent.tool` and no instance-decorator equivalent.
+- `Tool.external(name=..., input=..., output=...)` classmethod (cross-language stub).
+- `Tool.from_agent(agent, name=..., description=...)` classmethod (sub-agent as tool).
+- LLM schema synthesis from the function signature (`@tool`) or `input` Pydantic model (`Tool.external` / `Tool.from_agent`).
+- Tool registry per Worker. Same tool referenced from multiple agents registers once.
 - (Defer cross-language SDKs; just document the wire format and provide a Python-only smoke test.)
 
 **Risk:** low.
 
 ### Milestone M7 — Agent SDK (the primary user-facing surface) (2.5 weeks) ★ CRITICAL FOR DX
 
-This is the milestone that delivers Layer A (§4). It is the user-facing primary surface; without it, the SDK is positioned as a low-level Kafka-with-Actions library, not as an agent SDK. Treat its ergonomics as load-bearing as the M4 aggregator.
+Delivers Layer A (§4) — without it, the SDK is a Kafka-with-Actions library, not an agent SDK. Treat ergonomics as load-bearing as the M4 aggregator.
 
-- `Agent` class: `name`, `model`, `system_prompt` (static or dynamic callable), `tools`, `output_type`, `output_validators`, `handoffs`, `parallel_tools`, `interrupts`, `deps_type`, `max_turns`, `on_tool_error`, `publishes`, `subscribes_to`.
-- `@tool` decorator: synthesizes JSON schema for LLM, registers tool topic.
-- `external_tool(...)` declaration: cross-language tool stub.
-- `Sub(other_agent, as_tool=...)`: agent-as-tool composition.
-- `Subscription(...)` declaration: choreography binding (source/topic, payload, filter, react, group_id, start_from, cross_tenant). See §11.B.7.
-- `worker.add(agent)`: the compilation step. Materializes the synthesized Handler, registers tool Handlers, derives topics, wires subscriptions. `worker.inspect()` for visibility.
-- `worker.wire(source=..., target=..., payload=..., filter=...)`: deployment-time choreography binding (§11.B.6).
-- `ctx.trigger`: per-invocation origin info (`kind` ∈ {request, event, resume, tool_call, fan_child}; `source_topic`, `source_agent`, `event_type` populated for events).
-- Internal Agent Loop recipe: drives the LLM turn loop, emits `Call` on tool selection, emits `Fan` on multi-tool-selection (when `parallel_tools` covers them), emits `Reply` on final output, emits `Interrupt` on configured triggers, handles `output_validators` retry via `ModelRetry`. For event-triggered Runs, the loop terminates with `Emit` to `agent.<name>.events` instead of `Reply` when no caller awaits.
-- Choreography lifecycle events: `EventReceived`, `EventSkipped` (filter false), `EventDispatched`, `EventPublished` — observable via `on_event`.
-- Worked examples: hello-world (§4.2), trading agent with cross-language tool (§4.3), handoffs (§4.4), sub-agents (§4.4), parallel sub-agents (§4.4), HITL (§4.5), linear choreography (§11.B.1), pub/sub fan-out (§11.B.2), filtered subscription (§11.B.3), subscribing to arbitrary Kafka topic (§11.B.4), deployment-time wiring (§11.B.6), mixed orchestration+choreography (§11.B.12).
-- L2 test: agent with stubbed LLM + stubbed tools + InMemoryWorker, end-to-end via `worker.invoke(...)`; choreography subscription via `InMemoryWorker.publish_event(...)`.
-- L3 test: agent across two Worker processes (the agent on one, its tools on another), end-to-end via real Kafka; choreography pipeline of 3 agents with `publishes=`/`subscribes_to=` end-to-end.
+Acceptance checklist:
 
-**Risk:** medium-high. The compilation step (Agent → synthesized Handler) must be testable, inspectable, and overridable at every level. The ergonomics must feel like Pydantic AI for the simple cases; if `Agent(name=..., model=..., tools=[...])` doesn't deliver a working Kafka-deployed agent in under 30 minutes for a new user, the milestone has failed even if all the wire-format work is correct.
+- `Agent` narrow constructor (≤7 fields per §4.1); `system_prompt=` deprecated alias.
+- Agent instance methods: `@agent.output_validator`, `@agent.interrupt_when(...)`, `agent.handoffs_to(*peers)`. No tool-owning surface (§10.1).
+- Unified `Tool` type — `@tool`, `Tool.external(..., topic=...)`, `Tool.from_agent(...)`. All synthesize the same LLM-facing JSON schema.
+- `Worker` builder — `.use`, `.deps_from`, `.add`, `.publish`, `.wire`, `.subscribe`, `.runtime`, `.inspect`, `.run`, `.drain`. No `handlers=`/`extensions=` constructor kwargs.
+- `InMemoryWorker.testing(*agents)` plus the full builder; `wrk.invoke`/`emit`/`assert_published`/`published_envelopes`/`runs_for_agent`/`drain`.
+- `Client` surface — `invoke(agent | ClientAgentRef)`, `invoke_topic` escape hatch, `emit`, `resume`.
+- `Subscription(...)` value type (§11.B.7); `ctx.trigger` per-invocation origin info.
+- Agent Loop recipe: `Call` on tool selection, `Fan` on parallel-tool-call output, `Reply` on final output, `Interrupt` for `requires_approval`/`interrupt_when`, `Emit` for event-triggered terminal runs.
+- Choreography lifecycle events (`EventReceived`/`EventSkipped`/`EventDispatched`/`EventPublished`).
+- Done-reachability check at registration (Call-reachable handlers cannot return `Done`).
+- Namespace split: `calfkit` / `calfkit.actions` / `calfkit.extensions` / `calfkit.errors`.
+- `KnownModelName` `Literal[...]` re-export; `py.typed` marker.
+- Worked examples for §4.2, §4.3, §4.4, §4.5, §11.B.1-4, §11.B.6, §11.B.12.
+- L2 test: stubbed LLM + tools + `InMemoryWorker.testing`; choreography assertion via `wrk.runs_for_agent`. L3 test: agent + tools across two Worker processes; 3-agent choreography pipeline.
+
+**Risk:** medium-high. Pydantic-AI-migrant acceptance test: hello-world in <30 minutes. Document the `@agent.tool` → module-level `@tool` divergence prominently — migrants will type the wrong form from muscle memory.
 
 ### Milestone M8 — Observability defaults (1 week)
 
@@ -3309,8 +3297,8 @@ I list each with my current lean. None are blocking the start of implementation,
 3. **Should `Continue` action exist, or is it always expressible as `TailCall` to self?**
    *Lean:* keep `Continue` as in-process (no publish). It's the clean way for an Extension to short-circuit a Handler invocation without a Kafka round-trip.
 
-4. **Should the SDK ship a default `LLMExtension` that intercepts `agent_loop` model calls for centralized rate-limit/retry/cost, or is that always user-supplied?**
-   *Lean:* ship a default that handles cost-tracking only; rate-limit and retry are user-tunable Extensions.
+4. **Ship a default `LLMExtension` for centralized rate-limit/retry/cost?**
+   *Lean:* default handles cost-tracking only; rate-limit and retry are user-tunable.
 
 5. **How does `Worker.deps_factory` interact with hot-reload / config changes?**
    *Lean:* not in v1.0. Workers are deploy-stop-redeploy. Hot deps reload is a v1.x concern.
@@ -3318,14 +3306,14 @@ I list each with my current lean. None are blocking the start of implementation,
 6. **What happens to a Reply when the parent topic no longer has a consumer?** (e.g., parent Handler was removed in a deploy)
    *Lean:* DLQ to `calf.dlq.orphan-replies` after a configurable retention. Emit `OrphanReply` event.
 
-7. **Multi-Handler-on-same-topic — is that supported or rejected?**
-   *Lean:* one Handler per topic per Worker. Multiple Workers (different consumer groups) on the same topic is the broadcast pattern. Multiple Handlers in *one* Worker on the *same* topic is rejected (registration error).
+7. **Multi-Handler-on-same-topic?**
+   *Lean:* one Handler per topic per Worker (registration error otherwise). Multiple Workers on the same topic is the broadcast pattern.
 
 8. **Should `Fan.calls` allow heterogeneous payload types or only one type?**
    *Lean:* heterogeneous. The aggregator doesn't care; the user reconstructs by key. The type checker will complain unless `ctx.fan_results` is typed `dict[bytes, Any]`.
 
-9. **What's the right answer for "long-running tool" — tool takes 10 minutes, parent's `Call.timeout` expires?**
-   *Lean:* the `Call.timeout` is the parent's hint; the tool is not killed. The tool's Reply will arrive late and be dropped by dedup (frame already closed). The parent receives a `Fail` for the call. This is the at-least-once cost; explicit doc.
+9. **Long-running tool — tool takes 10 minutes, parent's `Call.timeout` expires.**
+   *Lean:* tool runs to completion (`timeout` is the parent's hint, not a kill); late Reply is dedup-dropped; parent receives `Fail`. At-least-once cost.
 
 10. **Should the runs-state topic carry the *full* state or just a pointer/version?**
     *Lean:* full state on `Interrupt` (we need it for resume); just metadata on `RunStarted`/`Completed` (we don't need to checkpoint mid-run by default).
@@ -3333,35 +3321,35 @@ I list each with my current lean. None are blocking the start of implementation,
 11. **Should tool topics be auto-created or must they pre-exist?**
     *Lean:* auto-create by default (with `Worker(auto_create_topics=True)`), with a flag to disable for prod environments where topic creation is gated.
 
-12. **What's the upgrade story when the Envelope schema_version bumps mid-deploy?**
-    *Lean:* a single Worker can read multiple schema versions (forward-compat decoder for known prior versions; unknown future versions DLQ). Schema version bumps are coordinated across the cluster; the SDK ships a one-version-back decoder.
+12. **Envelope `schema_version` bumps mid-deploy?**
+    *Lean:* Workers ship a one-version-back decoder; unknown future versions DLQ. Schema bumps are coordinated cluster-wide.
 
-13. **(Surfaced while writing this doc.) Cost tracking belongs on `Run`, but Runs can have sub-Runs (an agent that handoffs to another agent on the same physical Run vs invokes a sub-agent as a new logical Run). How do we model this for rollup?**
-    *Lean:* a Handoff (via `Call` within the same Run) is the same RunId — cost rolls up naturally. A sub-Run (a Handler explicitly creates a new Run via `client.invoke` from within the Handler, with `parent_run_id` set) is a separate RunId — `parent_run_id` enables roll-up at query time. The default is same-Run handoffs; sub-Runs are an explicit user choice.
+13. **Cost tracking with sub-Runs — same RunId vs new logical Run?**
+    *Lean:* Handoffs share the parent's RunId (cost rolls up naturally); explicit `client.invoke` sub-Runs get a fresh RunId with `parent_run_id` for query-time roll-up.
 
-14. **(Surfaced while writing this doc.) The `agent_loop` recipe's internal state (message_history, tool_calls, tool_results) — does it live in user `State` or in a recipe-owned sub-field?**
-    *Lean:* recipe-owned sub-field. The user's State has an optional `agent_loop: AgentLoopState` slot; the recipe reads/writes it. Users who don't use `agent_loop` don't pay the State complexity.
+14. **`agent_loop` internal state (`message_history`, `tool_calls`, `tool_results`) — in user `State` or a recipe-owned sub-field?**
+    *Lean:* recipe-owned sub-field. Optional `agent_loop: AgentLoopState` slot; users who don't use `agent_loop` don't pay the State complexity.
 
 15. **(Surfaced.) For the Schema Registry mode, do we require Confluent Schema Registry or accept Apicurio / Karapace / others?**
     *Lean:* Confluent Schema Registry first (most common). Add Apicurio/Karapace as adapters in v1.1.
 
-16. **(Choreography.) When an Agent declares `publishes=EventType` AND has a caller awaiting a `Reply`, do we emit the event topic + reply concurrently (single-flush) or sequentially (reply first, then event, with the event becoming visible *after* the caller observes the reply)?**
-    *Lean:* sequentially, reply first, then event — semantically clearer ("the request was completed before the event was broadcast") and observers don't race to see the event before the original caller has been answered. Cost: one extra small publish latency on the request path. Open to revisiting under load testing.
+16. **(Choreography.) When `worker.publish(...)` is set AND a caller awaits a `Reply`, emit the event topic + reply concurrently or sequentially?**
+    *Lean:* sequentially, reply first then event — semantically clearer; observers can't see the event before the caller has been answered. Revisit under load testing.
 
-17. **(Choreography.) Should `subscribes_to=` accept multiple Subscriptions whose payloads are the same type but different sources?**
+17. **(Choreography.) Should an agent accept multiple `worker.wire(...)` / `worker.subscribe(...)` calls whose payloads are the same type but different sources?**
     *Lean:* yes (no constraint). The dispatch routes by topic; the handler receives the payload + `ctx.trigger.source_topic` to disambiguate. The LLM is invoked with the payload; if the agent needs source-specific behavior, the user can branch on `ctx.trigger`.
 
-18. **(Choreography.) How do we detect orphaned subscriptions when a producer renames its events topic (or an Agent is removed from the deployment)?**
-    *Lean:* `worker.inspect()` in CI prints all subscriptions and their resolved topics. Auto-detection in production is hard (events that never arrive look identical to events that just haven't happened). A `--strict-wiring` flag could fail Worker startup if a Subscription's source-agent is not registered in the same Worker; useful for tightly-coupled deployments, optional for loose ones.
+18. **(Choreography.) Orphaned subscriptions when a producer renames its events topic?**
+    *Lean:* `worker.inspect()` in CI lists resolved topics; an optional `--strict-wiring` flag fails Worker startup if a Subscription's source-agent isn't co-registered (auto-detection in production is hard).
 
 19. **(Choreography.) Should the runs-state topic for an event-triggered Run carry the parent producer's `run_id` (lineage) as part of the value, or just as the `parent_run_id` field?**
     *Lean:* `parent_run_id` field is enough. Don't denormalize producer state into the consumer's record — that's coupling. The OTel span hierarchy + runs-state index by `parent_run_id` is the join path.
 
-20. **(Choreography.) Schema-typed subscriptions (`Subscription(payload=NewsArticle)` with no `topic=` or `source=`) require the SDK to resolve a topic from a Pydantic type. Is the convention `event.<module>.<TypeName>`, or do we require an explicit `class Config: calf_topic = ...`?**
-    *Lean:* require explicit `class Config: calf_topic = ...` in v1.0. Implicit type→topic conventions cross-package have produced footguns in every framework that adopted them; the explicit form is two extra lines for safety. Revisit for v1.1 if user demand is strong.
+20. **(Choreography.) Type→topic resolution for schema-typed subscriptions?**
+    *Lean:* require explicit `class Config: calf_topic = ...` in v1.0. Implicit conventions are cross-package footguns. Revisit for v1.1.
 
-21. **(Choreography.) For a Worker hosting N Agents with overlapping subscriptions to the same topic, do we share a single Kafka consumer subscription per topic and multiplex, or keep N separate consumers (one per Agent)?**
-    *Lean:* N separate consumers. Each Agent's subscription has its own consumer group so each receives every message — that's the whole point of pub/sub fan-out. Multiplexing inside the Worker would conflict with that. Cost: more consumer connections. Acceptable.
+21. **(Choreography.) N Agents subscribed to the same topic — one shared consumer or N separate?**
+    *Lean:* N separate. Each subscription needs its own consumer group (the point of pub/sub fan-out). Cost: more consumer connections. Acceptable.
 
 ---
 
@@ -3369,28 +3357,31 @@ I list each with my current lean. None are blocking the start of implementation,
 
 ### 25.1 Glossary
 
-- **Action** — A typed value returned by a Handler that describes a side effect (publish, checkpoint, terminate) to be performed by the runtime.
+- **Action** — A typed value returned by a Handler that describes a side effect (publish, checkpoint, terminate) to be performed by the runtime. Lives in `calfkit.actions`.
 - **Aggregator** — Runtime component that collects Fan-children Replies and re-enters the parent Handler with all results.
-- **Choreography** — Multi-agent pattern where producers publish events and consumers independently subscribe. Producers don't know consumers exist. See §11.B. Contrast with Orchestration.
-- **Context** — The per-invocation object passed to a Handler, exposing `run_id`, `state`, `deps`, `fan_results`, `resume_payload`, `trigger`, etc.
-- **Deps** — User-provided dependency object (DB conn, HTTP client, etc.) supplied at Worker startup, scoped to the Worker process.
+- **Agent** — A declarative class describing the identity, model, instructions, output schema, and tools of an LLM-driven Handler. Compiled to a Handler by `worker.add(agent)`. Not directly callable — see G13 and `InMemoryWorker`.
+- **Choreography** — Producers publish events; consumers independently subscribe. Producers don't know consumers exist. Wiring lives on the Worker. See §11.B. Contrast with Orchestration.
+- **ClientAgentRef** — A typed proxy for an Agent that the client process doesn't import. Carries `name`, `input_type`, `output_type`. Used by `client.invoke(ref, req)` in distributed deployments where the agent is hosted elsewhere.
+- **Context** — The per-invocation object passed to a Handler, parameterized as `Context[Deps]`. Exposes `run_id`, `frame_id`, `state`, `deps`, `fan_results`, `resume_payload`, `trigger`, `once()`, `llm()`.
+- **Deps** — User-provided dependency object (DB conn, HTTP client, etc.) supplied at Worker startup via `worker.deps_from(factory)`, scoped to the Worker process.
 - **Envelope** — The wire-format message carrying state bytes, payload bytes, frame stack, IDs.
 - **Event** — A wire-level envelope with `action_kind="emit"` and empty `call_stack`. Produced by `Emit`; consumed by Subscriptions. The choreography unit.
-- **Extension** — User-provided cross-cutting concern, implementing one or more of `around_invoke`, `around_publish`, `on_event`.
+- **Extension** — User-provided cross-cutting concern, implementing one or more of `around_invoke`, `around_publish`, `on_event`. Lives in `calfkit.extensions`.
 - **Fan** — An Action that dispatches N parallel Calls; the aggregator re-enters the parent with all Replies.
 - **Frame** — One (caller, callee) pair within a Run; tracked in the Envelope's call_stack.
-- **Handler** — User function from `(Context, Msg) -> Action`. The atomic unit of user code.
-- **HITL** — Human-in-the-loop. Achieved via `Interrupt` + `Resume`.
+- **Handler** — User function from `(Context, Msg) -> Action`. The atomic unit of user code at Layer B.
+- **HITL** — Human-in-the-loop. Layer A: `@tool(requires_approval=True, resume_with=...)` (primary) or `@agent.interrupt_when(...)` (secondary). Layer B: `Interrupt` Action + `client.resume(...)`. See §4.5.
 - **Hop** — One trip from publisher to consumer over Kafka.
+- **InMemoryWorker** — The `Worker` runtime with `MemoryTransport` instead of Kafka. Canonical local-dev / REPL / test idiom; `InMemoryWorker.testing(*agents)` is the factory. See §17.2.
 - **LifecycleEvent** — Typed observable event (RunStarted, ToolCallStarted, EventReceived, EventSkipped, etc.) consumed via `on_event`.
-- **Orchestration** — Multi-agent pattern where a caller explicitly invokes a callee via `Call`/`Reply`/`Fan`. See §11.A. Contrast with Choreography.
+- **Orchestration** — Caller explicitly invokes callee via `Call`/`Reply`/`Fan`. Wired via `agent.handoffs_to(...)` and `Tool.from_agent(...)`. See §11.A. Contrast with Choreography.
 - **Run** — The durable agent-execution aggregate, keyed by `RunId` (uuid7). Event-triggered Runs have `parent_run_id` set to the producer's Run.
 - **State** — User-typed value surviving across hops within a Run; opaque bytes on the wire.
-- **Subscription** — Declaration that binds an Agent (or Handler) to a Kafka topic as a reactive consumer. Carries `source` or `topic`, `payload` type, optional `filter`, `react`, `group_id`. See §11.B.7.
-- **Tool** — A Handler designated as callable by an LLM, with a synthesized JSON schema. Orchestration-only (called by an Agent, not subscribed).
+- **Subscription** — Power-user value type binding an Agent to a Kafka topic. Most users use `worker.wire(...)` / `worker.subscribe(...)` kwargs instead. See §11.B.7.
+- **Tool** — A standalone Kafka service callable by an LLM. First-class — never owned by an Agent. Three module-level construction paths: `@tool` (Python in-codebase), `Tool.external(...)` (cross-language stub), `Tool.from_agent(...)` (sub-agent). Attached via `tools=[...]`. Orchestration-only. See §10.1.
 - **Trigger** — The origin of a Handler invocation, exposed as `ctx.trigger`. Kinds: `request`, `event`, `resume`, `tool_call`, `fan_child`. Lets agent code branch on "how did I get here."
-- **Wire** — As in `worker.wire(source=..., target=..., payload=...)`. Deployment-time choreography binding — attaches a Subscription to an Agent outside its declaration. See §11.B.6.
-- **Worker** — A process hosting Handlers + Extensions, consuming from Kafka.
+- **Wire** — As in `worker.wire(source=..., target=..., payload=...)`. Deployment-time choreography binding — attaches a Subscription to an Agent. The canonical (and only) form for choreography wiring. See §11.B.6.
+- **Worker** — A process hosting Handlers + Extensions, consuming from Kafka. Builder-style: narrow constructor + methods to attach extensions, deps, agents, and topology.
 
 ### 25.2 References
 
@@ -3421,8 +3412,8 @@ For grounding of the discard list (§21):
 | `calfkit/nodes/agent.py` | 61-72 | `_parallel_state_aggregation` | Removed; runtime-owned |
 | `calfkit/nodes/agent.py` | 74-221 | `run()` god-method | Decomposed into agent_loop recipe + tool dispatch |
 | `calfkit/nodes/agent.py` | 116-120 | The `RuntimeError("This indicates lost PendingToolBatch state")` | Eliminated by design |
-| `calfkit/nodes/tool.py` | 26-105 | `ToolNodeDef` | `@tool` decorator |
-| `calfkit/nodes/tool.py` | 99-105 | `agent_tool` decorator | Renamed to `@tool` |
+| `calfkit/nodes/tool.py` | 26-105 | `ToolNodeDef` | Unified `Tool` class; `@tool` (module-level, topic auto-derived from `fn.__name__`) / `Tool.external` (explicit `topic=`) / `Tool.from_agent` |
+| `calfkit/nodes/tool.py` | 99-105 | `agent_tool` decorator | Replaced by module-level `@tool` (renamed and refined; the structural shape — standalone Kafka service, not agent-owned — is preserved from 0.x) |
 | `calfkit/models/actions.py` | 19-119 | `Reply`, `Delegate`, `Call`, `TailCall`, `ReturnCall`, `Sequential`, `Emit`, `Parallel`, `Silent` | New Action algebra (§3) |
 | `calfkit/models/envelope.py` | 9-17 | `Envelope(BaseModel)` with inline `SessionRunContext` | New Envelope with opaque state bytes (§6.1) |
 | `calfkit/models/state.py` | 18-101 | `State` god-model | User-defined StateT (§7) |
@@ -3430,7 +3421,7 @@ For grounding of the discard list (§21):
 | `calfkit/models/session_context.py` | 33-39 | `CallFrame` dataclass | Survives as internal Frame model |
 | `calfkit/models/session_context.py` | 45-70 | `WorkflowState` | Becomes part of Envelope structure |
 | `calfkit/models/session_context.py` | 73-78 | `Deps(BaseModel)` | Survives, slimmed |
-| `calfkit/models/session_context.py` | 81-114 | `BaseSessionRunContext` / `SessionRunContext` | Becomes `Context[DepsT, StateT]` |
+| `calfkit/models/session_context.py` | 81-114 | `BaseSessionRunContext` / `SessionRunContext` | Becomes `Context[Deps]` (single generic param) |
 | `calfkit/_protocol.py` | 21-25 | `HDR_EMITTER`, `HDR_EMITTER_KIND` | Survives; extended (§6.2) |
 | `calfkit/_protocol.py` | 28-39 | `decode_header_str` | Survives as internal codec helper |
 | `calfkit/client/base.py` | 50-112 | `BaseClient`, `connect` | Slimmed; `Client.connect` keeps the API surface |
