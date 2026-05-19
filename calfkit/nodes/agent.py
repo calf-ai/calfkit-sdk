@@ -285,6 +285,7 @@ class BaseAgentNodeDef(
         correlation_id: str,
         broker: BrokerAnnotation,
         inbound_headers: dict[str, Any] | None = None,
+        inbound_partition: int | None = None,
     ) -> Envelope:
         """Override the parallel-fan-out branch to write the durable batch
         record before publishing tool Calls, and route each Call's callback
@@ -295,7 +296,13 @@ class BaseAgentNodeDef(
         """
         if isinstance(output, list) and output and all(isinstance(item, Call) for item in output):
             await self._ensure_aggregator_ready(broker)
-            await self._publish_parallel_with_aggregator(output, envelope, correlation_id, broker)
+            await self._publish_parallel_with_aggregator(
+                output,
+                envelope,
+                correlation_id,
+                broker,
+                partition=inbound_partition,
+            )
             return envelope
 
         return await super()._publish_action(
@@ -304,6 +311,7 @@ class BaseAgentNodeDef(
             correlation_id,
             broker,
             inbound_headers=inbound_headers,
+            inbound_partition=inbound_partition,
         )
 
     async def _publish_parallel_with_aggregator(
@@ -312,6 +320,8 @@ class BaseAgentNodeDef(
         envelope: Envelope,
         correlation_id: str,
         broker: BrokerAnnotation,
+        *,
+        partition: int | None = None,
     ) -> None:
         """Publish a parallel tool fan-out with durable aggregator semantics.
 
@@ -353,7 +363,7 @@ class BaseAgentNodeDef(
             agent_topic=self.subscribe_topics[0],
         )
         key = (correlation_id, fan_out_id)
-        await state_store.put(key, initial_batch)
+        await state_store.put(key, initial_batch, partition=partition)
 
         logger.debug(
             "[%s] fan-out dispatch persisted key=%s expected=%d node=%s",
@@ -390,6 +400,7 @@ class BaseAgentNodeDef(
         correlation_id: Annotated[str, Context()],
         headers: Annotated[dict[str, Any], Context("message.headers")],
         broker: BrokerAnnotation,
+        partition: Annotated[int, Context("message.partition")] = 0,
     ) -> Response:
         """FastStream handler for tool returns arriving on ``{node_id}.fanout-returns``.
 
@@ -397,6 +408,11 @@ class BaseAgentNodeDef(
         completes, publishes the merged :class:`AggregatedReturn` back to the
         agent's main topic so the agent re-enters with the full set of tool
         results merged into its state.
+
+        ``partition`` is the inbound message's partition, threaded through
+        to the state-store write so the durable publish lands on the
+        partition this worker owns (co-partitioned via
+        :class:`FanOutAggregatorPartitioner`).
         """
         # Lazy setup so test paths that bypass Worker.run() still work.
         await self._ensure_aggregator_ready(broker)
@@ -451,7 +467,7 @@ class BaseAgentNodeDef(
         batch.last_updated_ms = int(time.time() * 1000)
 
         # 5. Durable write — publish to state topic, then update cache.
-        await state_store.put(key, batch)
+        await state_store.put(key, batch, partition=partition)
 
         # 6. on_partial hook.
         view = self.aggregator._batch_view(batch)
@@ -485,7 +501,7 @@ class BaseAgentNodeDef(
             )
 
             # Tombstone the batch so late returns are recognised.
-            await state_store.tombstone(key)
+            await state_store.tombstone(key, partition=partition)
 
         return Response(envelope, headers=self._emitter_headers())
 

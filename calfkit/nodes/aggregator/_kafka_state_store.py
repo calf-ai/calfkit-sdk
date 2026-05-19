@@ -158,6 +158,7 @@ class _KafkaStateStore:
             state,
             topic=self._state_topic,
             key=composite_key,
+            partition=partition,
         )
         self._cache[key] = batch
         self._by_partition.setdefault(partition, set()).add(key)
@@ -184,6 +185,7 @@ class _KafkaStateStore:
             None,
             topic=self._state_topic,
             key=composite_key,
+            partition=partition,
         )
         self._cache.pop(key, None)
         if partition in self._by_partition:

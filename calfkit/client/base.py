@@ -22,6 +22,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import OverridesState
+from calfkit.nodes.aggregator._partitioner import FanOutAggregatorPartitioner
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +101,17 @@ class BaseClient:
             reply_topic = f"calf-client-reply-{client_id}"
         group_id = f"calf-client-reply-{client_id}"
 
+        if "partitioner" in broker_kwargs:
+            raise ValueError(
+                "Calfkit installs its own partitioner (FanOutAggregatorPartitioner) "
+                "to preserve co-partitioning across fan-out aggregator topics. "
+                "Remove the 'partitioner' kwarg."
+            )
+
         broker_connection = KafkaBroker(
             server_urls,
             middlewares=[ContextInjectionMiddleware],
+            partitioner=FanOutAggregatorPartitioner(),
             **broker_kwargs,
         )
 

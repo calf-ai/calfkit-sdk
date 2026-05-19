@@ -274,6 +274,7 @@ class BaseNodeDef(BaseNodeSchema):
         correlation_id: str,
         broker: BrokerAnnotation,
         inbound_headers: dict[str, Any] | None = None,
+        inbound_partition: int | None = None,
     ) -> Envelope:
         """Publish the framework-level result of a ``run()`` invocation.
 
@@ -288,6 +289,13 @@ class BaseNodeDef(BaseNodeSchema):
         identity for the aggregator. Forward only on ``ReturnCall``; other
         publish kinds either generate new identity (parallel fan-out) or
         leave the headers untouched.
+
+        ``inbound_partition``: the Kafka partition the inbound message was
+        delivered on. Threaded through to the aggregator's state-store
+        publish so the durable write lands on the partition this worker
+        owns (co-partitioned with the agent's main topic). ``None`` means
+        the caller didn't supply one — the state store falls back to
+        :meth:`_KafkaStateStore.partition_for_key`.
         """
         publish_envelope: Envelope
 
@@ -378,6 +386,7 @@ class BaseNodeDef(BaseNodeSchema):
         correlation_id: Annotated[str, Context()],
         headers: Annotated[dict[str, Any], Context("message.headers")],
         broker: BrokerAnnotation,
+        partition: Annotated[int, Context("message.partition")] = 0,
     ) -> Response:
         raw_emitter = headers.get(HDR_EMITTER)
         emitter = decode_header_str(raw_emitter)
@@ -401,7 +410,14 @@ class BaseNodeDef(BaseNodeSchema):
             else:
                 output = await self.run(ctx)
             logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
-            body = await self._publish_action(output, envelope, correlation_id, broker, inbound_headers=headers)
+            body = await self._publish_action(
+                output,
+                envelope,
+                correlation_id,
+                broker,
+                inbound_headers=headers,
+                inbound_partition=partition,
+            )
 
         return Response(body, headers=self._emitter_headers())
 
