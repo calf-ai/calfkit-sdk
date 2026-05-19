@@ -198,7 +198,17 @@ def deploy_instructions_agent(container) -> Agent:
     return agent
 
 
-@pytest.fixture(params=["tool-override", "tool-override-none", "tool-override-empty", None])
+@pytest.fixture(
+    params=[
+        "tool-override",
+        "tool-override-none",
+        "tool-override-empty",
+        "model-settings-only",
+        "model-settings-nested",
+        "both-overrides",
+        None,
+    ]
+)
 def make_overrides_state_factory(request, container) -> Callable[..., OverridesState | None]:
     mode = request.param
 
@@ -224,6 +234,33 @@ def make_overrides_state_factory(request, container) -> Callable[..., OverridesS
 
     elif mode == "tool-override-empty":
         return lambda: OverridesState(override_agent_tools=list())
+
+    elif mode == "model-settings-only":
+        return lambda: OverridesState(model_settings={"temperature": 0.5})
+
+    elif mode == "model-settings-nested":
+        return lambda: OverridesState(
+            model_settings={
+                "extra_body": {"reasoning_effort": "high", "verbosity": "verbose"},
+                "stop_sequences": ["<END>", "<<STOP>>"],
+                "logit_bias": {"50256": -100},
+            }
+        )
+
+    elif mode == "both-overrides":
+        tools = container.get(list[ToolNodeDef])
+        return lambda: OverridesState(
+            override_agent_tools=[
+                BaseToolNodeSchema(
+                    node_id=t.node_id,
+                    subscribe_topics=t.subscribe_topics,
+                    publish_topic=t.publish_topic,
+                    tool_schema=t.tool_schema,
+                )
+                for t in tools
+            ],
+            model_settings={"max_tokens": 1024, "temperature": 0.2},
+        )
 
     raise ValueError(f"Unknown mode={mode}")
 
