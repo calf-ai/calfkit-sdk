@@ -433,18 +433,24 @@ async def test_unexpected_tool_call_id_is_ignored(
 # ---------------------------------------------------------------------------
 
 
-def test_fan_out_id_derives_deterministically_from_frame_id(agent: object) -> None:
-    """Two envelopes with the same inbound frame_id must produce the same
-    fan_out_id. Verified by inspection of the inbound's
-    ``current_frame.frame_id`` since ``_publish_parallel_with_aggregator``
-    uses it directly."""
-    e1 = _make_envelope("corr-D", frame_id="frame-stable")
-    e2 = _make_envelope("corr-D", frame_id="frame-stable")
+async def test_fan_out_id_is_the_inbound_frame_id(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """The fan_out_id used as the state-store key MUST equal the inbound
+    CallFrame.frame_id — that's how idempotent dispatch on redelivery
+    works. Verify by dispatching once and inspecting the durable key."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
-    assert e1.internal_workflow_state.current_frame.frame_id == "frame-stable"
-    assert e2.internal_workflow_state.current_frame.frame_id == "frame-stable"
-    # Same inbound frame_id → identical fan_out_id (deterministic dispatch).
-    assert e1.internal_workflow_state.current_frame.frame_id == e2.internal_workflow_state.current_frame.frame_id
+    envelope = _make_envelope("corr-id", frame_id="my-stable-frame-id")
+    calls = _make_calls("t1")
+
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls, envelope, "corr-id", broker, partition=0,
+    )
+
+    # The state-store key uses the inbound frame_id as fan_out_id.
+    assert ("corr-id", "my-stable-frame-id") in state_store._cache
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +623,143 @@ async def test_publish_failure_leaves_cache_unchanged(
 # ---------------------------------------------------------------------------
 # MergeErrorPolicy.DROP — degraded-merge header
 # ---------------------------------------------------------------------------
+
+
+async def test_abort_policy_re_raises_as_aggregator_merge_error(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """ABORT (default policy): user's merge raises → handler re-raises
+    AggregatorMergeError with structured correlation_id/fan_out_id so
+    FastStream redelivers and the late-return path eventually drops it."""
+    from calfkit.nodes.aggregator.errors import AggregatorMergeError
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    async def boom(batch: AggregatorBatch) -> AggregatedReturn:
+        raise RuntimeError("user merge boom")
+
+    agent.aggregator.merge = boom  # type: ignore[attr-defined,method-assign]
+
+    key = ("corr-abort", "fan-abort")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-abort",
+        fan_out_id="fan-abort",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope("corr-abort", state=_state_with_results({"t1": "r1"}))
+    headers = {"x-calf-fanout-id": "fan-abort"}
+
+    with pytest.raises(AggregatorMergeError) as excinfo:
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-abort",
+            headers=headers,
+            broker=broker,
+        )
+
+    assert excinfo.value.correlation_id == "corr-abort"
+    assert excinfo.value.fan_out_id == "fan-abort"
+
+
+async def test_retry_policy_succeeds_on_second_attempt(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """RETRY: first merge call raises, second succeeds, batch completes."""
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.RETRY  # type: ignore[attr-defined]
+
+    call_count = [0]
+
+    async def flaky(batch: AggregatorBatch) -> AggregatedReturn:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("transient")
+        return AggregatedReturn(state=batch.base_state)
+
+    agent.aggregator.merge = flaky  # type: ignore[attr-defined,method-assign]
+
+    key = ("corr-retry", "fan-retry")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-retry",
+        fan_out_id="fan-retry",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope("corr-retry", state=_state_with_results({"t1": "r1"}))
+    headers = {"x-calf-fanout-id": "fan-retry"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-retry",
+        headers=headers,
+        broker=broker,
+    )
+
+    assert call_count[0] == 2
+    # Batch completed: aggregated return published to agent topic.
+    agent_topic_publishes = [
+        c for c in broker.publish.await_args_list
+        if c.kwargs.get("topic") == "test_agent.input"
+    ]
+    assert len(agent_topic_publishes) == 1
+
+
+async def test_retry_policy_exhausted_raises(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """RETRY: both attempts raise → handler re-raises AggregatorMergeError."""
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+    from calfkit.nodes.aggregator.errors import AggregatorMergeError
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.RETRY  # type: ignore[attr-defined]
+
+    async def always_boom(batch: AggregatorBatch) -> AggregatedReturn:
+        raise RuntimeError("permanent")
+
+    agent.aggregator.merge = always_boom  # type: ignore[attr-defined,method-assign]
+
+    key = ("corr-exh", "fan-exh")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-exh",
+        fan_out_id="fan-exh",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope("corr-exh", state=_state_with_results({"t1": "r1"}))
+    headers = {"x-calf-fanout-id": "fan-exh"}
+
+    with pytest.raises(AggregatorMergeError):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-exh",
+            headers=headers,
+            broker=broker,
+        )
 
 
 async def test_drop_policy_stamps_degraded_header_on_publish(

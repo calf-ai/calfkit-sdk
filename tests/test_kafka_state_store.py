@@ -375,3 +375,85 @@ async def test_rehydrate_passes_client_kwargs() -> None:
     construction_kwargs = mock_cls.call_args.kwargs
     assert construction_kwargs.get("security_protocol") == "SASL_SSL"
     assert construction_kwargs.get("bootstrap_servers") == "kafka:9092"
+
+
+# ---------------------------------------------------------------------------
+# Simulated restart: rehydration rebuilds cache from the durable log
+# ---------------------------------------------------------------------------
+
+
+async def test_simulate_restart_rebuilds_cache_from_log() -> None:
+    """Restart recovery: put a few records, drop the store, construct a
+    new store, replay records via rehydrate_partitions → assert the
+    cache reflects what we wrote.
+
+    Mocks AIOKafkaConsumer to replay whatever the previous broker.publish
+    captured — no real broker required.
+    """
+    from aiokafka import TopicPartition
+
+    # First "process": construct store, put two batches.
+    broker_a = MagicMock()
+    broker_a.publish = AsyncMock()
+    store_a = _KafkaStateStore(
+        broker=broker_a,
+        state_topic="agent.fanout-state",
+        bootstrap_servers="localhost:9092",
+        partition_count=4,
+    )
+    batch_1 = _make_batch("c1", "f1")
+    batch_2 = _make_batch("c2", "f2")
+    batch_2.received["t1"] = "result1"
+
+    await store_a.put(("c1", "f1"), batch_1, partition=0)
+    await store_a.put(("c2", "f2"), batch_2, partition=0)
+
+    # Capture what was published (the durable log).
+    published = [c.args[0] for c in broker_a.publish.await_args_list]
+    published_keys = [c.kwargs["key"] for c in broker_a.publish.await_args_list]
+
+    # "Restart": new process, new store with no in-memory cache.
+    broker_b = MagicMock()
+    broker_b.publish = AsyncMock()
+    store_b = _KafkaStateStore(
+        broker=broker_b,
+        state_topic="agent.fanout-state",
+        bootstrap_servers="localhost:9092",
+        partition_count=4,
+    )
+
+    # Stub the rehydration consumer to replay published records.
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    tp = TopicPartition("agent.fanout-state", 0)
+    mock_consumer.end_offsets = AsyncMock(return_value={tp: len(published)})
+
+    class _Rec:
+        def __init__(self, key: bytes, value: bytes, offset: int) -> None:
+            self.key = key
+            self.value = value
+            self.offset = offset
+
+    records = [
+        _Rec(published_keys[i], published[i].model_dump_json().encode(), i)
+        for i in range(len(published))
+    ]
+    # getmany returns records on first call, empty on subsequent calls.
+    mock_consumer.getmany = AsyncMock(side_effect=[{tp: records}, {}])
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        await store_b.rehydrate_partitions({0})
+
+    # Cache rebuilt with both batches.
+    rehydrated_1 = store_b.get(("c1", "f1"))
+    rehydrated_2 = store_b.get(("c2", "f2"))
+    assert rehydrated_1 is not None
+    assert rehydrated_2 is not None
+    assert rehydrated_2.received == {"t1": "result1"}
+    assert 0 in store_b.owned_partitions
