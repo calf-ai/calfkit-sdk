@@ -18,30 +18,6 @@ from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import OverridesState
 
 
-def _validate_model_settings_jsonable(model_settings: ModelSettings | dict[str, Any] | None) -> None:
-    if model_settings is None:
-        return
-    try:
-        json.dumps(model_settings, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"model_settings is not JSON-serializable and cannot be sent over the wire. "
-            f"Offending payload: {model_settings!r}. Underlying error: {exc}"
-        ) from exc
-
-
-def _build_overrides(
-    tool_overrides: list[BaseToolNodeSchema] | None,
-    model_settings: ModelSettings | dict[str, Any] | None,
-) -> OverridesState | None:
-    if tool_overrides is None and model_settings is None:
-        return None
-    return OverridesState(
-        override_agent_tools=tool_overrides,
-        model_settings=dict(model_settings) if model_settings is not None else None,
-    )
-
-
 class Client(BaseClient):
     """High-level client for invoking Calf agent nodes.
 
@@ -133,7 +109,12 @@ class Client(BaseClient):
             An :class:`InvocationHandle` whose ``result()`` resolves to a
             :class:`NodeResult`.
         """
-        _validate_model_settings_jsonable(model_settings)
+        if model_settings is not None:
+            try:
+                json.dumps(model_settings, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_settings is not JSON-serializable: {exc}. Payload: {model_settings!r}") from exc
+
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
         if reply_topic is None:
@@ -141,13 +122,21 @@ class Client(BaseClient):
 
         state = State(message_history=message_history or list(), temp_instructions=temp_instructions)
         state.stage_message(ModelRequest.user_text_prompt(user_prompt))
+        overrides = (
+            OverridesState(
+                override_agent_tools=tool_overrides,
+                model_settings=dict(model_settings) if model_settings is not None else None,
+            )
+            if tool_overrides is not None or model_settings is not None
+            else None
+        )
         return await self._invoke(
             topic=topic,
             reply_topic=reply_topic,
             correlation_id=correlation_id,
             run_args=run_args,
             state=state,
-            overrides=_build_overrides(tool_overrides, model_settings),
+            overrides=overrides,
             deps=deps,
             output_type=output_type,
         )

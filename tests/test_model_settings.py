@@ -45,14 +45,13 @@ def _deploy_agent(
     tier1: ModelSettings | dict[str, Any] | None = None,
     tier2: ModelSettings | dict[str, Any] | None = None,
     tools: list[ToolNodeDef] | None = None,
-    topic: str = "test_model_settings_agent.input",
 ) -> tuple[Agent, _Capture]:
     worker = container.get(Worker)
     model, captured = _make_capture_model(tier1)
     agent = Agent(
         "test_model_settings_agent",
         system_prompt="You are a helpful AI assistant.",
-        subscribe_topics=topic,
+        subscribe_topics="test_model_settings_agent.input",
         publish_topic="test_model_settings_agent.output",
         model_client=model,
         model_settings=tier2,

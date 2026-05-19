@@ -131,13 +131,14 @@ class BaseAgentNodeDef(
         if ctx.state.uncommitted_message is not None:
             ctx.state.commit_message_to_history()
 
+        run_model_settings = cast(ModelSettings | None, ctx.state.overrides.model_settings) if ctx.state.overrides is not None else None
         result = await self._agent_loop.run(
             message_history=ctx.state.message_history,
             instructions=ctx.state.temp_instructions,
             toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
             deps=ctx.deps.provided_deps,  # None valid when AgentDepsT=NoneType
             deferred_tool_results=tool_results,
-            model_settings=cast(ModelSettings | None, ctx.state.overrides.model_settings) if ctx.state.overrides is not None else None,
+            model_settings=run_model_settings,
         )
         if isinstance(result.output, DeferredToolRequests):
             # The LLM called one or more tools
