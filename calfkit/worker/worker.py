@@ -33,26 +33,37 @@ class Worker:
     def register_handlers(self) -> None:
         if self._prepared:
             raise RuntimeError("register_handlers() already called")
-        else:
-            for node in self._nodes:
-                group_id = self._group_id or node.name
+
+        for node in self._nodes:
+            for sub in node.kafka_subscriptions():
+                group_id = sub.group_id or self._group_id or node.name
+                max_workers = sub.max_workers if sub.max_workers is not None else self._max_workers
+
+                # Per-subscription extra_kwargs override Worker-level values on conflict.
+                merged_extra_kwargs: dict[str, Any] = {**self._extra_subscribe_kwargs, **sub.extra_kwargs}
+                if sub.listener is not None:
+                    merged_extra_kwargs["listener"] = sub.listener
+                if sub.ack_policy is not None:
+                    merged_extra_kwargs["ack_policy"] = sub.ack_policy
+
                 logger.info(
-                    "registering node=%s subscribe=%s publish=%s",
+                    "registering node=%s topics=%s group_id=%s publish=%s",
                     node.name,
-                    node.subscribe_topics,
-                    node.publish_topic,
+                    sub.topics,
+                    group_id,
+                    sub.publish_topic,
                 )
                 subscriber = self._client._connection.subscriber(
-                    *node.subscribe_topics,
+                    *sub.topics,
                     group_id=group_id,
-                    max_workers=self._max_workers,
-                    **self._extra_subscribe_kwargs,
+                    max_workers=max_workers,
+                    **merged_extra_kwargs,
                 )
-                handler = subscriber(node.handler)
-                if node.publish_topic:
-                    self._client._connection.publisher(node.publish_topic, **self._extra_publish_kwargs)(handler)
+                handler = subscriber(sub.handler)
+                if sub.publish_topic:
+                    self._client._connection.publisher(sub.publish_topic, **self._extra_publish_kwargs)(handler)
 
-            self._prepared = True
+        self._prepared = True
 
     async def run(self, **extra_run_args: Any) -> None:
         """Blocking method to run worker as a service until stopped."""

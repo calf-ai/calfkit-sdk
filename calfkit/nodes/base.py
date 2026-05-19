@@ -2,6 +2,7 @@ import inspect
 import logging
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar
 
 from faststream import Context, Response
@@ -32,6 +33,63 @@ Returning ``False`` (or raising, or returning a non-bool) skips ``run()`` and re
 envelope unchanged. Gates stack with AND semantics in registration order and short-circuit
 on the first rejection.
 """
+
+
+# ---------------------------------------------------------------------------
+# Kafka subscription registration spec
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _KafkaSubscription:
+    """A Kafka subscriber registration spec returned by ``BaseNodeDef.kafka_subscriptions()``.
+
+    The :class:`~calfkit.worker.worker.Worker` iterates the list returned by
+    ``kafka_subscriptions()`` and registers each spec as an independent FastStream
+    ``@broker.subscriber``. The default ``BaseNodeDef`` returns a single spec that
+    mirrors today's wiring (handler on ``subscribe_topics`` with optional
+    ``publish_topic`` wrapper). Subclasses that need additional subscribers — e.g.,
+    agents that own a fan-out aggregator's returns subscriber — override
+    ``kafka_subscriptions()`` to return multiple specs.
+
+    Attributes carrying ``None`` (``group_id``, ``max_workers``) inherit the
+    Worker-level default at registration time. ``listener`` and ``ack_policy``
+    forward to the FastStream subscriber factory only when set.
+    """
+
+    topics: list[str]
+    """Topics this subscriber consumes from."""
+
+    handler: Callable[..., Any]
+    """Async callable that processes each message. Same shape as
+    :meth:`BaseNodeDef.handler`; FastStream supplies the parameters via its
+    ``Context()`` and broker annotations."""
+
+    group_id: str | None = None
+    """Consumer group id. ``None`` means inherit Worker default (Worker uses its
+    own ``group_id`` or falls back to ``node.name``)."""
+
+    listener: Any | None = None
+    """Optional ``aiokafka.ConsumerRebalanceListener`` for partition-assignment
+    callbacks. Forwarded to ``broker.subscriber(listener=...)`` when set."""
+
+    max_workers: int | None = None
+    """Per-subscription override of ``Worker.max_workers``. ``None`` means inherit
+    the Worker default."""
+
+    ack_policy: Any | None = None
+    """Optional ``faststream.middlewares.AckPolicy``. ``None`` lets FastStream
+    pick its own default."""
+
+    publish_topic: str | None = None
+    """If set, the handler's return value is published to this topic by wrapping
+    it with FastStream's ``@broker.publisher``. Only the node's main subscription
+    typically uses this; auxiliary subscriptions (e.g., the aggregator's returns
+    subscriber) leave it ``None``."""
+
+    extra_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Additional kwargs forwarded to ``broker.subscriber()``. Per-subscription
+    values override Worker-level ``extra_subscribe_kwargs`` on conflict."""
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +218,25 @@ class BaseNodeDef(BaseNodeSchema):
 
     def _emitter_headers(self) -> dict[str, str]:
         return {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind}
+
+    def kafka_subscriptions(self) -> list[_KafkaSubscription]:
+        """Return the list of Kafka subscriber registrations this node needs.
+
+        Default: one subscription mirroring today's behavior — ``self.handler`` on
+        ``self.subscribe_topics`` with the optional ``self.publish_topic`` wrapper.
+        Subclasses that need additional subscribers (e.g., agents owning a fan-out
+        aggregator's returns subscriber) override this to return multiple specs.
+
+        The Worker iterates the returned list and registers each spec as an
+        independent FastStream ``@broker.subscriber``.
+        """
+        return [
+            _KafkaSubscription(
+                topics=list(self.subscribe_topics),
+                handler=self.handler,
+                publish_topic=self.publish_topic,
+            )
+        ]
 
     async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
         publish_envelope: Envelope
