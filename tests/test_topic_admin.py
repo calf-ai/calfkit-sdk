@@ -12,6 +12,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiokafka.errors import (  # type: ignore[import-untyped]
+    TopicAlreadyExistsError,
+    UnknownTopicOrPartitionError,
+)
 
 from calfkit.nodes.aggregator._topic_admin import (
     STATE_TOPIC_CONFIG,
@@ -142,20 +146,91 @@ async def test_returns_correct_topic_names() -> None:
     assert returns_topic == "my-special_agent.fanout-returns"
 
 
-async def test_describe_topics_failure_falls_back_to_default() -> None:
-    """If describe_topics raises (e.g., broker unreachable), default partitions
-    are used and creation proceeds."""
+async def test_resolve_partition_count_raises_on_broker_down() -> None:
+    """A non-UnknownTopic exception (e.g., broker unreachable) must surface as
+    AggregatorStateStoreError rather than silently degrading to defaults."""
     admin = AsyncMock()
-    admin.describe_topics = AsyncMock(side_effect=Exception("broker unreachable"))
+    admin.describe_topics = AsyncMock(side_effect=Exception("connection refused"))
     admin.create_topics = AsyncMock()
     broker = _broker_with_admin(admin)
 
-    _state, _returns, partitions = await ensure_aggregator_topics(
+    with pytest.raises(AggregatorStateStoreError, match="failed to describe main topic"):
+        await ensure_aggregator_topics(
+            broker,
+            node_id="agent",
+            main_topic="agent.in",
+            default_partitions=6,
+        )
+
+    # No topics should have been created — startup must fail fast.
+    assert admin.create_topics.await_count == 0
+
+
+async def test_resolve_partition_count_falls_back_on_unknown_topic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the main topic legitimately doesn't exist (UnknownTopicOrPartitionError),
+    fall back to default_partitions and emit a WARN."""
+    admin = AsyncMock()
+    admin.describe_topics = AsyncMock(side_effect=UnknownTopicOrPartitionError())
+    admin.create_topics = AsyncMock()
+    broker = _broker_with_admin(admin)
+
+    with caplog.at_level("WARNING", logger="calfkit.nodes.aggregator._topic_admin"):
+        _state, _returns, partitions = await ensure_aggregator_topics(
+            broker,
+            node_id="agent",
+            main_topic="agent.in",
+            default_partitions=4,
+        )
+
+    assert partitions == 4
+    assert admin.create_topics.await_count == 2
+    # Confirm the WARN about defaulting to the fallback partition count fired.
+    assert any(
+        "agent.in" in record.message and "defaulting" in record.message
+        for record in caplog.records
+        if record.levelname == "WARNING"
+    )
+
+
+async def test_create_topic_swallows_topic_already_exists() -> None:
+    """If a peer worker creates the topic concurrently (TopicAlreadyExistsError),
+    fall through to the validate path rather than raising."""
+    admin = AsyncMock()
+
+    # describe_topics is called three times in total when both topics need to
+    # be created from scratch but the create races:
+    #   1. resolve main topic partition count -> 8
+    #   2. _ensure_topic(state) pre-create describe -> not found
+    #   3. _ensure_topic(returns) pre-create describe -> not found
+    describe_results: list[list[dict[str, Any]]] = [
+        [_topic_metadata("agent.in", 8)],
+        [],
+        [],
+    ]
+    describe_call_count = 0
+
+    async def describe_topics(_topic_names: list[str]) -> list[dict[str, Any]]:
+        nonlocal describe_call_count
+        result = describe_results[describe_call_count]
+        describe_call_count += 1
+        return result
+
+    admin.describe_topics = AsyncMock(side_effect=describe_topics)
+    # Both create_topics calls raise — simulating the race on both topics.
+    admin.create_topics = AsyncMock(side_effect=TopicAlreadyExistsError())
+
+    broker = _broker_with_admin(admin)
+
+    state_topic, returns_topic, partitions = await ensure_aggregator_topics(
         broker,
         node_id="agent",
         main_topic="agent.in",
-        default_partitions=6,
     )
 
-    assert partitions == 6
+    assert state_topic == "agent.fanout-state"
+    assert returns_topic == "agent.fanout-returns"
+    assert partitions == 8
+    # Both create attempts ran (race on each topic) and both were swallowed.
     assert admin.create_topics.await_count == 2

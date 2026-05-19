@@ -15,6 +15,10 @@ import logging
 from typing import Any, cast
 
 from aiokafka.admin import NewTopic  # type: ignore[import-untyped]
+from aiokafka.errors import (  # type: ignore[import-untyped]
+    TopicAlreadyExistsError,
+    UnknownTopicOrPartitionError,
+)
 from faststream.kafka import KafkaBroker
 
 from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
@@ -119,9 +123,16 @@ async def _resolve_partition_count(
     """
     try:
         descriptions = await admin.describe_topics([main_topic])
-    except Exception as exc:
-        logger.debug("describe_topics(%s) raised: %s", main_topic, exc)
+    except UnknownTopicOrPartitionError:
+        logger.debug(
+            "main topic %s not found via describe_topics; using default",
+            main_topic,
+        )
         descriptions = []
+    except Exception as exc:
+        raise AggregatorStateStoreError(
+            f"failed to describe main topic {main_topic!r}: {exc}"
+        ) from exc
 
     for desc in descriptions:
         if desc.get("topic") == main_topic and not desc.get("error"):
@@ -174,14 +185,12 @@ async def _ensure_topic(
     )
     try:
         await admin.create_topics([new_topic], validate_only=False)
+    except TopicAlreadyExistsError:
+        # Multi-worker startup race: another worker created the topic
+        # between our describe + create. Fall through to validate.
+        logger.debug("topic %s race-created by another worker; continuing", topic)
+        return
     except Exception as exc:
-        # Multi-worker startup race: two workers may attempt create_topics
-        # at the same time. We can't import the specific exception class
-        # without coupling to aiokafka internals (it varies across versions);
-        # name-match instead and fall through to validate on the next call.
-        if "TopicAlreadyExists" in type(exc).__name__:
-            logger.debug("topic %s race-created by another worker; continuing", topic)
-            return
         raise AggregatorStateStoreError(f"failed to create topic {topic!r}: {exc}") from exc
 
     logger.info(
@@ -196,8 +205,12 @@ async def _try_describe(admin: Any, topic: str) -> dict[str, Any] | None:
     """Return the topic's metadata dict, or ``None`` if the topic doesn't exist."""
     try:
         descriptions = await admin.describe_topics([topic])
-    except Exception:
+    except UnknownTopicOrPartitionError:
         return None
+    except Exception as exc:
+        raise AggregatorStateStoreError(
+            f"failed to describe topic {topic!r}: {exc}"
+        ) from exc
     for desc in descriptions:
         if desc.get("topic") == topic and not desc.get("error"):
             return cast("dict[str, Any]", desc)
