@@ -272,7 +272,8 @@ class _KafkaStateStore:
                             f"rehydration stalled after {empty_polls}s on state-topic "
                             f"partitions={sorted(tp.partition for tp in remaining)}; "
                             f"broker may be unhealthy or partition leadership in flux. "
-                            f"Refusing to activate partition assignment with partial state."
+                            f"Refusing to activate partition assignment with partial state.",
+                            state_topic=self._state_topic,
                         )
         finally:
             await consumer.stop()
@@ -355,7 +356,8 @@ class _KafkaStateStore:
             # the corruption to the operator.
             raise AggregatorStateStoreError(
                 f"failed to parse FanOutState on partition={partition} key={key!r}: {exc}. "
-                f"Refusing to activate partition with corrupt durable state."
+                f"Refusing to activate partition with corrupt durable state.",
+                state_topic=self._state_topic,
             ) from exc
 
         batch = _InFlightBatch.from_fanout_state(state)

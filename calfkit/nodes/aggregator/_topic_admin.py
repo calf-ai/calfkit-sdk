@@ -131,7 +131,8 @@ async def _resolve_partition_count(
         descriptions = []
     except Exception as exc:
         raise AggregatorStateStoreError(
-            f"failed to describe main topic {main_topic!r}: {exc}"
+            f"failed to describe main topic {main_topic!r}: {exc}",
+            state_topic=main_topic,
         ) from exc
 
     for desc in descriptions:
@@ -172,7 +173,8 @@ async def _ensure_topic(
                 f"topic {topic!r} has {existing_partitions} partitions but "
                 f"the aggregator requires {partitions} (must match main topic). "
                 f"Repartition the topic or align partition counts manually before "
-                f"restarting."
+                f"restarting.",
+                state_topic=topic,
             )
         logger.debug("topic %s already exists with %d partitions", topic, partitions)
         return
@@ -191,7 +193,10 @@ async def _ensure_topic(
         logger.debug("topic %s race-created by another worker; continuing", topic)
         return
     except Exception as exc:
-        raise AggregatorStateStoreError(f"failed to create topic {topic!r}: {exc}") from exc
+        raise AggregatorStateStoreError(
+            f"failed to create topic {topic!r}: {exc}",
+            state_topic=topic,
+        ) from exc
 
     logger.info(
         "created topic %s partitions=%d configs=%s",
@@ -209,7 +214,8 @@ async def _try_describe(admin: Any, topic: str) -> dict[str, Any] | None:
         return None
     except Exception as exc:
         raise AggregatorStateStoreError(
-            f"failed to describe topic {topic!r}: {exc}"
+            f"failed to describe topic {topic!r}: {exc}",
+            state_topic=topic,
         ) from exc
     for desc in descriptions:
         if desc.get("topic") == topic and not desc.get("error"):

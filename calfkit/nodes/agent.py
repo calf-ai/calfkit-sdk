@@ -546,7 +546,11 @@ class BaseAgentNodeDef(
                 if fallback is None:
                     # ABORT policy: re-raise so the broker delivers again
                     # (and the late-return path eventually drops it).
-                    raise AggregatorMergeError(f"merge() raised for key={key}") from exc
+                    raise AggregatorMergeError(
+                        f"merge() raised for key={key}",
+                        correlation_id=key[0],
+                        fan_out_id=key[1],
+                    ) from exc
                 merged = fallback
 
             # Construct an envelope mirroring a normal ReturnCall back to
