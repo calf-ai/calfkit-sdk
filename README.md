@@ -318,6 +318,57 @@ For tool-node gating, pass `gates=[...]` to `ToolNodeDef.create_tool_node(...)` 
 
 <br>
 
+### Consumer Nodes (Optional)
+
+A **consumer node** is a terminal sink — it subscribes to one or more topics and runs arbitrary Python logic against every event flowing through. Consumers receive the same `NodeResult` that `Client.execute_node()` returns, including the full session state (`tool_calls`, `tool_results`, `message_history`, `metadata`).
+
+Deploy a consumer as its own service. Wire it to an agent's `publish_topic` (or any topic carrying calfkit envelopes) to observe outputs from agents, tools, and intermediate hops:
+
+```python
+# weather_sink.py
+import asyncio
+from calfkit.client import Client, NodeResult
+from calfkit.nodes import consumer
+from calfkit.worker import Worker
+
+@consumer(subscribe_topics="weather_agent.output")
+async def log_weather(result: NodeResult) -> None:
+    if result.output is None:
+        return  # intermediate hop — no final output yet
+    print(f"[{result.correlation_id[:8]}] {result.output}")
+
+async def main():
+    client = Client.connect("localhost:9092")
+    worker = Worker(client, nodes=[log_weather])  # Deploy the consumer node
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run alongside the agent service:
+
+```shell
+python weather_sink.py
+```
+
+An agent's `publish_topic` emits on **every** state transition — intermediate hops, tool completions, and terminals — so `result.output` is `None` on hops without final output parts. Filter via a gate if you only want agent terminals:
+
+```python
+@consumer(
+    subscribe_topics="weather_agent.output",
+    gates=[lambda ctx: bool(ctx.state.final_output_parts)],
+)
+async def save_final(result: NodeResult) -> None:
+    await db.save(result.output)  # always populated here
+```
+
+**Upstream requirement**: the upstream agent or tool must have a `publish_topic` set for consumers to tap (e.g. add `publish_topic="weather_agent.output"` to the agent in step 4).
+
+**Error policy**: exceptions from the consumer function are logged and swallowed by default so a single bad event can't poison-pill the Kafka offset. Pass `re_raise=True` to fail loud during development.
+
+<br>
+
 ## Documentation
 
 Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.
