@@ -8,7 +8,7 @@ Do not add imports from ``calfkit.*`` to this module.
 
 from typing import Any, Literal
 
-NodeKind = Literal["node", "agent", "tool", "client"]
+NodeKind = Literal["node", "agent", "tool", "client", "consumer"]
 """Closed value space for the ``x-calf-emitter-kind`` Kafka header. Subclasses of
 ``BaseNodeDef`` declare their kind via ``_node_kind: ClassVar[NodeKind]``; the
 client publishes with ``CLIENT_KIND`` directly.
