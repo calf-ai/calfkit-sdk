@@ -330,11 +330,17 @@ class BaseAgentNodeDef(
         1. Derive ``fan_out_id`` deterministically from the inbound
            ``CallFrame.frame_id`` so redelivered inbounds produce the same
            id (idempotent dispatch).
-        2. Build the initial :class:`_InFlightBatch` describing this fan-out
-           and write it durably to the state topic. This MUST happen before
-           any tool Call is published — if the worker crashes here, the
-           state record is the recovery anchor.
-        3. Publish each tool ``Call`` to its tool topic with callback
+        2. Idempotency check against the durable state: if the batch is
+           already complete (tombstoned within the recently-completed TTL),
+           skip the fan-out entirely. If it's still in-flight with the
+           same ``expected_tool_call_ids``, preserve the merged ``received``
+           state and re-publish the Calls; the tool layer is responsible
+           for being idempotent on ``tool_call_id``.
+        3. On first-time dispatch, build the initial :class:`_InFlightBatch`
+           and write it durably to the state topic before publishing any
+           Call — the state record is the recovery anchor if the worker
+           crashes after publishing but before all returns arrive.
+        4. Publish each tool ``Call`` to its tool topic with callback
            routed to ``{node_id}.fanout-returns`` (the aggregator's
            subscriber) and headers stamped with :data:`HDR_FANOUT_ID`
            (the deterministic batch id) and :data:`HDR_FRAME_ID` (the new
@@ -347,23 +353,56 @@ class BaseAgentNodeDef(
 
         # 1. Deterministic fan_out_id from the inbound agent frame.
         fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
-
         expected_tool_call_ids = frozenset({call.input_args[0] for call in calls if call.input_args is not None})
-
-        # 2. Build and durably persist the initial batch state.
-        now_ms = int(time.time() * 1000)
-        initial_batch = _InFlightBatch(
-            correlation_id=correlation_id,
-            fan_out_id=fan_out_id,
-            expected_tool_call_ids=expected_tool_call_ids,
-            base_state=calls[0].state.model_copy(deep=True),
-            received={},
-            started_at_ms=now_ms,
-            last_updated_ms=now_ms,
-            agent_topic=self.subscribe_topics[0],
-        )
         key = (correlation_id, fan_out_id)
-        await state_store.put(key, initial_batch, partition=partition)
+
+        # 2. Idempotent dispatch — handle inbound redelivery cleanly.
+        if state_store.was_recently_completed(key):
+            logger.info(
+                "[%s] redelivered inbound for already-completed batch key=%s; skipping fan-out",
+                correlation_id[:8],
+                key,
+            )
+            return
+
+        existing = state_store.get(key)
+        if existing is not None and existing.expected_tool_call_ids == expected_tool_call_ids:
+            # In-flight redelivery: keep durable state untouched. Tool Calls
+            # are re-published below; tool dedup is the tool's responsibility.
+            logger.info(
+                "[%s] redelivered inbound for in-flight batch key=%s; preserving received=%d/%d",
+                correlation_id[:8],
+                key,
+                len(existing.received),
+                len(expected_tool_call_ids),
+            )
+        else:
+            if existing is not None:
+                # The agent loop produced a different set of tool calls on
+                # re-entry. This is a real upstream bug; surface it loudly
+                # and overwrite the stale state so the new dispatch can
+                # proceed.
+                logger.error(
+                    "[%s] fan-out key=%s redispatch with different expected_tool_call_ids "
+                    "(prev=%s new=%s); overwriting",
+                    correlation_id[:8],
+                    key,
+                    sorted(existing.expected_tool_call_ids),
+                    sorted(expected_tool_call_ids),
+                )
+            # 3. First-time dispatch — build and durably persist the initial batch.
+            now_ms = int(time.time() * 1000)
+            initial_batch = _InFlightBatch(
+                correlation_id=correlation_id,
+                fan_out_id=fan_out_id,
+                expected_tool_call_ids=expected_tool_call_ids,
+                base_state=calls[0].state.model_copy(deep=True),
+                received={},
+                started_at_ms=now_ms,
+                last_updated_ms=now_ms,
+                agent_topic=self.subscribe_topics[0],
+            )
+            await state_store.put(key, initial_batch, partition=partition)
 
         logger.debug(
             "[%s] fan-out dispatch persisted key=%s expected=%d node=%s",
@@ -373,7 +412,7 @@ class BaseAgentNodeDef(
             self.name,
         )
 
-        # 3. Publish each tool Call with callback → fanout-returns.
+        # 4. Publish each tool Call with callback → fanout-returns.
         for call in calls:
             wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
             wf_copy.invoke_frame(call, returns_topic)

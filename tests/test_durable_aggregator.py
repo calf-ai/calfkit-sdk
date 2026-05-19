@@ -435,3 +435,163 @@ def test_fan_out_id_derives_deterministically_from_frame_id(agent: object) -> No
     assert e2.internal_workflow_state.current_frame.frame_id == "frame-stable"
     # Same inbound frame_id → identical fan_out_id (deterministic dispatch).
     assert e1.internal_workflow_state.current_frame.frame_id == e2.internal_workflow_state.current_frame.frame_id
+
+
+# ---------------------------------------------------------------------------
+# Idempotent dispatch on inbound redelivery
+# ---------------------------------------------------------------------------
+
+
+def _make_calls(*tool_call_ids: str, topic: str = "tool.input") -> list[object]:
+    """Build a list of Call[State] objects shaped like
+    BaseAgentNodeDef.run would produce for parallel fan-out."""
+    from calfkit.models import Call
+
+    return [Call[State](topic, State(), tcid) for tcid in tool_call_ids]
+
+
+async def test_redispatch_preserves_received_for_in_flight_batch(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """An inbound redelivered for an in-flight batch must NOT overwrite
+    the already-merged ``received`` map. The durable record must be left
+    untouched; only the tool Calls re-publish (tool dedup is the tool's
+    responsibility)."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+
+    correlation_id = "corr-R"
+    frame_id = "frame-R"
+    key = (correlation_id, frame_id)
+
+    # Seed: this is what we'd see if a prior dispatch already happened and
+    # one of three tools has already returned and been merged.
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id=correlation_id,
+        fan_out_id=frame_id,
+        expected_tool_call_ids=frozenset({"t1", "t2", "t3"}),
+        base_state=State(),
+        received={"t1": "already-merged-result"},
+        started_at_ms=1000,
+        last_updated_ms=2000,
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(correlation_id, frame_id=frame_id)
+    calls = _make_calls("t1", "t2", "t3")
+
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls, envelope, correlation_id, broker, partition=0,
+    )
+
+    # No state-topic publish — the existing batch was preserved.
+    state_publishes = [
+        c for c in broker.publish.await_args_list
+        if c.kwargs.get("topic") == "test_agent.fanout-state"
+    ]
+    assert state_publishes == [], "expected no state-topic publish on redispatch"
+
+    # Cache state is preserved exactly — received["t1"] survives.
+    preserved = state_store._cache[key]
+    assert preserved.received == {"t1": "already-merged-result"}
+    assert preserved.last_updated_ms == 2000
+
+    # Tool Calls were re-published (3 of them, one per tool).
+    tool_publishes = [
+        c for c in broker.publish.await_args_list
+        if c.kwargs.get("topic") == "tool.input"
+    ]
+    assert len(tool_publishes) == 3
+
+
+async def test_redispatch_skipped_for_completed_batch(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """An inbound redelivered for a batch that already completed (and was
+    tombstoned within the recently-completed TTL) must not re-dispatch
+    the tools or write any new state — the work is done."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+
+    correlation_id = "corr-C"
+    frame_id = "frame-C"
+    key = (correlation_id, frame_id)
+
+    state_store.mark_completed(key)  # simulate prior tombstone
+
+    envelope = _make_envelope(correlation_id, frame_id=frame_id)
+    calls = _make_calls("t1", "t2")
+
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls, envelope, correlation_id, broker, partition=0,
+    )
+
+    broker.publish.assert_not_awaited()
+
+
+async def test_first_time_dispatch_persists_initial_batch(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When there's no prior state for the key, the initial batch is
+    durably persisted before any tool Calls are published."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+
+    correlation_id = "corr-F"
+    frame_id = "frame-F"
+    key = (correlation_id, frame_id)
+    assert state_store.get(key) is None
+
+    envelope = _make_envelope(correlation_id, frame_id=frame_id)
+    calls = _make_calls("t1", "t2")
+
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls, envelope, correlation_id, broker, partition=0,
+    )
+
+    persisted = state_store._cache[key]
+    assert persisted.expected_tool_call_ids == frozenset({"t1", "t2"})
+    assert persisted.received == {}
+
+    # First publish was to the state topic; subsequent publishes were
+    # the tool Calls.
+    first_topic = broker.publish.await_args_list[0].kwargs["topic"]
+    assert first_topic == "test_agent.fanout-state"
+
+
+async def test_redispatch_with_drifted_tool_call_ids_overwrites(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """If the agent loop produces a different expected_tool_call_ids set
+    on re-entry, the stale state is overwritten so the new dispatch
+    proceeds. This is a real upstream bug we surface via ERROR log; the
+    aggregator can't silently keep stale state."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+
+    correlation_id = "corr-D"
+    frame_id = "frame-D"
+    key = (correlation_id, frame_id)
+
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id=correlation_id,
+        fan_out_id=frame_id,
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={"t1": "stale-result"},
+        started_at_ms=1000,
+        last_updated_ms=2000,
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(correlation_id, frame_id=frame_id)
+    # Different set than what's cached.
+    calls = _make_calls("t1", "t2", "t3")
+
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls, envelope, correlation_id, broker, partition=0,
+    )
+
+    overwritten = state_store._cache[key]
+    assert overwritten.expected_tool_call_ids == frozenset({"t1", "t2", "t3"})
+    assert overwritten.received == {}  # fresh batch, stale received discarded
