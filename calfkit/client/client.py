@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import Any, overload
 
@@ -7,6 +8,7 @@ import uuid_utils
 
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
+from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client.base import BaseClient
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
@@ -14,6 +16,30 @@ from calfkit.client.node_result import NodeResult
 from calfkit.models import State
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import OverridesState
+
+
+def _validate_model_settings_jsonable(model_settings: ModelSettings | dict[str, Any] | None) -> None:
+    if model_settings is None:
+        return
+    try:
+        json.dumps(model_settings, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"model_settings is not JSON-serializable and cannot be sent over the wire. "
+            f"Offending payload: {model_settings!r}. Underlying error: {exc}"
+        ) from exc
+
+
+def _build_overrides(
+    tool_overrides: list[BaseToolNodeSchema] | None,
+    model_settings: ModelSettings | dict[str, Any] | None,
+) -> OverridesState | None:
+    if tool_overrides is None and model_settings is None:
+        return None
+    return OverridesState(
+        override_agent_tools=tool_overrides,
+        model_settings=dict(model_settings) if model_settings is not None else None,
+    )
 
 
 class Client(BaseClient):
@@ -39,6 +65,7 @@ class Client(BaseClient):
         message_history: list[ModelMessage] | None = ...,
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
+        model_settings: ModelSettings | dict[str, Any] | None = ...,
     ) -> InvocationHandle[OutputT]: ...
 
     @overload
@@ -54,6 +81,7 @@ class Client(BaseClient):
         message_history: list[ModelMessage] | None = ...,
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
+        model_settings: ModelSettings | dict[str, Any] | None = ...,
     ) -> InvocationHandle[Any]: ...
 
     async def invoke_node(
@@ -69,6 +97,7 @@ class Client(BaseClient):
         message_history: list[ModelMessage] | None = None,
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
+        model_settings: ModelSettings | dict[str, Any] | None = None,
     ) -> InvocationHandle[Any]:
         """Invoke an agent node asynchronously and return a handle for the reply.
 
@@ -95,11 +124,16 @@ class Client(BaseClient):
                 method.
             deps: A mapping of dependency keys to values, made available to
                 the node's tools at runtime via the session context.
+            model_settings: Per-call model settings (e.g. ``{"temperature": 0.0}``)
+                that merge over the agent's constructor defaults, which in turn
+                merge over the model client's defaults. Must be JSON-serializable
+                since it travels over Kafka.
 
         Returns:
             An :class:`InvocationHandle` whose ``result()`` resolves to a
             :class:`NodeResult`.
         """
+        _validate_model_settings_jsonable(model_settings)
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
         if reply_topic is None:
@@ -113,7 +147,7 @@ class Client(BaseClient):
             correlation_id=correlation_id,
             run_args=run_args,
             state=state,
-            overrides=OverridesState(override_agent_tools=tool_overrides) if tool_overrides is not None else None,
+            overrides=_build_overrides(tool_overrides, model_settings),
             deps=deps,
             output_type=output_type,
         )
@@ -132,6 +166,7 @@ class Client(BaseClient):
         message_history: list[ModelMessage] | None = ...,
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
+        model_settings: ModelSettings | dict[str, Any] | None = ...,
         timeout: float | None = ...,
     ) -> NodeResult[OutputT]: ...
 
@@ -148,6 +183,7 @@ class Client(BaseClient):
         message_history: list[ModelMessage] | None = ...,
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
+        model_settings: ModelSettings | dict[str, Any] | None = ...,
         timeout: float | None = ...,
     ) -> NodeResult[Any]: ...
 
@@ -164,6 +200,7 @@ class Client(BaseClient):
         message_history: list[ModelMessage] | None = None,
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
+        model_settings: ModelSettings | dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> NodeResult[Any]:
         """Invoke an agent node and await the reply in a single call.
@@ -193,6 +230,10 @@ class Client(BaseClient):
                 method.
             deps: A mapping of dependency keys to values, made available to
                 the node's tools at runtime via the session context.
+            model_settings: Per-call model settings (e.g. ``{"temperature": 0.0}``)
+                that merge over the agent's constructor defaults, which in turn
+                merge over the model client's defaults. Must be JSON-serializable
+                since it travels over Kafka.
             timeout: Maximum seconds to wait for the reply. ``None`` means
                 wait indefinitely.
 
@@ -214,5 +255,6 @@ class Client(BaseClient):
             message_history=message_history,
             run_args=run_args,
             deps=deps,
+            model_settings=model_settings,
         )
         return await handle.result(timeout=timeout)

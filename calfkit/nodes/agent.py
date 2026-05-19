@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Callable
-from typing import Any, ClassVar, Generic
+from typing import Any, ClassVar, Generic, cast
 
 from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
@@ -8,6 +8,7 @@ from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
 from calfkit._vendor.pydantic_ai.output import OutputSpec
+from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
@@ -42,6 +43,7 @@ class BaseAgentNodeDef(
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
+        model_settings: ModelSettings | dict[str, Any] | None = None,
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
@@ -55,7 +57,12 @@ class BaseAgentNodeDef(
         super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic, gates=gates)
 
         self._agent_loop: InternalAgentLoop[dict[str, Any], AgentOutputT | DeferredToolRequests] = InternalAgentLoop(
-            model_client, name=self.name, output_type=[final_output_type, DeferredToolRequests], deps_type=dict, instructions=system_prompt
+            model_client,
+            name=self.name,
+            output_type=[final_output_type, DeferredToolRequests],
+            deps_type=dict,
+            instructions=system_prompt,
+            model_settings=cast(ModelSettings | None, model_settings),
         )
 
     def _parallel_state_aggregation(self, ctx: SessionRunContext) -> None:
@@ -130,6 +137,7 @@ class BaseAgentNodeDef(
             toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
             deps=ctx.deps.provided_deps,  # None valid when AgentDepsT=NoneType
             deferred_tool_results=tool_results,
+            model_settings=cast(ModelSettings | None, ctx.state.overrides.model_settings) if ctx.state.overrides is not None else None,
         )
         if isinstance(result.output, DeferredToolRequests):
             # The LLM called one or more tools
