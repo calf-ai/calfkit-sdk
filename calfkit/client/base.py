@@ -22,7 +22,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import OverridesState
-from calfkit.nodes.aggregator._partitioner import FanOutAggregatorPartitioner
+from calfkit.nodes.aggregator._partitioner import FanOutAggregatorPartitioner, has_composite_delimiter
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,11 @@ class BaseClient:
         Returns:
             An invocation handle with an associated future for the reply.
         """
+        if has_composite_delimiter(correlation_id):
+            raise ValueError(
+                f"correlation_id must not contain '|' (fan-out aggregator composite-key delimiter): {correlation_id!r}"
+            )
+
         future = self._dispatcher.expect(correlation_id)
 
         logger.debug("[%s] invoke topic=%s reply=%s", correlation_id[:8], topic, reply_topic)
