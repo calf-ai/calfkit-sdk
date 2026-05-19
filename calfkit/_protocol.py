@@ -42,6 +42,18 @@ together with ``correlation_id`` and ``tool_call_id`` as the dedup triple for
 durable aggregation.
 """
 
+HDR_DEGRADED_MERGE = "x-calf-degraded-merge"
+"""Kafka header stamped on the aggregated fan-out return when the user's
+custom :meth:`FanOutAggregator.merge` raised and the configured
+``merge_error_policy`` is :data:`MergeErrorPolicy.DROP`.
+
+Value is the string ``"1"`` when set. Operators / observability tooling can
+filter on this header to surface fan-out batches whose downstream state was
+produced by the framework's default merge instead of the user's overridden
+behaviour — without this signal the DROP policy silently delivers
+potentially-incomplete state to the agent.
+"""
+
 
 def decode_header_str(value: Any) -> str | None:
     """Coerce an inbound Kafka header value to ``str | None``.

@@ -8,6 +8,7 @@ from faststream import Context, Response
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit._protocol import (
+    HDR_DEGRADED_MERGE,
     HDR_FANOUT_ID,
     HDR_FRAME_ID,
     NodeKind,
@@ -29,7 +30,7 @@ from calfkit.nodes.aggregator import FanOutAggregator
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
 from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
 from calfkit.nodes.aggregator.errors import AggregatorMergeError
-from calfkit.nodes.aggregator.state import ToolCallId
+from calfkit.nodes.aggregator.state import AggregatedReturn, ToolCallId
 from calfkit.nodes.base import BaseNodeDef, GateFunction, _KafkaSubscription
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -522,14 +523,16 @@ class BaseAgentNodeDef(
 
         # 7. Completion check + merge + publish aggregated result.
         if await self.aggregator.should_complete(view):
+            merged: AggregatedReturn
             try:
                 merged = await self.aggregator.merge(view)
             except Exception as exc:
-                merged = await self._handle_merge_error(view, key, exc)
-                if merged is None:
+                fallback = await self._handle_merge_error(view, key, exc)
+                if fallback is None:
                     # ABORT policy: re-raise so the broker delivers again
                     # (and the late-return path eventually drops it).
                     raise AggregatorMergeError(f"merge() raised for key={key}") from exc
+                merged = fallback
 
             # Construct an envelope mirroring a normal ReturnCall back to
             # the agent's main topic. The workflow_state already has the
@@ -539,12 +542,15 @@ class BaseAgentNodeDef(
                 context=SessionRunContext(state=merged.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
             )
+            outbound_headers = self._emitter_headers()
+            if merged.degraded:
+                outbound_headers[HDR_DEGRADED_MERGE] = "1"
             await broker.publish(
                 publish_envelope,
                 topic=batch.agent_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
-                headers=self._emitter_headers(),
+                headers=outbound_headers,
             )
 
             # Tombstone the batch so late returns are recognised.
@@ -557,7 +563,7 @@ class BaseAgentNodeDef(
         view: Any,
         key: tuple[str, str],
         exc: Exception,
-    ) -> Any:
+    ) -> AggregatedReturn | None:
         """Apply the configured :class:`MergeErrorPolicy`. Returns the merged
         result on success, or ``None`` to signal the caller to re-raise."""
         policy = self.aggregator.merge_error_policy
@@ -568,9 +574,19 @@ class BaseAgentNodeDef(
                 logger.exception("[%s] merge() raised on retry key=%s", key[0][:8], key)
                 return None
         if policy == MergeErrorPolicy.DROP:
-            # Fall back to the default merge so the batch still completes.
-            logger.exception("[%s] merge() raised; DROP policy → default merge key=%s", key[0][:8], key)
-            return await FanOutAggregator.merge(self.aggregator, view)
+            # Fall back to the default merge so the batch still completes,
+            # but mark the result as degraded so the published envelope
+            # gets HDR_DEGRADED_MERGE — operators can detect that the
+            # user's custom merge silently failed.
+            logger.exception(
+                "[%s] merge() raised; DROP policy → default merge key=%s "
+                "(downstream envelope will carry %s=1)",
+                key[0][:8],
+                key,
+                HDR_DEGRADED_MERGE,
+            )
+            default = await FanOutAggregator.merge(self.aggregator, view)
+            return AggregatedReturn(state=default.state, degraded=True)
         # ABORT
         logger.exception("[%s] merge() raised; ABORT policy key=%s", key[0][:8], key)
         return None

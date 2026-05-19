@@ -604,6 +604,113 @@ async def test_publish_failure_leaves_cache_unchanged(
     assert cached.received == {}, "received must NOT contain t1 after publish failure"
 
 
+# ---------------------------------------------------------------------------
+# MergeErrorPolicy.DROP — degraded-merge header
+# ---------------------------------------------------------------------------
+
+
+async def test_drop_policy_stamps_degraded_header_on_publish(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When the user's merge raises and MergeErrorPolicy.DROP fires, the
+    aggregator falls back to the default merge so the batch still
+    completes — but the published envelope MUST carry
+    HDR_DEGRADED_MERGE so operators can detect silently-degraded
+    batches."""
+    from calfkit._protocol import HDR_DEGRADED_MERGE
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.DROP  # type: ignore[attr-defined]
+
+    # Replace merge with a callable that always raises.
+    async def boom(batch: AggregatorBatch) -> AggregatedReturn:
+        raise RuntimeError("user merge boom")
+
+    agent.aggregator.merge = boom  # type: ignore[attr-defined,method-assign]
+
+    key = ("corr-drop", "fan-drop")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-drop",
+        fan_out_id="fan-drop",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={"t1": "r1"},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(
+        "corr-drop",
+        state=_state_with_results({"t1": "r1", "t2": "r2"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-drop"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-drop",
+        headers=headers,
+        broker=broker,
+    )
+
+    # The agent-topic publish (the aggregated return) is the second
+    # publish call (after state-topic update, before tombstone).
+    agent_topic_publishes = [
+        c for c in broker.publish.await_args_list
+        if c.kwargs.get("topic") == "test_agent.input"
+    ]
+    assert len(agent_topic_publishes) == 1
+    headers_on_publish = agent_topic_publishes[0].kwargs["headers"]
+    assert headers_on_publish.get(HDR_DEGRADED_MERGE) == "1"
+
+
+async def test_normal_completion_does_not_stamp_degraded_header(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """Sanity check: the degraded-merge header MUST NOT be stamped on
+    a normal (successful merge) completion."""
+    from calfkit._protocol import HDR_DEGRADED_MERGE
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+
+    key = ("corr-ok", "fan-ok")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-ok",
+        fan_out_id="fan-ok",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(
+        "corr-ok",
+        state=_state_with_results({"t1": "r1"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-ok"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-ok",
+        headers=headers,
+        broker=broker,
+    )
+
+    agent_topic_publishes = [
+        c for c in broker.publish.await_args_list
+        if c.kwargs.get("topic") == "test_agent.input"
+    ]
+    assert len(agent_topic_publishes) == 1
+    headers_on_publish = agent_topic_publishes[0].kwargs["headers"]
+    assert HDR_DEGRADED_MERGE not in headers_on_publish
+
+
 async def test_redispatch_with_drifted_tool_call_ids_overwrites(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:

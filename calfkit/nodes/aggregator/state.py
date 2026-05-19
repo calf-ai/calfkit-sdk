@@ -139,3 +139,12 @@ class AggregatedReturn:
     """The merged state with all tool results (or a custom transformation
     thereof) applied. Sent to the agent's main topic as the aggregated
     return."""
+
+    degraded: bool = False
+    """``True`` when this result came from the
+    :data:`MergeErrorPolicy.DROP` fallback path (user's :meth:`merge`
+    raised; framework fell back to the default merge). The framework
+    stamps :data:`HDR_DEGRADED_MERGE` on the published envelope so
+    operators can detect silently-degraded batches; users overriding
+    :meth:`merge` and returning ``AggregatedReturn`` directly can also
+    set this flag to signal a known-degraded result."""
