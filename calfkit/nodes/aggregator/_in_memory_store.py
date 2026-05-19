@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from calfkit.models.state import State
-from calfkit.nodes.aggregator.state import FanOutState
+from calfkit.nodes.aggregator.state import FanOutState, ToolCallId
 
 
 @dataclass
@@ -28,9 +28,9 @@ class _InFlightBatch:
 
     correlation_id: str
     fan_out_id: str
-    expected_tool_call_ids: frozenset[str]
+    expected_tool_call_ids: frozenset[ToolCallId]
     base_state: State
-    received: dict[str, Any] = field(default_factory=dict)
+    received: dict[ToolCallId, Any] = field(default_factory=dict)
     started_at_ms: int = 0
     last_updated_ms: int = 0
     agent_topic: str = ""
@@ -68,7 +68,7 @@ class _InFlightBatch:
 
     def with_received(
         self,
-        received: dict[str, Any],
+        received: dict[ToolCallId, Any],
         *,
         last_updated_ms: int,
     ) -> _InFlightBatch:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import enum
 import logging
+from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from calfkit.nodes.aggregator.state import (
@@ -208,7 +209,7 @@ class FanOutAggregator:
             correlation_id=batch.correlation_id,
             fan_out_id=batch.fan_out_id,
             expected_tool_call_ids=batch.expected_tool_call_ids,
-            received=dict(batch.received),
+            received=MappingProxyType(dict(batch.received)),
             base_state=batch.base_state,
             started_at_ms=batch.started_at_ms,
             last_updated_ms=batch.last_updated_ms,

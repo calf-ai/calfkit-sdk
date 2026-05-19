@@ -185,7 +185,7 @@ class InMemoryAggregator(FanOutAggregator):
         self,
         correlation_id: str,
         fan_out_id: str,
-        expected_tool_call_ids: frozenset[str],
+        expected_tool_call_ids: frozenset[ToolCallId],
         base_state: State,
         agent_topic: str = "agent.in",
         traceparent: str | None = None,
@@ -218,7 +218,7 @@ class InMemoryAggregator(FanOutAggregator):
         self,
         correlation_id: str,
         fan_out_id: str,
-        tool_call_id: str,
+        tool_call_id: ToolCallId,
         result: Any,
     ) -> AggregatedReturn | None:
         """Simulate a tool return arriving — drives the same handler path as

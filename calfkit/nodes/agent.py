@@ -505,7 +505,10 @@ class BaseAgentNodeDef(
         #    produce a phantom-merged cache state that no record reflects —
         #    FastStream's redelivery would then see the new tcid as
         #    "already merged" via the dedup check and skip it forever.
-        updated_received = {**batch.received, **{tcid: incoming_results[tcid] for tcid in new_ids}}
+        updated_received: dict[ToolCallId, Any] = {
+            **batch.received,
+            **{ToolCallId(tcid): incoming_results[tcid] for tcid in new_ids},
+        }
         updated_batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
 
         # 5. Durable write first — state_store.put publishes then updates

@@ -11,7 +11,9 @@ completion path returns an :class:`AggregatedReturn`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, NewType
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,10 +53,10 @@ class FanOutState(BaseModel):
     the agent's inbound :attr:`CallFrame.frame_id` so redelivered inbounds
     produce the same fan-out_id (idempotent dispatch)."""
 
-    expected_tool_call_ids: frozenset[str]
+    expected_tool_call_ids: frozenset[ToolCallId]
     """The set of tool_call_ids the agent dispatched for this batch."""
 
-    received: dict[str, Any] = Field(default_factory=dict)
+    received: dict[ToolCallId, Any] = Field(default_factory=dict)
     """Map of tool_call_id → tool result, accumulated as tool returns arrive."""
 
     base_state: State
@@ -94,11 +96,17 @@ class AggregatorBatch:
 
     correlation_id: str
     fan_out_id: str
-    expected_tool_call_ids: frozenset[str]
-    received: dict[str, Any]
+    expected_tool_call_ids: frozenset[ToolCallId]
+    received: Mapping[ToolCallId, Any]
     base_state: State
     started_at_ms: int
     last_updated_ms: int
+
+    def __post_init__(self) -> None:
+        # Enforce the "immutable view" contract regardless of caller.
+        # ``object.__setattr__`` is needed because the dataclass is frozen.
+        if not isinstance(self.received, MappingProxyType):
+            object.__setattr__(self, "received", MappingProxyType(dict(self.received)))
 
     @property
     def num_expected(self) -> int:
@@ -114,7 +122,7 @@ class AggregatorBatch:
         return self.expected_tool_call_ids <= frozenset(self.received.keys())
 
     @property
-    def missing_tool_call_ids(self) -> frozenset[str]:
+    def missing_tool_call_ids(self) -> frozenset[ToolCallId]:
         """Tool_call_ids that were dispatched but haven't returned yet."""
         return self.expected_tool_call_ids - frozenset(self.received.keys())
 
