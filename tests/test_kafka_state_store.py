@@ -340,3 +340,38 @@ async def test_rehydrate_skips_empty_partitions() -> None:
 
     assert 0 in store.owned_partitions
     mock_consumer.getmany.assert_not_awaited()
+
+
+async def test_rehydrate_passes_client_kwargs() -> None:
+    """The state store must forward client_kwargs (SASL/SSL) to the
+    transient AIOKafkaConsumer so rehydration works in production
+    clusters with broker auth."""
+    broker = MagicMock()
+    broker.publish = AsyncMock()
+    store = _KafkaStateStore(
+        broker=broker,
+        state_topic="agent.fanout-state",
+        bootstrap_servers="kafka:9092",
+        partition_count=4,
+        client_kwargs={"security_protocol": "SASL_SSL"},
+    )
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    from aiokafka import TopicPartition
+
+    mock_consumer.end_offsets = AsyncMock(return_value={TopicPartition("agent.fanout-state", 0): 0})
+    mock_consumer.getmany = AsyncMock(return_value={})
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ) as mock_cls:
+        await store.rehydrate_partitions({0})
+
+    construction_kwargs = mock_cls.call_args.kwargs
+    assert construction_kwargs.get("security_protocol") == "SASL_SSL"
+    assert construction_kwargs.get("bootstrap_servers") == "kafka:9092"

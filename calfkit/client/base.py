@@ -10,6 +10,7 @@ from typing_extensions import Self
 from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
+from calfkit.client.kafka_config import KafkaConfig
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.models import State
@@ -48,7 +49,14 @@ class BaseClient:
             result = await client.execute_node(...)
     """
 
-    def __init__(self, connection: KafkaBroker, reply_topic: str, dispatcher: _ReplyDispatcher, emitter_id: str | None = None) -> None:
+    def __init__(
+        self,
+        connection: KafkaBroker,
+        reply_topic: str,
+        dispatcher: _ReplyDispatcher,
+        emitter_id: str | None = None,
+        kafka_config: KafkaConfig | None = None,
+    ) -> None:
         """Initialize the client with pre-configured components.
 
         Prefer :meth:`connect` for constructing a fully wired client instance.
@@ -61,6 +69,16 @@ class BaseClient:
             emitter_id: Stable identifier stamped onto every outbound message as
                 the ``x-calf-emitter`` Kafka header. When ``None``, a random
                 uuid7-based id is generated.
+            kafka_config: Snapshot of the Kafka client kwargs (bootstrap
+                servers + SASL/SSL/security settings) used to build the
+                ``KafkaBroker``. The :class:`~calfkit.worker.worker.Worker`
+                threads this forward to the fan-out aggregator's state
+                store so its transient :class:`AIOKafkaConsumer`
+                (rehydration only) shares the broker's auth/transport
+                configuration. ``None`` for backwards compatibility with
+                callers that construct ``BaseClient`` directly (tests);
+                in that case, :class:`~calfkit.worker.worker.Worker`
+                raises if it needs the config.
         """
         if emitter_id is not None and not emitter_id.strip():
             raise ValueError("emitter_id must be a non-empty string or None")
@@ -68,6 +86,7 @@ class BaseClient:
         self._reply_topic = reply_topic
         self._dispatcher = dispatcher
         self._emitter_id = emitter_id if emitter_id is not None else _new_client_emitter_id()
+        self._kafka_config = kafka_config
 
     @classmethod
     def connect(
@@ -108,6 +127,18 @@ class BaseClient:
                 "Remove the 'partitioner' kwarg."
             )
 
+        # Snapshot kwargs BEFORE constructing the broker so the aggregator's
+        # transient AIOKafkaConsumer can reuse the same security/SASL/SSL
+        # config. dict(...) copies; the splat into KafkaBroker(...) below
+        # is unaffected. Narrow Iterable[str] to list[str] so KafkaConfig's
+        # str | list[str] field type is honoured.
+        bootstrap_for_config: str | list[str]
+        bootstrap_for_config = server_urls if isinstance(server_urls, str) else list(server_urls)
+        kafka_config = KafkaConfig(
+            bootstrap_servers=bootstrap_for_config,
+            client_kwargs=dict(broker_kwargs),
+        )
+
         broker_connection = KafkaBroker(
             server_urls,
             middlewares=[ContextInjectionMiddleware],
@@ -118,7 +149,13 @@ class BaseClient:
         dispatcher = _ReplyDispatcher()
         dispatcher.register(broker_connection, reply_topic, group_id)
 
-        return cls(broker_connection, reply_topic, dispatcher, emitter_id=_new_client_emitter_id(client_id))
+        return cls(
+            broker_connection,
+            reply_topic,
+            dispatcher,
+            emitter_id=_new_client_emitter_id(client_id),
+            kafka_config=kafka_config,
+        )
 
     @property
     def broker(self) -> KafkaBroker:
@@ -129,6 +166,19 @@ class BaseClient:
     def reply_topic(self) -> str:
         """The Kafka topic this client subscribes to for receiving replies."""
         return self._reply_topic
+
+    @property
+    def kafka_config(self) -> KafkaConfig | None:
+        """Snapshot of the Kafka client kwargs used to construct the broker.
+
+        Captured by :meth:`connect` (the public factory). ``None`` when the
+        client was constructed directly via :meth:`__init__` without an
+        explicit ``kafka_config`` -- typically tests. The
+        :class:`~calfkit.worker.worker.Worker` uses this to thread
+        bootstrap + security settings into the fan-out aggregator's
+        state store and raises if it's ``None`` when needed.
+        """
+        return self._kafka_config
 
     async def _invoke(
         self,

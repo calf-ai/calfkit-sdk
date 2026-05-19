@@ -6,6 +6,7 @@ from faststream import FastStream
 from calfkit.client import Client
 from calfkit.nodes import BaseNodeDef
 from calfkit.nodes.agent import BaseAgentNodeDef
+from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,34 @@ class Worker:
         broker = self._client._connection
         # Ensure broker is connected so admin_client is available.
         await broker.connect()
+
+        # Aggregators need the broker's bootstrap servers + security kwargs
+        # to construct their transient AIOKafkaConsumer for state-topic
+        # rehydration. Client.connect captures these; if a caller built the
+        # client directly via BaseClient(...) and skipped the snapshot,
+        # we have to fail loudly rather than silently default to localhost
+        # (the previous _extract_bootstrap_servers behaviour).
+        kafka_config = self._client.kafka_config
+        if kafka_config is None and any(isinstance(n, BaseAgentNodeDef) for n in self._nodes):
+            raise AggregatorStateStoreError(
+                "Worker requires Client.kafka_config to wire up the durable "
+                "fan-out aggregator. Either use Client.connect(...) (which "
+                "captures kafka_config automatically) or pass kafka_config "
+                "explicitly when constructing BaseClient."
+            )
+
         for node in self._nodes:
             if isinstance(node, BaseAgentNodeDef):
                 main_topic = node.subscribe_topics[0]
-                await node.aggregator.setup(broker, node_id=node.node_id, main_topic=main_topic)
+                # kafka_config is not None here: the guard above raised for
+                # any agent node when it was None.
+                assert kafka_config is not None
+                await node.aggregator.setup(
+                    broker,
+                    node_id=node.node_id,
+                    main_topic=main_topic,
+                    kafka_config=kafka_config,
+                )
 
     def register_handlers(self) -> None:
         if self._prepared:

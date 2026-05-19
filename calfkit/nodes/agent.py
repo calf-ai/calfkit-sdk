@@ -138,9 +138,24 @@ class BaseAgentNodeDef(
         paths that bypass ``Worker.run()`` (``TestKafkaBroker`` flows) so the
         first parallel fan-out can construct the state store on demand.
         Idempotent: subsequent calls are no-ops.
+
+        Test paths don't have a :class:`KafkaConfig` threaded through, so
+        we synthesise a placeholder here. The transient
+        :class:`AIOKafkaConsumer` constructed with it is never invoked
+        under ``TestKafkaBroker`` (which simulates Kafka in memory), so
+        the placeholder values never reach a real broker.
         """
         if self.aggregator._state_store is None:
-            await self.aggregator.setup(broker, node_id=self.node_id, main_topic=self.subscribe_topics[0])
+            # Local import to avoid a circular at module-load time
+            # (calfkit.client imports calfkit.nodes via partitioner).
+            from calfkit.client.kafka_config import KafkaConfig
+
+            await self.aggregator.setup(
+                broker,
+                node_id=self.node_id,
+                main_topic=self.subscribe_topics[0],
+                kafka_config=KafkaConfig(bootstrap_servers="localhost:9092", client_kwargs={}),
+            )
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         tools_registry = dict[str, BaseToolNodeSchema]()

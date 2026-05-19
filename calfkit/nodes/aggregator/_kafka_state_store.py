@@ -60,6 +60,7 @@ class _KafkaStateStore:
         partition_count: int | None = None,
         completion_ttl_seconds: float = 60.0,
         clock: Callable[[], float] | None = None,
+        client_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Initialise the state store.
 
@@ -68,8 +69,8 @@ class _KafkaStateStore:
                 state topic.
             state_topic: ``{node_id}.fanout-state`` topic name.
             bootstrap_servers: Bootstrap servers for the transient
-                ``AIOKafkaConsumer`` used during rehydration. Typically read
-                from ``broker.config`` at construction time.
+                ``AIOKafkaConsumer`` used during rehydration. Captured by
+                ``Client.connect`` and threaded through the worker.
             partition_count: Total partition count for the state topic. When
                 set, :meth:`partition_for_key` computes the partition
                 deterministically from ``correlation_id``; otherwise callers
@@ -79,11 +80,18 @@ class _KafkaStateStore:
             completion_ttl_seconds: TTL for the recently-completed key set;
                 matches the state topic's ``delete.retention.ms``.
             clock: Optional clock for deterministic TTL tests.
+            client_kwargs: Extra Kafka client kwargs (security_protocol,
+                sasl_mechanism, sasl_plain_username, sasl_plain_password,
+                ssl_context, client_id, ...) forwarded to the transient
+                :class:`AIOKafkaConsumer` used during rehydration. Without
+                these, rehydration fails on any production cluster with
+                SASL/SSL auth. ``None`` is treated as an empty dict.
         """
         self._broker = broker
         self._state_topic = state_topic
         self._bootstrap_servers = bootstrap_servers
         self._partition_count = partition_count
+        self._client_kwargs: dict[str, Any] = dict(client_kwargs) if client_kwargs else {}
         self._cache: dict[tuple[str, str], _InFlightBatch] = {}
         self._by_partition: dict[int, set[tuple[str, str]]] = {}
         self._owned_partitions: set[int] = set()
@@ -233,6 +241,7 @@ class _KafkaStateStore:
         consumer = AIOKafkaConsumer(
             bootstrap_servers=self._bootstrap_servers,
             enable_auto_commit=False,
+            **self._client_kwargs,
         )
         await consumer.start()
         try:

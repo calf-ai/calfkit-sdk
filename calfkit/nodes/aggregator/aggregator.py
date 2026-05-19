@@ -23,8 +23,9 @@ from __future__ import annotations
 import enum
 import logging
 from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
+from calfkit.client.kafka_config import KafkaConfig
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
     AggregatorBatch,
@@ -39,36 +40,6 @@ if TYPE_CHECKING:
     from calfkit.nodes.aggregator._rebalance import _StateStoreRebalanceListener
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_bootstrap_servers(broker: KafkaBroker) -> str | list[str]:
-    """Pull ``bootstrap_servers`` from a FastStream broker.
-
-    Used by :meth:`FanOutAggregator.setup` to construct the transient
-    ``AIOKafkaConsumer`` for state-store rehydration without re-specifying
-    connection details. FastStream stores connection params on the broker
-    instance itself (``self._connection_kwargs``) — not on
-    ``broker.config`` directly.
-
-    Falls back to ``"localhost"`` when no servers are configured (e.g. in
-    ``TestKafkaBroker`` flows that never connect to a real broker); the
-    transient consumer the value feeds into is never invoked under
-    ``TestKafkaBroker``, so the fallback is purely a "don't crash on
-    setup" affordance.
-    """
-    for attr in ("_connection_kwargs",):
-        kwargs = getattr(broker, attr, None)
-        if isinstance(kwargs, dict) and "bootstrap_servers" in kwargs:
-            return cast("str | list[str]", kwargs["bootstrap_servers"])
-    config = getattr(broker, "config", None)
-    if config is not None:
-        client_kwargs = getattr(config, "client_kwargs", None) or {}
-        if isinstance(client_kwargs, dict) and "bootstrap_servers" in client_kwargs:
-            return cast("str | list[str]", client_kwargs["bootstrap_servers"])
-        bootstrap = getattr(config, "bootstrap_servers", None)
-        if bootstrap is not None:
-            return cast("str | list[str]", bootstrap)
-    return "localhost"
 
 
 class MergeErrorPolicy(str, enum.Enum):
@@ -143,6 +114,8 @@ class FanOutAggregator:
         broker: KafkaBroker,
         node_id: str,
         main_topic: str,
+        *,
+        kafka_config: KafkaConfig,
     ) -> None:
         """Provision topics and wire up the state store + rebalance listener.
 
@@ -158,6 +131,12 @@ class FanOutAggregator:
                 aggregator topics.
             main_topic: The agent's main input topic; used to read the
                 target partition count (for co-partitioning).
+            kafka_config: Connection config (bootstrap servers + SASL/SSL
+                kwargs) captured by ``Client.connect`` and threaded
+                forward by the worker. Forwarded to the underlying
+                :class:`_KafkaStateStore` so its transient
+                :class:`AIOKafkaConsumer` for rehydration inherits the
+                same security/transport settings as the broker.
         """
         if self._state_store is not None:
             return  # idempotent
@@ -179,12 +158,12 @@ class FanOutAggregator:
         self._returns_topic = returns_topic
         self._partition_count = partition_count
 
-        bootstrap_servers = _extract_bootstrap_servers(broker)
         self._state_store = _KafkaStateStore(
             broker=broker,
             state_topic=state_topic,
-            bootstrap_servers=bootstrap_servers,
+            bootstrap_servers=kafka_config.bootstrap_servers,
             partition_count=partition_count,
+            client_kwargs=kafka_config.client_kwargs,
         )
         self._rebalance_listener = _StateStoreRebalanceListener(
             state_store=self._state_store,
