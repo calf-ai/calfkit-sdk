@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.0...v0.3.1) (2026-05-19)
+
+
+### Features
+
+* add ConsumerNodeDef and expose State on NodeResult ([#137](https://github.com/calf-ai/calfkit-sdk/issues/137)) ([aa139c7](https://github.com/calf-ai/calfkit-sdk/commit/aa139c74fe7e0d1baa0a016b5db423ebdc6e65ad))
+* add runtime model_settings to Agent and Client ([#134](https://github.com/calf-ai/calfkit-sdk/issues/134)) ([47d64b2](https://github.com/calf-ai/calfkit-sdk/commit/47d64b286b3ca151cc40022dfab22b4862d06b04))
+
+
+### Documentation
+
+* add ROADMAP.md index pointing to design docs ([#135](https://github.com/calf-ai/calfkit-sdk/issues/135)) ([5fa2a1a](https://github.com/calf-ai/calfkit-sdk/commit/5fa2a1af731341e3d9bef71be42e30841451058a))
+
 ## [0.3.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.2.6...v0.3.0) (2026-05-18)
 
 

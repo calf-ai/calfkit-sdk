@@ -5,11 +5,14 @@ from calfkit.models import ToolContext
 from calfkit.nodes import (
     Agent,
     BaseNodeDef,
+    ConsumerFn,
+    ConsumerNodeDef,
     FanOutAggregator,
     GateFunction,
     NodeDef,
     ToolNodeDef,
     agent_tool,
+    consumer,
 )
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.worker import Worker
@@ -26,11 +29,14 @@ __all__ = [
     # nodes
     "Agent",
     "BaseNodeDef",
+    "ConsumerFn",
+    "ConsumerNodeDef",
     "FanOutAggregator",
     "GateFunction",
     "NodeDef",
     "ToolNodeDef",
     "agent_tool",
+    "consumer",
     # providers
     "AnthropicModelClient",
     "OpenAIModelClient",

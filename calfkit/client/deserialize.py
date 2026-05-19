@@ -15,6 +15,9 @@ _UNSET: Any = object()
 def deserialize_to_node_result(
     envelope: Envelope,
     output_type: type[Any] = _UNSET,
+    *,
+    strict: bool = True,
+    type_adapter: TypeAdapter[Any] | None = None,
 ) -> NodeResult[Any]:
     """Project an ``Envelope`` into a client-facing ``NodeResult``.
 
@@ -26,41 +29,57 @@ def deserialize_to_node_result(
               (returned as a raw dict), fall back to ``TextPart.text`` (str).
             * ``str``: extract the first ``TextPart.text``.
             * **anything else**: extract the first ``DataPart.data`` and validate
-              it through ``TypeAdapter(output_type)``.
+              it through ``TypeAdapter(output_type)`` (or *type_adapter* if
+              provided).
+        strict: When ``True`` (default — client semantics), raises
+            :class:`DeserializationError` if ``final_output_parts`` is empty or
+            doesn't contain the expected part type. When ``False`` (consumer
+            semantics), returns ``output=None`` for an empty
+            ``final_output_parts`` (intermediate hop / tool completion);
+            validation errors on *present* parts still propagate.
+        type_adapter: An optional pre-built :class:`pydantic.TypeAdapter` to
+            use for validating ``DataPart.data`` against *output_type*. When
+            ``None`` (default), a new adapter is constructed per call.
+            Consumers pre-build at wiring time so schema-generation errors
+            surface once at construction rather than per envelope.
 
     Returns:
-        A ``NodeResult`` whose ``.output`` is typed according to *output_type*.
+        A ``NodeResult`` whose ``.output`` is typed according to *output_type*
+        (or ``None`` when ``strict=False`` and no parts are present).
 
     Raises:
         DeserializationError: If the expected content part is not found in
-            ``final_output_parts``.
+            ``final_output_parts`` (and either ``strict=True`` or the parts
+            list is non-empty but lacks the expected shape).
+        pydantic.ValidationError: If ``output_type`` is provided and the
+            matching ``DataPart.data`` doesn't validate against it.
+        pydantic.PydanticSchemaGenerationError: If ``type_adapter`` is ``None``
+            and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
     """
     state = envelope.context.state
-    output_parts = state.final_output_parts
-    message_history = state.message_history
-    metadata = state.metadata
     correlation_id = envelope.context.deps.correlation_id
 
-    output = _extract_output(output_parts, output_type)
+    if not state.final_output_parts and not strict:
+        output: Any = None
+    else:
+        output = _extract_output(state.final_output_parts, output_type, type_adapter=type_adapter)
 
     return NodeResult(
         output=output,
-        output_parts=output_parts,
-        message_history=message_history,
-        metadata=metadata,
+        state=state,
         correlation_id=correlation_id,
         emitter_node_id=envelope.context.emitter_node_id,
         emitter_node_kind=envelope.context.emitter_node_kind,
     )
 
 
-def _extract_output(parts: list[Any], output_type: type[Any]) -> Any:
+def _extract_output(parts: list[Any], output_type: type[Any], type_adapter: TypeAdapter[Any] | None = None) -> Any:
     """Extract and optionally deserialize the output from content parts."""
     if output_type is _UNSET:
         return _extract_auto(parts)
     if output_type is str:
         return _extract_text(parts)
-    return _extract_data(parts, output_type)
+    return _extract_data(parts, output_type, type_adapter=type_adapter)
 
 
 def _extract_auto(parts: list[Any]) -> Any:
@@ -82,10 +101,15 @@ def _extract_text(parts: list[Any]) -> str:
     raise DeserializationError("No TextPart found in final_output_parts; expected output_type=str.")
 
 
-def _extract_data(parts: list[Any], output_type: type[Any]) -> Any:
-    """Extract the first DataPart.data and validate via TypeAdapter."""
+def _extract_data(parts: list[Any], output_type: type[Any], type_adapter: TypeAdapter[Any] | None = None) -> Any:
+    """Extract the first DataPart.data and validate via TypeAdapter.
+
+    Uses *type_adapter* if provided; otherwise constructs a new one (which may
+    raise :class:`pydantic.PydanticSchemaGenerationError` if *output_type* is
+    unschematizable).
+    """
     for part in parts:
         if isinstance(part, DataPart):
-            adapter: TypeAdapter[Any] = TypeAdapter(output_type)
+            adapter = type_adapter if type_adapter is not None else TypeAdapter(output_type)
             return adapter.validate_python(part.data)
     raise DeserializationError(f"No DataPart found in final_output_parts; expected output_type={getattr(output_type, '__name__', str(output_type))}.")
