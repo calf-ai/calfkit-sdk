@@ -16,10 +16,11 @@ the same retry / lifecycle behaviour as other framework publishes.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, cast
 
-from aiokafka import AIOKafkaConsumer, TopicPartition
-from aiokafka.partitioner import murmur2
+from aiokafka import AIOKafkaConsumer, TopicPartition  # type: ignore[import-untyped]
+from aiokafka.partitioner import murmur2  # type: ignore[import-untyped]
 from faststream.kafka import KafkaBroker
 
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch, _TtlSet
@@ -128,7 +129,7 @@ class _KafkaStateStore:
                 "pass partition=... explicitly to put/tombstone, or set "
                 "partition_count when constructing the store"
             )
-        return (murmur2(key[0].encode()) & 0x7FFFFFFF) % self._partition_count
+        return (cast(int, murmur2(key[0].encode())) & 0x7FFFFFFF) % self._partition_count
 
     async def put(
         self,
@@ -232,9 +233,7 @@ class _KafkaStateStore:
             end_offsets = await consumer.end_offsets(tps)
 
             # Empty partitions (end_offset == 0) have nothing to read.
-            remaining: dict[TopicPartition, int] = {
-                tp: end_offsets[tp] for tp in tps if end_offsets[tp] > 0
-            }
+            remaining: dict[TopicPartition, int] = {tp: end_offsets[tp] for tp in tps if end_offsets[tp] > 0}
 
             while remaining:
                 batch_records = await consumer.getmany(timeout_ms=1000, max_records=500)

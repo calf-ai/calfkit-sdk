@@ -293,11 +293,7 @@ class BaseAgentNodeDef(
         All other branches (single Call, ReturnCall, TailCall, Silent) fall
         through to :meth:`BaseNodeDef._publish_action` unchanged.
         """
-        if (
-            isinstance(output, list)
-            and output
-            and all(isinstance(item, Call) for item in output)
-        ):
+        if isinstance(output, list) and output and all(isinstance(item, Call) for item in output):
             await self._ensure_aggregator_ready(broker)
             await self._publish_parallel_with_aggregator(output, envelope, correlation_id, broker)
             return envelope
@@ -342,9 +338,7 @@ class BaseAgentNodeDef(
         # 1. Deterministic fan_out_id from the inbound agent frame.
         fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
 
-        expected_tool_call_ids = frozenset(
-            {call.input_args[0] for call in calls if call.input_args is not None}
-        )
+        expected_tool_call_ids = frozenset({call.input_args[0] for call in calls if call.input_args is not None})
 
         # 2. Build and durably persist the initial batch state.
         now_ms = int(time.time() * 1000)
@@ -418,6 +412,8 @@ class BaseAgentNodeDef(
 
         key = (correlation_id, fan_out_id)
         state_store = self.aggregator._state_store
+        # _ensure_aggregator_ready guarantees state_store is set; narrow for mypy.
+        assert state_store is not None
 
         # 1. Reject late returns for already-completed batches.
         if state_store.was_recently_completed(key):
@@ -440,11 +436,7 @@ class BaseAgentNodeDef(
 
         # 3. Determine which tool_call_id is newly returned (diff vs batch.received).
         incoming_results = envelope.context.state.tool_results
-        new_ids = {
-            tcid
-            for tcid in incoming_results
-            if tcid in batch.expected_tool_call_ids and tcid not in batch.received
-        }
+        new_ids = {tcid for tcid in incoming_results if tcid in batch.expected_tool_call_ids and tcid not in batch.received}
         if not new_ids:
             logger.debug(
                 "[%s] duplicate/empty return key=%s; idempotent drop",
@@ -474,9 +466,7 @@ class BaseAgentNodeDef(
                 if merged is None:
                     # ABORT policy: re-raise so the broker delivers again
                     # (and the late-return path eventually drops it).
-                    raise AggregatorMergeError(
-                        f"merge() raised for key={key}"
-                    ) from exc
+                    raise AggregatorMergeError(f"merge() raised for key={key}") from exc
 
             # Construct an envelope mirroring a normal ReturnCall back to
             # the agent's main topic. The workflow_state already has the

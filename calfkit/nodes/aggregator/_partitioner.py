@@ -14,8 +14,9 @@ per-publisher.
 from __future__ import annotations
 
 import random
+from typing import cast
 
-from aiokafka.partitioner import murmur2
+from aiokafka.partitioner import murmur2  # type: ignore[import-untyped]
 
 _COMPOSITE_KEY_DELIMITER = b"|"
 _COMPOSITE_KEY_DELIMITER_STR = "|"
@@ -51,7 +52,7 @@ class FanOutAggregatorPartitioner:
             return random.choice(all_partitions)
 
         partition_key = self._extract_partition_key(key)
-        idx = murmur2(partition_key)
+        idx = cast(int, murmur2(partition_key))
         idx &= 0x7FFFFFFF
         idx %= len(all_partitions)
         return all_partitions[idx]
@@ -76,10 +77,7 @@ def build_composite_key(correlation_id: str, fan_out_id: str) -> bytes:
     framework-internal mistakes.
     """
     if _COMPOSITE_KEY_DELIMITER_STR in correlation_id:
-        raise ValueError(
-            f"correlation_id contains delimiter '|' which conflicts with the "
-            f"fan-out state-topic key format: {correlation_id!r}"
-        )
+        raise ValueError(f"correlation_id contains delimiter '|' which conflicts with the fan-out state-topic key format: {correlation_id!r}")
     return f"{correlation_id}{_COMPOSITE_KEY_DELIMITER_STR}{fan_out_id}".encode()
 
 

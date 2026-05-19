@@ -105,7 +105,6 @@ def primed_state_store(agent: object) -> tuple[object, MagicMock]:
     """Wire up a minimal aggregator state store on the agent without going
     through Worker.setup. Replaces the broker with a MagicMock so publishes
     are observable."""
-    from calfkit.nodes.aggregator._in_memory_store import _TtlSet
     from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
 
     broker = MagicMock()
@@ -144,9 +143,7 @@ def test_sequential_only_mode_emits_deprecation_warning() -> None:
             sequential_only_mode=True,
         )
 
-    deprecation_warnings = [
-        w for w in recorded if issubclass(w.category, DeprecationWarning)
-    ]
+    deprecation_warnings = [w for w in recorded if issubclass(w.category, DeprecationWarning)]
     assert deprecation_warnings, "expected a DeprecationWarning for sequential_only_mode=True"
     assert "sequential_only_mode" in str(deprecation_warnings[0].message)
 
@@ -166,12 +163,8 @@ def test_sequential_only_mode_default_false_emits_no_warning() -> None:
             model_client=model_client,
         )
 
-    deprecation_warnings = [
-        w for w in recorded if issubclass(w.category, DeprecationWarning)
-    ]
-    assert not any(
-        "sequential_only_mode" in str(w.message) for w in deprecation_warnings
-    )
+    deprecation_warnings = [w for w in recorded if issubclass(w.category, DeprecationWarning)]
+    assert not any("sequential_only_mode" in str(w.message) for w in deprecation_warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +434,4 @@ def test_fan_out_id_derives_deterministically_from_frame_id(agent: object) -> No
     assert e1.internal_workflow_state.current_frame.frame_id == "frame-stable"
     assert e2.internal_workflow_state.current_frame.frame_id == "frame-stable"
     # Same inbound frame_id → identical fan_out_id (deterministic dispatch).
-    assert (
-        e1.internal_workflow_state.current_frame.frame_id
-        == e2.internal_workflow_state.current_frame.frame_id
-    )
+    assert e1.internal_workflow_state.current_frame.frame_id == e2.internal_workflow_state.current_frame.frame_id

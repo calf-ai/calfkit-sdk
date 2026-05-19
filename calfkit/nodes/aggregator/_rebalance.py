@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from aiokafka import ConsumerRebalanceListener, TopicPartition
+from aiokafka import ConsumerRebalanceListener, TopicPartition  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class _StateStoreProtocol(Protocol):
     def evict_partitions(self, partition_ids: set[int]) -> None: ...
 
 
-class _StateStoreRebalanceListener(ConsumerRebalanceListener):
+class _StateStoreRebalanceListener(ConsumerRebalanceListener):  # type: ignore[misc]
     """Drives state-store partition lifecycle from Kafka rebalance events.
 
     The listener is attached to the returns subscriber, so the
@@ -58,18 +58,14 @@ class _StateStoreRebalanceListener(ConsumerRebalanceListener):
         self._returns_topic = returns_topic
 
     async def on_partitions_assigned(self, assigned: set[TopicPartition]) -> None:
-        partition_ids = {
-            tp.partition for tp in assigned if tp.topic == self._returns_topic
-        }
+        partition_ids = {tp.partition for tp in assigned if tp.topic == self._returns_topic}
         if not partition_ids:
             return
         logger.info("aggregator partitions assigned: %s", sorted(partition_ids))
         await self._state_store.rehydrate_partitions(partition_ids)
 
     async def on_partitions_revoked(self, revoked: set[TopicPartition]) -> None:
-        partition_ids = {
-            tp.partition for tp in revoked if tp.topic == self._returns_topic
-        }
+        partition_ids = {tp.partition for tp in revoked if tp.topic == self._returns_topic}
         if not partition_ids:
             return
         logger.info("aggregator partitions revoked: %s", sorted(partition_ids))

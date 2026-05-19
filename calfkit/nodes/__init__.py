@@ -1,5 +1,5 @@
-from calfkit.nodes.aggregator import FanOutAggregator
 from calfkit.nodes.agent import Agent, BaseAgentNodeDef
+from calfkit.nodes.aggregator import FanOutAggregator
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.consumer import ConsumerFn, ConsumerNodeDef, consumer
 from calfkit.nodes.node import NodeDef

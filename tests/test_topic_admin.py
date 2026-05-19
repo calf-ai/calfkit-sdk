@@ -37,11 +37,7 @@ def _make_admin(known_topics: dict[str, int]) -> AsyncMock:
     admin = AsyncMock()
 
     async def describe_topics(topic_names: list[str]) -> list[dict[str, Any]]:
-        return [
-            _topic_metadata(name, known_topics[name])
-            for name in topic_names
-            if name in known_topics
-        ]
+        return [_topic_metadata(name, known_topics[name]) for name in topic_names if name in known_topics]
 
     admin.describe_topics = AsyncMock(side_effect=describe_topics)
     admin.create_topics = AsyncMock()
@@ -59,9 +55,7 @@ async def test_creates_both_topics_when_main_exists() -> None:
     admin = _make_admin({"agent.in": 8})
     broker = _broker_with_admin(admin)
 
-    state_topic, returns_topic, partitions = await ensure_aggregator_topics(
-        broker, node_id="agent", main_topic="agent.in"
-    )
+    state_topic, returns_topic, partitions = await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
 
     assert state_topic == "agent.fanout-state"
     assert returns_topic == "agent.fanout-returns"
@@ -109,11 +103,13 @@ async def test_state_topic_creation_uses_compact_config() -> None:
 
 
 async def test_skips_existing_with_matching_partitions() -> None:
-    admin = _make_admin({
-        "agent.in": 6,
-        "agent.fanout-state": 6,
-        "agent.fanout-returns": 6,
-    })
+    admin = _make_admin(
+        {
+            "agent.in": 6,
+            "agent.fanout-state": 6,
+            "agent.fanout-returns": 6,
+        }
+    )
     broker = _broker_with_admin(admin)
 
     await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
@@ -123,10 +119,12 @@ async def test_skips_existing_with_matching_partitions() -> None:
 
 
 async def test_raises_on_partition_count_mismatch() -> None:
-    admin = _make_admin({
-        "agent.in": 6,
-        "agent.fanout-state": 3,  # wrong!
-    })
+    admin = _make_admin(
+        {
+            "agent.in": 6,
+            "agent.fanout-state": 3,  # wrong!
+        }
+    )
     broker = _broker_with_admin(admin)
 
     with pytest.raises(AggregatorStateStoreError, match="partitions"):
@@ -138,9 +136,7 @@ async def test_returns_correct_topic_names() -> None:
     admin = _make_admin({})
     broker = _broker_with_admin(admin)
 
-    state_topic, returns_topic, _ = await ensure_aggregator_topics(
-        broker, node_id="my-special_agent", main_topic="my-special_agent.in"
-    )
+    state_topic, returns_topic, _ = await ensure_aggregator_topics(broker, node_id="my-special_agent", main_topic="my-special_agent.in")
 
     assert state_topic == "my-special_agent.fanout-state"
     assert returns_topic == "my-special_agent.fanout-returns"

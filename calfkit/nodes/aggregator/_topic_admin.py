@@ -12,9 +12,9 @@ on mismatch.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
-from aiokafka.admin import NewTopic
+from aiokafka.admin import NewTopic  # type: ignore[import-untyped]
 from faststream.kafka import KafkaBroker
 
 from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
@@ -182,9 +182,7 @@ async def _ensure_topic(
         if "TopicAlreadyExists" in type(exc).__name__:
             logger.debug("topic %s race-created by another worker; continuing", topic)
             return
-        raise AggregatorStateStoreError(
-            f"failed to create topic {topic!r}: {exc}"
-        ) from exc
+        raise AggregatorStateStoreError(f"failed to create topic {topic!r}: {exc}") from exc
 
     logger.info(
         "created topic %s partitions=%d configs=%s",
@@ -202,5 +200,5 @@ async def _try_describe(admin: Any, topic: str) -> dict[str, Any] | None:
         return None
     for desc in descriptions:
         if desc.get("topic") == topic and not desc.get("error"):
-            return desc
+            return cast("dict[str, Any]", desc)
     return None

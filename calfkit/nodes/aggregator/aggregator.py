@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import enum
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
@@ -58,15 +58,15 @@ def _extract_bootstrap_servers(broker: KafkaBroker) -> str | list[str]:
     for attr in ("_connection_kwargs",):
         kwargs = getattr(broker, attr, None)
         if isinstance(kwargs, dict) and "bootstrap_servers" in kwargs:
-            return kwargs["bootstrap_servers"]
+            return cast("str | list[str]", kwargs["bootstrap_servers"])
     config = getattr(broker, "config", None)
     if config is not None:
         client_kwargs = getattr(config, "client_kwargs", None) or {}
         if isinstance(client_kwargs, dict) and "bootstrap_servers" in client_kwargs:
-            return client_kwargs["bootstrap_servers"]
+            return cast("str | list[str]", client_kwargs["bootstrap_servers"])
         bootstrap = getattr(config, "bootstrap_servers", None)
         if bootstrap is not None:
-            return bootstrap  # type: ignore[return-value]
+            return cast("str | list[str]", bootstrap)
     return "localhost"
 
 

@@ -18,8 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, cast
 
 from calfkit.models.state import State
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch, _InMemoryStateStore
@@ -285,9 +286,7 @@ class InMemoryAggregator(FanOutAggregator):
                 try:
                     return await self.merge(view)
                 except Exception as exc2:
-                    raise AggregatorMergeError(
-                        f"merge() raised on retry for key={key}"
-                    ) from exc2
+                    raise AggregatorMergeError(f"merge() raised on retry for key={key}") from exc2
             if self.merge_error_policy == MergeErrorPolicy.DROP:
                 # Fall back to default merge so the batch still completes.
                 return await FanOutAggregator.merge(self, view)
@@ -395,4 +394,4 @@ class InMemoryAggregator(FanOutAggregator):
         for attr, value in vars(base).items():
             if attr not in instance_attrs:
                 setattr(instance, attr, value)
-        return instance
+        return cast(InMemoryAggregator, instance)

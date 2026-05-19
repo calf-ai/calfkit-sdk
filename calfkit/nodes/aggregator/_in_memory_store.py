@@ -9,8 +9,9 @@ structures with Kafka-backed durability.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from calfkit.models.state import State
 from calfkit.nodes.aggregator.state import FanOutState
