@@ -404,8 +404,7 @@ class BaseAgentNodeDef(
                 # and overwrite the stale state so the new dispatch can
                 # proceed.
                 logger.error(
-                    "[%s] fan-out key=%s redispatch with different expected_tool_call_ids "
-                    "(prev=%s new=%s); overwriting",
+                    "[%s] fan-out key=%s redispatch with different expected_tool_call_ids (prev=%s new=%s); overwriting",
                     correlation_id[:8],
                     key,
                     sorted(existing.expected_tool_call_ids),
@@ -593,8 +592,7 @@ class BaseAgentNodeDef(
             # gets HDR_DEGRADED_MERGE — operators can detect that the
             # user's custom merge silently failed.
             logger.exception(
-                "[%s] merge() raised; DROP policy → default merge key=%s "
-                "(downstream envelope will carry %s=1)",
+                "[%s] merge() raised; DROP policy → default merge key=%s (downstream envelope will carry %s=1)",
                 key[0][:8],
                 key,
                 HDR_DEGRADED_MERGE,

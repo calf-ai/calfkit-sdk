@@ -8,6 +8,7 @@ internals, Client.connect captures the kwargs it passed and threads
 them forward through Worker._prepare_aggregators -> FanOutAggregator.
 setup -> _KafkaStateStore.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

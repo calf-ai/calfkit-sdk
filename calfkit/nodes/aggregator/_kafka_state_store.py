@@ -321,8 +321,7 @@ class _KafkaStateStore:
             # the anomaly without aborting partition activation for an
             # unrelated stray record.
             logger.error(
-                "state-topic record with null key on partition=%d; skipping "
-                "(unexpected: aggregator writes always have composite keys)",
+                "state-topic record with null key on partition=%d; skipping (unexpected: aggregator writes always have composite keys)",
                 partition,
             )
             return
@@ -330,8 +329,7 @@ class _KafkaStateStore:
             key = parse_composite_key(key_bytes)
         except ValueError as exc:
             logger.error(
-                "state-topic record with malformed key %r on partition=%d: %s; "
-                "skipping (no aggregator state can be tied to this record)",
+                "state-topic record with malformed key %r on partition=%d: %s; skipping (no aggregator state can be tied to this record)",
                 key_bytes,
                 partition,
                 exc,

@@ -187,11 +187,7 @@ async def test_resolve_partition_count_falls_back_on_unknown_topic(
     assert partitions == 4
     assert admin.create_topics.await_count == 2
     # Confirm the WARN about defaulting to the fallback partition count fired.
-    assert any(
-        "agent.in" in record.message and "defaulting" in record.message
-        for record in caplog.records
-        if record.levelname == "WARNING"
-    )
+    assert any("agent.in" in record.message and "defaulting" in record.message for record in caplog.records if record.levelname == "WARNING")
 
 
 async def test_create_topic_swallows_topic_already_exists() -> None:

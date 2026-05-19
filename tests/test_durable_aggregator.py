@@ -446,7 +446,11 @@ async def test_fan_out_id_is_the_inbound_frame_id(
     calls = _make_calls("t1")
 
     await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
-        calls, envelope, "corr-id", broker, partition=0,
+        calls,
+        envelope,
+        "corr-id",
+        broker,
+        partition=0,
     )
 
     # The state-store key uses the inbound frame_id as fan_out_id.
@@ -497,14 +501,15 @@ async def test_redispatch_preserves_received_for_in_flight_batch(
     calls = _make_calls("t1", "t2", "t3")
 
     await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
-        calls, envelope, correlation_id, broker, partition=0,
+        calls,
+        envelope,
+        correlation_id,
+        broker,
+        partition=0,
     )
 
     # No state-topic publish — the existing batch was preserved.
-    state_publishes = [
-        c for c in broker.publish.await_args_list
-        if c.kwargs.get("topic") == "test_agent.fanout-state"
-    ]
+    state_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.fanout-state"]
     assert state_publishes == [], "expected no state-topic publish on redispatch"
 
     # Cache state is preserved exactly — received["t1"] survives.
@@ -513,10 +518,7 @@ async def test_redispatch_preserves_received_for_in_flight_batch(
     assert preserved.last_updated_ms == 2000
 
     # Tool Calls were re-published (3 of them, one per tool).
-    tool_publishes = [
-        c for c in broker.publish.await_args_list
-        if c.kwargs.get("topic") == "tool.input"
-    ]
+    tool_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "tool.input"]
     assert len(tool_publishes) == 3
 
 
@@ -539,7 +541,11 @@ async def test_redispatch_skipped_for_completed_batch(
     calls = _make_calls("t1", "t2")
 
     await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
-        calls, envelope, correlation_id, broker, partition=0,
+        calls,
+        envelope,
+        correlation_id,
+        broker,
+        partition=0,
     )
 
     broker.publish.assert_not_awaited()
@@ -562,7 +568,11 @@ async def test_first_time_dispatch_persists_initial_batch(
     calls = _make_calls("t1", "t2")
 
     await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
-        calls, envelope, correlation_id, broker, partition=0,
+        calls,
+        envelope,
+        correlation_id,
+        broker,
+        partition=0,
     )
 
     persisted = state_store._cache[key]
@@ -714,10 +724,7 @@ async def test_retry_policy_succeeds_on_second_attempt(
 
     assert call_count[0] == 2
     # Batch completed: aggregated return published to agent topic.
-    agent_topic_publishes = [
-        c for c in broker.publish.await_args_list
-        if c.kwargs.get("topic") == "test_agent.input"
-    ]
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
     assert len(agent_topic_publishes) == 1
 
 
@@ -811,10 +818,7 @@ async def test_drop_policy_stamps_degraded_header_on_publish(
 
     # The agent-topic publish (the aggregated return) is the second
     # publish call (after state-topic update, before tombstone).
-    agent_topic_publishes = [
-        c for c in broker.publish.await_args_list
-        if c.kwargs.get("topic") == "test_agent.input"
-    ]
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
     assert len(agent_topic_publishes) == 1
     headers_on_publish = agent_topic_publishes[0].kwargs["headers"]
     assert headers_on_publish.get(HDR_DEGRADED_MERGE) == "1"
@@ -855,10 +859,7 @@ async def test_normal_completion_does_not_stamp_degraded_header(
         broker=broker,
     )
 
-    agent_topic_publishes = [
-        c for c in broker.publish.await_args_list
-        if c.kwargs.get("topic") == "test_agent.input"
-    ]
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
     assert len(agent_topic_publishes) == 1
     headers_on_publish = agent_topic_publishes[0].kwargs["headers"]
     assert HDR_DEGRADED_MERGE not in headers_on_publish
@@ -894,7 +895,11 @@ async def test_redispatch_with_drifted_tool_call_ids_overwrites(
     calls = _make_calls("t1", "t2", "t3")
 
     await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
-        calls, envelope, correlation_id, broker, partition=0,
+        calls,
+        envelope,
+        correlation_id,
+        broker,
+        partition=0,
     )
 
     overwritten = state_store._cache[key]

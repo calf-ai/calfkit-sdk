@@ -1,4 +1,5 @@
 """Tests for AggregatorBatch immutability and ToolCallId propagation."""
+
 from __future__ import annotations
 
 import pytest

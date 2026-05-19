@@ -7,6 +7,7 @@ AIOKafkaConsumer (used only during state-topic rehydration) does not
 share the FastStream broker's connection -- without this snapshot it
 fails on any production cluster with SASL/SSL auth.
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch

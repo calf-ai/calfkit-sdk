@@ -72,8 +72,7 @@ class _StateStoreRebalanceListener(ConsumerRebalanceListener):  # type: ignore[m
             # everything we touched and re-raise so aiokafka surfaces the
             # rebalance failure to the operator.
             logger.exception(
-                "aggregator rehydration failed for partitions=%s; evicting "
-                "partially-loaded keys and aborting partition activation",
+                "aggregator rehydration failed for partitions=%s; evicting partially-loaded keys and aborting partition activation",
                 sorted(partition_ids),
             )
             self._state_store.evict_partitions(partition_ids)

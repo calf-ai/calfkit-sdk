@@ -437,10 +437,7 @@ async def test_simulate_restart_rebuilds_cache_from_log() -> None:
             self.value = value
             self.offset = offset
 
-    records = [
-        _Rec(published_keys[i], published[i].model_dump_json().encode(), i)
-        for i in range(len(published))
-    ]
+    records = [_Rec(published_keys[i], published[i].model_dump_json().encode(), i) for i in range(len(published))]
     # getmany returns records on first call, empty on subsequent calls.
     mock_consumer.getmany = AsyncMock(side_effect=[{tp: records}, {}])
 

@@ -205,9 +205,7 @@ class BaseClient:
             An invocation handle with an associated future for the reply.
         """
         if has_composite_delimiter(correlation_id):
-            raise ValueError(
-                f"correlation_id must not contain '|' (fan-out aggregator composite-key delimiter): {correlation_id!r}"
-            )
+            raise ValueError(f"correlation_id must not contain '|' (fan-out aggregator composite-key delimiter): {correlation_id!r}")
 
         future = self._dispatcher.expect(correlation_id)
 

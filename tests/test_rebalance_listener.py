@@ -134,9 +134,7 @@ async def test_assigned_evicts_partial_state_when_rehydrate_raises() -> None:
     surfaces the rebalance failure. Activating the partition with partial
     state would corrupt the durability invariant."""
     raising_store = _StubStateStore(rehydrate_raises=RuntimeError("broker stalled"))
-    listener = _StateStoreRebalanceListener(
-        state_store=raising_store, returns_topic="agent.fanout-returns"
-    )
+    listener = _StateStoreRebalanceListener(state_store=raising_store, returns_topic="agent.fanout-returns")
 
     assigned = {
         TopicPartition("agent.fanout-returns", 0),
