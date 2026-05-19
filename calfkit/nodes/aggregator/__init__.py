@@ -17,7 +17,6 @@ Public API:
 Exception hierarchy under :class:`~calfkit.exceptions.CalfkitError`:
 
 - :class:`AggregatorError` — base.
-- :class:`FanOutTimeoutError` — idle-timeout reaping.
 - :class:`AggregatorMergeError` — :meth:`merge` raised with ABORT policy.
 - :class:`AggregatorStateStoreError` — durable store init / config failure.
 
@@ -31,7 +30,6 @@ from calfkit.nodes.aggregator.errors import (
     AggregatorError,
     AggregatorMergeError,
     AggregatorStateStoreError,
-    FanOutTimeoutError,
 )
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
@@ -48,7 +46,6 @@ __all__ = [
     "AggregatorStateStoreError",
     "FanOutAggregator",
     "FanOutState",
-    "FanOutTimeoutError",
     "MergeErrorPolicy",
     "ToolCallId",
 ]

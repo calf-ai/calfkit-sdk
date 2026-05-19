@@ -44,6 +44,13 @@ scope: Canonical merged design for the durable fan-out aggregator — public API
 >    branch: protocol headers / kafka_subscriptions / FanOutAggregator skeleton /
 >    state store + topic admin / wire-up + remove `_pending_batches` / tests +
 >    deprecation. The behavioural change ships in PR 5.
+> 8. **`idle_timeout_seconds` and `FanOutTimeoutError` dropped from v1.** The
+>    idle-timeout reaping mechanism is documented at length in this doc but
+>    was never implemented (no reaper task exists). Rather than ship dead
+>    code, the constructor parameter and the exception type were removed.
+>    A follow-up roadmap entry tracks the proper implementation
+>    (partition-scoped periodic sweep with async task lifecycle and test
+>    plumbing). See `ROADMAP.md` and the "Future work" pointer in §17.
 
 ## 1. Executive summary
 
@@ -80,7 +87,7 @@ Estimated implementation footprint: **~1,400–1,800 LoC** new code (aggregator 
 - **A general "DLQ" framework.** Late arrivals are logged and dropped in v1. A configurable DLQ topic is a future addition.
 - **Cross-agent fan-in / scatter-gather.** Aggregator joins are scoped to one agent's tool fan-out. Choreography across agents is a separate primitive (`Emit` / subscription patterns).
 - **A RocksDB-backed state store.** v1 holds in-memory cache with full rehydration from the compacted log on startup. RocksDB-backing is a v2 consideration if memory bounds become an operational concern.
-- **Soft-timeouts / progress-heartbeats.** v1 has a single firm idle timeout. Soft-progress hooks (e.g. `on_idle_progress(elapsed)`) are v2.
+- **Idle-timeout reaping of stuck batches.** v1 ships without an idle-timeout reaper. Batches live until they complete or are evicted by partition rebalance. A partition-scoped periodic sweep is tracked as a follow-up in `ROADMAP.md`. Soft-progress hooks (e.g. `on_idle_progress(elapsed)`) are v2.
 
 ### 2.3 What survives unchanged
 
@@ -219,7 +226,7 @@ calfkit/
       aggregator.py      # FanOutAggregator class
       state.py           # FanOutState, AggregatorBatch, AggregatedReturn, ToolCallId
       state_store.py     # _KafkaStateStore (private)
-      errors.py          # AggregatorError, FanOutTimeoutError, AggregatorMergeError, AggregatorStateStoreError
+      errors.py          # AggregatorError, AggregatorMergeError, AggregatorStateStoreError
       testing.py         # InMemoryAggregator
 ```
 
@@ -230,7 +237,7 @@ from calfkit.nodes import FanOutAggregator
 from calfkit.nodes.aggregator import AggregatorBatch, AggregatedReturn, ToolCallId
 from calfkit.nodes.aggregator.testing import InMemoryAggregator
 from calfkit.nodes.aggregator.errors import (
-    AggregatorError, FanOutTimeoutError, AggregatorMergeError, AggregatorStateStoreError,
+    AggregatorError, AggregatorMergeError, AggregatorStateStoreError,
 )
 ```
 
@@ -241,7 +248,6 @@ class FanOutAggregator(Generic[StateT, ResultT]):
     def __init__(
         self,
         *,
-        idle_timeout: timedelta = timedelta(minutes=5),
         on_merge_error: Literal["abort", "retry", "drop"] = "abort",
         merge_retry_count: int = 0,
         kafka_topic_config: Mapping[str, str] | None = None,
@@ -250,12 +256,14 @@ class FanOutAggregator(Generic[StateT, ResultT]):
     ) -> None: ...
 ```
 
+(`idle_timeout` was dropped from v1 — see the "Future work" pointer in §17 and the
+`ROADMAP.md` entry for the deferred idle-timeout reaper design.)
+
 Environment variables:
 
 | Env var | Purpose | Default |
 |---|---|---|
 | `CALFKIT_AGGREGATOR_OTEL` | `"0"` disables auto-OTel, `"1"` forces it | Auto-detect on `opentelemetry` import |
-| `CALFKIT_AGGREGATOR_IDLE_TIMEOUT_MS` | Default idle timeout for un-configured aggregators | `300000` |
 | `CALFKIT_AGGREGATOR_LOG_LEVEL` | Logger level override for `calfkit.aggregator` namespace | Inherits root |
 
 The full DX surface (testing API, comparison tables, naming rationale, etc.) is in [aggregator-dx-design.md](./drafts/aggregator-dx-design.md); not duplicated here.
@@ -895,17 +903,17 @@ Restated and consolidated from §7 plus new failure scenarios:
 |---|---|---|---|
 | Agent process crashes after writing FanOutState, before any tool dispatch | Inbound redelivered; idempotent dispatch check finds prior state | Re-dispatch tool Calls (per simpler alternative in §8.1) | Tool runs once or twice (idempotency required); batch completes normally |
 | Agent process crashes after dispatching some tools, before all | Some tool Calls were published; others were not. Inbound redelivered. | Re-dispatch; deduped via tool's own idempotency on `(correlation_id, tool_call_id)` | Some tools run twice; results converge |
-| Tool process crashes mid-execution | No return arrives within idle_timeout | Aggregator emits FanOutTimeoutError; agent receives it as an inbound exception | Configurable error handling at agent layer |
+| Tool process crashes mid-execution | No return arrives | Batch remains pending until partition rebalance evicts it (v1 has no idle-timeout reaper — see `ROADMAP.md` follow-up). Operator-visible via stuck `pending_batches`. | Batch stays in-flight; operator must redrive or rely on rebalance eviction |
 | Aggregator process crashes after receiving return, before write-through | Return's consumer offset never committed; redelivered to next owner | Next owner re-receives; dedup based on `tool_call_id` not in `collected_results` (post-rehydration); proceeds | None |
 | Aggregator process crashes after write-through, before completion check | Cache lost; rehydrate finds updated state; should_complete re-runs | Completion fires (if applicable); re-entry happens | Slight delay; correct outcome |
-| Aggregator process crashes after completion publish, before tombstone | re-entry message visible to agent; agent runs next LLM call; aggregator next-start sees no tombstone and considers the batch still active | The agent's next inbound might already be on the main topic. Aggregator's rehydration loads the (now-stale) state; subsequent late returns are deduped via collected_results. Eventually `idle_timeout` fires and the aggregator emits `FanOutTimeoutError` to a duplicate run that already completed. | Risk of duplicate FanOutTimeoutError firing for a completed batch. Mitigation: emit tombstone BEFORE re-entry publish. Trade: tombstone may exist for a batch whose re-entry was lost. Then the agent never resumes, and the next idle_timeout fires.... |
+| Aggregator process crashes after completion publish, before tombstone | re-entry message visible to agent; agent runs next LLM call; aggregator next-start sees no tombstone and considers the batch still active | The agent's next inbound might already be on the main topic. Aggregator's rehydration loads the (now-stale) state; subsequent late returns are deduped via collected_results. With no idle-timeout reaper in v1, the stale state lingers until the partition is reassigned. | Stale state lingers in-cache for a completed batch. Mitigation: emit tombstone BEFORE re-entry publish. Trade: tombstone may exist for a batch whose re-entry was lost — then the agent never resumes. |
 
 The last row is the trickiest. The atomicity gap between "tombstone write" and "re-entry publish" cannot be closed without Kafka transactions. Two non-transactional mitigations:
 
 1. **Write tombstone first, then publish re-entry.** If tombstone succeeds but re-entry fails, the agent never resumes. On rehydration, the batch is gone. There is no way to recover the in-flight correlation from the aggregator's records. The agent is stuck waiting for a resumption that will never come.
-2. **Publish re-entry first, then write tombstone.** If re-entry succeeds but tombstone fails, the agent resumes (and may complete its work). On rehydration, the batch reloads; idle_timeout will eventually fire. The fired timeout is "for a completed batch" — a confusing observability artifact. The agent's actual run is unaffected.
+2. **Publish re-entry first, then write tombstone.** If re-entry succeeds but tombstone fails, the agent resumes (and may complete its work). On rehydration, the batch reloads. With no idle-timeout reaper in v1, the stale entry lingers until partition rebalance evicts the cached state. The agent's actual run is unaffected.
 
-**Recommendation:** option 2 (re-entry first, then tombstone). The failure mode is a noisy false-positive `FanOutTimeoutError` for a batch that actually completed — annoying, observable, but the work was done correctly. Option 1 risks lost work, which is worse.
+**Recommendation:** option 2 (re-entry first, then tombstone). The failure mode is a stale in-cache entry for a batch that actually completed — observable via `pending_batches` metrics, but the work was done correctly. Option 1 risks lost work, which is worse.
 
 If exactly-once is needed, Kafka transactions (atomic write-and-publish across `fanout-state` and the agent's main topic) are the correct solution. This is a v2 consideration.
 
@@ -1087,7 +1095,7 @@ by an ``Agent`` and is auto-attached at construction time when none is provided.
 
 from calfkit.nodes.aggregator.aggregator import FanOutAggregator
 from calfkit.nodes.aggregator.errors import (
-    AggregatorError, AggregatorMergeError, AggregatorStateStoreError, FanOutTimeoutError,
+    AggregatorError, AggregatorMergeError, AggregatorStateStoreError,
 )
 from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch, ToolCallId
 
@@ -1097,7 +1105,6 @@ __all__ = [
     "AggregatedReturn",
     "ToolCallId",
     "AggregatorError",
-    "FanOutTimeoutError",
     "AggregatorMergeError",
     "AggregatorStateStoreError",
 ]
@@ -1107,7 +1114,7 @@ __all__ = [
 
 Houses `FanOutAggregator` class with:
 
-- `__init__` (config knobs: `idle_timeout`, `on_merge_error`, `merge_retry_count`, `kafka_topic_config`, `state_topic`, `returns_topic`).
+- `__init__` (config knobs: `on_merge_error`, `merge_retry_count`, `kafka_topic_config`, `state_topic`, `returns_topic`). The `idle_timeout` knob from earlier drafts was dropped from v1; see `ROADMAP.md` for the deferred reaper design.
 - `merge`, `should_complete`, `on_partial` (default implementations).
 - `kafka_subscriptions(node_id, broker)` — builds the `_KafkaSubscription` for `fanout-returns`.
 - `_handle_return(envelope, correlation_id, headers, broker)` — the actual Kafka handler.
@@ -1176,16 +1183,6 @@ class CalfkitError(Exception):
 
 class AggregatorError(CalfkitError): ...
 
-class FanOutTimeoutError(AggregatorError):
-    def __init__(
-        self,
-        correlation_id: str,
-        node_id: str,
-        fan_out_id: str,
-        missing_tool_call_ids: frozenset[str],
-        elapsed: timedelta,
-    ) -> None: ...
-
 class AggregatorMergeError(AggregatorError):
     def __init__(self, original: Exception, correlation_id: str, fan_out_id: str) -> None: ...
 
@@ -1216,7 +1213,6 @@ class InMemoryAggregator(FanOutAggregator):
         *,
         persist_to_disk: bool = False,
         path: Path | None = None,
-        idle_timeout: timedelta = timedelta(minutes=5),
         on_merge_error: Literal["abort", "retry", "drop"] = "abort",
         merge_retry_count: int = 0,
     ) -> None: ...
@@ -1436,10 +1432,12 @@ Requires real broker or careful FastStream simulation. May land as a docker-comp
 
 `test_late_return_is_logged_and_dropped`:
 
-1. Configure short `idle_timeout` (200ms).
-2. Dispatch fan-out; let only 2 of 3 tools return; let timeout fire (agent gets `FanOutTimeoutError`).
-3. Have the third tool return after a 1s delay.
-4. Assert: aggregator logs "late return" at INFO; metric `calfkit_aggregator_returns_late_total` incremented; agent does not re-enter (already errored out).
+1. Dispatch fan-out with three tools.
+2. Let all three return so the batch completes and writes a tombstone.
+3. Replay one of the returns after completion (simulating an at-least-once redelivery from Kafka).
+4. Assert: aggregator logs "late return" at INFO; metric `calfkit_aggregator_returns_late_total` incremented; agent does not re-enter (batch is already in `_recently_completed`).
+
+(Pre-completion timeout scenarios are deferred — v1 ships without an idle-timeout reaper; see `ROADMAP.md`.)
 
 ### 13.5 Idempotent re-arrival
 
@@ -1480,7 +1478,7 @@ Three sub-tests:
 
 - `test_merge_error_abort`: user `merge()` raises; assert `AggregatorMergeError` propagates; assert FastStream message is nacked (under `TestKafkaBroker`, hard to verify directly; assert via metric `calfkit_aggregator_state_store_write_errors_total` or by mocking the broker).
 - `test_merge_error_retry`: `on_merge_error="retry"`, `merge_retry_count=2`, `merge()` raises twice then succeeds; assert batch completes; assert two retries observable via log.
-- `test_merge_error_drop`: `on_merge_error="drop"`, `merge()` raises; assert tombstone written; assert agent never re-enters; assert `FanOutTimeoutError` does NOT fire (the batch was explicitly dropped, not timed out).
+- `test_merge_error_drop`: `on_merge_error="drop"`, `merge()` raises; assert tombstone written; assert agent never re-enters.
 
 ### 13.10 Custom `should_complete`
 
@@ -1710,9 +1708,9 @@ v1 has 1 partition. At what fan-out rate does this become a bottleneck? Order-of
 
 ### 17.2 Exactly-once via Kafka transactions
 
-The §9 analysis shows a small window of "duplicate FanOutTimeoutError firing for a completed batch" or "lost completion if tombstone+publish ordering reverses." Kafka transactions (`transactional.id`) would close this gap atomically.
+The §9 analysis shows a small window of "stale state lingers in-cache for a completed batch" or "lost completion if tombstone+publish ordering reverses." Kafka transactions (`transactional.id`) would close this gap atomically.
 
-Cost: meaningful complexity (transactional producer, isolation level on consumers, write order constraints). Benefit: eliminates the noisy false-positive timeout error.
+Cost: meaningful complexity (transactional producer, isolation level on consumers, write order constraints). Benefit: eliminates the stale-state observability artifact.
 
 **v1 recommendation:** skip transactions. Live with the small operational artifact. Document loudly. Revisit in v2 if real users hit it.
 
@@ -1761,6 +1759,12 @@ Trade-off: simpler reasoning vs. throughput cap. v1 picks 1 for `fanout-state`, 
 ### 17.10 What if the agent's main topic has a different partitioner from `fanout-returns`?
 
 We assume both use murmur2 (Kafka's default). If a user configures a custom partitioner on the main topic but not on `fanout-returns`, co-location breaks. The `_ensure_topics` pre-flight should validate partition count match and partitioner config match. **Action:** add a startup check.
+
+### 17.11 Idle-timeout reaping (Future work)
+
+Earlier drafts of this document proposed an `idle_timeout_seconds` knob on `FanOutAggregator` plus a `FanOutTimeoutError` raised when a batch's `last_updated_ms` ages past the threshold. Both were dropped from v1: the reaping mechanism needs a partition-scoped background task whose lifecycle is intertwined with consumer-group rebalances, plus deterministic test plumbing — non-trivial enough that shipping the parameter without a working reaper would be ship-dead-code. `last_updated_ms` is still recorded on `FanOutState` for observability.
+
+A follow-up design doc tracking the proper implementation (partition-scoped periodic sweep, async task lifecycle, test plumbing) is registered in `ROADMAP.md`.
 
 ---
 

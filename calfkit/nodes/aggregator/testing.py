@@ -51,7 +51,6 @@ class InMemoryAggregator(FanOutAggregator):
         self,
         *,
         merge_error_policy: MergeErrorPolicy = MergeErrorPolicy.ABORT,
-        idle_timeout_seconds: float | None = None,
         persist_to_disk: bool = True,
         disk_path: str | Path | None = None,
         completion_ttl_seconds: float = 60.0,
@@ -61,7 +60,6 @@ class InMemoryAggregator(FanOutAggregator):
         Args:
             merge_error_policy: How exceptions from :meth:`merge` are handled.
                 Forwarded to :class:`FanOutAggregator`.
-            idle_timeout_seconds: Forwarded to :class:`FanOutAggregator`.
             persist_to_disk: When ``True`` (default), the harness writes a
                 JSONL log of state mutations to ``disk_path`` so a
                 :meth:`simulate_restart` followed by re-instantiation
@@ -78,7 +76,6 @@ class InMemoryAggregator(FanOutAggregator):
         """
         super().__init__(
             merge_error_policy=merge_error_policy,
-            idle_timeout_seconds=idle_timeout_seconds,
         )
         self.persist_to_disk = persist_to_disk
         self._disk_path: Path | None = Path(disk_path) if disk_path is not None else None
@@ -381,7 +378,6 @@ class InMemoryAggregator(FanOutAggregator):
         # Defaults inherited from base; kwargs take precedence on conflict.
         init_kwargs: dict[str, Any] = {
             "merge_error_policy": base.merge_error_policy,
-            "idle_timeout_seconds": base.idle_timeout_seconds,
             **kwargs,
         }
         instance = wrapped_cls(**init_kwargs)

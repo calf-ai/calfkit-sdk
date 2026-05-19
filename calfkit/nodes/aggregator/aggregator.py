@@ -115,7 +115,6 @@ class FanOutAggregator:
         self,
         *,
         merge_error_policy: MergeErrorPolicy = MergeErrorPolicy.ABORT,
-        idle_timeout_seconds: float | None = None,
     ) -> None:
         """Initialise the aggregator.
 
@@ -124,15 +123,8 @@ class FanOutAggregator:
                 :meth:`merge`. Default :data:`MergeErrorPolicy.ABORT` raises
                 :class:`AggregatorMergeError`; see :class:`MergeErrorPolicy`
                 for the alternatives.
-            idle_timeout_seconds: If set, batches whose ``last_updated_ms`` is
-                older than this many seconds are reaped as failed (a
-                :class:`FanOutTimeoutError` is logged and the batch is
-                tombstoned). ``None`` (default) disables idle-timeout
-                reaping; batches live until they complete or are evicted by
-                a partition rebalance.
         """
         self.merge_error_policy = merge_error_policy
-        self.idle_timeout_seconds = idle_timeout_seconds
         # Populated by :meth:`setup` at worker startup. Internal attributes;
         # the agent's `_aggregator_handler` reads them.
         self._state_topic: str | None = None

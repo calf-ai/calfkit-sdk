@@ -12,16 +12,6 @@ class AggregatorError(CalfkitError):
     """Base class for fan-out aggregator-related errors."""
 
 
-class FanOutTimeoutError(AggregatorError):
-    """Raised when a fan-out batch exceeds its idle timeout without completing.
-
-    Idle timeout is measured from ``FanOutState.last_updated_ms`` — the last
-    time a tool return was merged into the batch. A batch that receives no
-    tool returns within ``FanOutAggregator.idle_timeout_seconds`` is treated
-    as failed and reaped.
-    """
-
-
 class AggregatorMergeError(AggregatorError):
     """Raised when :meth:`FanOutAggregator.merge` raises and the configured
     ``merge_error_policy`` is :data:`MergeErrorPolicy.ABORT` (or RETRY exhausted)."""
