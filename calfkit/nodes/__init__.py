@@ -1,3 +1,4 @@
+from calfkit.nodes.aggregator import FanOutAggregator
 from calfkit.nodes.agent import Agent, BaseAgentNodeDef
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.node import NodeDef
@@ -8,6 +9,7 @@ __all__ = [
     "BaseAgentNodeDef",
     "BaseNodeDef",
     "BaseToolNodeDef",
+    "FanOutAggregator",
     "GateFunction",
     "NodeDef",
     "ToolNodeDef",

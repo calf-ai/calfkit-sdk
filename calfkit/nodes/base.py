@@ -10,7 +10,14 @@ from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, NodeKind, decode_header_str
+from calfkit._protocol import (
+    HDR_EMITTER,
+    HDR_EMITTER_KIND,
+    HDR_FANOUT_ID,
+    HDR_FRAME_ID,
+    NodeKind,
+    decode_header_str,
+)
 from calfkit.models import (
     Call,
     NodeResult,
@@ -219,6 +226,28 @@ class BaseNodeDef(BaseNodeSchema):
     def _emitter_headers(self) -> dict[str, str]:
         return {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind}
 
+    def _publish_headers(
+        self,
+        inbound_headers: dict[str, Any] | None = None,
+        *,
+        forward_fanout: bool = False,
+    ) -> dict[str, str]:
+        """Build outbound publish headers.
+
+        Always stamps :data:`HDR_EMITTER` and :data:`HDR_EMITTER_KIND`.
+        When ``forward_fanout=True``, also forwards :data:`HDR_FANOUT_ID`
+        and :data:`HDR_FRAME_ID` from ``inbound_headers`` (if present) —
+        used by the ``ReturnCall`` publish path so a tool's return carries
+        the same fan-out identity as the inbound ``Call`` from the agent.
+        """
+        headers = self._emitter_headers()
+        if forward_fanout and inbound_headers is not None:
+            for fwd in (HDR_FANOUT_ID, HDR_FRAME_ID):
+                value = decode_header_str(inbound_headers.get(fwd))
+                if value is not None:
+                    headers[fwd] = value
+        return headers
+
     def kafka_subscriptions(self) -> list[_KafkaSubscription]:
         """Return the list of Kafka subscriber registrations this node needs.
 
@@ -238,11 +267,34 @@ class BaseNodeDef(BaseNodeSchema):
             )
         ]
 
-    async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
+    async def _publish_action(
+        self,
+        output: NodeResult[State],
+        envelope: Envelope,
+        correlation_id: str,
+        broker: BrokerAnnotation,
+        inbound_headers: dict[str, Any] | None = None,
+    ) -> Envelope:
+        """Publish the framework-level result of a ``run()`` invocation.
+
+        Subclasses (e.g. :class:`BaseAgentNodeDef`) override this to inject
+        aggregator semantics on the ``list[Call]`` parallel-fan-out branch
+        before delegating back here for everything else.
+
+        ``inbound_headers``: the headers of the message that triggered this
+        invocation. Used to forward :data:`HDR_FANOUT_ID` /
+        :data:`HDR_FRAME_ID` from the inbound to ``ReturnCall`` publishes,
+        so tools returning to an agent's fan-out carry the right batch
+        identity for the aggregator. Forward only on ``ReturnCall``; other
+        publish kinds either generate new identity (parallel fan-out) or
+        leave the headers untouched.
+        """
         publish_envelope: Envelope
 
         if isinstance(output, list) and all(isinstance(item, Call) for item in output):
-            # Parallel fan-out: publish each Call with independent workflow_state
+            # Parallel fan-out: publish each Call with independent workflow_state.
+            # Subclasses that need aggregator semantics override _publish_action
+            # to intercept this branch before delegating back.
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
                 wf_copy.invoke_frame(call, self.subscribe_topics[0])
@@ -260,7 +312,6 @@ class BaseNodeDef(BaseNodeSchema):
             return envelope
 
         elif isinstance(output, Call):
-            # push to callstack and call the target topic
             envelope.internal_workflow_state.invoke_frame(output, self.subscribe_topics[0])
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
@@ -276,7 +327,6 @@ class BaseNodeDef(BaseNodeSchema):
                 headers=self._emitter_headers(),
             )
         elif isinstance(output, ReturnCall):
-            # unwind current frame and return to previous topic
             frame = envelope.internal_workflow_state.unwind_frame()
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
@@ -288,11 +338,12 @@ class BaseNodeDef(BaseNodeSchema):
                 topic=frame.callback_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
-                headers=self._emitter_headers(),
+                # Forward HDR_FANOUT_ID/HDR_FRAME_ID so the aggregator can
+                # identify which fan-out batch a tool's return belongs to.
+                headers=self._publish_headers(inbound_headers, forward_fanout=True),
             )
 
         elif isinstance(output, TailCall):
-            # tailcall optimization: replace current call frame with new tailcall
             frame = envelope.internal_workflow_state.unwind_frame()
             envelope.internal_workflow_state.invoke_frame(output, frame.callback_topic)
             publish_envelope = Envelope(
@@ -350,7 +401,7 @@ class BaseNodeDef(BaseNodeSchema):
             else:
                 output = await self.run(ctx)
             logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
-            body = await self._publish_action(output, envelope, correlation_id, broker)
+            body = await self._publish_action(output, envelope, correlation_id, broker, inbound_headers=headers)
 
         return Response(body, headers=self._emitter_headers())
 

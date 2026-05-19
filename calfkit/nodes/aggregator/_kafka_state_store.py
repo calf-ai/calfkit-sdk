@@ -19,6 +19,7 @@ import logging
 from typing import Any, Callable
 
 from aiokafka import AIOKafkaConsumer, TopicPartition
+from aiokafka.partitioner import murmur2
 from faststream.kafka import KafkaBroker
 
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch, _TtlSet
@@ -48,12 +49,33 @@ class _KafkaStateStore:
         state_topic: str,
         *,
         bootstrap_servers: str | list[str],
+        partition_count: int | None = None,
         completion_ttl_seconds: float = 60.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
+        """Initialise the state store.
+
+        Args:
+            broker: FastStream KafkaBroker; used for durable publishes to the
+                state topic.
+            state_topic: ``{node_id}.fanout-state`` topic name.
+            bootstrap_servers: Bootstrap servers for the transient
+                ``AIOKafkaConsumer`` used during rehydration. Typically read
+                from ``broker.config`` at construction time.
+            partition_count: Total partition count for the state topic. When
+                set, :meth:`partition_for_key` computes the partition
+                deterministically from ``correlation_id``; otherwise callers
+                must pass ``partition=`` explicitly to :meth:`put` /
+                :meth:`tombstone`. Production code sets this via
+                :class:`FanOutAggregator.setup`; tests typically omit it.
+            completion_ttl_seconds: TTL for the recently-completed key set;
+                matches the state topic's ``delete.retention.ms``.
+            clock: Optional clock for deterministic TTL tests.
+        """
         self._broker = broker
         self._state_topic = state_topic
         self._bootstrap_servers = bootstrap_servers
+        self._partition_count = partition_count
         self._cache: dict[tuple[str, str], _InFlightBatch] = {}
         self._by_partition: dict[int, set[tuple[str, str]]] = {}
         self._owned_partitions: set[int] = set()
@@ -90,12 +112,30 @@ class _KafkaStateStore:
     # Write-side API (called by the FanOutAggregator returns handler)
     # ------------------------------------------------------------------
 
+    def partition_for_key(self, key: tuple[str, str]) -> int:
+        """Compute the state-topic partition for ``(corr, fanout)``.
+
+        Uses murmur2 over the ``correlation_id`` bytes — matching the
+        :class:`FanOutAggregatorPartitioner` behaviour on the producer
+        side. Requires :attr:`_partition_count` to be set.
+
+        Raises:
+            RuntimeError: if ``partition_count`` was not set at construction.
+        """
+        if self._partition_count is None:
+            raise RuntimeError(
+                "partition_count not configured on the state store; either "
+                "pass partition=... explicitly to put/tombstone, or set "
+                "partition_count when constructing the store"
+            )
+        return (murmur2(key[0].encode()) & 0x7FFFFFFF) % self._partition_count
+
     async def put(
         self,
         key: tuple[str, str],
         batch: _InFlightBatch,
         *,
-        partition: int,
+        partition: int | None = None,
     ) -> None:
         """Durably publish the batch state, then update the local cache.
 
@@ -104,10 +144,13 @@ class _KafkaStateStore:
         the source of truth and rehydration recovers correctly.
 
         ``partition`` is the state-topic partition this batch belongs to.
-        The handler passes it from the inbound message's partition (the
-        returns topic is co-partitioned with the state topic, so the
-        partition IDs match).
+        When ``None``, it's auto-computed via :meth:`partition_for_key`
+        (requires ``partition_count`` set at construction). The handler
+        normally passes it explicitly from the inbound returns-topic
+        message's partition (co-partitioned with the state topic).
         """
+        if partition is None:
+            partition = self.partition_for_key(key)
         state = batch.to_fanout_state()
         composite_key = build_composite_key(*key)
         await self._broker.publish(
@@ -122,14 +165,19 @@ class _KafkaStateStore:
         self,
         key: tuple[str, str],
         *,
-        partition: int,
+        partition: int | None = None,
     ) -> None:
         """Durably publish a null-value record (Kafka tombstone), then drop
         the cache entry and remember ``key`` for the recently-completed TTL.
 
         Late returns for ``key`` arriving within ``completion_ttl_seconds``
         of this call are dropped by :meth:`was_recently_completed`.
+
+        ``partition`` may be ``None`` to auto-compute via
+        :meth:`partition_for_key` (requires ``partition_count`` set).
         """
+        if partition is None:
+            partition = self.partition_for_key(key)
         composite_key = build_composite_key(*key)
         await self._broker.publish(
             None,

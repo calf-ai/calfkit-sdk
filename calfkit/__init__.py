@@ -2,7 +2,15 @@ from importlib.metadata import version
 
 from calfkit.client import Client, InvocationHandle, NodeResult
 from calfkit.models import ToolContext
-from calfkit.nodes import Agent, BaseNodeDef, GateFunction, NodeDef, ToolNodeDef, agent_tool
+from calfkit.nodes import (
+    Agent,
+    BaseNodeDef,
+    FanOutAggregator,
+    GateFunction,
+    NodeDef,
+    ToolNodeDef,
+    agent_tool,
+)
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.worker import Worker
 
@@ -18,6 +26,7 @@ __all__ = [
     # nodes
     "Agent",
     "BaseNodeDef",
+    "FanOutAggregator",
     "GateFunction",
     "NodeDef",
     "ToolNodeDef",

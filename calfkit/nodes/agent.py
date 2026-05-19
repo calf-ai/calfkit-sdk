@@ -1,8 +1,17 @@
 import logging
+import time
 from collections.abc import Callable
-from typing import Any, ClassVar, Generic, cast
+from typing import Annotated, Any, ClassVar, Generic, cast
 
-from calfkit._protocol import NodeKind
+from faststream import Context, Response
+from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
+
+from calfkit._protocol import (
+    HDR_FANOUT_ID,
+    HDR_FRAME_ID,
+    NodeKind,
+    decode_header_str,
+)
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
@@ -12,11 +21,15 @@ from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
-from calfkit.models.actions import Silent
+from calfkit.models.envelope import Envelope
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.state import PendingToolBatch
-from calfkit.nodes.base import BaseNodeDef, GateFunction
+from calfkit.nodes.aggregator import FanOutAggregator
+from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
+from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+from calfkit.nodes.aggregator.errors import AggregatorMergeError
+from calfkit.nodes.aggregator.state import ToolCallId
+from calfkit.nodes.base import BaseNodeDef, GateFunction, _KafkaSubscription
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
@@ -44,12 +57,16 @@ class BaseAgentNodeDef(
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
         model_settings: ModelSettings | dict[str, Any] | None = None,
+        aggregator: FanOutAggregator | None = None,
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
         self.tools = tools or list()
         self.sequential_only_mode = sequential_only_mode
-        self._pending_batches: dict[str, PendingToolBatch] = dict()
+        # The aggregator owns the durable join-state for parallel tool fan-out.
+        # An instance is always present so the Worker can wire it up at startup;
+        # subclasses (or callers) override behaviour by passing their own.
+        self.aggregator: FanOutAggregator = aggregator if aggregator is not None else FanOutAggregator()
 
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
@@ -65,18 +82,53 @@ class BaseAgentNodeDef(
             model_settings=cast(ModelSettings | None, model_settings),
         )
 
-    def _parallel_state_aggregation(self, ctx: SessionRunContext) -> None:
-        batch = self._pending_batches.get(ctx.deps.correlation_id)
-        if batch is not None:
-            for tool_call_id in batch.expected_tool_call_ids:
-                if tool_call_id not in batch.collected_results and tool_call_id in ctx.state.tool_results:
-                    batch.collected_results[tool_call_id] = ctx.state.tool_results[tool_call_id]
+    @property
+    def fanout_state_topic(self) -> str:
+        """Well-known topic name for this agent's compacted state topic."""
+        return f"{self.node_id}.fanout-state"
 
-            if batch.is_complete:
-                for tool_call_id, tool_call_result in batch.collected_results.items():
-                    batch.base_state.add_tool_result(tool_call_id, tool_call_result)
-                ctx.state = batch.base_state
-                del self._pending_batches[ctx.deps.correlation_id]
+    @property
+    def fanout_returns_topic(self) -> str:
+        """Well-known topic name for this agent's fan-out returns topic."""
+        return f"{self.node_id}.fanout-returns"
+
+    def kafka_subscriptions(self) -> list[_KafkaSubscription]:
+        """Return the agent's main subscription plus the aggregator's returns subscription.
+
+        The aggregator subscription is always included (using well-known
+        topic names derived from ``node_id``) so :meth:`Worker.register_handlers`
+        registers it regardless of whether
+        :meth:`FanOutAggregator.setup` has run yet. The rebalance listener
+        is included only after ``setup()`` has populated it (during
+        ``Worker.run()`` in production); in tests that bypass
+        ``Worker.run()`` and rely on ``TestKafkaBroker``, the listener is
+        absent — which is correct because the test harness doesn't simulate
+        partition rebalances.
+        """
+        subscriptions = list(super().kafka_subscriptions())
+        subscriptions.append(
+            _KafkaSubscription(
+                topics=[self.fanout_returns_topic],
+                handler=self._aggregator_handler,
+                listener=self.aggregator._rebalance_listener,
+                # Force serial processing: a single asyncio loop processes
+                # returns for this agent's partitions, so read-modify-write
+                # on the state store is linearizable.
+                max_workers=1,
+            )
+        )
+        return subscriptions
+
+    async def _ensure_aggregator_ready(self, broker: BrokerAnnotation) -> None:
+        """Lazily run :meth:`FanOutAggregator.setup` if it hasn't been called yet.
+
+        The Worker pre-runs setup in production; this fallback covers test
+        paths that bypass ``Worker.run()`` (``TestKafkaBroker`` flows) so the
+        first parallel fan-out can construct the state store on demand.
+        Idempotent: subsequent calls are no-ops.
+        """
+        if self.aggregator._state_store is None:
+            await self.aggregator.setup(broker, node_id=self.node_id, main_topic=self.subscribe_topics[0])
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         tools_registry = dict[str, BaseToolNodeSchema]()
@@ -93,38 +145,27 @@ class BaseAgentNodeDef(
             len(ctx.state.message_history),
         )
 
-        if not self.sequential_only_mode:
-            self._parallel_state_aggregation(ctx)
-            batch = self._pending_batches.get(ctx.deps.correlation_id)
-            if batch and not batch.is_complete:
-                return Silent()
-
         latest_tool_calls = ctx.state.latest_tool_calls()
         tool_results = None
 
         if len(latest_tool_calls) > 0:
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
-                if self.sequential_only_mode:
-                    target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
-                    logger.debug(
-                        "[%s] routing pending tool call=%s tool=%s node=%s",
-                        ctx.deps.correlation_id[:8],
-                        target_tool_call.tool_call_id,
-                        target_tool_call.tool_name,
-                        self.name,
-                    )
-                    return Call[State](
-                        tools_registry[target_tool_call.tool_name].subscribe_topics[0],
-                        ctx.state,
-                        target_tool_call.tool_call_id,
-                    )
-                else:
-                    remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
-                    raise RuntimeError(
-                        f"[{ctx.deps.correlation_id[:8]}] Parallel mode reached incomplete tool calls outside aggregation gate. "
-                        f"node={self.name} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
-                        f"This indicates lost PendingToolBatch state (e.g. partition rebalance or process restart)."
-                    )
+                # In sequential mode, route the next pending tool one at a time.
+                # In parallel mode, we shouldn't be here — the aggregator has
+                # already merged everything by the time we re-enter run().
+                target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
+                logger.debug(
+                    "[%s] routing pending tool call=%s tool=%s node=%s",
+                    ctx.deps.correlation_id[:8],
+                    target_tool_call.tool_call_id,
+                    target_tool_call.tool_name,
+                    self.name,
+                )
+                return Call[State](
+                    tools_registry[target_tool_call.tool_name].subscribe_topics[0],
+                    ctx.state,
+                    target_tool_call.tool_call_id,
+                )
 
             tool_results = DeferredToolResults(calls={tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id) for tc in latest_tool_calls})
 
@@ -141,14 +182,13 @@ class BaseAgentNodeDef(
             model_settings=run_model_settings,
         )
         if isinstance(result.output, DeferredToolRequests):
-            # The LLM called one or more tools
             logger.debug(
                 "[%s] model returned DeferredToolRequests tool_count=%d node=%s",
                 ctx.deps.correlation_id[:8],
                 len(result.output.calls),
                 self.name,
             )
-            messages = result.new_messages()  # preserve conversation history
+            messages = result.new_messages()
             ctx.state.message_history.extend(messages)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
@@ -180,9 +220,8 @@ class BaseAgentNodeDef(
                         ),
                     )
 
-            if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):  # All tool calls were invalid, we need to retry.
-                # TODO: maybe consider a node retry return type that doesn't require round trip to itself.
-                # Tailcall to itself is a roundtrip.
+            if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
+                # All tool calls were invalid; retry by tail-calling the agent.
                 logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
                 return TailCall[State](target_topic=self.subscribe_topics[0], state=ctx.state)
 
@@ -203,7 +242,12 @@ class BaseAgentNodeDef(
                     target_tool_call.tool_call_id,
                 )
             else:
-                launch_tool_call_ids = [tc.tool_call_id for tc in pending_tool_calls]
+                # Parallel fan-out: emit list[Call]. The base class's
+                # _publish_action recognises the agent has an aggregator
+                # attached and (a) writes the initial FanOutState record
+                # to the compacted state topic and (b) routes each Call's
+                # callback to {node_id}.fanout-returns so the aggregator
+                # collects the returns durably.
                 parallel_tool_calls = [
                     Call[State](
                         tools_registry[tc.tool_name].subscribe_topics[0],
@@ -212,12 +256,6 @@ class BaseAgentNodeDef(
                     )
                     for tc in pending_tool_calls
                 ]
-
-                self._pending_batches[ctx.deps.correlation_id] = PendingToolBatch(
-                    expected_tool_call_ids=frozenset(launch_tool_call_ids),
-                    base_state=ctx.state.model_copy(deep=True),
-                )
-
                 return parallel_tool_calls
 
         else:
@@ -228,6 +266,250 @@ class BaseAgentNodeDef(
             else:
                 ctx.state.final_output_parts = [DataPart(data=result.output)]
             return ReturnCall[State](state=ctx.state)
+
+    async def _publish_action(
+        self,
+        output: NodeResult[State],
+        envelope: Envelope,
+        correlation_id: str,
+        broker: BrokerAnnotation,
+        inbound_headers: dict[str, Any] | None = None,
+    ) -> Envelope:
+        """Override the parallel-fan-out branch to write the durable batch
+        record before publishing tool Calls, and route each Call's callback
+        to the aggregator's returns topic.
+
+        All other branches (single Call, ReturnCall, TailCall, Silent) fall
+        through to :meth:`BaseNodeDef._publish_action` unchanged.
+        """
+        if (
+            isinstance(output, list)
+            and output
+            and all(isinstance(item, Call) for item in output)
+        ):
+            await self._ensure_aggregator_ready(broker)
+            await self._publish_parallel_with_aggregator(output, envelope, correlation_id, broker)
+            return envelope
+
+        return await super()._publish_action(
+            output,
+            envelope,
+            correlation_id,
+            broker,
+            inbound_headers=inbound_headers,
+        )
+
+    async def _publish_parallel_with_aggregator(
+        self,
+        calls: list[Call[State]],
+        envelope: Envelope,
+        correlation_id: str,
+        broker: BrokerAnnotation,
+    ) -> None:
+        """Publish a parallel tool fan-out with durable aggregator semantics.
+
+        Steps:
+
+        1. Derive ``fan_out_id`` deterministically from the inbound
+           ``CallFrame.frame_id`` so redelivered inbounds produce the same
+           id (idempotent dispatch).
+        2. Build the initial :class:`_InFlightBatch` describing this fan-out
+           and write it durably to the state topic. This MUST happen before
+           any tool Call is published — if the worker crashes here, the
+           state record is the recovery anchor.
+        3. Publish each tool ``Call`` to its tool topic with callback
+           routed to ``{node_id}.fanout-returns`` (the aggregator's
+           subscriber) and headers stamped with :data:`HDR_FANOUT_ID`
+           (the deterministic batch id) and :data:`HDR_FRAME_ID` (the new
+           per-tool-call frame id).
+        """
+        assert self.aggregator._state_store is not None, "setup() must have been called"
+        assert self.aggregator._returns_topic is not None
+        state_store = self.aggregator._state_store
+        returns_topic = self.aggregator._returns_topic
+
+        # 1. Deterministic fan_out_id from the inbound agent frame.
+        fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
+
+        expected_tool_call_ids = frozenset(
+            {call.input_args[0] for call in calls if call.input_args is not None}
+        )
+
+        # 2. Build and durably persist the initial batch state.
+        now_ms = int(time.time() * 1000)
+        initial_batch = _InFlightBatch(
+            correlation_id=correlation_id,
+            fan_out_id=fan_out_id,
+            expected_tool_call_ids=expected_tool_call_ids,
+            base_state=calls[0].state.model_copy(deep=True),
+            received={},
+            started_at_ms=now_ms,
+            last_updated_ms=now_ms,
+            agent_topic=self.subscribe_topics[0],
+        )
+        key = (correlation_id, fan_out_id)
+        await state_store.put(key, initial_batch)
+
+        logger.debug(
+            "[%s] fan-out dispatch persisted key=%s expected=%d node=%s",
+            correlation_id[:8],
+            key,
+            len(expected_tool_call_ids),
+            self.name,
+        )
+
+        # 3. Publish each tool Call with callback → fanout-returns.
+        for call in calls:
+            wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
+            wf_copy.invoke_frame(call, returns_topic)
+            publish_envelope = Envelope(
+                context=SessionRunContext(state=call.state, deps=envelope.context.deps),
+                internal_workflow_state=wf_copy,
+            )
+            outbound_headers = {
+                **self._emitter_headers(),
+                HDR_FANOUT_ID: fan_out_id,
+                HDR_FRAME_ID: wf_copy.current_frame.frame_id,
+            }
+            await broker.publish(
+                publish_envelope,
+                topic=wf_copy.current_frame.target_topic,
+                correlation_id=correlation_id,
+                key=correlation_id.encode(),
+                headers=outbound_headers,
+            )
+
+    async def _aggregator_handler(
+        self,
+        envelope: Envelope,
+        correlation_id: Annotated[str, Context()],
+        headers: Annotated[dict[str, Any], Context("message.headers")],
+        broker: BrokerAnnotation,
+    ) -> Response:
+        """FastStream handler for tool returns arriving on ``{node_id}.fanout-returns``.
+
+        Maintains the durable fan-out aggregator state and, when the batch
+        completes, publishes the merged :class:`AggregatedReturn` back to the
+        agent's main topic so the agent re-enters with the full set of tool
+        results merged into its state.
+        """
+        # Lazy setup so test paths that bypass Worker.run() still work.
+        await self._ensure_aggregator_ready(broker)
+
+        fan_out_id = decode_header_str(headers.get(HDR_FANOUT_ID))
+        if fan_out_id is None:
+            logger.warning(
+                "[%s] fanout-returns msg without %s header; dropping",
+                correlation_id[:8],
+                HDR_FANOUT_ID,
+            )
+            return Response(envelope, headers=self._emitter_headers())
+
+        key = (correlation_id, fan_out_id)
+        state_store = self.aggregator._state_store
+
+        # 1. Reject late returns for already-completed batches.
+        if state_store.was_recently_completed(key):
+            logger.info(
+                "[%s] late return after completion key=%s; dropping",
+                correlation_id[:8],
+                key,
+            )
+            return Response(envelope, headers=self._emitter_headers())
+
+        # 2. Look up the in-flight batch in the cache.
+        batch = state_store.get(key)
+        if batch is None:
+            logger.warning(
+                "[%s] orphan return key=%s (no active batch in cache); dropping",
+                correlation_id[:8],
+                key,
+            )
+            return Response(envelope, headers=self._emitter_headers())
+
+        # 3. Determine which tool_call_id is newly returned (diff vs batch.received).
+        incoming_results = envelope.context.state.tool_results
+        new_ids = {
+            tcid
+            for tcid in incoming_results
+            if tcid in batch.expected_tool_call_ids and tcid not in batch.received
+        }
+        if not new_ids:
+            logger.debug(
+                "[%s] duplicate/empty return key=%s; idempotent drop",
+                correlation_id[:8],
+                key,
+            )
+            return Response(envelope, headers=self._emitter_headers())
+
+        # 4. Merge into the in-memory batch.
+        for tcid in new_ids:
+            batch.received[tcid] = incoming_results[tcid]
+        batch.last_updated_ms = int(time.time() * 1000)
+
+        # 5. Durable write — publish to state topic, then update cache.
+        await state_store.put(key, batch)
+
+        # 6. on_partial hook.
+        view = self.aggregator._batch_view(batch)
+        await self.aggregator.on_partial(view, frozenset({ToolCallId(tcid) for tcid in new_ids}))
+
+        # 7. Completion check + merge + publish aggregated result.
+        if await self.aggregator.should_complete(view):
+            try:
+                merged = await self.aggregator.merge(view)
+            except Exception as exc:
+                merged = await self._handle_merge_error(view, key, exc)
+                if merged is None:
+                    # ABORT policy: re-raise so the broker delivers again
+                    # (and the late-return path eventually drops it).
+                    raise AggregatorMergeError(
+                        f"merge() raised for key={key}"
+                    ) from exc
+
+            # Construct an envelope mirroring a normal ReturnCall back to
+            # the agent's main topic. The workflow_state already has the
+            # agent's frame on top (the tool frames were unwound when each
+            # tool returned), so the agent re-enters cleanly.
+            publish_envelope = Envelope(
+                context=SessionRunContext(state=merged.state, deps=envelope.context.deps),
+                internal_workflow_state=envelope.internal_workflow_state,
+            )
+            await broker.publish(
+                publish_envelope,
+                topic=batch.agent_topic,
+                correlation_id=correlation_id,
+                key=correlation_id.encode(),
+                headers=self._emitter_headers(),
+            )
+
+            # Tombstone the batch so late returns are recognised.
+            await state_store.tombstone(key)
+
+        return Response(envelope, headers=self._emitter_headers())
+
+    async def _handle_merge_error(
+        self,
+        view: Any,
+        key: tuple[str, str],
+        exc: Exception,
+    ) -> Any:
+        """Apply the configured :class:`MergeErrorPolicy`. Returns the merged
+        result on success, or ``None`` to signal the caller to re-raise."""
+        policy = self.aggregator.merge_error_policy
+        if policy == MergeErrorPolicy.RETRY:
+            try:
+                return await self.aggregator.merge(view)
+            except Exception:
+                logger.exception("[%s] merge() raised on retry key=%s", key[0][:8], key)
+                return None
+        if policy == MergeErrorPolicy.DROP:
+            # Fall back to the default merge so the batch still completes.
+            logger.exception("[%s] merge() raised; DROP policy → default merge key=%s", key[0][:8], key)
+            return await FanOutAggregator.merge(self.aggregator, view)
+        # ABORT
+        logger.exception("[%s] merge() raised; ABORT policy key=%s", key[0][:8], key)
+        return None
 
     def add_tools(self, *tools: ToolNodeDef) -> None:
         self.tools.extend(tools)

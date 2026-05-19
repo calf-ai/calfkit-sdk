@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import enum
 import logging
+from typing import TYPE_CHECKING
 
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
@@ -29,7 +30,44 @@ from calfkit.nodes.aggregator.state import (
     ToolCallId,
 )
 
+if TYPE_CHECKING:
+    from faststream.kafka import KafkaBroker
+
+    from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
+    from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
+    from calfkit.nodes.aggregator._rebalance import _StateStoreRebalanceListener
+
 logger = logging.getLogger(__name__)
+
+
+def _extract_bootstrap_servers(broker: KafkaBroker) -> str | list[str]:
+    """Pull ``bootstrap_servers`` from a FastStream broker.
+
+    Used by :meth:`FanOutAggregator.setup` to construct the transient
+    ``AIOKafkaConsumer`` for state-store rehydration without re-specifying
+    connection details. FastStream stores connection params on the broker
+    instance itself (``self._connection_kwargs``) — not on
+    ``broker.config`` directly.
+
+    Falls back to ``"localhost"`` when no servers are configured (e.g. in
+    ``TestKafkaBroker`` flows that never connect to a real broker); the
+    transient consumer the value feeds into is never invoked under
+    ``TestKafkaBroker``, so the fallback is purely a "don't crash on
+    setup" affordance.
+    """
+    for attr in ("_connection_kwargs",):
+        kwargs = getattr(broker, attr, None)
+        if isinstance(kwargs, dict) and "bootstrap_servers" in kwargs:
+            return kwargs["bootstrap_servers"]
+    config = getattr(broker, "config", None)
+    if config is not None:
+        client_kwargs = getattr(config, "client_kwargs", None) or {}
+        if isinstance(client_kwargs, dict) and "bootstrap_servers" in client_kwargs:
+            return client_kwargs["bootstrap_servers"]
+        bootstrap = getattr(config, "bootstrap_servers", None)
+        if bootstrap is not None:
+            return bootstrap  # type: ignore[return-value]
+    return "localhost"
 
 
 class MergeErrorPolicy(str, enum.Enum):
@@ -95,6 +133,94 @@ class FanOutAggregator:
         """
         self.merge_error_policy = merge_error_policy
         self.idle_timeout_seconds = idle_timeout_seconds
+        # Populated by :meth:`setup` at worker startup. Internal attributes;
+        # the agent's `_aggregator_handler` reads them.
+        self._state_topic: str | None = None
+        self._returns_topic: str | None = None
+        self._partition_count: int | None = None
+        self._state_store: _KafkaStateStore | None = None
+        self._rebalance_listener: _StateStoreRebalanceListener | None = None
+
+    # ------------------------------------------------------------------
+    # Framework lifecycle — called by Worker before subscribers register
+    # ------------------------------------------------------------------
+
+    async def setup(
+        self,
+        broker: KafkaBroker,
+        node_id: str,
+        main_topic: str,
+    ) -> None:
+        """Provision topics and wire up the state store + rebalance listener.
+
+        Called by :class:`~calfkit.worker.worker.Worker` exactly once per
+        agent, after ``broker.connect()`` and before
+        ``Worker.register_handlers()``. Subsequent calls are a no-op.
+
+        Args:
+            broker: A connected FastStream :class:`KafkaBroker`. The broker
+                must already be connected so ``broker.config.admin_client``
+                is available.
+            node_id: The agent's node_id; used as the prefix for the two
+                aggregator topics.
+            main_topic: The agent's main input topic; used to read the
+                target partition count (for co-partitioning).
+        """
+        if self._state_store is not None:
+            return  # idempotent
+
+        # Local imports avoid a circular dependency: the state store and
+        # listener pull in aiokafka, which we don't want at module import
+        # time for the public API surface.
+        from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
+        from calfkit.nodes.aggregator._rebalance import _StateStoreRebalanceListener
+        from calfkit.nodes.aggregator._topic_admin import ensure_aggregator_topics
+
+        state_topic, returns_topic, partition_count = await ensure_aggregator_topics(
+            broker,
+            node_id=node_id,
+            main_topic=main_topic,
+        )
+
+        self._state_topic = state_topic
+        self._returns_topic = returns_topic
+        self._partition_count = partition_count
+
+        bootstrap_servers = _extract_bootstrap_servers(broker)
+        self._state_store = _KafkaStateStore(
+            broker=broker,
+            state_topic=state_topic,
+            bootstrap_servers=bootstrap_servers,
+            partition_count=partition_count,
+        )
+        self._rebalance_listener = _StateStoreRebalanceListener(
+            state_store=self._state_store,
+            returns_topic=returns_topic,
+        )
+
+        logger.info(
+            "aggregator setup complete: node=%s state_topic=%s returns_topic=%s partitions=%d",
+            node_id,
+            state_topic,
+            returns_topic,
+            partition_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers used by the agent handler — internal API
+    # ------------------------------------------------------------------
+
+    def _batch_view(self, batch: _InFlightBatch) -> AggregatorBatch:
+        """Build the immutable :class:`AggregatorBatch` view passed to overrides."""
+        return AggregatorBatch(
+            correlation_id=batch.correlation_id,
+            fan_out_id=batch.fan_out_id,
+            expected_tool_call_ids=batch.expected_tool_call_ids,
+            received=dict(batch.received),
+            base_state=batch.base_state,
+            started_at_ms=batch.started_at_ms,
+            last_updated_ms=batch.last_updated_ms,
+        )
 
     # ------------------------------------------------------------------
     # User-overridable behaviour

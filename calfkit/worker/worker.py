@@ -5,6 +5,7 @@ from faststream import FastStream
 
 from calfkit.client import Client
 from calfkit.nodes import BaseNodeDef
+from calfkit.nodes.agent import BaseAgentNodeDef
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,21 @@ class Worker:
 
     def add_nodes(self, *nodes: BaseNodeDef) -> None:
         self._nodes.extend(nodes)
+
+    async def _prepare_aggregators(self) -> None:
+        """Run :meth:`FanOutAggregator.setup` for each agent node.
+
+        Requires the broker to be connected (so ``broker.config.admin_client``
+        is available). Called from :meth:`run` before
+        :meth:`register_handlers`.
+        """
+        broker = self._client._connection
+        # Ensure broker is connected so admin_client is available.
+        await broker.connect()
+        for node in self._nodes:
+            if isinstance(node, BaseAgentNodeDef):
+                main_topic = node.subscribe_topics[0]
+                await node.aggregator.setup(broker, node_id=node.node_id, main_topic=main_topic)
 
     def register_handlers(self) -> None:
         if self._prepared:
@@ -66,7 +82,19 @@ class Worker:
         self._prepared = True
 
     async def run(self, **extra_run_args: Any) -> None:
-        """Blocking method to run worker as a service until stopped."""
+        """Blocking method to run worker as a service until stopped.
+
+        Order of operations:
+
+        1. Connect broker and run :meth:`FanOutAggregator.setup` for each
+           agent (provisions per-agent topics and wires the state store +
+           rebalance listener).
+        2. Register handlers (now reads each agent's expanded
+           ``kafka_subscriptions`` including the aggregator returns
+           subscriber).
+        3. Hand off to FastStream's lifecycle.
+        """
         logger.info("worker starting with %d node(s)", len(self._nodes))
+        await self._prepare_aggregators()
         self.register_handlers()
         await FastStream(self._client._connection).run(**extra_run_args)
