@@ -11,46 +11,60 @@ scope: Canonical merged design for the durable fan-out aggregator — public API
 
 # Durable Fan-Out Aggregator — Canonical Design
 
-> **Implementation status (v1 shipped on `feat/durable-fanout-aggregator`):**
-> The implementation diverges from this doc in the following ways. They reflect
-> the multi-partition v1 baseline and pure-FastStream pattern decisions made
-> after this design was first written. Read these before relying on any
-> specific section for implementation detail.
+> **Implementation status (shipped on `feat/durable-fanout-aggregator`).**
+> The implementation diverges from this doc in the following ways; treat this
+> banner as authoritative when it contradicts the body below.
 >
 > 1. **Multi-partition by default.** All three topics (main, `{node_id}.fanout-state`,
 >    `{node_id}.fanout-returns`) share the same partition count, auto-detected
 >    from the agent's main topic at worker startup (default 6 when missing).
->    The "single-partition v1 / multi-partition v1.1" framing in §17.5/§17.9 is
->    obsolete — multi-partition is v1.
+>    Co-partitioning is preserved by a custom
+>    `FanOutAggregatorPartitioner` installed broker-wide at `Client.connect`
+>    (`calfkit/client/base.py::BaseClient.connect`,
+>    `calfkit/nodes/aggregator/_partitioner.py`). Earlier "single-partition
+>    v1 / multi-partition v1.1" framing is obsolete; the body below has
+>    been updated to match.
 > 2. **Per-partition linearisation** (§7.1) is achieved via consumer-group
 >    ownership of the returns topic plus `max_workers=1` on the aggregator's
->    subscriber. The same group_id is shared with the agent's main subscriber
->    so co-partitioning is automatic.
+>    subscriber (`calfkit/nodes/agent.py::BaseAgentNodeDef.kafka_subscriptions`).
 > 3. **Rehydration is rebalance-driven and partition-scoped** (§8.5).
->    `_StateStoreRebalanceListener.on_partitions_assigned` performs a one-shot
->    read of just the newly-assigned state-topic partitions via
->    `AIOKafkaConsumer` — not eager full-log rehydration in `Worker.run()`.
+>    `_StateStoreRebalanceListener.on_partitions_assigned`
+>    (`calfkit/nodes/aggregator/_rebalance.py`) drives
+>    `_KafkaStateStore.rehydrate_partitions`
+>    (`calfkit/nodes/aggregator/_kafka_state_store.py`) on the assigned
+>    partitions — not eager full-log rehydration in `Worker.run()`. The
+>    rehydration consumer uses **no** `group_id` and `assign()`s partitions
+>    manually.
 > 4. **No second consumer.** Standard Kafka Streams-style aggregation:
 >    the returns subscriber owns reads and writes; there is no
 >    "state-watcher" tailing the state topic in the background.
 > 5. **`broker.config.admin_client` is the production access path** for topic
->    provisioning; the one small `AIOKafkaConsumer` usage in
->    `_kafka_state_store.py` is for the rehydration pattern FastStream's
->    `@broker.subscriber` decorator doesn't express. Both are accessed
->    through FastStream where possible.
-> 6. **Standby replicas are explicitly out of scope for v1** (§2.2). Pure
->    consumer-group ownership handles failover.
-> 7. **Implementation lives on six PRs** on the `feat/durable-fanout-aggregator`
->    branch: protocol headers / kafka_subscriptions / FanOutAggregator skeleton /
->    state store + topic admin / wire-up + remove `_pending_batches` / tests +
->    deprecation. The behavioural change ships in PR 5.
-> 8. **`idle_timeout_seconds` and `FanOutTimeoutError` dropped from v1.** The
->    idle-timeout reaping mechanism is documented at length in this doc but
->    was never implemented (no reaper task exists). Rather than ship dead
->    code, the constructor parameter and the exception type were removed.
->    A follow-up roadmap entry tracks the proper implementation
->    (partition-scoped periodic sweep with async task lifecycle and test
->    plumbing). See `ROADMAP.md` and the "Future work" pointer in §17.
+>    provisioning (`calfkit/nodes/aggregator/_topic_admin.py`); the one
+>    small `AIOKafkaConsumer` usage in `_kafka_state_store.py` is for the
+>    rehydration pattern FastStream's `@broker.subscriber` doesn't express.
+> 6. **`KafkaConfig` is threaded through `Client.connect` → `Worker._prepare_aggregators`
+>    → `FanOutAggregator.setup` → `_KafkaStateStore`** so the transient
+>    rehydration consumer inherits the broker's SASL/SSL configuration
+>    (`calfkit/client/kafka_config.py`).
+> 7. **Public-API split:** the user-facing `FanOutAggregator` holds only
+>    behaviour overrides plus `merge_error_policy`; all Kafka mechanics
+>    live behind a single `_runtime: _FanOutRuntime` attribute
+>    (`calfkit/nodes/aggregator/_runtime.py`,
+>    `calfkit/nodes/aggregator/aggregator.py::FanOutAggregator.runtime`).
+> 8. **Structured exception context.** `AggregatorMergeError` carries
+>    `correlation_id` / `fan_out_id`; `AggregatorStateStoreError` carries
+>    `state_topic` (`calfkit/nodes/aggregator/errors.py`).
+> 9. **`HDR_DEGRADED_MERGE`** (`calfkit/_protocol.py`) is stamped on the
+>    aggregated return when `MergeErrorPolicy.DROP` is in effect and the
+>    user's `merge()` raised. Operators can filter on this header to
+>    surface silently-degraded batches.
+> 10. **`idle_timeout_seconds` and `FanOutTimeoutError` are removed.**
+>    The reaper was never built; rather than ship dead code, the parameter
+>    and exception were dropped. The follow-up design is registered in
+>    `ROADMAP.md` (`docs/fanout-idle-timeout-reaper.md`). `last_updated_ms`
+>    is still recorded on `FanOutState` for observability.
+> 11. **`merge_retry_count` is not a knob.** `MergeErrorPolicy.RETRY`
+>    retries `merge()` exactly once; no configuration.
 
 ## 1. Executive summary
 
@@ -83,7 +97,6 @@ Estimated implementation footprint: **~1,400–1,800 LoC** new code (aggregator 
 ### 2.2 Non-goals (v1)
 
 - **Exactly-once semantics via Kafka transactions.** We commit to at-least-once + idempotent merge. Transactional production is a v2 consideration.
-- **Multi-partition aggregator topics.** v1 ships single-partition `{node_id}.fanout-state` and `{node_id}.fanout-returns` per agent. Multi-partition scale-out is a v2 problem.
 - **A general "DLQ" framework.** Late arrivals are logged and dropped in v1. A configurable DLQ topic is a future addition.
 - **Cross-agent fan-in / scatter-gather.** Aggregator joins are scoped to one agent's tool fan-out. Choreography across agents is a separate primitive (`Emit` / subscription patterns).
 - **A RocksDB-backed state store.** v1 holds in-memory cache with full rehydration from the compacted log on startup. RocksDB-backing is a v2 consideration if memory bounds become an operational concern.
@@ -98,44 +111,42 @@ Estimated implementation footprint: **~1,400–1,800 LoC** new code (aggregator 
 
 ---
 
-## 3. Background: the bug we are fixing
+## 3. Background: the bug this design fixed (historical)
 
-### 3.1 Current state of the code
+> This section describes the pre-aggregator code paths that the shipped
+> `FanOutAggregator` replaced. `PendingToolBatch`, `_pending_batches`, and
+> `_parallel_state_aggregation` are all gone; field names referenced below
+> (`collected_results` etc.) refer to that removed type, not to the shipped
+> `FanOutState.received`.
 
-`BaseAgentNodeDef.__init__` initialises:
+### 3.1 What the code used to do
+
+`BaseAgentNodeDef.__init__` initialised an in-process dict:
 
 ```python
 self._pending_batches: dict[str, PendingToolBatch] = dict()
 ```
 
-(`calfkit/nodes/agent.py:52`).
+On a parallel turn, after the LLM emitted N tool calls, the agent stored a
+`PendingToolBatch(expected_tool_call_ids=..., base_state=...)` keyed by
+`correlation_id` and returned `list[Call]`. When each tool's `ReturnCall`
+came back, an aggregation gate inside `run()` looked up the batch, copied
+new tool_results into `batch.collected_results`, and either completed or
+waited.
 
-On a parallel turn, after the LLM emits N tool calls, the agent does the following inside `run()` (`agent.py:206-221`):
+### 3.2 What went wrong
 
-1. Constructs N `Call[State]` actions, one per tool.
-2. Stores a `PendingToolBatch(expected_tool_call_ids=frozenset(...), base_state=ctx.state.model_copy(deep=True))` in `self._pending_batches[ctx.deps.correlation_id]`.
-3. Returns `list[Call]` — `_publish_action` (`base.py:167-183`) iterates and publishes one Kafka message per tool with `key=correlation_id.encode()`.
+`self._pending_batches` was process-local. Three failure modes:
 
-When each tool finishes and a `ReturnCall` arrives back at the agent, the gate at `agent.py:97-101` runs `_parallel_state_aggregation(ctx)` which:
-
-1. Looks up the batch in `self._pending_batches.get(ctx.deps.correlation_id)`.
-2. If found, copies any new `tool_results` into `batch.collected_results`.
-3. If complete, merges into `batch.base_state`, sets `ctx.state = batch.base_state`, deletes the batch entry.
-4. If incomplete, returns `Silent()` — no further publish, agent waits for the next return.
-
-### 3.2 What goes wrong
-
-`self._pending_batches` is process-local. Three failure modes:
-
-1. **Worker process restart.** Between the fan-out publish and the first return, the worker is killed (deploy, OOM, crash). On restart, `_pending_batches` is empty. The first return arrives, the gate at `agent.py:99-127` raises the canonical `RuntimeError: This indicates lost PendingToolBatch state (e.g. partition rebalance or process restart).`
+1. **Worker process restart.** Between dispatch and the first return, the worker is killed (deploy, OOM, crash). On restart, `_pending_batches` is empty. The first return arrives and the gate raises the canonical `RuntimeError: This indicates lost PendingToolBatch state (e.g. partition rebalance or process restart).`
 2. **Consumer-group rebalance.** A second worker joins the group. Kafka reassigns the partition holding this `correlation_id` to the new worker. Returns now arrive at a worker whose `_pending_batches` never saw the dispatch. Same error.
-3. **Replay / duplicate delivery.** If a tool return is redelivered (consumer hasn't committed offset, broker re-pushed), `_parallel_state_aggregation` will idempotently re-copy the same `tool_call_id` into `batch.collected_results` — that's fine. But if the batch was already completed and the dict entry deleted, the redelivered return arrives at the gate with no batch present and triggers the same `RuntimeError`.
+3. **Replay / duplicate delivery.** If a tool return is redelivered (consumer hasn't committed offset, broker re-pushed), the aggregation gate would idempotently re-copy the same `tool_call_id` — fine. But if the batch had already completed and the dict entry was deleted, the redelivered return triggered the same `RuntimeError`.
 
-### 3.3 The invariant we need
+### 3.3 The invariant we needed
 
-> Given any `(correlation_id, fan_out_id)`, the set of `expected_tool_call_ids` and the dict `collected_results` must be recoverable by any process that owns the agent's partition, regardless of restart history.
+> Given any `(correlation_id, fan_out_id)`, the set of `expected_tool_call_ids` and the per-batch received-tool-results map must be recoverable by any process that owns the agent's partition, regardless of restart history.
 
-Kafka itself is a perfectly good store for this. The fix is to put the batch record on a **compacted topic** keyed by `(correlation_id, fan_out_id)`, write through it on every state change, and rehydrate the in-memory cache from offset 0 on startup.
+Kafka itself is a perfectly good store for this. The fix is to put the batch record on a **compacted topic** keyed by `(correlation_id, fan_out_id)`, write through it on every state change, and rehydrate the in-memory cache from the log on partition assignment.
 
 ---
 
@@ -179,7 +190,7 @@ from calfkit.nodes.aggregator import AggregatorBatch
 class FirstSuccessAggregator(FanOutAggregator):
     """Complete the batch as soon as one tool returns successfully."""
     async def should_complete(self, batch: AggregatorBatch) -> bool:
-        return any(not isinstance(r, Exception) for r in batch.collected_results.values())
+        return any(not isinstance(r, Exception) for r in batch.received.values())
 
 agent = Agent(
     "racing_agent",
@@ -191,29 +202,26 @@ agent = Agent(
 )
 ```
 
-The three override methods, restated:
+The three override methods, restated (shipped signatures —
+`calfkit/nodes/aggregator/aggregator.py::FanOutAggregator`):
 
 ```python
-class FanOutAggregator(Generic[StateT, ResultT]):
-    async def merge(
-        self,
-        base_state: StateT,
-        results: Mapping[ToolCallId, ResultT],
-    ) -> StateT: ...
+class FanOutAggregator:
+    async def merge(self, batch: AggregatorBatch) -> AggregatedReturn: ...
 
-    async def should_complete(self, batch: AggregatorBatch[StateT, ResultT]) -> bool: ...
+    async def should_complete(self, batch: AggregatorBatch) -> bool: ...
 
     async def on_partial(
         self,
-        batch: AggregatorBatch[StateT, ResultT],
-        latest: AggregatedReturn[ResultT],
+        batch: AggregatorBatch,
+        newly_received: frozenset[ToolCallId],
     ) -> None: ...
 ```
 
 Defaults:
 
-- `merge`: deep-copy `base_state`, call `add_tool_result` for each `(tool_call_id, result)`, return.
-- `should_complete`: `frozenset(batch.collected_results) == batch.expected_tool_call_ids`.
+- `merge`: deep-copy `batch.base_state`, call `add_tool_result` for each `(tool_call_id, result)` in `batch.received`, return as `AggregatedReturn(state=...)`.
+- `should_complete`: `batch.is_complete_by_count` — true when `expected_tool_call_ids <= frozenset(received.keys())`.
 - `on_partial`: no-op.
 
 ### 4.3 Public types and module structure
@@ -222,49 +230,65 @@ Defaults:
 calfkit/
   nodes/
     aggregator/
-      __init__.py        # FanOutAggregator, AggregatorBatch, AggregatedReturn, ToolCallId
-      aggregator.py      # FanOutAggregator class
-      state.py           # FanOutState, AggregatorBatch, AggregatedReturn, ToolCallId
-      state_store.py     # _KafkaStateStore (private)
-      errors.py          # AggregatorError, AggregatorMergeError, AggregatorStateStoreError
-      testing.py         # InMemoryAggregator
+      __init__.py            # FanOutAggregator, MergeErrorPolicy, AggregatorBatch,
+                             # AggregatedReturn, FanOutState, ToolCallId, errors
+      aggregator.py          # FanOutAggregator, MergeErrorPolicy (public)
+      state.py               # FanOutState, AggregatorBatch, AggregatedReturn, ToolCallId
+      errors.py              # AggregatorError, AggregatorMergeError, AggregatorStateStoreError
+      testing.py             # InMemoryAggregator
+      _runtime.py            # _FanOutRuntime (framework-managed runtime state)
+      _kafka_state_store.py  # _KafkaStateStore (production durable store)
+      _in_memory_store.py    # _InFlightBatch, _TtlSet, _InMemoryStateStore (test scaffolding)
+      _topic_admin.py        # ensure_aggregator_topics, STATE_TOPIC_CONFIG
+      _partitioner.py        # FanOutAggregatorPartitioner, composite-key helpers
+      _rebalance.py          # _StateStoreRebalanceListener
 ```
 
-Public surface:
+Public surface (shipped — `calfkit/nodes/aggregator/__init__.py`):
 
 ```python
-from calfkit.nodes import FanOutAggregator
-from calfkit.nodes.aggregator import AggregatorBatch, AggregatedReturn, ToolCallId
-from calfkit.nodes.aggregator.testing import InMemoryAggregator
-from calfkit.nodes.aggregator.errors import (
-    AggregatorError, AggregatorMergeError, AggregatorStateStoreError,
+from calfkit.nodes.aggregator import (
+    FanOutAggregator,
+    MergeErrorPolicy,
+    AggregatorBatch,
+    AggregatedReturn,
+    FanOutState,
+    ToolCallId,
+    AggregatorError,
+    AggregatorMergeError,
+    AggregatorStateStoreError,
 )
+from calfkit.nodes.aggregator.testing import InMemoryAggregator
 ```
 
 ### 4.4 Configuration
 
+The shipped constructor takes exactly one knob —
+`calfkit/nodes/aggregator/aggregator.py::FanOutAggregator.__init__`:
+
 ```python
-class FanOutAggregator(Generic[StateT, ResultT]):
+class FanOutAggregator:
     def __init__(
         self,
         *,
-        on_merge_error: Literal["abort", "retry", "drop"] = "abort",
-        merge_retry_count: int = 0,
-        kafka_topic_config: Mapping[str, str] | None = None,
-        state_topic: str | None = None,        # default: f"{node_id}.fanout-state"
-        returns_topic: str | None = None,      # default: f"{node_id}.fanout-returns"
+        merge_error_policy: MergeErrorPolicy = MergeErrorPolicy.ABORT,
     ) -> None: ...
 ```
 
-(`idle_timeout` was dropped from v1 — see the "Future work" pointer in §17 and the
-`ROADMAP.md` entry for the deferred idle-timeout reaper design.)
+`MergeErrorPolicy` (an `enum.Enum` with `str` values):
 
-Environment variables:
+| Value | Behaviour |
+|---|---|
+| `ABORT` (default) | Raise `AggregatorMergeError` and let FastStream nack/redeliver. |
+| `RETRY` | Retry `merge()` exactly once; fall back to ABORT on the second failure. Not configurable beyond on/off. |
+| `DROP` | Log the error, fall back to the default merge, stamp `HDR_DEGRADED_MERGE=1` on the published envelope, complete normally. |
 
-| Env var | Purpose | Default |
-|---|---|---|
-| `CALFKIT_AGGREGATOR_OTEL` | `"0"` disables auto-OTel, `"1"` forces it | Auto-detect on `opentelemetry` import |
-| `CALFKIT_AGGREGATOR_LOG_LEVEL` | Logger level override for `calfkit.aggregator` namespace | Inherits root |
+Topic names are derived from `node_id` (`{node_id}.fanout-state`,
+`{node_id}.fanout-returns`); compacted-topic config is the
+`STATE_TOPIC_CONFIG` constant in
+`calfkit/nodes/aggregator/_topic_admin.py` (see §6.5). Neither is a
+user knob in v1. `idle_timeout_seconds` was removed entirely — see §17.11
+and the `ROADMAP.md` entry for the deferred idle-timeout reaper.
 
 The full DX surface (testing API, comparison tables, naming rationale, etc.) is in [aggregator-dx-design.md](./drafts/aggregator-dx-design.md); not duplicated here.
 
@@ -277,9 +301,17 @@ The full DX surface (testing API, comparison tables, naming rationale, etc.) is 
 Each `Agent` instance owns two new Kafka topics:
 
 ```
-{node_id}.fanout-state      compacted, 1 partition  — system of record for in-flight batches
+{node_id}.fanout-state      compacted, N partitions — system of record for in-flight batches
 {node_id}.fanout-returns    normal,    N partitions — fan-in channel for tool returns
 ```
+
+Both share the same partition count `N` as the agent's main topic (auto-detected
+at startup; default 6 when the main topic doesn't exist yet —
+`calfkit/nodes/aggregator/_topic_admin.py::ensure_aggregator_topics`). The
+`FanOutAggregatorPartitioner` keeps composite-key (`{corr}|{fan_out_id}`)
+records co-partitioned with `correlation_id`-keyed records, so the same
+correlation lands on the same partition number across all three topics
+(`calfkit/nodes/aggregator/_partitioner.py`).
 
 Per-agent ownership is the locked-in decision. Multiple agents do not share these topics.
 
@@ -360,15 +392,9 @@ All wire-format types live in `calfkit/nodes/aggregator/state.py`. The naming co
 
 `FanOutState` is the value published to `{node_id}.fanout-state`. The key is the dedup composite `(correlation_id, fan_out_id)` serialised as `f"{correlation_id}|{fan_out_id}"` (matching the partition-key convention; `|` is illegal in uuid7 hex). On completion we publish a tombstone (`value=None`) on this key.
 
+Shipped at `calfkit/nodes/aggregator/state.py::FanOutState`:
+
 ```python
-# calfkit/nodes/aggregator/state.py
-
-from datetime import datetime
-from typing import Any
-from pydantic import BaseModel, ConfigDict, Field
-
-from calfkit.models.state import State
-
 class FanOutState(BaseModel):
     """Value type for the {node_id}.fanout-state compacted topic.
 
@@ -378,52 +404,40 @@ class FanOutState(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    # Identity (also the key — duplicated in value for self-contained replay)
     correlation_id: str
-    fan_out_id: str = Field(description="uuid7 hex assigned by the agent at dispatch time")
-    node_id: str = Field(description="The owning agent's node_id (the compacted topic name's prefix)")
-
-    # Expected work
-    expected_tool_call_ids: frozenset[str] = Field(
-        description="The full set of tool_call_id values this batch waits on. Frozen at dispatch."
-    )
-
-    # Collected results so far. None values are not allowed — a missing key means
-    # "not yet collected". A present key is unambiguously "received".
-    collected_results: dict[str, Any] = Field(
-        default_factory=dict,
-        description="tool_call_id -> serialised tool result. Tool results are arbitrary, "
-                    "carried as-is from State.tool_results. JSON-serialisable.",
-    )
-
-    # Snapshot of agent State at fan-out time (the basis the merge will be applied to)
+    fan_out_id: str          # derived from CallFrame.frame_id at dispatch
+    expected_tool_call_ids: frozenset[ToolCallId]
+    received: dict[ToolCallId, Any] = Field(default_factory=dict)
     base_state: State
-
-    # Lifecycle timestamps (epoch millis; integers, not floats, for compact JSON)
     started_at_ms: int
     last_updated_ms: int
+    agent_topic: str         # where the aggregated return is published
 
-    # Versioning of the wire shape — bump on backwards-incompatible changes
-    schema_version: int = 1
-
-    # Optional propagation
-    traceparent: str | None = Field(
-        default=None,
-        description="W3C trace-context value captured at dispatch time; used to "
-                    "stitch the completion span back to the originating trace.",
-    )
+    # Optional W3C trace-context propagation
+    traceparent: str | None = None
     tracestate: str | None = None
 ```
 
+Earlier drafts of this doc additionally proposed `node_id: str` and
+`schema_version: int = 1` fields; neither shipped. The owning agent's
+`node_id` is recoverable from the state topic name (`{node_id}.fanout-state`),
+and schema evolution is handled by Pydantic's `extra="ignore"` plus the
+"never remove a field" convention.
+
 **Why plain BaseModel, not CompactBaseModel:** the rules in agent memory (`exclude_unset=True` requires `= None` defaults, list mutation does not mark fields) apply to `State`/`CompactBaseModel`. For a value type written and read by the same component on a topic with strict round-trip, plain BaseModel is simpler and avoids the trap. `Envelope` already follows this convention for the same reason.
 
-**Why `expected_tool_call_ids: frozenset[str]`, not a list:** the dedup invariant is set-based; a frozenset documents it. Pydantic serialises it to a JSON array; on read we coerce back. Order is irrelevant.
+**Why `expected_tool_call_ids: frozenset[ToolCallId]`, not a list:** the dedup invariant is set-based; a frozenset documents it. Pydantic serialises it to a JSON array; on read we coerce back. Order is irrelevant.
 
 **Why store `base_state` in the record:** completion requires merging into the state snapshot captured at dispatch time, not whatever state the latest return brings (returns carry stale fragments). On rehydration after restart, the aggregator needs `base_state` to perform the merge — we cannot reconstruct it from envelopes alone. Cost: each fan-out writes one State-sized record. State is bounded by message_history which is bounded by the agent loop, so this is reasonable.
 
-### 6.2 The returns-topic message: `FanOutReturnEnvelope`
+**Why store `agent_topic` in the record:** completion publishes the
+`AggregatedReturn` to the agent's main topic, and rehydration may run on
+a worker that wasn't the one that wrote the record. The agent's main
+topic name is the canonical recovery anchor.
 
-The aggregator subscribes to `{node_id}.fanout-returns`. Each message is a regular calfkit `Envelope` — tools publish via the existing `_publish_action` pathway. **No new envelope type.** The only thing we change is the destination topic (via the rewritten `callback_topic`) and the headers we stamp on dispatch.
+### 6.2 The returns-topic message: standard `Envelope`
+
+The aggregator subscribes to `{node_id}.fanout-returns`. Each message is a regular calfkit `Envelope` — tools publish via the existing `_publish_action` pathway. **No new envelope type.** The only thing that changes is the destination topic (via the rewritten `callback_topic`) and the headers stamped on dispatch.
 
 The aggregator's subscriber unpacks the standard `Envelope`:
 
@@ -435,10 +449,10 @@ This is the **right call**: we do not invent a new envelope type for a transient
 
 ### 6.3 The post-completion message: re-entry to the main topic
 
-When the batch completes, the aggregator publishes one envelope to the agent's main subscribe topic. The envelope shape is again the standard `Envelope`. The aggregator constructs it by:
+When the batch completes, the aggregator publishes one envelope to the agent's main subscribe topic (`FanOutState.agent_topic`). The envelope shape is again the standard `Envelope`. The aggregator constructs it by:
 
 1. Taking the persisted `FanOutState.base_state`.
-2. Running it through `aggregator.merge(base_state, collected_results)` to produce the final merged `State`.
+2. Running it through `aggregator.merge(batch)` where `batch.received` holds the accumulated tool results, to produce an `AggregatedReturn(state=...)`.
 3. Reusing the **first** received return's `internal_workflow_state` (with the call-stack appropriately unwound — see §8.3).
 
 This re-entry message is what the agent's `run()` will see. From the agent's point of view, it's a normal inbound on its main subscribe topic, with merged state. The existing `_parallel_state_aggregation` gate and the `RuntimeError` are removed; the agent simply runs the next LLM iteration.
@@ -472,15 +486,23 @@ is the canonical cross-hop dedup key under at-least-once delivery.
 """
 ```
 
+A third aggregator-specific header is added in this branch
+(`calfkit/_protocol.py::HDR_DEGRADED_MERGE`, value `"x-calf-degraded-merge"`).
+It is stamped on the aggregated return ONLY when `MergeErrorPolicy.DROP`
+fell back to the default merge after the user's `merge()` raised; value is
+the string `"1"`. Operators and observability tooling filter on this
+header to surface silently-degraded batches.
+
 Header summary, by message:
 
-| Message | `x-calf-emitter` | `x-calf-emitter-kind` | `x-calf-frame-id` | `x-calf-fanout-id` | `traceparent`/`tracestate` |
-|---|---|---|---|---|---|
-| Client initial invoke | client.{id} | `client` | (from frame) | absent | (if client-side OTel) |
-| Agent single-tool dispatch | {agent.node_id} | `agent` | (from frame) | absent | (propagated) |
-| Agent parallel dispatch (one per call) | {agent.node_id} | `agent` | (from frame, distinct per call) | {fan_out_id} | (propagated) |
-| Tool ReturnCall (parallel) | {tool.node_id} | `tool` | (from new frame) | {fan_out_id} (echoed) | (propagated) |
-| Aggregator re-entry to agent main topic | {agent.node_id} | `agent` | (synthesised new frame) | absent (batch is done) | (carried from base) |
+| Message | `x-calf-emitter` | `x-calf-emitter-kind` | `x-calf-frame-id` | `x-calf-fanout-id` | `x-calf-degraded-merge` | `traceparent`/`tracestate` |
+|---|---|---|---|---|---|---|
+| Client initial invoke | client.{id} | `client` | (from frame) | absent | absent | (if client-side OTel) |
+| Agent single-tool dispatch | {agent.node_id} | `agent` | (from frame) | absent | absent | (propagated) |
+| Agent parallel dispatch (one per call) | {agent.node_id} | `agent` | (from frame, distinct per call) | {fan_out_id} | absent | (propagated) |
+| Tool ReturnCall (parallel) | {tool.node_id} | `tool` | (from new frame) | {fan_out_id} (echoed) | absent | (propagated) |
+| Aggregator re-entry — normal | {agent.node_id} | `agent` | (synthesised new frame) | absent | absent | (carried from base) |
+| Aggregator re-entry — DROP fallback | {agent.node_id} | `agent` | (synthesised new frame) | absent | `"1"` | (carried from base) |
 
 **Echoing rule:** the existing `BaseNodeDef.handler` returns `Response(body, headers=self._emitter_headers())` at `base.py:278`. The Response headers include `HDR_EMITTER` and `HDR_EMITTER_KIND`. The fan-out and frame headers ride only on the outbound `broker.publish(...)` call sites at `base.py:176-181, 194-199, 209-214, 227-232`. Tools do not need to know they're in a fan-out — `_publish_action` reads them from the inbound `headers` dict (via FastStream `Context("message.headers")`) and forwards them.
 
@@ -488,40 +510,41 @@ Concretely: a small helper `_emit_headers(envelope, inbound_headers)` builds the
 
 ### 6.5 Compacted topic configuration
 
+Shipped at `calfkit/nodes/aggregator/_topic_admin.py::STATE_TOPIC_CONFIG`:
+
 ```python
-# calfkit/nodes/aggregator/state_store.py
-
-DEFAULT_FANOUT_STATE_TOPIC_CONFIG: dict[str, str] = {
+STATE_TOPIC_CONFIG: dict[str, str] = {
     "cleanup.policy": "compact",
-    "min.cleanable.dirty.ratio": "0.1",     # compact aggressively; short-lived keys
-    "min.compaction.lag.ms": "60000",       # 1 min: ensure consumers can read recent writes before compaction
-    "delete.retention.ms": "60000",         # 1 min: tombstones retained briefly after compaction
-    "segment.ms": "600000",                 # 10 min: small segments to enable frequent compaction
-    "segment.bytes": "10485760",            # 10 MB
-    "retention.ms": "-1",                   # infinite — compaction owns retention
-    "max.compaction.lag.ms": "300000",      # 5 min: hard upper bound
-}
-
-DEFAULT_FANOUT_RETURNS_TOPIC_CONFIG: dict[str, str] = {
-    "cleanup.policy": "delete",
-    "retention.ms": "3600000",              # 1 hour: returns are ephemeral once aggregated
-    "segment.ms": "600000",
+    "min.compaction.lag.ms": "60000",      # 1 min: matches recently-completed TTL
+    "delete.retention.ms": "60000",        # 1 min: tombstones retained long enough to disambiguate
+    "segment.ms": "604800000",             # 7 days: Kafka default; compaction triggers via min.compaction.lag.ms
 }
 ```
 
+The returns topic uses Kafka defaults (no per-topic config overrides).
+
 **Rationale per setting (fanout-state):**
 
-- `cleanup.policy=compact` — required: we want per-key retention only. Without this, the topic is delete-policy and a tombstone is meaningless.
-- `min.compaction.lag.ms=60000` — protects against compaction racing with consumers that just read a key and need to re-read it during rehydration. 1 minute is a balance between aggressive cleanup and read safety.
+- `cleanup.policy=compact` — required: per-key retention only. Without this, the topic is delete-policy and a tombstone is meaningless.
+- `min.compaction.lag.ms=60000` — matches the `_recently_completed` TTL in the in-memory cache. Protects against compaction racing with consumers that just read a key and need to re-read it during rehydration.
 - `delete.retention.ms=60000` — how long a tombstone is retained after the key is compacted away. Long enough for a rehydrating consumer to see the tombstone and know the batch is done; short enough that completed batches don't bloat the log.
-- `segment.ms=600000`, `segment.bytes=10485760` — small segments make compaction run frequently on the active segment. Default Kafka segment size (1 GB / 7 days) would mean the active segment never closes for low-volume topics, blocking compaction. 10 MB / 10 min is right for the expected bounded state size.
-- `max.compaction.lag.ms=300000` — hard upper bound on how stale the log can get before compaction is forced.
+- `segment.ms=604800000` (7 days) — Kafka's default; small `min.compaction.lag.ms` already drives frequent enough compaction without forcing tiny segments.
+
+Earlier drafts proposed `min.cleanable.dirty.ratio`, `segment.bytes`,
+`retention.ms`, and `max.compaction.lag.ms`. None shipped — the four keys
+above are sufficient in practice and Kafka's defaults are reasonable for
+the unspecified parameters.
 
 **Partition count and replication factor:**
 
-- `fanout-state`: **1 partition** in v1. Single-partition guarantees total order of writes for a given `(correlation_id, fan_out_id)` key, which simplifies the read-modify-write contract. The trade-off is throughput cap; at expected scale (low-100s of in-flight batches per agent), one partition holds. Document a v2 path: hash-by-correlation_id across N partitions when needed, with the aggregator consuming all partitions (no consumer group, or one consumer-per-partition).
-- `fanout-returns`: **partition count co-partitioned with the agent's primary subscribe topic.** If the main topic has 6 partitions, this one has 6, keyed by `correlation_id`. This keeps a given correlation's returns on a single aggregator instance.
-- Replication factor: **3** for both, matching production Kafka defaults. Configurable via `kafka_topic_config` for dev / single-broker environments where 1 is acceptable.
+- Both topics: **partition count auto-detected from the agent's main
+  topic** at startup (default 6 when the main topic doesn't exist).
+  Co-partitioning is preserved by the `FanOutAggregatorPartitioner`,
+  which extracts the `correlation_id` prefix from the
+  `{corr}|{fan_out_id}` composite keys before hashing.
+- Replication factor: **3** for both, matching production Kafka defaults
+  (`_topic_admin.py::ensure_aggregator_topics` accepts a
+  `replication_factor` kwarg for dev / single-broker environments).
 
 ### 6.6 Why `frozenset[str]` on Kafka
 
@@ -529,7 +552,7 @@ Pydantic serialises `frozenset[str]` to a JSON array. On deserialise we coerce b
 
 ### 6.7 Forbidden patterns reaffirmed
 
-- **No `dict[str, Any]` on the wire** in user-facing types. `FanOutState.collected_results` is `dict[str, Any]` only because `tool_results` upstream is `dict[str, ToolCallResult | Any]`. This is a known weak point in the existing State model; the aggregator does not make it worse.
+- **No `dict[str, Any]` on the wire** in user-facing types. `FanOutState.received` is `dict[ToolCallId, Any]` only because `tool_results` upstream is `dict[str, ToolCallResult | Any]`. This is a known weak point in the existing State model; the aggregator does not make it worse.
 - **No `headers` field on `Envelope`.** User propagation context flows via Kafka transport headers per the existing `_protocol.py` channel. The aggregator's `traceparent`/`tracestate` are also Kafka headers, never body fields.
 
 ---
@@ -540,9 +563,13 @@ Pydantic serialises `frozenset[str]` to a JSON array. On deserialise we coerce b
 
 For any `(correlation_id, fan_out_id)`, all reads and writes to `fanout-state` must be linearisable from the aggregator's perspective. That is, the read-modify-write sequence "load batch, merge new return, write back" must not interleave with a competing writer.
 
-In v1, this is achieved trivially: `fanout-state` has 1 partition, so one Kafka consumer-group member reads and writes it. Two aggregator instances cannot race because the consumer group assigns the single partition to one member.
+This is achieved via three composed properties:
 
-In v2 with N partitions, the contract requires hash-by-correlation_id on both producer and consumer, so writes for the same correlation always land on the same partition and thus the same consumer.
+1. **Co-partitioning.** The `FanOutAggregatorPartitioner` extracts `correlation_id` from composite keys before hashing, so writes for the same `correlation_id` always land on the same partition number across main / fanout-state / fanout-returns (`calfkit/nodes/aggregator/_partitioner.py`).
+2. **Single owner per partition.** The aggregator's returns subscriber is a consumer-group member; Kafka guarantees one member owns a given partition at a time.
+3. **Serial dispatch within the owner.** The aggregator's subscription registers with `max_workers=1` (`calfkit/nodes/agent.py::BaseAgentNodeDef.kafka_subscriptions`), so a single asyncio task drives read-modify-write for all owned partitions on this worker — no in-process race for the same key.
+
+Together these make per-key writes linearisable across the cluster.
 
 ### 7.2 Co-partitioning with the agent's main topic
 
@@ -578,26 +605,35 @@ This is the §10.3 "late return" path. The reason `delete.retention.ms=60000` is
 
 The composite key for dedup is `(correlation_id, fan_out_id, tool_call_id)`.
 
-**Inbound on `fanout-returns`:**
-1. Decode `correlation_id` (Kafka header), `fan_out_id` (Kafka header), and unpack the `tool_call_id` from `envelope.context.state.tool_results` (there should be exactly one new entry).
-2. Look up `(correlation_id, fan_out_id)` in the in-memory cache.
-   - **Not found, no tombstone known:** rehydrate from `fanout-state` (one targeted read of the recent log). If still not found: log warning "orphan return"; drop.
-   - **Found in active set:** check if `tool_call_id` is already in `batch.collected_results`. If yes: dedup hit, log DEBUG, drop. If no: proceed.
-   - **Found in recently-tombstoned set:** log INFO "late return after completion"; drop. (Optionally route to DLQ — v2.)
-3. Update `batch.collected_results[tool_call_id] = result`, set `last_updated_ms`, write-through to `fanout-state`.
-4. Call `on_partial(batch, latest)`.
-5. Call `should_complete(batch)`. If true, run §8.4 completion path.
+**Inbound on `fanout-returns`** — handler at
+`calfkit/nodes/agent.py::BaseAgentNodeDef._aggregator_handler`:
 
-**Outbound dispatch dedup:**
+1. Decode `correlation_id` (FastStream context), `fan_out_id` (Kafka header `HDR_FANOUT_ID`), and the `tool_call_id` from `envelope.context.state.tool_results`.
+2. Look up `(correlation_id, fan_out_id)` in the state-store cache (`state_store.get(key)`):
+   - **Recently completed** (`state_store.was_recently_completed(key)` returns true): log INFO "late return after completion"; drop. (Optionally route to DLQ — v2.)
+   - **Not found:** log WARN "orphan return"; drop. Rehydration runs on partition assignment, so a cache miss here means the batch was never started on this partition or was already tombstoned past the `delete.retention.ms` window.
+   - **Found in active set:** filter out `tool_call_id`s already in `batch.received` (dedup) and `tool_call_id`s outside `batch.expected_tool_call_ids` (defensive). If nothing new remains: log DEBUG "no new returns; dedup or no-match"; ack and return.
+3. Build the post-merge batch via `_InFlightBatch.with_received(...)` (copy-on-write — see `_in_memory_store.py`), then `await state_store.put(key, new_batch, partition=...)`. The durable publish completes before the cache write, so a crash between the two leaves the durable log as the source of truth.
+4. Call `aggregator.on_partial(batch_view, newly_received)`.
+5. Call `aggregator.should_complete(batch_view)`. If true, run §8.4 completion path.
 
-A redelivered inbound on the agent's main topic re-runs `run()` and re-emits the parallel `list[Call]`. Without dedup, this would publish N more tool calls and create a second batch.
+**Outbound dispatch dedup — the shipped idempotent-dispatch check**
+(at `calfkit/nodes/agent.py::BaseAgentNodeDef._publish_parallel_fanout`):
 
-Two-stage guard:
+A redelivered inbound on the agent's main topic re-runs `run()` and re-emits
+the parallel `list[Call]`. Without dedup, this would publish N more tool
+calls and create a second batch. The check has three branches keyed off
+the durable state at `(correlation_id, fan_out_id)`:
 
-1. **`fan_out_id` is derived deterministically from a stable source per agent turn.** Use `envelope.internal_workflow_state.current_frame.frame_id` (the uuid7 assigned to the inbound frame at `session_context.py:38`). Same redelivery → same frame_id → same `fan_out_id`.
-2. **Before dispatching, the agent checks `fanout-state` for an existing record at `(correlation_id, fan_out_id)`.** If present and `expected_tool_call_ids` matches, the agent skips re-dispatch (the prior dispatch already happened; returns are en route). The agent returns `Silent()`.
+1. **Deterministic `fan_out_id`.** `fan_out_id = envelope.internal_workflow_state.current_frame.frame_id`. Same inbound redelivery → same frame_id → same `fan_out_id`.
+2. **Recently-completed:** `state_store.was_recently_completed(key)` → skip the fan-out entirely (return). The aggregated return has already been published; re-publishing would either duplicate Tool Calls or rewind a completed batch.
+3. **In-flight with matching `expected_tool_call_ids`:** `state_store.get(key)` returns a batch whose `expected_tool_call_ids` matches the newly-computed set → preserve the durable `received` map (do NOT call `state_store.put`) and re-publish the tool Calls. Tools are responsible for being idempotent on `(correlation_id, tool_call_id)` — the standard calfkit contract — so duplicate dispatches converge.
+4. **In-flight with drifted `expected_tool_call_ids`:** `state_store.get(key)` returns a batch whose `expected_tool_call_ids` differs from the newly-computed set. This is a real upstream bug (the agent loop produced a different set of tool calls on re-entry). Log `ERROR "redispatch with different expected_tool_call_ids; overwriting"` and fall through to the first-time-dispatch write so the new dispatch can proceed.
+5. **First-time dispatch:** no record exists → build the initial `_InFlightBatch` (with `agent_topic=self.subscribe_topics[0]`) and `await state_store.put(key, initial_batch)` before publishing any tool Call.
 
-This is the "idempotent dispatch" pattern. It is small additional cost (one cache lookup at dispatch time) and is critical for at-least-once correctness.
+This is the "idempotent dispatch" pattern. It costs one cache lookup at
+dispatch time and one durable publish on first dispatch, and is critical
+for at-least-once correctness.
 
 ### 7.6 What is allowed to be slow
 
@@ -615,66 +651,55 @@ This is the "idempotent dispatch" pattern. It is small additional cost (one cach
 
 ### 8.1 Dispatch (parallel fan-out begins)
 
+Shipped at `calfkit/nodes/agent.py::BaseAgentNodeDef._publish_parallel_fanout`:
+
 ```
 agent.run() returns list[Call]
   |
   v
-_publish_action receives list[Call]
+_publish_parallel_fanout(calls, envelope, correlation_id, broker, partition):
   |
-  +--- compute fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
+  +--- fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
+  +--- expected_tool_call_ids = frozenset of call.input_args[0] for each call
+  +--- key = (correlation_id, fan_out_id)
   |
-  +--- compute expected_tool_call_ids = frozenset(c.state.tool_results plus pending)
-  |    Note: pending_tool_calls in agent.run() already determined the set; pass it through
+  +--- IDEMPOTENT-DISPATCH BRANCHING (see §7.5):
+  |      state_store.was_recently_completed(key)? → return (skip)
+  |      state_store.get(key) is not None and matches expected? → preserve, fall through to step "publish Calls"
+  |      state_store.get(key) is not None but drifted?         → log ERROR, overwrite below
+  |      state_store.get(key) is None                          → first-time dispatch, write below
   |
-  +--- IDEMPOTENT DISPATCH CHECK
-  |    aggregator._kafka_state_store.get((corr, fan_out_id))
-  |    if found and matches expected: log "duplicate dispatch suppressed"; return envelope
+  +--- (first-time / overwrite branch) build initial _InFlightBatch
+  |      with base_state = calls[0].state deep-copy,
+  |      received = {}, agent_topic = self.subscribe_topics[0]
+  |    await state_store.put(key, initial_batch, partition=partition)
+  |    The publish completes before the cache write — durable log is the recovery anchor.
   |
-  +--- write FanOutState to {node_id}.fanout-state
-  |    key   = f"{corr}|{fan_out_id}"
-  |    value = FanOutState(
-  |       correlation_id=corr, fan_out_id=fan_out_id, node_id=self.node_id,
-  |       expected_tool_call_ids=expected,
-  |       collected_results={},
-  |       base_state=envelope.context.state.model_copy(deep=True),
-  |       started_at_ms=now_ms, last_updated_ms=now_ms,
-  |       traceparent=inbound_headers.get("traceparent"),
-  |       tracestate=inbound_headers.get("tracestate"),
-  |    )
-  |    Wait for ack (acks=all) — this is the durability gate.
-  |
-  +--- for each Call in list[Call]:
-  |       build wf_copy: copy workflow_state; invoke_frame(call, callback_topic=fanout-returns)
-  |       NOTE: callback_topic is overridden to {node_id}.fanout-returns
-  |             (vs. the existing default self.subscribe_topics[0])
-  |       publish to wf_copy.current_frame.target_topic with:
-  |         key      = correlation_id.encode()
+  +--- for each Call in calls:
+  |       wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
+  |       wf_copy.invoke_frame(call, callback_topic=returns_topic)  # = {node_id}.fanout-returns
+  |       publish wf_copy.current_frame.target_topic with:
+  |         key      = correlation_id.encode()  # partitioner extracts the correlation_id
   |         headers  = {
-  |           HDR_EMITTER, HDR_EMITTER_KIND, HDR_FRAME_ID (new frame),
+  |           HDR_EMITTER, HDR_EMITTER_KIND,
+  |           HDR_FRAME_ID: wf_copy.current_frame.frame_id,
   |           HDR_FANOUT_ID: fan_out_id,
-  |           traceparent: (propagated or new span),
-  |           tracestate:  (propagated or new),
+  |           # traceparent/tracestate are propagated via _emitter_headers
   |         }
-  |
-  v
-return envelope (echo to caller; agent waits for aggregator to re-enter)
 ```
 
-The order is critical: **write `FanOutState` first, then publish tool Calls.** If the state write is durable (acks=all, replication=3) but tool Calls fail to publish, the next redelivery of the inbound will re-dispatch (the idempotent check sees the existing state, but `expected_tool_call_ids` differs only if the new dispatch decided differently — same inputs ⇒ same outputs, so it matches; on match, dispatch is suppressed; ah but the tools haven't actually run!). Subtle: if the inbound is redelivered before any tool Call published successfully, the `FanOutState` exists but `collected_results` is empty and no tools were actually called. Redispatch must re-publish tool Calls in that case.
+The order is critical: **write `FanOutState` first, then publish tool Calls.**
+If the state write succeeds but tool Calls fail to publish, the next
+redelivery of the inbound will hit the "in-flight with matching
+`expected_tool_call_ids`" branch and re-publish the Calls. This relies on
+tools being idempotent on `(correlation_id, tool_call_id)` — the standard
+calfkit contract — so duplicate dispatches converge.
 
-Resolution: the idempotent-dispatch check is "state record exists AND `expected_tool_call_ids` matches" → suppress. But on suppression we still need to *guarantee* the tools were called. Two-phase shape:
-
-- Stage A: write `FanOutState(dispatched_calls=False, ...)` — durably record intent.
-- Stage B: publish tool Calls.
-- Stage C: write `FanOutState(dispatched_calls=True, ...)` — durably record completion of dispatch.
-
-On redelivery, if stage A exists but stage C doesn't, retry stage B. If stage C exists, suppress.
-
-This adds one round-trip to dispatch. Reasonable in practice; this is the at-least-once tax.
-
-**Alternative (simpler):** since tool Calls are idempotent themselves under at-least-once (tools re-running with the same `correlation_id` and `tool_call_id` should be safe — that is, after all, the calfkit contract), we can skip the two-phase ceremony and just re-publish on redelivery. The aggregator's dedup at the returns side handles duplicate completions.
-
-**Recommendation:** the simpler alternative. Document that tools must be idempotent on `(correlation_id, tool_call_id)`. This is the existing implicit contract; we make it explicit. Stage A and Stage B collapse into one write.
+If both `state_store.put` and any subsequent Call publish are non-atomic
+under at-least-once: at worst, tools may run twice with the same
+`tool_call_id`; tool-side idempotency makes this a no-op at the level of
+aggregated results. Kafka transactions could close the window atomically;
+that is a v2 consideration (§17.2).
 
 ### 8.2 Tool return (one of N)
 
@@ -723,24 +748,23 @@ aggregator_handler(envelope, correlation_id, headers, broker):
   +--- # Extract the new tool result
   |    new_returns = {tcid: r for tcid, r in envelope.context.state.tool_results.items()
   |                  if tcid in batch.expected_tool_call_ids
-  |                  and tcid not in batch.collected_results}
+  |                  and tcid not in batch.received}
   |
   +--- if not new_returns:
   |       # dedup hit (already collected) or no expected matches (bug)
   |       log DEBUG "no new returns; dedup or no-match"; ack and return
   |
-  +--- # Update batch
-  |    for tcid, result in new_returns.items():
-  |       batch.collected_results[tcid] = result
-  |    batch.last_updated_ms = now_ms
+  +--- # Build the post-merge batch via copy-on-write
+  |    next_batch = batch.with_received({**batch.received, **new_returns},
+  |                                     last_updated_ms=now_ms)
   |
-  +--- # Write-through to compacted topic
-  |    await self._kafka_state_store.put(key, batch.to_fanout_state())
+  +--- # Write-through to compacted topic, then update the cache
+  |    await state_store.put(key, next_batch, partition=msg_partition)
   |
   +--- # Build immutable view for user hooks
   |    view = AggregatorBatch(
-  |       correlation_id=corr, expected_tool_call_ids=batch.expected_tool_call_ids,
-  |       collected_results=MappingProxyType(dict(batch.collected_results)),
+  |       correlation_id=corr, expected_tool_call_ids=next_batch.expected_tool_call_ids,
+  |       received=MappingProxyType(dict(next_batch.received)),
   |       base_state=batch.base_state, started_at_ms=batch.started_at_ms,
   |    )
   |
@@ -748,16 +772,17 @@ aggregator_handler(envelope, correlation_id, headers, broker):
   |    latest = AggregatedReturn(
   |       tool_call_id=tcid,                 # only one expected per return
   |       tool_name=batch.base_state.tool_calls[tcid].tool_name,
-  |       result=new_returns[tcid],
-  |       received_at_ms=now_ms,
+  |       base_state=next_batch.base_state, started_at_ms=next_batch.started_at_ms,
+  |       last_updated_ms=next_batch.last_updated_ms,
   |    )
+  |    newly_received = frozenset(new_returns.keys())
   |    try:
-  |       await self._aggregator.on_partial(view, latest)
+  |       await self.aggregator.on_partial(view, newly_received)
   |    except Exception:
   |       log ERROR "on_partial raised"; continue (do not block completion)
   |
   +--- # Check completion
-  |    if await self._aggregator.should_complete(view):
+  |    if await self.aggregator.should_complete(view):
   |       go to §8.4 completion path
   |    else:
   |       ack and return (wait for more)
@@ -769,47 +794,40 @@ aggregator_handler(envelope, correlation_id, headers, broker):
 # Triggered when should_complete() returns True
   |
   +--- try:
-  |       merged_state = await self._aggregator.merge(
-  |          batch.base_state, batch.collected_results)
+  |       aggregated = await self.aggregator.merge(view)
+  |       # aggregated is an AggregatedReturn(state=..., degraded=False)
   |    except Exception as e:
-  |       handle per on_merge_error policy:
-  |         "abort":  raise AggregatorMergeError(e) — FastStream will nack/redeliver
-  |         "retry":  retry up to merge_retry_count times then abort
-  |         "drop":   log + tombstone + drop (agent will not resume)
-  |       return
+  |       handle per aggregator.merge_error_policy:
+  |         ABORT:  raise AggregatorMergeError(correlation_id=..., fan_out_id=...)
+  |                 FastStream nacks/redelivers
+  |         RETRY:  retry merge() exactly once; on second failure, fall through to ABORT
+  |         DROP:   log; fall back to the default merge (apply received to base_state);
+  |                 set degraded=True so HDR_DEGRADED_MERGE is stamped on the published envelope
   |
-  +--- # Reconstruct the agent's re-entry envelope
-  |    # The agent expects to consume on its main topic, with the merged State.
-  |    # The call_stack must look as it did when the inbound that triggered the
-  |    # original fan-out was being handled — i.e., one frame above the fan-out
-  |    # frame. The fan-out frame itself is consumed (the "frame" of the parallel
-  |    # dispatch is logically completed).
+  +--- # Build the re-entry envelope.
   |    re_entry_envelope = Envelope(
-  |       context=SessionRunContext(state=merged_state, deps=batch.base_state_deps),
-  |       internal_workflow_state=batch.base_workflow_state,  # snapshotted at dispatch
+  |       context=SessionRunContext(state=aggregated.state, deps=...),
+  |       internal_workflow_state=...,
   |    )
   |
-  +--- # Tombstone fanout-state record
-  |    await self._kafka_state_store.tombstone(key)
+  +--- # Tombstone fanout-state record FIRST (durable write), then publish re-entry.
+  |    # On crash between the two: the durable log says "completed"; the agent
+  |    # never resumes — observable via stuck pending_batches. The reverse order
+  |    # is worse: a stale state record outlives a successful re-entry and
+  |    # confuses subsequent rebalances. See §9.1 last row.
+  |    await state_store.tombstone(key, partition=msg_partition)
   |
-  +--- # Add to recently-tombstoned set (TTL = delete.retention.ms = 60s)
-  |    self._recently_completed.add(key, ttl_ms=60_000)
-  |
-  +--- # Publish to agent's main topic
-  |    await broker.publish(
-  |       re_entry_envelope,
-  |       topic=self._agent.subscribe_topics[0],     # agent main topic
-  |       correlation_id=correlation_id,
-  |       key=correlation_id.encode(),
-  |       headers={
-  |          HDR_EMITTER: self._agent.node_id,
-  |          HDR_EMITTER_KIND: "agent",
-  |          HDR_FRAME_ID: new_frame_id,
-  |          # HDR_FANOUT_ID is absent — the batch is done, this is a resumption
-  |          traceparent: batch.traceparent,
-  |          tracestate:  batch.tracestate,
-  |       },
-  |    )
+  +--- # Publish to agent's main topic (FanOutState.agent_topic).
+  |    headers = {
+  |       HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: "agent",
+  |       HDR_FRAME_ID: new_frame_id,
+  |       # HDR_FANOUT_ID is absent — the batch is done, this is a resumption
+  |       # If aggregated.degraded: HDR_DEGRADED_MERGE = "1"
+  |       # traceparent / tracestate carried from batch
+  |    }
+  |    await broker.publish(re_entry_envelope, topic=batch.agent_topic,
+  |                         correlation_id=correlation_id,
+  |                         key=correlation_id.encode(), headers=headers)
   |
   +--- log INFO "batch completed"; emit metric
   +--- ack and return
@@ -817,62 +835,78 @@ aggregator_handler(envelope, correlation_id, headers, broker):
 
 A subtle property: **the merged state goes to the agent's main topic, not to the original caller.** The agent then runs its next LLM iteration. The caller's reply only happens when the agent eventually returns a `ReturnCall` after all LLM iterations are done.
 
-### 8.5 Worker startup rehydration
+### 8.5 Worker startup and rehydration
+
+Topic provisioning happens once at worker startup; rehydration is
+framework-managed and partition-scoped, triggered by Kafka rebalance
+events — NOT by an eager full-log read at boot.
 
 ```
 Worker.run():
   |
-  +--- for each node in self._nodes:
-  |    for each KafkaSubscription in node.kafka_subscriptions():
-  |       register the subscriber on the broker
-  |       (this includes the aggregator's fanout-returns subscriber)
+  +--- await Worker._prepare_aggregators():
+  |       await broker.connect()  # makes broker.config.admin_client available
+  |       for each agent in self._nodes:
+  |          await agent.aggregator.setup(
+  |              broker,
+  |              node_id=agent.node_id,
+  |              main_topic=agent.subscribe_topics[0],
+  |              kafka_config=self._client.kafka_config,
+  |          )
+  |       # FanOutAggregator.setup:
+  |       #   1. ensure_aggregator_topics(broker, node_id, main_topic)
+  |       #      -> reads main_topic's partition count via admin.describe_topics
+  |       #      -> creates {node_id}.fanout-state with STATE_TOPIC_CONFIG
+  |       #      -> creates {node_id}.fanout-returns with default config
+  |       #      -> validates partition count on existing topics
+  |       #   2. construct _KafkaStateStore (with kafka_config kwargs forwarded)
+  |       #   3. construct _StateStoreRebalanceListener
+  |       #   4. publish runtime state to FanOutAggregator._runtime
   |
-  +--- # Pre-flight: ensure aggregator topics exist with correct config
-  |    for each agent in self._nodes:
-  |       if agent has aggregator:
-  |          await agent.aggregator._ensure_topics(broker)
-  |          # checks topic exists, validates cleanup.policy=compact for state topic
-  |          # creates with default config if missing (requires admin API)
-  |          # logs WARN and continues if cluster forbids topic creation
+  +--- Worker.register_handlers():
+  |       iterates node.kafka_subscriptions() for each node; passes the
+  |       aggregator subscription's listener through to broker.subscriber.
   |
-  +--- # Rehydration: build the in-memory cache from fanout-state
-  |    for each agent in self._nodes:
-  |       if agent has aggregator:
-  |          await agent.aggregator._rehydrate(broker)
-  |          # see §10 for rehydration steps
-  |
-  +--- # Start the FastStream broker (begins consuming all subscribed topics)
-  |    await FastStream(self._client._connection).run(...)
+  +--- await FastStream(broker).run(**extra_run_args)
+       FastStream begins consuming; aiokafka assigns partitions; the
+       rebalance listener fires on_partitions_assigned, which calls
+       state_store.rehydrate_partitions(partition_ids) BEFORE the
+       returns subscriber begins handling messages for those partitions.
 ```
 
-Rehydration steps inside `agent.aggregator._rehydrate(broker)`:
+Rehydration runs inside
+`calfkit/nodes/aggregator/_rebalance.py::_StateStoreRebalanceListener.on_partitions_assigned`,
+which delegates to
+`calfkit/nodes/aggregator/_kafka_state_store.py::_KafkaStateStore.rehydrate_partitions`:
 
-```
-1. Create a one-shot consumer on {agent.node_id}.fanout-state.
-   - group_id = unique per worker instance (NOT a stable group; we want full read-from-zero)
-   - auto_offset_reset = "earliest"
-   - enable_auto_commit = False
-2. Read until end-of-log (high watermark) timestamp is exceeded:
-   - For each record:
-     - if value is None (tombstone): drop key from cache; record in _recently_completed
-       with received_at as TTL anchor
-     - else: deserialise to FanOutState; insert into cache
-3. Close the consumer.
-4. Emit metric: calfkit_aggregator_rehydration_seconds.observe(duration)
-5. Emit log: INFO "rehydration complete batches={n} returns={m}"
-6. Mark aggregator as "ready"; release any awaiters.
-```
+1. Construct a transient `AIOKafkaConsumer` with
+   `bootstrap_servers=kafka_config.bootstrap_servers`,
+   `**kafka_config.client_kwargs` (SASL/SSL settings inherited from
+   `Client.connect`), and **no `group_id`** — the consumer uses
+   `assign()` to take partitions explicitly so it doesn't participate
+   in group coordination.
+2. Seek to beginning on the assigned state-topic partitions.
+3. Loop `consumer.getmany(timeout_ms=1000)` until each partition's
+   end-offset has been crossed. Each record is applied via
+   `_apply_record`: tombstones drop the key from cache and add it to
+   `_recently_completed`; non-tombstones parse to `FanOutState` and
+   populate the cache. After
+   `_REHYDRATE_MAX_EMPTY_POLLS=5` consecutive empty polls with
+   partitions still outstanding, `rehydrate_partitions` raises
+   `AggregatorStateStoreError` rather than silently activating the
+   partition with partial state.
+4. Mark partitions owned; the rebalance listener returns and aiokafka
+   resumes the returns subscriber on those partitions.
 
-**When does main topic consumption begin?**
+On revoke (`on_partitions_revoked`), the listener calls
+`state_store.evict_partitions(...)` synchronously to drop cache entries
+for revoked partitions BEFORE Kafka reassigns them to another worker.
 
-Two options:
-
-- **A. Rehydrate-then-serve (sequential).** Block all subscribers until rehydration is complete. Simple; safe; adds startup latency proportional to log size.
-- **B. Rehydrate-while-serving (parallel).** Begin consuming main topic immediately; if a return arrives for a `(corr, fan_out_id)` not yet seen by rehydration, block that one handler until rehydration is past that offset. Lower startup latency; more complex.
-
-**Recommendation: A for v1.** Rehydration of bounded state (low-thousands of records, JSON-serialised) is fast — sub-second to a few seconds. Startup latency is acceptable. The B path is a v2 optimisation if startup time becomes a problem in production.
-
-Implementation detail: Worker.register_handlers() returns synchronously today and FastStream's `run()` does the subscribing. We need a hook *between* register and run: pre-flight + rehydration. The simplest path is to make `Worker.run()` async-await the rehydration step before calling `FastStream(...).run(...)`.
+Earlier drafts proposed an eager `_rehydrate(broker)` call in
+`Worker.run()` with a uniquely-named per-worker `group_id` for the
+rehydration consumer. Neither shipped: rebalance-driven rehydration is
+strictly better (no startup-time stalls, no orphan partitions, no
+group-coordination complexity).
 
 ### 8.6 Graceful shutdown
 
@@ -904,25 +938,26 @@ Restated and consolidated from §7 plus new failure scenarios:
 | Agent process crashes after writing FanOutState, before any tool dispatch | Inbound redelivered; idempotent dispatch check finds prior state | Re-dispatch tool Calls (per simpler alternative in §8.1) | Tool runs once or twice (idempotency required); batch completes normally |
 | Agent process crashes after dispatching some tools, before all | Some tool Calls were published; others were not. Inbound redelivered. | Re-dispatch; deduped via tool's own idempotency on `(correlation_id, tool_call_id)` | Some tools run twice; results converge |
 | Tool process crashes mid-execution | No return arrives | Batch remains pending until partition rebalance evicts it (v1 has no idle-timeout reaper — see `ROADMAP.md` follow-up). Operator-visible via stuck `pending_batches`. | Batch stays in-flight; operator must redrive or rely on rebalance eviction |
-| Aggregator process crashes after receiving return, before write-through | Return's consumer offset never committed; redelivered to next owner | Next owner re-receives; dedup based on `tool_call_id` not in `collected_results` (post-rehydration); proceeds | None |
-| Aggregator process crashes after write-through, before completion check | Cache lost; rehydrate finds updated state; should_complete re-runs | Completion fires (if applicable); re-entry happens | Slight delay; correct outcome |
-| Aggregator process crashes after completion publish, before tombstone | re-entry message visible to agent; agent runs next LLM call; aggregator next-start sees no tombstone and considers the batch still active | The agent's next inbound might already be on the main topic. Aggregator's rehydration loads the (now-stale) state; subsequent late returns are deduped via collected_results. With no idle-timeout reaper in v1, the stale state lingers until the partition is reassigned. | Stale state lingers in-cache for a completed batch. Mitigation: emit tombstone BEFORE re-entry publish. Trade: tombstone may exist for a batch whose re-entry was lost — then the agent never resumes. |
+| Aggregator process crashes after receiving return, before write-through | Return's consumer offset never committed; redelivered to next owner | Next owner re-receives; dedup based on `tool_call_id` not in `batch.received` (post-rehydration); proceeds | None |
+| Aggregator process crashes after write-through, before completion check | Cache lost; rebalance rehydration finds updated state; should_complete re-runs | Completion fires (if applicable); re-entry happens | Slight delay; correct outcome |
+| Aggregator process crashes after tombstone, before completion publish | The durable log says "completed" but no re-entry reached the agent's main topic | On rehydration, the key is in `_recently_completed`. The agent never resumes. Observable via stuck `pending_batches` metric. | Lost work in this narrow window — the v1 trade for the simpler ordering. Kafka transactions would close the gap (§17.2). |
 
-The last row is the trickiest. The atomicity gap between "tombstone write" and "re-entry publish" cannot be closed without Kafka transactions. Two non-transactional mitigations:
-
-1. **Write tombstone first, then publish re-entry.** If tombstone succeeds but re-entry fails, the agent never resumes. On rehydration, the batch is gone. There is no way to recover the in-flight correlation from the aggregator's records. The agent is stuck waiting for a resumption that will never come.
-2. **Publish re-entry first, then write tombstone.** If re-entry succeeds but tombstone fails, the agent resumes (and may complete its work). On rehydration, the batch reloads. With no idle-timeout reaper in v1, the stale entry lingers until partition rebalance evicts the cached state. The agent's actual run is unaffected.
-
-**Recommendation:** option 2 (re-entry first, then tombstone). The failure mode is a stale in-cache entry for a batch that actually completed — observable via `pending_batches` metrics, but the work was done correctly. Option 1 risks lost work, which is worse.
-
-If exactly-once is needed, Kafka transactions (atomic write-and-publish across `fanout-state` and the agent's main topic) are the correct solution. This is a v2 consideration.
+The last row is the trickiest. The atomicity gap between "tombstone write"
+and "re-entry publish" cannot be closed without Kafka transactions. The
+shipped order is **tombstone first, then publish re-entry**: this
+guarantees the durable log never contradicts itself (no stale state
+record outlives a successful re-entry). The trade is that a crash in
+this exact narrow window loses the re-entry — the agent stays
+unresumed, observable via metrics. Kafka transactions
+(atomic write-and-publish across `fanout-state` and the agent's main
+topic) would close the gap; that is a v2 consideration (§17.2).
 
 ### 9.2 The dedup contract restated
 
 The aggregator MUST be idempotent under at-least-once delivery on the following keys:
 
-- **Same tool return arrives twice**: dedup via `tool_call_id in batch.collected_results` check. Drop the second.
-- **Same dispatch happens twice**: dedup via idempotent-dispatch check (state record exists for `(corr, fan_out_id)`). Suppress the second.
+- **Same tool return arrives twice**: dedup via `tool_call_id in batch.received` check. Drop the second.
+- **Same dispatch happens twice**: dedup via idempotent-dispatch check at `_publish_parallel_fanout` (see §7.5). Recently-completed → skip; in-flight matching → preserve and re-publish; in-flight drifted → log ERROR and overwrite.
 - **Same completion publish happens twice**: the agent's main topic handler must be idempotent on `correlation_id`. The agent's next LLM iteration sees a deduped inbound and produces a single resume. This is the existing calfkit contract for redelivery on any handler.
 
 ### 9.3 Late-return policy
@@ -931,11 +966,25 @@ A return arriving for a `(correlation_id, fan_out_id)` that is in `_recently_com
 
 ### 9.4 Merge error policy
 
-The user's `merge()` can raise. The policy is `on_merge_error` on the `FanOutAggregator` constructor:
+The user's `merge()` can raise. The policy is `merge_error_policy` on the
+`FanOutAggregator` constructor — a `MergeErrorPolicy` enum
+(`calfkit/nodes/aggregator/aggregator.py::MergeErrorPolicy`):
 
-- `"abort"` (default): raise `AggregatorMergeError(orig)`. FastStream nacks the inbound; Kafka redelivers. If the underlying issue is transient (network blip), the next try succeeds. If permanent (bug in `merge`), the message redelivers forever — operator must intervene. **This is the standard Kafka at-least-once failure mode.**
-- `"retry"`: retry `merge()` up to `merge_retry_count` times in-process before raising `AggregatorMergeError`.
-- `"drop"`: log the error, write tombstone, drop the batch. Agent never resumes. Use only for fire-and-forget patterns. Document loudly.
+- `MergeErrorPolicy.ABORT` (default): raise
+  `AggregatorMergeError(correlation_id=..., fan_out_id=...)`. FastStream
+  nacks the inbound; Kafka redelivers. If transient, the next try
+  succeeds. If permanent (bug in `merge`), the message redelivers
+  forever — operator must intervene. The exception carries structured
+  context for grouping in Sentry / Statsig.
+- `MergeErrorPolicy.RETRY`: retry `merge()` exactly once. Useful for a
+  transient downstream call (e.g., LLM timeout). On the second failure,
+  behaves as `ABORT`. There is no `merge_retry_count` knob — retry
+  count is fixed at one.
+- `MergeErrorPolicy.DROP`: log the error, fall back to the default merge
+  (apply `batch.received` to a copy of `batch.base_state`), complete
+  normally, and stamp `HDR_DEGRADED_MERGE=1` on the published envelope
+  so operators can detect silently-degraded batches. The agent resumes
+  with default-merged state.
 
 ---
 
@@ -943,40 +992,65 @@ The user's `merge()` can raise. The policy is `on_merge_error` on the `FanOutAgg
 
 ### 10.1 The in-memory cache
 
+Shipped at `calfkit/nodes/aggregator/_in_memory_store.py` and
+`calfkit/nodes/aggregator/_kafka_state_store.py`:
+
 ```python
-# calfkit/nodes/aggregator/state_store.py
-
+@dataclass
 class _InFlightBatch:
-    """Mutable in-memory representation. Mirrors FanOutState on the wire,
-    but lives in process memory for hot-path mutation."""
-
+    """Mutable in-memory representation; mirrors FanOutState on the wire."""
     correlation_id: str
     fan_out_id: str
-    expected_tool_call_ids: frozenset[str]
-    collected_results: dict[str, Any]
+    expected_tool_call_ids: frozenset[ToolCallId]
     base_state: State
-    started_at_ms: int
-    last_updated_ms: int
-    traceparent: str | None
-    tracestate: str | None
+    received: dict[ToolCallId, Any] = field(default_factory=dict)
+    started_at_ms: int = 0
+    last_updated_ms: int = 0
+    agent_topic: str = ""
+    traceparent: str | None = None
+    tracestate: str | None = None
 
     def to_fanout_state(self) -> FanOutState: ...
+    @classmethod
+    def from_fanout_state(cls, state: FanOutState) -> _InFlightBatch: ...
+    def with_received(self, received, *, last_updated_ms) -> _InFlightBatch: ...
+
 
 class _KafkaStateStore:
-    """Write-through cache over {node_id}.fanout-state."""
+    """Partition-scoped in-memory cache backed by the compacted state topic.
 
-    _cache: dict[tuple[str, str], _InFlightBatch]      # key = (corr_id, fan_out_id)
-    _recently_completed: _TtlSet[tuple[str, str]]      # 60s TTL
-    _broker: KafkaBroker
-    _state_topic: str
-    _ready: asyncio.Event
+    Standard Kafka-Streams-style: the returns subscriber owns reads and
+    writes; rehydrate_partitions is called from the rebalance listener
+    on partition assignment.
+    """
 
-    async def rehydrate(self) -> None: ...
-    async def get(self, key: tuple[str, str]) -> _InFlightBatch | None: ...
-    async def put(self, key: tuple[str, str], state: FanOutState) -> None: ...
-    async def tombstone(self, key: tuple[str, str]) -> None: ...
-    def mark_completed(self, key: tuple[str, str]) -> None: ...
+    # Reads
+    def get(self, key) -> _InFlightBatch | None: ...
+    def was_recently_completed(self, key) -> bool: ...
+
+    # Writes (durable publish first, then cache update)
+    def partition_for_key(self, key) -> int: ...
+    async def put(self, key, batch, *, partition=None) -> None: ...
+    async def tombstone(self, key, *, partition=None) -> None: ...
+    def mark_completed(self, key) -> None: ...
+
+    # Rebalance lifecycle (called by _StateStoreRebalanceListener)
+    async def rehydrate_partitions(self, partition_ids: set[int]) -> None: ...
+    def evict_partitions(self, partition_ids: set[int]) -> None: ...
 ```
+
+A few load-bearing properties:
+
+- **Partition-scoped.** Only partitions this worker currently owns are
+  in the cache; `evict_partitions` drops entries on revoke,
+  `rehydrate_partitions` rebuilds them on assignment.
+- **Composite keying.** `put`/`tombstone` use
+  `_partitioner.build_composite_key(correlation_id, fan_out_id)` so the
+  partitioner can extract `correlation_id` before hashing.
+- **Copy-on-write batch mutation.** The agent handler uses
+  `batch.with_received(...)` to build the post-merge batch BEFORE the
+  durable publish, so a failed publish leaves the cached batch
+  unchanged and FastStream's redelivery re-merges cleanly.
 
 ### 10.2 Memory bounds
 
@@ -1078,172 +1152,33 @@ Auto-detect on `opentelemetry` import; `CALFKIT_AGGREGATOR_OTEL=0` disables. Whe
 
 ---
 
-## 12. File-by-file changes
+## 12. File-by-file layout (shipped)
 
-Concrete plan. Sizes are order-of-magnitude estimates.
+The implementation ships in one PR on `feat/durable-fanout-aggregator`.
+The layout below reflects what is on the branch, not a plan. For the
+authoritative module structure see §4.3.
 
 ### 12.1 New files
 
-#### `calfkit/nodes/aggregator/__init__.py` (~30 LoC)
+| File | Purpose |
+|---|---|
+| `calfkit/nodes/aggregator/__init__.py` | Public re-exports (see §4.3). |
+| `calfkit/nodes/aggregator/aggregator.py` | `FanOutAggregator` (behaviour overrides + `merge_error_policy` + `setup`) and `MergeErrorPolicy`. |
+| `calfkit/nodes/aggregator/state.py` | `FanOutState` (wire format), `AggregatorBatch` (immutable view), `AggregatedReturn`, `ToolCallId`. |
+| `calfkit/nodes/aggregator/errors.py` | `AggregatorError`, `AggregatorMergeError` (carries `correlation_id`/`fan_out_id`), `AggregatorStateStoreError` (carries `state_topic`). |
+| `calfkit/nodes/aggregator/_runtime.py` | `_FanOutRuntime` frozen dataclass — framework-managed state (topics, partition count, state store, rebalance listener). |
+| `calfkit/nodes/aggregator/_kafka_state_store.py` | `_KafkaStateStore` — partition-scoped cache, durable publishes via `broker.publish`, transient `AIOKafkaConsumer` for `rehydrate_partitions`. |
+| `calfkit/nodes/aggregator/_in_memory_store.py` | `_InFlightBatch` (mutable in-memory shape), `_TtlSet`, `_InMemoryStateStore` (test scaffolding). |
+| `calfkit/nodes/aggregator/_topic_admin.py` | `ensure_aggregator_topics`, `STATE_TOPIC_CONFIG`. |
+| `calfkit/nodes/aggregator/_partitioner.py` | `FanOutAggregatorPartitioner`, `build_composite_key`, `parse_composite_key`, `has_composite_delimiter`. |
+| `calfkit/nodes/aggregator/_rebalance.py` | `_StateStoreRebalanceListener`. |
+| `calfkit/nodes/aggregator/testing.py` | `InMemoryAggregator` (drop-in `FanOutAggregator` for unit tests). |
+| `calfkit/client/kafka_config.py` | `KafkaConfig` dataclass — snapshot of bootstrap servers + client kwargs captured by `Client.connect`. |
+| `tests/test_durable_aggregator.py` and friends | Test suite (see §13). |
 
-```python
-"""Durable join for parallel tool calls.
-
-See ``FanOutAggregator`` for the public API. The companion construct is owned
-by an ``Agent`` and is auto-attached at construction time when none is provided.
-"""
-
-from calfkit.nodes.aggregator.aggregator import FanOutAggregator
-from calfkit.nodes.aggregator.errors import (
-    AggregatorError, AggregatorMergeError, AggregatorStateStoreError,
-)
-from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch, ToolCallId
-
-__all__ = [
-    "FanOutAggregator",
-    "AggregatorBatch",
-    "AggregatedReturn",
-    "ToolCallId",
-    "AggregatorError",
-    "AggregatorMergeError",
-    "AggregatorStateStoreError",
-]
-```
-
-#### `calfkit/nodes/aggregator/aggregator.py` (~400 LoC)
-
-Houses `FanOutAggregator` class with:
-
-- `__init__` (config knobs: `on_merge_error`, `merge_retry_count`, `kafka_topic_config`, `state_topic`, `returns_topic`). The `idle_timeout` knob from earlier drafts was dropped from v1; see `ROADMAP.md` for the deferred reaper design.
-- `merge`, `should_complete`, `on_partial` (default implementations).
-- `kafka_subscriptions(node_id, broker)` — builds the `_KafkaSubscription` for `fanout-returns`.
-- `_handle_return(envelope, correlation_id, headers, broker)` — the actual Kafka handler.
-- `_rehydrate(broker)` — invoked from Worker startup.
-- `_ensure_topics(broker)` — pre-flight topic creation/validation.
-- Internal references: `self._kafka_state_store: _KafkaStateStore`, `self._agent: Agent | None` (back-reference set when bound).
-
-#### `calfkit/nodes/aggregator/state.py` (~250 LoC)
-
-```python
-from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, Generic, NewType
-
-from pydantic import BaseModel, ConfigDict, Field
-
-from calfkit._types import StateT
-from calfkit.models.state import State
-
-ToolCallId = NewType("ToolCallId", str)
-
-@dataclass(frozen=True)
-class AggregatedReturn(Generic[Any]):
-    tool_call_id: ToolCallId
-    tool_name: str
-    result: Any
-    received_at_ms: int
-
-@dataclass(frozen=True)
-class AggregatorBatch(Generic[StateT]):
-    correlation_id: str
-    fan_out_id: str
-    expected_tool_call_ids: frozenset[ToolCallId]
-    collected_results: Mapping[ToolCallId, Any]   # MappingProxyType for immutability
-    base_state: StateT
-    started_at_ms: int
-
-    @property
-    def is_complete(self) -> bool: ...
-    @property
-    def progress(self) -> float: ...
-
-class FanOutState(BaseModel):
-    """Wire format for the {node_id}.fanout-state compacted topic."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    correlation_id: str
-    fan_out_id: str
-    node_id: str
-    expected_tool_call_ids: frozenset[str]
-    collected_results: dict[str, Any] = Field(default_factory=dict)
-    base_state: State
-    started_at_ms: int
-    last_updated_ms: int
-    schema_version: int = 1
-    traceparent: str | None = None
-    tracestate: str | None = None
-```
-
-#### `calfkit/nodes/aggregator/errors.py` (~80 LoC)
-
-```python
-class CalfkitError(Exception):
-    """Base for all calfkit-raised errors. (New base — see §12.5.)"""
-
-class AggregatorError(CalfkitError): ...
-
-class AggregatorMergeError(AggregatorError):
-    def __init__(self, original: Exception, correlation_id: str, fan_out_id: str) -> None: ...
-
-class AggregatorStateStoreError(AggregatorError):
-    def __init__(self, op: str, correlation_id: str | None, fan_out_id: str | None, original: Exception) -> None: ...
-```
-
-#### `calfkit/nodes/aggregator/state_store.py` (~450 LoC)
-
-The `_KafkaStateStore` write-through cache. Methods per §10.1.
-
-Key implementation notes:
-- The rehydration consumer uses a uniquely-named group_id per worker instance to ensure read-from-zero.
-- Write-through `put()` uses `acks=all` (Kafka producer config) to wait for durable commit.
-- The `_recently_completed` TTL set uses asyncio-friendly bookkeeping (a `deque` of `(key, expiry_ms)` checked on insert).
-
-#### `calfkit/nodes/aggregator/testing.py` (~300 LoC)
-
-```python
-class InMemoryAggregator(FanOutAggregator):
-    """Drop-in for FanOutAggregator that skips the Kafka state-store layer.
-
-    Backed by a plain dict; supports persist_to_disk for cross-restart tests.
-    """
-
-    def __init__(
-        self,
-        *,
-        persist_to_disk: bool = False,
-        path: Path | None = None,
-        on_merge_error: Literal["abort", "retry", "drop"] = "abort",
-        merge_retry_count: int = 0,
-    ) -> None: ...
-
-    @classmethod
-    def wrap(cls, base: FanOutAggregator) -> "InMemoryAggregator":
-        """Take an existing aggregator subclass and wrap it with in-memory storage."""
-
-    @classmethod
-    def rehydrate_from_disk(cls, path: Path) -> "InMemoryAggregator": ...
-
-    async def wait_for_partial_state(
-        self, *, correlation_id: str | None = None, n_returns: int = 1
-    ) -> AggregatorBatch: ...
-
-    async def wait_for_completion(
-        self, *, correlation_id: str, timeout: float = 5.0
-    ) -> AggregatorBatch: ...
-
-    def drop_correlation(self, correlation_id: str) -> None: ...
-
-    def simulate_restart(self) -> "InMemoryAggregator": ...
-
-    def set_clock(self, now_ms: int) -> None:
-        """Inspired by Temporal's TestWorkflowEnvironment.advance_time().
-        Lets tests inject a deterministic clock for timeout testing."""
-```
-
-#### `tests/test_durable_aggregator.py` (~700 LoC)
-
-New test file for the v1 feature set. Outline in §13.
+Earlier drafts of this section detailed pseudo-code for each new file. Read
+the shipped source for the authoritative shape; this doc only annotates
+the load-bearing choices.
 
 ### 12.2 Edited files
 
@@ -1287,38 +1222,43 @@ Add `HDR_FANOUT_ID` and `HDR_FRAME_ID` constants. ~20 lines added.
 
 #### `calfkit/worker/worker.py`
 
-`register_handlers` iterates `node.kafka_subscriptions()` instead of doing one subscription per node. `run()` adds pre-rehydration step before `FastStream(...).run()`.
+`register_handlers` iterates `node.kafka_subscriptions()` and threads the
+aggregator subscription's `listener` through to `broker.subscriber`.
+`run()` calls `_prepare_aggregators` BEFORE `register_handlers` so the
+runtime is populated before subscriptions are built — see shipped code at
+`calfkit/worker/worker.py`:
 
 ```python
-def register_handlers(self) -> None:
-    if self._prepared: raise RuntimeError(...)
+async def _prepare_aggregators(self) -> None:
+    broker = self._client._connection
+    await broker.connect()  # makes broker.config.admin_client available
+
+    kafka_config = self._client.kafka_config
+    if kafka_config is None and any(isinstance(n, BaseAgentNodeDef) for n in self._nodes):
+        raise AggregatorStateStoreError(
+            "Worker requires Client.kafka_config to wire up the durable "
+            "fan-out aggregator. ..."
+        )
+
     for node in self._nodes:
-        for sub in node.kafka_subscriptions():
-            subscriber = self._client._connection.subscriber(
-                *sub.topics,
-                group_id=sub.group_id or self._group_id or node.name,
-                max_workers=self._max_workers,
-                **self._extra_subscribe_kwargs,
+        if isinstance(node, BaseAgentNodeDef):
+            await node.aggregator.setup(
+                broker,
+                node_id=node.node_id,
+                main_topic=node.subscribe_topics[0],
+                kafka_config=kafka_config,
             )
-            handler = subscriber(sub.handler)
-            if sub.publish_topic:
-                self._client._connection.publisher(sub.publish_topic, ...)(handler)
-    self._prepared = True
 
 async def run(self, **extra_run_args: Any) -> None:
+    await self._prepare_aggregators()
     self.register_handlers()
-    if not self._client._connection._connection:
-        await self._client._connection.start()
-    # Pre-flight + rehydration
-    for node in self._nodes:
-        if hasattr(node, "aggregator") and node.aggregator is not None:
-            await node.aggregator._ensure_topics(self._client._connection)
-            await node.aggregator._rehydrate(self._client._connection)
-    # Begin serving
     await FastStream(self._client._connection).run(**extra_run_args)
 ```
 
-Estimated diff: ~40 lines changed.
+Note the contrast with earlier drafts: there is no `_ensure_topics` /
+`_rehydrate` pair on `FanOutAggregator`; topic provisioning happens
+inside `setup()` (via `_topic_admin.ensure_aggregator_topics`), and
+rehydration is framework-managed by the rebalance listener (§8.5).
 
 #### `calfkit/models/state.py`
 
@@ -1445,7 +1385,7 @@ Requires real broker or careful FastStream simulation. May land as a docker-comp
 
 1. Dispatch fan-out with two tools.
 2. Inject the same tool return twice (via `InMemoryAggregator` test hook or by manually publishing on `TestKafkaBroker`).
-3. Assert: only one update to `batch.collected_results`; only one `on_partial` invocation.
+3. Assert: only one update to `batch.received`; only one `on_partial` invocation.
 
 ### 13.6 Empty fan-out
 
@@ -1474,11 +1414,11 @@ The existing code at `agent.py:191-204` short-circuits for `len(pending_tool_cal
 
 ### 13.9 Merge error policies
 
-Three sub-tests:
+Three sub-tests, one per `MergeErrorPolicy`:
 
-- `test_merge_error_abort`: user `merge()` raises; assert `AggregatorMergeError` propagates; assert FastStream message is nacked (under `TestKafkaBroker`, hard to verify directly; assert via metric `calfkit_aggregator_state_store_write_errors_total` or by mocking the broker).
-- `test_merge_error_retry`: `on_merge_error="retry"`, `merge_retry_count=2`, `merge()` raises twice then succeeds; assert batch completes; assert two retries observable via log.
-- `test_merge_error_drop`: `on_merge_error="drop"`, `merge()` raises; assert tombstone written; assert agent never re-enters.
+- `test_merge_error_abort`: default `merge_error_policy=ABORT`; user `merge()` raises; assert `AggregatorMergeError` (with `correlation_id` / `fan_out_id` attributes) propagates; assert FastStream message is nacked.
+- `test_merge_error_retry`: `merge_error_policy=RETRY`; `merge()` raises once then succeeds; assert batch completes after exactly one retry. Retry count is fixed at one — no `merge_retry_count` knob.
+- `test_merge_error_drop`: `merge_error_policy=DROP`; `merge()` raises; assert the default merge runs as fallback; assert published envelope carries `HDR_DEGRADED_MERGE=1`; assert tombstone written; assert agent resumes with default-merged state.
 
 ### 13.10 Custom `should_complete`
 
@@ -1532,39 +1472,35 @@ In `tests/conftest.py`, add:
 ```
 1. Worker.__init__: nodes registered, aggregators auto-attached
 2. Worker.run:
-   a. Worker.register_handlers (synchronous):
-      for each node:
-         for each KafkaSubscription in node.kafka_subscriptions():
-            broker.subscriber(...)(...)
-   b. broker.start() — establish connection
-   c. For each agent's aggregator:
-      i. aggregator._ensure_topics(broker)
-      ii. aggregator._rehydrate(broker)
-   d. FastStream(broker).run() — begin consuming
+   a. Worker._prepare_aggregators:
+      - await broker.connect()
+      - for each BaseAgentNodeDef in self._nodes:
+          await node.aggregator.setup(
+              broker, node_id, main_topic, kafka_config=client.kafka_config)
+        which internally:
+          - ensure_aggregator_topics(...) via broker.config.admin_client
+          - constructs _KafkaStateStore with kafka_config kwargs
+          - constructs _StateStoreRebalanceListener
+   b. Worker.register_handlers:
+      for each node, for each KafkaSubscription in node.kafka_subscriptions():
+        broker.subscriber(*topics, listener=sub.listener, max_workers=...)(handler)
+   c. FastStream(broker).run() — begin consuming.
+      On partition assignment, the rebalance listener drives
+      state_store.rehydrate_partitions BEFORE the returns subscriber
+      processes any messages for those partitions.
 ```
 
 ### 14.2 Topic auto-creation vs explicit creation
 
 Three modes:
 
-- **Cluster allows topic auto-creation** (`auto.create.topics.enable=true`): the first publish to `fanout-state` will auto-create it — but with the *default* cleanup.policy=delete, which is WRONG. The aggregator's `_ensure_topics` must use the Kafka Admin API to (a) check the topic exists, (b) check `cleanup.policy=compact`, (c) if missing, create with the correct config; if wrong policy, log ERROR and (option A: hard fail / option B: continue with risk).
-- **Cluster forbids topic auto-creation**: `_ensure_topics` must create explicitly via Admin API. If the broker user lacks permission, log ERROR and fail to start (it's a configuration error).
-- **Managed Kafka (e.g. Confluent Cloud, AWS MSK Serverless)**: the user must pre-create topics. Provide a CLI helper.
+- **Cluster allows topic auto-creation** (`auto.create.topics.enable=true`): the first publish to `fanout-state` would auto-create it — but with the *default* `cleanup.policy=delete`, which is WRONG. The shipped `_topic_admin.ensure_aggregator_topics` uses the Kafka Admin API to (a) check the topic exists, (b) create with `STATE_TOPIC_CONFIG` if missing, (c) validate partition count if it exists. It does NOT validate `cleanup.policy` on an existing state topic — that's a known gap; an operator with a misconfigured pre-existing topic will silently get incorrect compaction behaviour.
+- **Cluster forbids topic auto-creation**: `ensure_aggregator_topics` creates explicitly via Admin API. If the broker user lacks permission, `AggregatorStateStoreError` is raised and the worker fails to start (it's a configuration error).
+- **Managed Kafka (e.g. Confluent Cloud, AWS MSK Serverless)**: the user must pre-create topics. No CLI ships in v1.
 
-### 14.3 CLI helper
+### 14.3 CLI helper (not shipped)
 
-```
-uv run calfkit topics create-aggregator <node_id> [--state-topic NAME] [--returns-topic NAME] [--partitions N]
-```
-
-Outputs:
-- The topic names that would be created.
-- The config that would be applied.
-- If `--apply` is passed and the broker is reachable, creates the topics.
-
-Implementation: a new `calfkit/cli/` module. Could share Click / Typer dependency. Estimated +200 LoC, but out of scope for v1 if we accept "start-time auto-create via Admin API with sensible defaults" as the primary path.
-
-**Recommendation:** ship v1 with start-time auto-create only (via Admin API in `_ensure_topics`). Defer the CLI to v1.1 if user demand surfaces.
+Earlier drafts proposed a `uv run calfkit topics create-aggregator <node_id>` CLI. Not shipped in v1 — start-time auto-create via the Admin API in `ensure_aggregator_topics` is the primary path. Defer the CLI to v1.1 if user demand surfaces.
 
 ### 14.4 Graceful shutdown (recap)
 
@@ -1609,15 +1545,15 @@ Two new topics per agent. Operational impact:
 
 - `sequential_only_mode=True` on `Agent` is soft-deprecated. It still works (the single-tool path covers it). Add `DeprecationWarning` on construction with `sequential_only_mode=True`. Remove in the next major.
 
-### 15.6 Rollout sequence (recommended)
+### 15.6 Rollout
 
-1. PR 1: introduce `CalfkitError` base.
-2. PR 2: introduce `HDR_FANOUT_ID`, `HDR_FRAME_ID`; refactor `_emitter_headers` to include `HDR_FRAME_ID` (per the existing memory recommendation).
-3. PR 3: introduce `BaseNodeDef.kafka_subscriptions()` method with default; no behaviour change (single subscription per node, same as today).
-4. PR 4 (the big one): introduce `FanOutAggregator` subpackage, edit `agent.py` to use it, edit `base.py` for the rewritten `_publish_action` parallel branch, edit `worker.py` for rehydration. Tests.
-5. PR 5: deprecation warning on `sequential_only_mode`.
-
-Each PR is self-contained, reviewable, revertable. PR 4 is the only one that ships the behaviour change; everything before is preparation.
+The implementation shipped in one PR on `feat/durable-fanout-aggregator`.
+The earlier multi-PR breakdown in this section (introduce `CalfkitError`,
+then `HDR_FANOUT_ID` / `HDR_FRAME_ID`, then `kafka_subscriptions`, then
+the aggregator subpackage, then `sequential_only_mode` deprecation) is
+left behind as a historical note on review staging — useful for
+reading the branch's commit log, not for understanding the shipped
+behaviour.
 
 ---
 
@@ -1700,11 +1636,16 @@ Everything else in the DX design. The three override methods, the module structu
 
 Honest list of things that need prototyping, validation, or further design before shipping.
 
-### 17.1 Single-partition `fanout-state` throughput
+### 17.1 Per-partition `fanout-state` throughput
 
-v1 has 1 partition. At what fan-out rate does this become a bottleneck? Order-of-magnitude estimate: each batch is 1 write-on-dispatch + N writes-on-return + 1 tombstone, so ~(N+2) writes per batch. For 100 fan-outs/sec with 5 tool calls each: 700 writes/sec on the state topic. Far below single-partition Kafka throughput (~10k+ msg/sec on commodity hardware). Plausibly fine for v1; needs load-test.
+Per-batch: 1 write-on-dispatch + N writes-on-return + 1 tombstone, i.e.
+~(N+2) writes per batch. At 100 fan-outs/sec with 5 tool calls each:
+~700 writes/sec on the state topic, divided across `partition_count`
+partitions. Far below per-partition Kafka throughput (~10k+ msg/sec on
+commodity hardware). Plausibly fine; needs load-test.
 
-**Action item:** include a benchmark in `tests/perf/` once the implementation lands.
+**Action item:** include a benchmark in `tests/perf/` once load-testing
+infrastructure is in place.
 
 ### 17.2 Exactly-once via Kafka transactions
 
@@ -1726,11 +1667,12 @@ v1 logs + drops. A configurable DLQ topic (`{node_id}.fanout-dlq`) would let ope
 
 **Action:** out of scope for v1 (the existing weakness is not made worse). Long-term, tighten `tool_results` to a tagged union, propagate the tightening to `FanOutAggregator[StateT, ResultT]`.
 
-### 17.5 Multi-partition `fanout-state`
+### 17.5 Multi-partition `fanout-state` (shipped — resolved)
 
-Going beyond 1 partition for state. The aggregator's read-modify-write must remain linearisable per key. Standard pattern: hash-by-`correlation_id` consistently on the producer; the consumer-group rebalance auto-co-locates writers and readers for a given key.
-
-Implementation cost: small (just change the producer's key hash). Operational cost: more partitions = more files = slightly more overhead on the broker. Probably worth doing in v1.1 once we know v1 works.
+This was an open question in earlier drafts; shipped in v1. The state
+topic shares the agent main topic's partition count;
+`FanOutAggregatorPartitioner` extracts `correlation_id` from composite
+keys to preserve co-partitioning. See §6.5, §7.1, §8.5.
 
 ### 17.6 RocksDB-backed cache
 
@@ -1752,19 +1694,39 @@ The risk: tool publishes are not transactional with the state write; we cannot p
 
 **Action:** document this contract clearly in the migration note. "Tools must be idempotent on `(correlation_id, tool_call_id)`" — this is already an implicit contract; we are making it explicit.
 
-### 17.9 Should aggregator topics always be single-partition for simplicity?
+### 17.9 Should aggregator topics always be single-partition for simplicity? (resolved)
 
-Trade-off: simpler reasoning vs. throughput cap. v1 picks 1 for `fanout-state`, co-partitioned for `fanout-returns`. The co-partitioning lets `fanout-returns` scale; `fanout-state` is the throughput bound at the single-partition limit (~10k writes/sec on commodity hardware, ample for v1 workloads).
+Resolved against single-partition: the shipped design is multi-partition
+with `FanOutAggregatorPartitioner` keeping co-partitioning intact. See
+§7.1 for the linearisation contract.
 
-### 17.10 What if the agent's main topic has a different partitioner from `fanout-returns`?
+### 17.10 What if the agent's main topic has a different partitioner from `fanout-returns`? (resolved)
 
-We assume both use murmur2 (Kafka's default). If a user configures a custom partitioner on the main topic but not on `fanout-returns`, co-location breaks. The `_ensure_topics` pre-flight should validate partition count match and partitioner config match. **Action:** add a startup check.
+The shipped `FanOutAggregatorPartitioner` is installed broker-wide by
+`Client.connect` (`calfkit/client/base.py::BaseClient.connect`) and
+hashes plain keys with the same murmur2 as Kafka's default partitioner
+— so co-location holds as long as users do not pass their own
+`partitioner=` to the `Client.connect` kwargs (which the framework
+explicitly rejects with a `ValueError`). A partition-count mismatch
+between main and aggregator topics is caught by
+`ensure_aggregator_topics`, which raises `AggregatorStateStoreError`
+on validation failure.
 
-### 17.11 Idle-timeout reaping (Future work)
+### 17.11 Idle-timeout reaping (Future work — deferred)
 
-Earlier drafts of this document proposed an `idle_timeout_seconds` knob on `FanOutAggregator` plus a `FanOutTimeoutError` raised when a batch's `last_updated_ms` ages past the threshold. Both were dropped from v1: the reaping mechanism needs a partition-scoped background task whose lifecycle is intertwined with consumer-group rebalances, plus deterministic test plumbing — non-trivial enough that shipping the parameter without a working reaper would be ship-dead-code. `last_updated_ms` is still recorded on `FanOutState` for observability.
+Earlier drafts of this document proposed an `idle_timeout_seconds` knob
+on `FanOutAggregator` plus a `FanOutTimeoutError` raised when a batch's
+`last_updated_ms` ages past the threshold. Both were removed from v1:
+the reaping mechanism needs a partition-scoped background task whose
+lifecycle is intertwined with consumer-group rebalances, plus
+deterministic test plumbing — non-trivial enough that shipping the
+parameter without a working reaper would have been ship-dead-code.
+`last_updated_ms` is still recorded on `FanOutState` for observability.
 
-A follow-up design doc tracking the proper implementation (partition-scoped periodic sweep, async task lifecycle, test plumbing) is registered in `ROADMAP.md`.
+The proper implementation (partition-scoped periodic sweep, async task
+lifecycle, test plumbing) is tracked in
+[`docs/fanout-idle-timeout-reaper.md`](./fanout-idle-timeout-reaper.md)
+via `ROADMAP.md`.
 
 ---
 
