@@ -102,10 +102,13 @@ def agent() -> object:
 
 @pytest.fixture
 def primed_state_store(agent: object) -> tuple[object, MagicMock]:
-    """Wire up a minimal aggregator state store on the agent without going
-    through Worker.setup. Replaces the broker with a MagicMock so publishes
-    are observable."""
+    """Wire up a minimal aggregator runtime on the agent without going
+    through Worker.setup. Replaces the broker with a MagicMock so
+    publishes are observable; uses a stub rebalance listener since
+    these tests don't simulate partition rebalances."""
     from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
+    from calfkit.nodes.aggregator._rebalance import _StateStoreRebalanceListener
+    from calfkit.nodes.aggregator._runtime import _FanOutRuntime
 
     broker = MagicMock()
     broker.publish = AsyncMock()
@@ -115,10 +118,17 @@ def primed_state_store(agent: object) -> tuple[object, MagicMock]:
         bootstrap_servers="localhost:9092",
         partition_count=6,
     )
-    agent.aggregator._state_topic = "test_agent.fanout-state"  # type: ignore[attr-defined]
-    agent.aggregator._returns_topic = "test_agent.fanout-returns"  # type: ignore[attr-defined]
-    agent.aggregator._partition_count = 6  # type: ignore[attr-defined]
-    agent.aggregator._state_store = state_store  # type: ignore[attr-defined]
+    rebalance_listener = _StateStoreRebalanceListener(
+        state_store=state_store,
+        returns_topic="test_agent.fanout-returns",
+    )
+    agent.aggregator._runtime = _FanOutRuntime(  # type: ignore[attr-defined]
+        state_topic="test_agent.fanout-state",
+        returns_topic="test_agent.fanout-returns",
+        partition_count=6,
+        state_store=state_store,
+        rebalance_listener=rebalance_listener,
+    )
     return agent, broker
 
 
@@ -175,7 +185,7 @@ def test_sequential_only_mode_default_false_emits_no_warning() -> None:
 async def test_duplicate_return_is_deduped(primed_state_store: tuple[object, MagicMock]) -> None:
     """A redelivered tool return for an already-received tool_call_id is a no-op."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     # Seed the cache with an in-flight batch.
     key = ("corr-1", "fan-1")
@@ -217,7 +227,7 @@ async def test_late_return_after_completion_is_dropped(
 ) -> None:
     """A return arriving after the batch has been tombstoned is dropped."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     key = ("corr-late", "fan-late")
     state_store.mark_completed(key)  # simulate prior tombstone
@@ -289,7 +299,7 @@ async def test_return_advances_batch_and_publishes_state(
     """A new tool_call_id is merged into the batch and the new state is
     published to the state topic."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     key = ("corr-A", "fan-A")
     initial = _InFlightBatch(
@@ -334,7 +344,7 @@ async def test_completion_publishes_aggregated_and_tombstones(
     """When the final tool returns, the merged state is published to the
     agent's main topic and the batch is tombstoned."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     key = ("corr-B", "fan-B")
     initial = _InFlightBatch(
@@ -387,7 +397,7 @@ async def test_unexpected_tool_call_id_is_ignored(
 ) -> None:
     """A return with a tool_call_id NOT in expected_tool_call_ids is dropped."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     key = ("corr-X", "fan-X")
     state_store._cache[key] = _InFlightBatch(
@@ -458,7 +468,7 @@ async def test_redispatch_preserves_received_for_in_flight_batch(
     untouched; only the tool Calls re-publish (tool dedup is the tool's
     responsibility)."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     correlation_id = "corr-R"
     frame_id = "frame-R"
@@ -511,7 +521,7 @@ async def test_redispatch_skipped_for_completed_batch(
     tombstoned within the recently-completed TTL) must not re-dispatch
     the tools or write any new state — the work is done."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     correlation_id = "corr-C"
     frame_id = "frame-C"
@@ -535,7 +545,7 @@ async def test_first_time_dispatch_persists_initial_batch(
     """When there's no prior state for the key, the initial batch is
     durably persisted before any tool Calls are published."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     correlation_id = "corr-F"
     frame_id = "frame-F"
@@ -567,7 +577,7 @@ async def test_publish_failure_leaves_cache_unchanged(
     see the un-merged batch so the merge re-attempts (otherwise the
     in-memory dedup would skip the tcid and the merge is silently lost)."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     key = ("corr-pubfail", "fan-pubfail")
     state_store._cache[key] = _InFlightBatch(
@@ -622,7 +632,7 @@ async def test_drop_policy_stamps_degraded_header_on_publish(
     from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
 
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
     agent.aggregator.merge_error_policy = MergeErrorPolicy.DROP  # type: ignore[attr-defined]
 
     # Replace merge with a callable that always raises.
@@ -675,7 +685,7 @@ async def test_normal_completion_does_not_stamp_degraded_header(
     from calfkit._protocol import HDR_DEGRADED_MERGE
 
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     key = ("corr-ok", "fan-ok")
     state_store._cache[key] = _InFlightBatch(
@@ -719,7 +729,7 @@ async def test_redispatch_with_drifted_tool_call_ids_overwrites(
     proceeds. This is a real upstream bug we surface via ERROR log; the
     aggregator can't silently keep stale state."""
     agent, broker = primed_state_store
-    state_store = agent.aggregator._state_store  # type: ignore[attr-defined]
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
 
     correlation_id = "corr-D"
     frame_id = "frame-D"

@@ -26,6 +26,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from calfkit.client.kafka_config import KafkaConfig
+from calfkit.nodes.aggregator._runtime import _FanOutRuntime
+from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
     AggregatorBatch,
@@ -36,8 +38,6 @@ if TYPE_CHECKING:
     from faststream.kafka import KafkaBroker
 
     from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
-    from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
-    from calfkit.nodes.aggregator._rebalance import _StateStoreRebalanceListener
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +49,16 @@ class MergeErrorPolicy(str, enum.Enum):
     """Raise :class:`AggregatorMergeError` and fail the batch loudly. Default."""
 
     RETRY = "retry"
-    """Retry the merge once after a small delay. Useful for transient failures
-    (e.g., a downstream LLM call that times out). If the retry also raises,
+    """Retry the merge once. Useful for transient failures (e.g., a
+    downstream LLM call that times out). If the retry also raises,
     behaves as :data:`ABORT`."""
 
     DROP = "drop"
     """Log the error and complete the batch via the default merge (apply all
     received results to ``base_state``). Useful for best-effort aggregation
-    where falling back to the un-customised state is acceptable."""
+    where falling back to the un-customised state is acceptable. The
+    framework stamps :data:`HDR_DEGRADED_MERGE` on the published envelope
+    so operators can detect silently-degraded batches."""
 
 
 class FanOutAggregator:
@@ -97,13 +99,34 @@ class FanOutAggregator:
                 for the alternatives.
         """
         self.merge_error_policy = merge_error_policy
-        # Populated by :meth:`setup` at worker startup. Internal attributes;
-        # the agent's `_aggregator_handler` reads them.
-        self._state_topic: str | None = None
-        self._returns_topic: str | None = None
-        self._partition_count: int | None = None
-        self._state_store: _KafkaStateStore | None = None
-        self._rebalance_listener: _StateStoreRebalanceListener | None = None
+        # Populated by :meth:`setup` at worker startup. Framework-internal
+        # state stays behind a single underscore-prefixed attribute rather
+        # than leaking five separate _state_topic / _state_store / etc.
+        # attributes onto the public class. Access via :attr:`runtime`
+        # (raises if unset) or directly via ``_runtime`` (may be None
+        # pre-setup, used by ``kafka_subscriptions`` which can run before
+        # ``setup()``).
+        self._runtime: _FanOutRuntime | None = None
+
+    @property
+    def runtime(self) -> _FanOutRuntime:
+        """Return the framework-managed runtime state, or raise.
+
+        Used by :class:`BaseAgentNodeDef`'s aggregator handler after
+        ``_ensure_aggregator_ready`` has ensured ``setup()`` has run.
+        Pre-setup access from non-handler paths (e.g.,
+        ``kafka_subscriptions`` building a subscription list) should
+        check ``self._runtime is not None`` instead — the property
+        intentionally raises so handler code stays terse.
+        """
+        if self._runtime is None:
+            raise AggregatorStateStoreError(
+                "FanOutAggregator.setup() must run before runtime access. "
+                "Worker.run() runs setup at startup; test paths bypassing "
+                "Worker.run() rely on BaseAgentNodeDef._ensure_aggregator_ready "
+                "to lazily call setup() before the first parallel fan-out."
+            )
+        return self._runtime
 
     # ------------------------------------------------------------------
     # Framework lifecycle — called by Worker before subscribers register
@@ -138,7 +161,7 @@ class FanOutAggregator:
                 :class:`AIOKafkaConsumer` for rehydration inherits the
                 same security/transport settings as the broker.
         """
-        if self._state_store is not None:
+        if self._runtime is not None:
             return  # idempotent
 
         # Local imports avoid a circular dependency: the state store and
@@ -154,20 +177,24 @@ class FanOutAggregator:
             main_topic=main_topic,
         )
 
-        self._state_topic = state_topic
-        self._returns_topic = returns_topic
-        self._partition_count = partition_count
-
-        self._state_store = _KafkaStateStore(
+        state_store = _KafkaStateStore(
             broker=broker,
             state_topic=state_topic,
             bootstrap_servers=kafka_config.bootstrap_servers,
             partition_count=partition_count,
             client_kwargs=kafka_config.client_kwargs,
         )
-        self._rebalance_listener = _StateStoreRebalanceListener(
-            state_store=self._state_store,
+        rebalance_listener = _StateStoreRebalanceListener(
+            state_store=state_store,
             returns_topic=returns_topic,
+        )
+
+        self._runtime = _FanOutRuntime(
+            state_topic=state_topic,
+            returns_topic=returns_topic,
+            partition_count=partition_count,
+            state_store=state_store,
+            rebalance_listener=rebalance_listener,
         )
 
         logger.info(

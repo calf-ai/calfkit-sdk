@@ -118,11 +118,17 @@ class BaseAgentNodeDef(
         partition rebalances.
         """
         subscriptions = list(super().kafka_subscriptions())
+        # The rebalance listener is set on the aggregator's runtime by
+        # setup(); it's None in test paths that haven't run setup yet
+        # (TestKafkaBroker), and the subscription's listener field
+        # tolerates None.
+        runtime = self.aggregator._runtime
+        listener = runtime.rebalance_listener if runtime is not None else None
         subscriptions.append(
             _KafkaSubscription(
                 topics=[self.fanout_returns_topic],
                 handler=self._aggregator_handler,
-                listener=self.aggregator._rebalance_listener,
+                listener=listener,
                 # Force serial processing: a single asyncio loop processes
                 # returns for this agent's partitions, so read-modify-write
                 # on the state store is linearizable.
@@ -145,7 +151,7 @@ class BaseAgentNodeDef(
         under ``TestKafkaBroker`` (which simulates Kafka in memory), so
         the placeholder values never reach a real broker.
         """
-        if self.aggregator._state_store is None:
+        if self.aggregator._runtime is None:
             # Local import to avoid a circular at module-load time
             # (calfkit.client imports calfkit.nodes via partitioner).
             from calfkit.client.kafka_config import KafkaConfig
@@ -362,10 +368,9 @@ class BaseAgentNodeDef(
            (the deterministic batch id) and :data:`HDR_FRAME_ID` (the new
            per-tool-call frame id).
         """
-        assert self.aggregator._state_store is not None, "setup() must have been called"
-        assert self.aggregator._returns_topic is not None
-        state_store = self.aggregator._state_store
-        returns_topic = self.aggregator._returns_topic
+        runtime = self.aggregator.runtime
+        state_store = runtime.state_store
+        returns_topic = runtime.returns_topic
 
         # 1. Deterministic fan_out_id from the inbound agent frame.
         fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
@@ -482,9 +487,10 @@ class BaseAgentNodeDef(
             return Response(envelope, headers=self._emitter_headers())
 
         key = (correlation_id, fan_out_id)
-        state_store = self.aggregator._state_store
-        # _ensure_aggregator_ready guarantees state_store is set; narrow for mypy.
-        assert state_store is not None
+        # _ensure_aggregator_ready guarantees the runtime is set; this
+        # access raises AggregatorStateStoreError if a test path bypasses
+        # the lazy setup somehow.
+        state_store = self.aggregator.runtime.state_store
 
         # 1. Reject late returns for already-completed batches.
         if state_store.was_recently_completed(key):
