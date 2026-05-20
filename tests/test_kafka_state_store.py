@@ -9,6 +9,7 @@ is unit-testable against a mocked consumer.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -252,38 +253,167 @@ async def test_rehydrate_raises_on_stalled_poll() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Rehydration: end_offsets re-poll until stable
+# ---------------------------------------------------------------------------
+
+
+async def test_rehydrate_repolls_end_offsets_until_stable() -> None:
+    """The previous partition owner may still be flushing in-flight
+    writes when the new owner snapshots end_offsets. After draining to
+    the snapshot, rehydration must re-poll end_offsets and continue
+    reading if the offset advanced — otherwise the new owner activates
+    with state that's already stale.
+
+    Scenario: snapshot reports end=2, drain reads records 0-1, re-poll
+    reports end=3 (one new record landed during the read), drain reads
+    record 2, re-poll reports end=3 again → converged. All three records
+    must end up in the cache."""
+    from aiokafka import TopicPartition
+
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    tp = TopicPartition("agent.fanout-state", 0)
+
+    def _state(fan_out: str) -> FanOutState:
+        return FanOutState(
+            correlation_id="c1",
+            fan_out_id=fan_out,
+            expected_tool_call_ids=frozenset({"t1"}),
+            base_state=State(),
+            received={},
+            started_at_ms=0,
+            last_updated_ms=0,
+            agent_topic="agent.in",
+        )
+
+    class _Rec:
+        def __init__(self, key: bytes, value: bytes, offset: int) -> None:
+            self.key = key
+            self.value = value
+            self.offset = offset
+
+    rec_0 = _Rec(b"c1|f0", _state("f0").model_dump_json().encode(), 0)
+    rec_1 = _Rec(b"c1|f1", _state("f1").model_dump_json().encode(), 1)
+    rec_2 = _Rec(b"c1|f2", _state("f2").model_dump_json().encode(), 2)
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    # end_offsets sequence: initial snapshot returns 2, after first drain
+    # returns 3 (active producer landed one more), after second drain
+    # returns 3 again (converged).
+    mock_consumer.end_offsets = AsyncMock(side_effect=[{tp: 2}, {tp: 3}, {tp: 3}])
+    # getmany sequence: first call delivers records 0-1, second call (after
+    # the re-poll detects the advance) delivers record 2.
+    mock_consumer.getmany = AsyncMock(side_effect=[{tp: [rec_0, rec_1]}, {tp: [rec_2]}])
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        await store.rehydrate_partitions({0})
+
+    # All three records must be in the cache.
+    assert store.get(("c1", "f0")) is not None
+    assert store.get(("c1", "f1")) is not None
+    assert store.get(("c1", "f2")) is not None
+    assert 0 in store.owned_partitions
+    # end_offsets called 3 times: initial + 2 re-polls.
+    assert mock_consumer.end_offsets.await_count == 3
+
+
+async def test_rehydrate_raises_after_max_endoffset_repolls() -> None:
+    """If end_offsets keeps advancing on every re-poll, an active
+    producer is still writing during the rebalance — the new owner
+    cannot safely race against it. After ``_REHYDRATE_MAX_ENDOFFSET_REPOLLS``
+    consecutive advances, rehydration must raise rather than loop
+    forever or activate with state guaranteed to be stale."""
+    from aiokafka import TopicPartition
+
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    tp = TopicPartition("agent.fanout-state", 0)
+
+    def _record(offset: int) -> Any:
+        state = FanOutState(
+            correlation_id="c1",
+            fan_out_id=f"f{offset}",
+            expected_tool_call_ids=frozenset({"t1"}),
+            base_state=State(),
+            received={},
+            started_at_ms=0,
+            last_updated_ms=0,
+            agent_topic="agent.in",
+        )
+
+        class _Rec:
+            def __init__(self, key: bytes, value: bytes, offset: int) -> None:
+                self.key = key
+                self.value = value
+                self.offset = offset
+
+        return _Rec(f"c1|f{offset}".encode(), state.model_dump_json().encode(), offset)
+
+    # End offsets always advance by one — the producer never lets up.
+    # initial=1, after drain 1 -> 2, after drain 2 -> 3, after drain 3 -> 4.
+    # That's 1 initial + _REHYDRATE_MAX_ENDOFFSET_REPOLLS (=3) re-polls
+    # that each show an advance. The 3rd re-poll triggers the raise.
+    end_offset_sequence = [{tp: 1}, {tp: 2}, {tp: 3}, {tp: 4}]
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    mock_consumer.end_offsets = AsyncMock(side_effect=end_offset_sequence)
+    # Each drain reads exactly the one record at the current tail.
+    mock_consumer.getmany = AsyncMock(side_effect=[{tp: [_record(0)]}, {tp: [_record(1)]}, {tp: [_record(2)]}])
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        with pytest.raises(AggregatorStateStoreError, match="end_offsets failed to stabilise"):
+            await store.rehydrate_partitions({0})
+
+    # Partition must not be activated when end_offsets never stabilises.
+    assert 0 not in store.owned_partitions
+    mock_consumer.stop.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
 # _apply_record: poison-record handling
 # ---------------------------------------------------------------------------
 
 
-def test_apply_record_skips_null_key(caplog: pytest.LogCaptureFixture) -> None:
-    """Null-key records on the state topic are unexpected (the aggregator
-    always writes composite keys). Log loudly but don't raise — these are
-    stray records from elsewhere, not corrupt aggregator state."""
-    import logging
-
+def test_apply_record_raises_on_null_key() -> None:
+    """Null-key records on the state topic indicate something other than
+    this aggregator has written to the topic — the aggregator's writes
+    always use composite keys. The trust invariant is violated; refuse
+    activation rather than silently skipping (and possibly missing valid
+    records adjacent to the contamination)."""
     store, _ = _make_store()
 
-    with caplog.at_level(logging.ERROR):
-        store._apply_record(partition=0, key_bytes=None, value_bytes=b"any")
-
-    assert any("null key" in r.message for r in caplog.records)
-    assert store._cache == {}
+    with pytest.raises(AggregatorStateStoreError, match="null key"):
+        store._apply_record(partition=0, key_bytes=None, value_bytes=b"any", offset=42)
 
 
-def test_apply_record_skips_malformed_key(caplog: pytest.LogCaptureFixture) -> None:
-    """Malformed (non-composite) keys are unrecoverable for the
-    aggregator (no key to associate state with). Log ERROR and skip."""
-    import logging
-
+def test_apply_record_raises_on_malformed_key() -> None:
+    """Malformed (non-composite) keys cannot be produced by this
+    aggregator. Like null-key records, they indicate the state topic has
+    been contaminated; refuse to activate the partition."""
     store, _ = _make_store()
 
-    with caplog.at_level(logging.ERROR):
+    with pytest.raises(AggregatorStateStoreError, match="malformed key"):
         # No "|" delimiter → parse_composite_key raises ValueError.
-        store._apply_record(partition=0, key_bytes=b"no-delim", value_bytes=b"{}")
-
-    assert any("malformed key" in r.message for r in caplog.records)
-    assert store._cache == {}
+        store._apply_record(partition=0, key_bytes=b"no-delim", value_bytes=b"{}", offset=99)
 
 
 def test_apply_record_raises_on_malformed_value() -> None:

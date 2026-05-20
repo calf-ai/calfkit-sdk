@@ -80,7 +80,4 @@ class AggregatorStateStoreError(AggregatorError):
 
     def __repr__(self) -> str:
         message = self.args[0] if self.args else ""
-        return (
-            f"{type(self).__name__}({message!r}, "
-            f"state_topic={self.state_topic!r})"
-        )
+        return f"{type(self).__name__}({message!r}, state_topic={self.state_topic!r})"

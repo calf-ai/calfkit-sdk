@@ -249,9 +249,17 @@ async def test_late_return_after_completion_is_dropped(
     broker.publish.assert_not_awaited()
 
 
-async def test_orphan_return_is_dropped(primed_state_store: tuple[object, MagicMock]) -> None:
-    """A return for a fan_out_id with no active batch is dropped (orphan)."""
+async def test_orphan_return_on_unowned_partition_is_dropped(primed_state_store: tuple[object, MagicMock]) -> None:
+    """A return for a fan_out_id with no active batch on a partition NOT
+    currently owned by this worker is dropped — legitimate rebalance race
+    (the new owner has the durable state)."""
     agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    # Simulate this worker owning partitions {1, 2} but the inbound arrived
+    # on partition 0 (the old owner). Acking is correct here — the new
+    # owner of partition 0 will see the durable state.
+    state_store._owned_partitions = {1, 2}
 
     envelope = _make_envelope(
         "corr-orphan",
@@ -264,16 +272,25 @@ async def test_orphan_return_is_dropped(primed_state_store: tuple[object, MagicM
         correlation_id="corr-orphan",
         headers=headers,
         broker=broker,
+        partition=0,
     )
 
     assert response is not None
     broker.publish.assert_not_awaited()
 
 
-async def test_return_without_fanout_header_is_dropped(
+async def test_return_without_fanout_header_raises(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:
-    """A return missing HDR_FANOUT_ID is dropped with a WARN log."""
+    """A return missing HDR_FANOUT_ID raises AggregatorStateStoreError.
+
+    The previous WARN-and-ack swallowed a protocol violation (an upstream
+    producer or forwarder failed to stamp the header). Raising surfaces
+    the broken pipeline via NACK redelivery rather than silently dropping
+    work.
+    """
+    from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
+
     agent, broker = primed_state_store
 
     envelope = _make_envelope(
@@ -282,14 +299,14 @@ async def test_return_without_fanout_header_is_dropped(
     )
     headers: dict[str, object] = {}  # no fanout_id
 
-    response = await agent._aggregator_handler(  # type: ignore[attr-defined]
-        envelope,
-        correlation_id="corr-noheader",
-        headers=headers,
-        broker=broker,
-    )
+    with pytest.raises(AggregatorStateStoreError, match="missing"):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-noheader",
+            headers=headers,
+            broker=broker,
+        )
 
-    assert response is not None
     broker.publish.assert_not_awaited()
 
 
@@ -638,16 +655,23 @@ async def test_publish_failure_leaves_cache_unchanged(
 async def test_abort_policy_re_raises_as_aggregator_merge_error(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:
-    """ABORT (default policy): user's merge raises → handler re-raises
-    AggregatorMergeError with structured correlation_id/fan_out_id.
-    FastStream's ack_policy=NACK_ON_ERROR (set on the fanout-returns
-    subscription) then rewinds the offset so the message is redelivered
-    and the merge is re-attempted on the next consume."""
+    """ABORT: user's merge raises → handler re-raises AggregatorMergeError
+    with structured correlation_id/fan_out_id. FastStream's
+    ack_policy=NACK_ON_ERROR (set on the fanout-returns subscription) then
+    rewinds the offset so the message is redelivered and the merge is
+    re-attempted on the next consume.
+
+    ABORT is no longer the default — must be opted into explicitly. The
+    new default (:data:`MergeErrorPolicy.FALLBACK_TO_DEFAULT`) is covered
+    by :func:`test_fallback_to_default_policy_stamps_degraded_header_on_publish`.
+    """
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
     from calfkit.nodes.aggregator.errors import AggregatorMergeError
     from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
 
     agent, broker = primed_state_store
     state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.ABORT  # type: ignore[attr-defined]
 
     async def boom(batch: AggregatorBatch) -> AggregatedReturn:
         raise RuntimeError("user merge boom")
@@ -1793,4 +1817,356 @@ async def test_user_merge_mutating_base_state_does_not_corrupt_cache(
     # owns the cache and a user merge should never reach into it.
     assert len(seeded_state.message_history) == 1, (
         "User merge mutated framework-cached base_state. The _batch_view must deep-copy base_state so user merge can't corrupt the cache."
+    )
+
+
+# ---------------------------------------------------------------------------
+# New: default policy, orphan-return raise semantics, deterministic re-entry,
+# handler-identity matching, single deep-copy invariant.
+# ---------------------------------------------------------------------------
+
+
+def test_default_policy_is_fallback_to_default() -> None:
+    """A bare ``FanOutAggregator()`` defaults to FALLBACK_TO_DEFAULT.
+
+    The plain default must be safe-by-default: a bug in a user's merge
+    shouldn't be able to stall a partition on an unbounded NACK redelivery
+    loop. Users who want fail-loud ABORT semantics opt in explicitly.
+    """
+    from calfkit.nodes.aggregator import FanOutAggregator
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+
+    agg = FanOutAggregator()
+    assert agg.merge_error_policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT
+
+
+async def test_orphan_return_with_owned_partition_raises(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When ``state_store.get(key)`` returns ``None`` AND the partition IS
+    owned by this worker, the previous WARN-and-drop hid a real durability
+    violation (state-store entry vanished). Raise so NACK redelivers and
+    the operator sees a stuck partition instead of a silently lost batch.
+    """
+    from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    # Simulate this worker owning partition 0 (where the inbound arrives).
+    state_store._owned_partitions = {0}
+
+    envelope = _make_envelope(
+        "corr-orphan-owned",
+        state=_state_with_results({"t1": "no-state-record"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-orphan-owned"}
+
+    with pytest.raises(AggregatorStateStoreError, match="orphan return"):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-orphan-owned",
+            headers=headers,
+            broker=broker,
+            partition=0,
+        )
+
+    # No phantom publishes from the half-handled handler call.
+    broker.publish.assert_not_awaited()
+
+
+async def test_orphan_return_with_unowned_partition_acks(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When the partition is NOT owned (legitimate rebalance race), the
+    handler must ack quietly so the new owner can process the message
+    against its durable state. Raising here would loop on a message we
+    can't act on."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    # Owner of partition 0 has moved elsewhere; this worker now owns {1, 2}.
+    state_store._owned_partitions = {1, 2}
+
+    envelope = _make_envelope(
+        "corr-orphan-unowned",
+        state=_state_with_results({"t1": "for-the-other-owner"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-orphan-unowned"}
+
+    response = await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-orphan-unowned",
+        headers=headers,
+        broker=broker,
+        partition=0,
+    )
+
+    assert response is not None
+    broker.publish.assert_not_awaited()
+
+
+async def test_missing_fanout_id_header_raises(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """A fanout-returns message missing HDR_FANOUT_ID is a protocol
+    violation. The previous WARN-and-ack swallowed the failure; raising
+    forces NACK redelivery and operator attention."""
+    from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
+
+    agent, broker = primed_state_store
+
+    envelope = _make_envelope(
+        "corr-missing-hdr",
+        state=_state_with_results({"t1": "r1"}),
+    )
+
+    with pytest.raises(AggregatorStateStoreError, match="missing"):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-missing-hdr",
+            headers={},  # no HDR_FANOUT_ID
+            broker=broker,
+        )
+
+    broker.publish.assert_not_awaited()
+
+
+async def test_reentry_frame_id_is_deterministic(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """Two completions of the same logical batch must produce the SAME
+    re-entry frame_id.
+
+    This is what lets downstream stateful sinks dedup redelivered re-entry
+    envelopes (e.g., a NACK between agent-topic publish and tombstone
+    causes the same merged batch to re-fire the completion path; each
+    redelivery must look like the same event downstream).
+
+    Also asserts the existing invariant: the re-entry frame_id differs
+    from the inbound's (so a subsequent fan-out within the same
+    invocation doesn't collide with the just-tombstoned key).
+    """
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    inbound_frame_id = "stable-inbound-frame"
+
+    async def drive_once(suffix: str) -> tuple[str, str]:
+        """Seed and drive a complete batch, return (inbound_frame_id, re_entry_frame_id)."""
+        key = (f"corr-det-{suffix}", f"fan-det-{suffix}")
+        state_store._cache[key] = _InFlightBatch(
+            correlation_id=key[0],
+            fan_out_id=key[1],
+            expected_tool_call_ids=frozenset({"t1"}),
+            base_state=State(),
+            received={},
+            started_at_ms=int(time.time() * 1000),
+            last_updated_ms=int(time.time() * 1000),
+            agent_topic="test_agent.input",
+        )
+        broker.publish.reset_mock()
+        env = _make_envelope(
+            key[0],
+            state=_state_with_results({"t1": "r1"}),
+            frame_id=inbound_frame_id,
+        )
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            env,
+            correlation_id=key[0],
+            headers={"x-calf-fanout-id": key[1]},
+            broker=broker,
+        )
+        agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+        assert len(agent_topic_publishes) == 1
+        publish_env = agent_topic_publishes[0].args[0]
+        return inbound_frame_id, publish_env.internal_workflow_state.current_frame.frame_id
+
+    in_a, out_a = await drive_once("a")
+    in_b, out_b = await drive_once("b")
+
+    # Determinism: same inbound frame_id → same re-entry frame_id.
+    assert out_a == out_b, (
+        f"Re-entry frame_id must be deterministic from inbound frame_id. "
+        f"Two runs of the same inbound produced different ids: {out_a!r} vs {out_b!r}. "
+        f"Without determinism, NACK redelivery between agent-topic publish and "
+        f"tombstone emits distinct re-entry envelopes that downstream dedup can't fold."
+    )
+    # Distinctness preserved from the pre-existing invariant.
+    assert out_a != in_a, (
+        "Re-entry frame_id must differ from inbound frame_id; otherwise a "
+        "subsequent fan-out within the same invocation collides with the "
+        "tombstoned key (silent skip, agent hangs)."
+    )
+
+
+async def test_reentry_logs_parent_chain(
+    primed_state_store: tuple[object, MagicMock],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The re-entry path must emit a structured INFO log carrying both the
+    new frame_id and the parent frame_id so operators can reconstruct the
+    agent-invocation lineage via grep."""
+    import logging as _logging
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    inbound_frame_id = "parent-frame-XYZ"
+    key = ("corr-logchain", "fan-logchain")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id=key[0],
+        fan_out_id=key[1],
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(
+        key[0],
+        state=_state_with_results({"t1": "r1"}),
+        frame_id=inbound_frame_id,
+    )
+
+    with caplog.at_level(_logging.INFO, logger="calfkit.nodes.agent"):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id=key[0],
+            headers={"x-calf-fanout-id": key[1]},
+            broker=broker,
+        )
+
+    # Find the re-entry log line.
+    re_entry_records = [r for r in caplog.records if "agent re-entry" in r.getMessage()]
+    assert len(re_entry_records) == 1, (
+        f"expected exactly one 'agent re-entry' INFO log line; got {len(re_entry_records)}: {[r.getMessage() for r in caplog.records]}"
+    )
+    msg = re_entry_records[0].getMessage()
+    # Parent frame_id must be present verbatim; new frame_id is derived
+    # (SHA-256 truncated to 32 hex chars) so we only assert it's present
+    # in some form alongside the parent.
+    assert inbound_frame_id in msg, f"re-entry log must include the parent frame_id={inbound_frame_id!r}; got: {msg!r}"
+    assert "frame=" in msg and "parent_frame=" in msg, f"re-entry log must include 'frame=' and 'parent_frame=' tokens; got: {msg!r}"
+
+
+def test_kafka_subscriptions_applies_nack_on_handler_identity(agent: object) -> None:
+    """The NACK_ON_ERROR override is applied by matching on the handler
+    reference, not by checking topic-list equality. We verify this by
+    patching ``BaseNodeDef.kafka_subscriptions`` to return a subscription
+    whose ``topics`` differs from ``self.subscribe_topics`` but whose
+    ``handler`` is still ``self.handler``. The old equality-on-topics
+    check would miss that subscription and silently leave it on the
+    (unsafe) default ack policy.
+    """
+    from unittest.mock import patch
+
+    from faststream import AckPolicy
+
+    from calfkit.nodes.base import BaseNodeDef, _KafkaSubscription
+
+    # Build a base subscription that uses the same handler instance as the
+    # agent's main handler but advertises a different topic list. This
+    # simulates a future subclass that decorates topics post-hoc, or a
+    # framework feature that rewrites the topic list before the agent's
+    # ``kafka_subscriptions`` runs.
+    def fake_base_kafka_subscriptions(self: BaseNodeDef) -> list[_KafkaSubscription]:
+        return [
+            _KafkaSubscription(
+                topics=["totally.different.topic"],
+                handler=self.handler,  # identical reference; equal under bound-method ==
+                publish_topic=None,
+            )
+        ]
+
+    with patch.object(BaseNodeDef, "kafka_subscriptions", fake_base_kafka_subscriptions):
+        subs = agent.kafka_subscriptions()  # type: ignore[attr-defined]
+
+    main_subs = [s for s in subs if s.handler == agent.handler]  # type: ignore[attr-defined]
+    assert len(main_subs) == 1, f"expected exactly one main-handler subscription; got {len(main_subs)}"
+    sub = main_subs[0]
+    assert sub.topics == ["totally.different.topic"], (
+        "topic list should reflect the (faked) base subscription, proving the match criterion is NOT based on topic-list equality"
+    )
+    assert sub.ack_policy is AckPolicy.NACK_ON_ERROR, (
+        f"main-handler subscription must receive NACK_ON_ERROR via handler-identity match; got {sub.ack_policy!r} on topics={sub.topics!r}"
+    )
+
+
+async def test_aggregator_batch_view_reuses_single_deep_copy(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """A single ``_aggregator_handler`` invocation must produce AT MOST ONE
+    framework deep-copy of ``batch.base_state`` (the one shared across the
+    up-to-three override calls).
+
+    The previous implementation deep-copied inside every ``_batch_view``
+    call site — up to three times per handler invocation. The merge
+    contract (``should_complete`` and ``on_partial`` MUST NOT mutate;
+    ``merge`` MAY mutate last) makes the shared copy safe.
+
+    A user override may choose to make additional copies of its own (the
+    default ``merge`` does so defensively); those are out of scope of this
+    test. We isolate the framework's copies by replacing ``merge`` with
+    one that does no copy.
+    """
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    # User merge that does NOT copy — isolates the framework's deep-copy
+    # count from the default merge's own defensive copy.
+    async def non_copying_merge(batch: AggregatorBatch) -> AggregatedReturn:
+        return AggregatedReturn(state=batch.base_state)
+
+    agent.aggregator.merge = non_copying_merge  # type: ignore[attr-defined,method-assign]
+
+    # Seed a batch that exercises the new-tcid completion path — the
+    # worst case for copy count (on_partial + should_complete + merge,
+    # plus the post-update view).
+    key = ("corr-copies", "fan-copies")
+    seeded_state = State()
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id=key[0],
+        fan_out_id=key[1],
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=seeded_state,
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    # Patch ``State.model_copy`` to count deep copies. Only count
+    # ``deep=True`` invocations (shallow copies are cheap and used
+    # internally by Pydantic for unrelated purposes).
+    deep_copy_count = [0]
+    original_model_copy = State.model_copy
+
+    def counting_copy(self: State, **kwargs: object) -> State:
+        if kwargs.get("deep"):
+            deep_copy_count[0] += 1
+        return original_model_copy(self, **kwargs)
+
+    State.model_copy = counting_copy  # type: ignore[method-assign,assignment]
+    try:
+        envelope = _make_envelope(
+            key[0],
+            state=_state_with_results({"t1": "r1"}),
+        )
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id=key[0],
+            headers={"x-calf-fanout-id": key[1]},
+            broker=broker,
+        )
+    finally:
+        State.model_copy = original_model_copy  # type: ignore[method-assign]
+
+    assert deep_copy_count[0] <= 1, (
+        f"Expected at most one framework deep copy of base_state per handler invocation; "
+        f"got {deep_copy_count[0]}. Per-call-site _batch_view deep-copy regressed."
     )

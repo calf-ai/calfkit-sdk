@@ -35,7 +35,19 @@ STATE_TOPIC_CONFIG: dict[str, str] = {
     "cleanup.policy": "compact",
     "min.compaction.lag.ms": "60000",
     "delete.retention.ms": "60000",
-    "segment.ms": "604800000",
+    # 1 hour, down from the Kafka default of 7 days. The log compactor
+    # only operates on *closed* segments; with the default 7-day active
+    # segment, tombstones for completed batches would linger up to a
+    # week before becoming eligible for compaction, ballooning disk usage
+    # and rehydration time on a hot state topic.
+    "segment.ms": "3600000",
+    # 0.1, down from the Kafka default of 0.5. The state topic accumulates
+    # tombstones at the same rate it accumulates puts (every completed
+    # batch tombstones the key it wrote earlier), so the "dirty" ratio
+    # rises quickly. Lowering the cleanable threshold keeps the compactor
+    # eager about reclaiming that space rather than waiting for half the
+    # log to be tombstones.
+    "min.cleanable.dirty.ratio": "0.1",
 }
 """Default Kafka topic configuration for the compacted state topic.
 
@@ -43,6 +55,10 @@ STATE_TOPIC_CONFIG: dict[str, str] = {
 to match the ``_recently_completed`` TTL in the in-memory cache. This gives
 the aggregator a 60-second window to distinguish a recently-tombstoned key
 from one that has been compacted away during a rebalance.
+
+``segment.ms`` and ``min.cleanable.dirty.ratio`` are tuned tighter than the
+Kafka defaults so the compactor reclaims tombstoned-key space promptly on
+the (write-heavy, tombstone-heavy) state topic — see inline comments above.
 """
 
 
@@ -145,16 +161,26 @@ async def _resolve_partition_count(
             continue
         error_code = desc.get("error_code", 0)
         if error_code != 0:
-            logger.warning(
-                "main topic %r returned error_code=%d from describe_topics; "
-                "treating as not found and falling back to default partitions. "
-                "If the broker is reporting an auth or invalid-topic error, the "
-                "operator must fix that before aggregator co-partitioning can be "
-                "guaranteed.",
-                main_topic,
-                error_code,
+            # Only "topic doesn't exist" (UnknownTopicOrPartitionError,
+            # errno=3) is a legitimate fall-through to defaults — the
+            # user is presumably running a demo without pre-provisioned
+            # topics. All other broker errors (auth, invalid topic, etc.)
+            # have completely different remediations: an operator must
+            # fix the broker-side condition before aggregator
+            # co-partitioning can be guaranteed. Silently falling back
+            # on TOPIC_AUTHORIZATION_FAILED would silently break
+            # co-partitioning when the real cause is missing ACLs.
+            if error_code == UnknownTopicOrPartitionError.errno:
+                continue
+            error_label = _resolve_kafka_error_label(error_code)
+            raise AggregatorStateStoreError(
+                f"describe_topics for main topic {main_topic!r} returned "
+                f"broker error {error_label}; the aggregator cannot resolve "
+                f"the partition count required for co-partitioning. "
+                f"Fix the broker-side condition (typically ACLs or topic "
+                f"configuration) and restart.",
+                state_topic=main_topic,
             )
-            continue
         partitions = desc.get("partitions", [])
         if partitions:
             return len(partitions)
@@ -267,8 +293,24 @@ async def _try_describe(admin: Any, topic: str) -> dict[str, Any] | None:
     for desc in descriptions:
         if desc.get("topic") != topic:
             continue
-        if desc.get("error_code", 0) != 0:
-            continue
+        error_code = desc.get("error_code", 0)
+        if error_code != 0:
+            # Only "topic doesn't exist" should return None and trigger
+            # the create-topic path. Any other broker error (auth,
+            # invalid topic, etc.) must raise — otherwise the caller
+            # would attempt to create the topic, the create would fail
+            # with the same broker error, and operators would chase a
+            # misleading create-failure stack trace instead of the real
+            # auth/config problem.
+            if error_code == UnknownTopicOrPartitionError.errno:
+                continue
+            error_label = _resolve_kafka_error_label(error_code)
+            raise AggregatorStateStoreError(
+                f"describe_topics for topic {topic!r} returned broker error "
+                f"{error_label}; cannot determine whether the topic exists. "
+                f"Fix the broker-side condition (typically ACLs) and restart.",
+                state_topic=topic,
+            )
         return cast("dict[str, Any]", desc)
     return None
 

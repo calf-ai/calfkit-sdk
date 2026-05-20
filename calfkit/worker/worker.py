@@ -50,13 +50,21 @@ class Worker:
         # we fail loudly rather than silently defaulting to a localhost
         # placeholder.
         kafka_config = self._client.kafka_config
-        if kafka_config is None and any(isinstance(n, BaseAgentNodeDef) for n in self._nodes):
+        has_agent_node = any(isinstance(n, BaseAgentNodeDef) for n in self._nodes)
+        if kafka_config is None and has_agent_node:
             raise AggregatorStateStoreError(
                 "Worker requires Client.kafka_config to wire up the durable "
                 "fan-out aggregator. Either use Client.connect(...) (which "
                 "captures kafka_config automatically) or pass kafka_config "
                 "explicitly when constructing BaseClient."
             )
+
+        # Only check the rehydration timeout floor when at least one
+        # agent node will register a state-store rebalance listener.
+        # Workers without aggregators don't pay the rehydration cost, so
+        # the floor doesn't apply.
+        if has_agent_node and kafka_config is not None:
+            kafka_config.check_rehydration_timeout_floor()
 
         for node in self._nodes:
             if isinstance(node, BaseAgentNodeDef):

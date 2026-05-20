@@ -226,6 +226,101 @@ def test_inflight_batch_degraded_propagates_through_fanout_state() -> None:
 
     advanced = batch.with_received({"t1": "r1"}, last_updated_ms=2000)
     assert advanced.degraded is True, (
-        "with_received must preserve degraded; otherwise the next state-topic "
-        "write would silently un-degrade the batch on the first tool return."
+        "with_received must preserve degraded; otherwise the next state-topic write would silently un-degrade the batch on the first tool return."
     )
+
+
+# ---------------------------------------------------------------------------
+# FanOutState.schema_version wire-format versioning
+# ---------------------------------------------------------------------------
+
+
+def test_schema_version_default_is_one() -> None:
+    """Constructing a ``FanOutState`` without specifying ``schema_version``
+    must default to ``1`` — current wire format. The default keeps the
+    Python-side construction call sites (used by ``_InFlightBatch.to_fanout_state``)
+    unchanged while still stamping a version on every published record."""
+    state = _make_fanout_state()
+    assert state.schema_version == 1
+
+
+def test_schema_version_roundtrip() -> None:
+    """``schema_version`` must survive a JSON round-trip — the durable
+    log is the source of truth for partition rehydration, and the
+    version is what enables future readers to detect incompatible
+    record shapes."""
+    state = _make_fanout_state(schema_version=1)
+    rebuilt = FanOutState.model_validate_json(state.model_dump_json())
+    assert rebuilt.schema_version == 1
+
+
+def test_schema_version_forward_compat_higher_version_with_unknown_fields() -> None:
+    """Forward compatibility: a writer running a future build can stamp
+    ``schema_version=99`` and tack on fields this build doesn't know
+    about; the current reader must still deserialise the record by
+    dropping the unknown fields (``extra="ignore"``) and preserving the
+    higher version marker so any later consumer can re-detect the
+    wire-format generation."""
+    raw = (
+        '{"schema_version": 99, "correlation_id": "c", "fan_out_id": "f", '
+        '"expected_tool_call_ids": ["t1"], "received": {}, '
+        '"base_state": {}, "started_at_ms": 1000, "last_updated_ms": 1000, '
+        '"agent_topic": "agent.in", '
+        '"future_field_a": "some new value", "future_field_b": 42}'
+    )
+    state = FanOutState.model_validate_json(raw)
+    assert state.schema_version == 99
+    assert state.correlation_id == "c"
+    # Unknown fields are dropped (extra="ignore") — they are not exposed
+    # as attributes on the parsed instance.
+    assert not hasattr(state, "future_field_a")
+    assert not hasattr(state, "future_field_b")
+
+
+def test_schema_version_rejects_below_minimum() -> None:
+    """Backward incompatibility: a record stamped with a version below
+    ``_MIN_SUPPORTED_SCHEMA_VERSION`` must raise ``ValidationError`` at
+    deserialisation time. The rehydration callsite treats this as a
+    partition-activation failure rather than silently dropping the
+    record, so an operator gets a loud failure instead of in-flight
+    batches vanishing on rehydrate."""
+    payload = {
+        "schema_version": 0,
+        "correlation_id": "c",
+        "fan_out_id": "f",
+        "expected_tool_call_ids": ["t1"],
+        "received": {},
+        "base_state": {},
+        "started_at_ms": 1000,
+        "last_updated_ms": 1000,
+        "agent_topic": "agent.in",
+    }
+    with pytest.raises(pydantic.ValidationError) as exc_info:
+        FanOutState.model_validate(payload)
+    # The observed version must appear in the error so operators can
+    # diagnose the producer mismatch quickly.
+    assert "schema_version=0" in str(exc_info.value)
+
+
+def test_schema_version_legacy_records_default_to_one() -> None:
+    """Pre-versioning legacy records: a record written by older code
+    before ``schema_version`` existed will not carry the field. The
+    field MUST default to ``1`` (not be required) so those records
+    deserialise cleanly during rehydration — a required-field design
+    would treat every legacy record as a ValidationError and abort
+    partition activation, which would be a worse data-loss bug than
+    the one this versioning scheme was introduced to prevent."""
+    legacy_payload = {
+        # Note: no "schema_version" key — simulates a record written by
+        # a build that predates this field.
+        "correlation_id": "c",
+        "fan_out_id": "f",
+        "expected_tool_call_ids": ["t1"],
+        "received": {},
+        "base_state": {},
+        "started_at_ms": 1000,
+        "last_updated_ms": 1000,
+        "agent_topic": "agent.in",
+    }
+    state = FanOutState.model_validate(legacy_payload)
+    assert state.schema_version == 1

@@ -13,6 +13,7 @@ from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.kafka_config import KafkaConfig
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
+from calfkit.exceptions import DurabilityConfigError
 from calfkit.models import State
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
@@ -34,6 +35,80 @@ def _new_client_emitter_id(client_id: str | None = None) -> str:
     (e.g. the one used for the reply topic) instead of minting a fresh one.
     """
     return f"client.{client_id if client_id is not None else uuid_utils.uuid7().hex}"
+
+
+# Names of the typed fields on :class:`KafkaConfig` that map 1:1 to
+# aiokafka producer/consumer kwargs. ``Client.connect`` extracts these
+# from the user-supplied ``broker_kwargs`` into KafkaConfig's explicit
+# slots; anything else stays in ``client_kwargs`` as an escape hatch.
+_KAFKA_CONFIG_TYPED_FIELDS = (
+    "security_protocol",
+    "sasl_mechanism",
+    "sasl_plain_username",
+    "sasl_plain_password",
+    "ssl_context",
+    "client_id",
+)
+
+
+def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
+    """Validate (and inject defaults for) producer durability settings.
+
+    Mutates ``broker_kwargs`` in place. The fan-out aggregator's state
+    topic is written via the same FastStream producer used for inter-node
+    messages; without ``acks="all"`` + ``enable_idempotence=True`` a
+    single-broker outage between the leader's ack and follower catch-up
+    can silently drop a state-topic write, leaving the durable log out
+    of sync with the in-memory cache.
+    """
+    acks = broker_kwargs.get("acks")
+    # Kafka accepts both "all" and -1 as the "wait for all in-sync
+    # replicas" setting; both are durability-safe.
+    if acks is not None and acks != "all" and acks != -1:
+        raise DurabilityConfigError(
+            f"broker_kwargs['acks']={acks!r} is not durable enough for the "
+            "fan-out aggregator. State-topic writes must survive a single-broker "
+            "outage between leader ack and replica catch-up, which requires "
+            "acks='all' (or the synonym acks=-1). Remove the acks override or "
+            "set it to 'all'."
+        )
+    if acks is None:
+        broker_kwargs["acks"] = "all"
+
+    enable_idempotence = broker_kwargs.get("enable_idempotence")
+    if enable_idempotence is False:
+        raise DurabilityConfigError(
+            "broker_kwargs['enable_idempotence']=False is incompatible with the "
+            "fan-out aggregator's at-least-once delivery contract — producer "
+            "retries without idempotence can produce duplicate state-topic "
+            "writes that the compactor cannot reliably deduplicate. Remove the "
+            "override or set enable_idempotence=True."
+        )
+    if enable_idempotence is None:
+        broker_kwargs["enable_idempotence"] = True
+
+
+def _build_kafka_config(
+    bootstrap_servers: str | list[str],
+    broker_kwargs: dict[str, Any],
+) -> KafkaConfig:
+    """Snapshot the broker kwargs into a :class:`KafkaConfig`.
+
+    Typed fields documented on KafkaConfig are pulled out of
+    ``broker_kwargs`` into their explicit slots; anything else stays in
+    ``client_kwargs``. The input dict is not mutated — KafkaBroker still
+    receives the full unmodified kwargs.
+    """
+    residual: dict[str, Any] = dict(broker_kwargs)
+    typed_values: dict[str, Any] = {}
+    for field_name in _KAFKA_CONFIG_TYPED_FIELDS:
+        if field_name in residual:
+            typed_values[field_name] = residual.pop(field_name)
+    return KafkaConfig(
+        bootstrap_servers=bootstrap_servers,
+        client_kwargs=residual,
+        **typed_values,
+    )
 
 
 class BaseClient:
@@ -127,17 +202,20 @@ class BaseClient:
                 "Remove the 'partitioner' kwarg."
             )
 
+        # Validate / inject producer durability settings BEFORE snapshotting:
+        # the snapshot must reflect what KafkaBroker actually receives so
+        # downstream observers (KafkaConfig.to_consumer_kwargs) see the
+        # same view as the broker. Mutates broker_kwargs in place.
+        _enforce_durability_config(broker_kwargs)
+
         # Snapshot kwargs BEFORE constructing the broker so the aggregator's
         # transient AIOKafkaConsumer can reuse the same security/SASL/SSL
-        # config. dict(...) copies; the splat into KafkaBroker(...) below
-        # is unaffected. Narrow Iterable[str] to list[str] so KafkaConfig's
-        # str | list[str] field type is honoured.
+        # config. ``_build_kafka_config`` copies; the splat into
+        # KafkaBroker(...) below is unaffected. Narrow Iterable[str] to
+        # list[str] so KafkaConfig's str | list[str] field type is honoured.
         bootstrap_for_config: str | list[str]
         bootstrap_for_config = server_urls if isinstance(server_urls, str) else list(server_urls)
-        kafka_config = KafkaConfig(
-            bootstrap_servers=bootstrap_for_config,
-            client_kwargs=dict(broker_kwargs),
-        )
+        kafka_config = _build_kafka_config(bootstrap_for_config, broker_kwargs)
 
         broker_connection = KafkaBroker(
             server_urls,

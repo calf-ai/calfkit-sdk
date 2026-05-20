@@ -17,16 +17,21 @@ client used by :meth:`merge`) is per-process; cross-process coordination
 happens via the ``{node_id}.fanout-state`` compacted topic, not via
 attributes on this object.
 
-.. warning::
+.. note::
 
    The fanout-returns subscription is configured with
    ``AckPolicy.NACK_ON_ERROR`` so handler raises rewind the offset for
-   redelivery. The default :data:`MergeErrorPolicy.ABORT` raises
-   :class:`AggregatorMergeError`, which under that ack policy triggers
-   indefinite redelivery for non-transient failures. The aggregator does
-   not yet ship a DLQ on ``{node_id}.fanout-returns``; deployments running
-   ABORT in production should provision their own DLQ or accept the
-   redelivery-loop risk (tracked in ``ROADMAP.md``).
+   redelivery. The default :data:`MergeErrorPolicy.FALLBACK_TO_DEFAULT`
+   logs the user-merge failure and completes the batch via the framework's
+   default merge so non-transient bugs don't loop indefinitely.
+
+   Users who opt into :data:`MergeErrorPolicy.ABORT` should be aware that
+   ABORT raises :class:`AggregatorMergeError`, which under
+   ``AckPolicy.NACK_ON_ERROR`` triggers indefinite redelivery for
+   non-transient failures. The aggregator does not yet ship a DLQ on
+   ``{node_id}.fanout-returns``; deployments running ABORT in production
+   should provision their own DLQ or accept the redelivery-loop risk
+   (tracked in ``ROADMAP.md``).
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from calfkit.nodes.aggregator.state import (
 if TYPE_CHECKING:
     from faststream.kafka import KafkaBroker
 
+    from calfkit.models.state import State
     from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
 
 logger = logging.getLogger(__name__)
@@ -59,25 +65,26 @@ class MergeErrorPolicy(str, enum.Enum):
     topic, so the member names can evolve pre-1.0 without a wire-format
     migration.
 
-    .. warning::
-
-       :data:`ABORT` (the default) raises :class:`AggregatorMergeError`
-       which, under the fanout-returns subscription's
-       ``AckPolicy.NACK_ON_ERROR``, triggers Kafka redelivery. If the merge
-       failure is non-transient (a bug in the user's :meth:`merge`), the
-       message redelivers indefinitely until an operator intervenes. The
-       aggregator does not yet ship a DLQ on ``{node_id}.fanout-returns``
-       (see ``ROADMAP.md``); deployments running ABORT in production should
-       provision their own DLQ or accept the redelivery-loop risk.
+    The default is :data:`FALLBACK_TO_DEFAULT`: a failed user merge logs
+    and completes via the framework default so a buggy custom merge can't
+    silently stall the partition with an unbounded NACK redelivery loop.
+    Users who prefer fail-loud semantics (and have a DLQ wired up) can opt
+    into :data:`ABORT` explicitly.
     """
 
     ABORT = "abort"
-    """Raise :class:`AggregatorMergeError` and fail the batch loudly. Default.
+    """Raise :class:`AggregatorMergeError` and fail the batch loudly.
 
-    Under ``AckPolicy.NACK_ON_ERROR`` (the fanout-returns subscription
-    default) the raise causes Kafka to redeliver the inbound. A
-    non-transient failure therefore loops indefinitely without a DLQ — see
-    the class-level warning above and ``ROADMAP.md`` for the DLQ design.
+    .. warning::
+
+       Under ``AckPolicy.NACK_ON_ERROR`` (the fanout-returns subscription
+       default) the raise causes Kafka to redeliver the inbound. If the
+       merge failure is non-transient (a bug in the user's :meth:`merge`),
+       the message redelivers indefinitely until an operator intervenes.
+       The aggregator does not yet ship a DLQ on
+       ``{node_id}.fanout-returns`` (see ``ROADMAP.md``); deployments
+       opting into ABORT in production should provision their own DLQ or
+       accept the redelivery-loop risk.
     """
 
     RETRY = "retry"
@@ -133,15 +140,20 @@ class FanOutAggregator:
     def __init__(
         self,
         *,
-        merge_error_policy: MergeErrorPolicy = MergeErrorPolicy.ABORT,
+        merge_error_policy: MergeErrorPolicy = MergeErrorPolicy.FALLBACK_TO_DEFAULT,
     ) -> None:
         """Initialise the aggregator.
 
         Args:
             merge_error_policy: How to handle exceptions raised by
-                :meth:`merge`. Default :data:`MergeErrorPolicy.ABORT` raises
-                :class:`AggregatorMergeError`; see :class:`MergeErrorPolicy`
-                for the alternatives.
+                :meth:`merge`. Default :data:`MergeErrorPolicy.FALLBACK_TO_DEFAULT`
+                logs the user-merge failure and completes the batch via the
+                framework's default merge (stamping
+                :data:`HDR_DEGRADED_MERGE` for observability) so a buggy
+                custom merge can't stall the partition in an unbounded NACK
+                redelivery loop. See :class:`MergeErrorPolicy` for the
+                fail-loud :data:`ABORT` and one-shot :data:`RETRY`
+                alternatives.
         """
         self.merge_error_policy = merge_error_policy
         # Populated by :meth:`setup` at worker startup. Framework-internal
@@ -226,12 +238,19 @@ class FanOutAggregator:
             main_topic=main_topic,
         )
 
+        # ``to_consumer_kwargs`` merges the typed fields (security_protocol,
+        # sasl_*, client_id, ...) with the ``client_kwargs`` escape hatch
+        # so the rehydration consumer inherits the broker's full auth
+        # config. Pop bootstrap_servers because the state store accepts
+        # it as a separate constructor parameter.
+        consumer_kwargs = kafka_config.to_consumer_kwargs()
+        consumer_bootstrap = consumer_kwargs.pop("bootstrap_servers")
         state_store = _KafkaStateStore(
             broker=broker,
             state_topic=state_topic,
-            bootstrap_servers=kafka_config.bootstrap_servers,
+            bootstrap_servers=consumer_bootstrap,
             partition_count=partition_count,
-            client_kwargs=kafka_config.client_kwargs,
+            client_kwargs=consumer_kwargs,
         )
         rebalance_listener = _StateStoreRebalanceListener(
             state_store=state_store,
@@ -258,7 +277,12 @@ class FanOutAggregator:
     # Helpers used by the agent handler — internal API
     # ------------------------------------------------------------------
 
-    def _batch_view(self, batch: _InFlightBatch) -> AggregatorBatch:
+    def _batch_view(
+        self,
+        batch: _InFlightBatch,
+        *,
+        base_state_copy: State | None = None,
+    ) -> AggregatorBatch:
         """Build the immutable :class:`AggregatorBatch` view passed to overrides.
 
         ``base_state`` is deep-copied so a user :meth:`merge` that mutates
@@ -266,13 +290,24 @@ class FanOutAggregator:
         the framework's cached :class:`_InFlightBatch.base_state`. The view's
         ``received`` mapping is wrapped in ``MappingProxyType`` for the same
         defensive reason.
+
+        ``base_state_copy`` lets the caller pass a pre-computed deep copy
+        of ``batch.base_state`` so a single handler invocation can amortise
+        one deep copy across the up-to-three override calls (``on_partial``,
+        ``should_complete``, ``merge``). The contract documented on
+        :meth:`merge` — observers don't mutate, ``merge`` may mutate last —
+        is what makes a shared copy safe. When ``None`` the legacy
+        per-call deep-copy behaviour is preserved (used by tests that
+        invoke ``_batch_view`` directly).
         """
+        if base_state_copy is None:
+            base_state_copy = batch.base_state.model_copy(deep=True)
         return AggregatorBatch(
             correlation_id=batch.correlation_id,
             fan_out_id=batch.fan_out_id,
             expected_tool_call_ids=batch.expected_tool_call_ids,
             received=MappingProxyType(dict(batch.received)),
-            base_state=batch.base_state.model_copy(deep=True),
+            base_state=base_state_copy,
             started_at_ms=batch.started_at_ms,
             last_updated_ms=batch.last_updated_ms,
         )
@@ -290,6 +325,20 @@ class FanOutAggregator:
         returned to the agent.
 
         Called once per batch, when :meth:`should_complete` returns ``True``.
+
+        Mutation contract: ``merge`` MAY mutate ``batch.base_state``;
+        :meth:`should_complete` and :meth:`on_partial` MUST NOT. The
+        framework relies on this ordering to amortise a single deep copy
+        of ``base_state`` across all three override calls per handler
+        invocation (observers run first, ``merge`` runs last). Mutating
+        ``base_state`` from an observer would silently corrupt the view
+        that ``merge`` later sees.
+
+        The default ``merge`` does its own ``model_copy(deep=True)``
+        defensively so the FALLBACK_TO_DEFAULT recovery path (which reuses
+        the view after a user override raised) still sees a clean state
+        even if the failed user override partially mutated ``base_state``
+        before raising.
 
         Args:
             batch: Immutable view of the batch at completion time.

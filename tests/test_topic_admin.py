@@ -117,6 +117,18 @@ async def test_uses_default_partitions_when_main_missing() -> None:
     assert admin.create_topics.await_count == 2
 
 
+def test_state_topic_config_includes_segment_ms_and_dirty_ratio() -> None:
+    """The state topic's default config must include ``segment.ms=3600000``
+    (1 hour) and ``min.cleanable.dirty.ratio=0.1``. The Kafka compactor
+    only operates on closed segments, so leaving segment.ms at the default
+    7 days would let tombstones for completed batches linger on disk for
+    up to a week before becoming eligible for compaction. Lowering the
+    dirty-ratio threshold keeps the compactor eager about reclaiming
+    space on this write-heavy, tombstone-heavy state topic."""
+    assert STATE_TOPIC_CONFIG["segment.ms"] == "3600000"
+    assert STATE_TOPIC_CONFIG["min.cleanable.dirty.ratio"] == "0.1"
+
+
 async def test_state_topic_creation_uses_compact_config() -> None:
     """The state topic must be created with cleanup.policy=compact."""
     admin = _make_admin({"agent.in": 6})
@@ -270,12 +282,13 @@ async def test_create_topic_swallows_topic_already_exists() -> None:
     assert admin.create_topics.await_count == 2
 
 
-async def test_resolve_partition_count_skips_topics_with_nonzero_error_code(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Topics reported with a non-zero error_code (e.g., TOPIC_AUTHORIZATION_FAILED)
-    must not be treated as valid partition-count sources. The function must fall
-    back to default_partitions and emit a clear WARNING.
+async def test_resolve_partition_count_raises_on_authorization_failure() -> None:
+    """When describe_topics returns ``error_code=29`` (TOPIC_AUTHORIZATION_FAILED)
+    for the main topic, ``_resolve_partition_count`` must raise rather than
+    silently fall back to default partitions. Falling back would silently
+    break co-partitioning when the real cause is missing broker ACLs — the
+    aggregator's state and returns topics would be created with the wrong
+    partition count and the agent would be undeliverable.
     """
     admin = AsyncMock()
 
@@ -288,22 +301,51 @@ async def test_resolve_partition_count_skips_topics_with_nonzero_error_code(
     admin.create_topics = AsyncMock()
     broker = _broker_with_admin(admin)
 
-    with caplog.at_level("WARNING", logger="calfkit.nodes.aggregator._topic_admin"):
-        _state, _returns, partitions = await ensure_aggregator_topics(
+    with pytest.raises(AggregatorStateStoreError) as exc_info:
+        await ensure_aggregator_topics(
             broker,
             node_id="agent",
             main_topic="agent.in",
             default_partitions=4,
         )
 
-    assert partitions == 4
-    # A WARNING that explicitly cites the error_code must be emitted so an
-    # operator can correlate the silent fallback with the auth failure.
-    assert any(
-        "agent.in" in record.message and "error_code" in record.message and "29" in record.message
-        for record in caplog.records
-        if record.levelname == "WARNING"
+    message = str(exc_info.value)
+    assert "TOPIC_AUTHORIZATION_FAILED" in message
+    assert "agent.in" in message
+    # No topics should have been created — startup must fail fast.
+    assert admin.create_topics.await_count == 0
+
+
+async def test_resolve_partition_count_falls_back_only_on_unknown_topic() -> None:
+    """When the broker reports ``error_code=3`` (UNKNOWN_TOPIC_OR_PARTITION)
+    on the per-topic description, the function MUST fall back to default
+    partitions — that's the legitimate "topic not provisioned yet" path
+    where defaulting is the right behaviour. This is the regression-safe
+    counterpart to the auth-failure test above.
+    """
+    from aiokafka.errors import UnknownTopicOrPartitionError  # type: ignore[import-untyped]
+
+    admin = AsyncMock()
+
+    async def describe_topics(_topic_names: list[str]) -> list[dict[str, Any]]:
+        meta = _topic_metadata("agent.in", 0)
+        meta["error_code"] = UnknownTopicOrPartitionError.errno
+        return [meta]
+
+    admin.describe_topics = AsyncMock(side_effect=describe_topics)
+    admin.create_topics = AsyncMock()
+    broker = _broker_with_admin(admin)
+
+    _state, _returns, partitions = await ensure_aggregator_topics(
+        broker,
+        node_id="agent",
+        main_topic="agent.in",
+        default_partitions=4,
     )
+
+    assert partitions == 4
+    # Both aggregator topics are created at the default partition count.
+    assert admin.create_topics.await_count == 2
 
 
 async def test_resolve_partition_count_accepts_topic_with_error_code_zero() -> None:
@@ -329,11 +371,13 @@ async def test_resolve_partition_count_accepts_topic_with_error_code_zero() -> N
     assert partitions == 10
 
 
-async def test_try_describe_skips_topics_with_nonzero_error_code() -> None:
-    """`_try_describe` (used during the existence check) must treat a non-zero
-    error_code on a topic as "not visible / not usable" and behave like a
-    not-found result so the existence check falls through to create.
-    """
+async def test_try_describe_raises_on_authorization_failure() -> None:
+    """``_try_describe`` (used during the existence check) must raise when
+    the broker returns a non-not-found error code such as
+    TOPIC_AUTHORIZATION_FAILED. Falling through to the create-topic path
+    would just trigger a misleading create-failure stack trace — operators
+    should see the actual auth error instead, with the resolved label so
+    they can grep Kafka docs for the remediation."""
     admin = AsyncMock()
 
     call_count = 0
@@ -342,11 +386,46 @@ async def test_try_describe_skips_topics_with_nonzero_error_code() -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # main topic resolution
+            # main topic resolution succeeds.
             return [_topic_metadata(topic_names[0], 6)]
-        # _ensure_topic existence check — reply with error_code != 0
+        # _ensure_topic existence check — broker returns an auth failure.
         meta = _topic_metadata(topic_names[0], 6)
-        meta["error_code"] = 17  # INVALID_TOPIC_EXCEPTION
+        meta["error_code"] = 29  # TOPIC_AUTHORIZATION_FAILED
+        return [meta]
+
+    admin.describe_topics = AsyncMock(side_effect=describe_topics)
+    admin.create_topics = AsyncMock()
+    broker = _broker_with_admin(admin)
+
+    with pytest.raises(AggregatorStateStoreError) as exc_info:
+        await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
+
+    message = str(exc_info.value)
+    assert "TOPIC_AUTHORIZATION_FAILED" in message
+    # No create_topics call — the existence check must surface the auth error
+    # before any provisioning is attempted.
+    assert admin.create_topics.await_count == 0
+
+
+async def test_try_describe_falls_back_only_on_unknown_topic() -> None:
+    """``_try_describe`` must continue treating ``UnknownTopicOrPartitionError``
+    (errno=3) as "topic doesn't exist yet" so the create-topic path runs as
+    designed — the auth-failure raise must not regress the legitimate
+    not-yet-provisioned path."""
+    from aiokafka.errors import UnknownTopicOrPartitionError  # type: ignore[import-untyped]
+
+    admin = AsyncMock()
+
+    call_count = 0
+
+    async def describe_topics(topic_names: list[str]) -> list[dict[str, Any]]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # main topic resolution succeeds.
+            return [_topic_metadata(topic_names[0], 6)]
+        meta = _topic_metadata(topic_names[0], 6)
+        meta["error_code"] = UnknownTopicOrPartitionError.errno
         return [meta]
 
     admin.describe_topics = AsyncMock(side_effect=describe_topics)
@@ -355,8 +434,8 @@ async def test_try_describe_skips_topics_with_nonzero_error_code() -> None:
 
     await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
 
-    # Both state and returns topics must be created because their describe
-    # results were filtered out by the error_code check.
+    # Both topics must be created when the existence-check describe reports
+    # UNKNOWN_TOPIC_OR_PARTITION.
     assert admin.create_topics.await_count == 2
 
 

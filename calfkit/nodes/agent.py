@@ -1,11 +1,11 @@
 import dataclasses
+import hashlib
 import logging
 import time
 import warnings
 from collections.abc import Callable
 from typing import Annotated, Any, ClassVar, Generic, cast
 
-import uuid_utils
 from faststream import AckPolicy, Context, Response
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
@@ -129,9 +129,23 @@ class BaseAgentNodeDef(
         partition rebalances.
         """
         base_subscriptions = list(super().kafka_subscriptions())
+        # Match on the handler reference rather than equality on
+        # ``topics``: the real invariant is "the agent's main inbound
+        # handler must rewind on raise so a state-store write or per-Call
+        # publish failure doesn't commit-then-lose the inbound." A subclass
+        # that overrides ``kafka_subscriptions()`` to mutate the topic list
+        # but keeps ``self.handler`` would silently lose NACK_ON_ERROR
+        # under the previous ``sub.topics == list(self.subscribe_topics)``
+        # check. The handler reference is the durable identity.
+        #
+        # Bound methods in CPython are recreated on every attribute access
+        # (``self.handler is self.handler`` is False), so we must compare
+        # via ``==`` — which on bound methods is defined as
+        # ``__self__ is __self__ and __func__ is __func__``. That is
+        # semantic identity (same instance, same function), not value
+        # equality in any deeper sense.
         subscriptions = [
-            dataclasses.replace(sub, ack_policy=AckPolicy.NACK_ON_ERROR) if sub.topics == list(self.subscribe_topics) else sub
-            for sub in base_subscriptions
+            dataclasses.replace(sub, ack_policy=AckPolicy.NACK_ON_ERROR) if sub.handler == self.handler else sub for sub in base_subscriptions
         ]
         # The rebalance listener is set on the aggregator's runtime by
         # setup(); it's None in test paths that haven't run setup yet
@@ -500,12 +514,21 @@ class BaseAgentNodeDef(
 
         fan_out_id = decode_header_str(headers.get(HDR_FANOUT_ID))
         if fan_out_id is None:
-            logger.warning(
-                "[%s] fanout-returns msg without %s header; dropping",
-                correlation_id[:8],
-                HDR_FANOUT_ID,
+            # A fanout-returns message without HDR_FANOUT_ID can't be tied
+            # to any in-flight batch. The previous WARN-and-ack swallowed
+            # the protocol violation; under NACK_ON_ERROR a raise rewinds
+            # the offset so the operator sees the corruption (a stuck
+            # partition) instead of silent data loss. Include the inbound
+            # frame_id in the context so an operator can correlate against
+            # the producer's logs.
+            inbound_frame_id = envelope.internal_workflow_state.current_frame.frame_id
+            raise AggregatorStateStoreError(
+                f"fanout-returns message missing {HDR_FANOUT_ID} header "
+                f"(correlation_id={correlation_id}, inbound_frame_id={inbound_frame_id}); "
+                f"refusing to silently drop — the producer or upstream forwarder is "
+                f"violating the fan-out protocol",
+                state_topic=self.aggregator.runtime.state_topic,
             )
-            return Response(envelope, headers=self._emitter_headers())
 
         # Late returns / orphan returns / duplicate returns all drop silently;
         # only new tool_call_ids advance the batch. The cache write is
@@ -525,15 +548,52 @@ class BaseAgentNodeDef(
 
         batch = state_store.get(key)
         if batch is None:
-            logger.warning(
-                "[%s] orphan return key=%s (no active batch in cache); dropping",
-                correlation_id[:8],
-                key,
+            # An empty cache slot for a fanout-returns message has two
+            # legitimate causes:
+            #   (a) partition rebalance race — this worker received a
+            #       message for a partition it doesn't yet own (or has
+            #       just lost). The new owner has the durable state;
+            #       acking here is correct, otherwise we'd loop on a
+            #       message we can't act on.
+            #   (b) partition owned but cache empty — the state record
+            #       genuinely doesn't exist (lost write, manual deletion,
+            #       protocol bug). Silently acking here was the previous
+            #       behaviour and meant a real durability violation
+            #       disappeared into a WARN log. Raise instead so
+            #       NACK_ON_ERROR redelivers and the operator sees a
+            #       stuck partition rather than a vanished batch.
+            owned = state_store.owned_partitions
+            if owned and partition not in owned:
+                logger.info(
+                    "[%s] orphan return key=%s on partition=%d not in owned_partitions=%s; rebalance race, dropping",
+                    correlation_id[:8],
+                    key,
+                    partition,
+                    sorted(owned),
+                )
+                return Response(envelope, headers=self._emitter_headers())
+            raise AggregatorStateStoreError(
+                f"orphan return: no in-flight batch for key={key} on owned "
+                f"partition={partition} (correlation_id={correlation_id}, "
+                f"fan_out_id={fan_out_id}). The state record is missing; the durable "
+                f"log may have been truncated, the producer may not have written it, "
+                f"or partition co-partitioning is broken.",
+                state_topic=self.aggregator.runtime.state_topic,
             )
-            return Response(envelope, headers=self._emitter_headers())
 
         incoming_results = envelope.context.state.tool_results
         new_ids = {tcid for tcid in incoming_results if tcid in batch.expected_tool_call_ids and tcid not in batch.received}
+
+        # One deep copy of base_state amortised across every override call
+        # in this handler invocation (up to two of {on_partial,
+        # should_complete} plus merge). The merge contract documented on
+        # ``FanOutAggregator.merge`` states observers don't mutate and
+        # merge mutates last, which is what makes sharing the copy safe.
+        # Without this, a worst-case handler invocation deep-copied the
+        # full agent State three separate times (one per ``_batch_view``
+        # call site) — measurable overhead for any State carrying real
+        # message_history.
+        shared_base_state = batch.base_state.model_copy(deep=True)
 
         if new_ids:
             updated_received: dict[str, Any] = {
@@ -543,7 +603,11 @@ class BaseAgentNodeDef(
             updated_batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
             await state_store.put(key, updated_batch, partition=partition)
             batch = updated_batch
-            view = self.aggregator._batch_view(batch)
+            # The shared copy was taken from the pre-update batch's
+            # base_state, but ``with_received`` carries base_state through
+            # by reference so the copy is still a faithful snapshot of the
+            # post-update batch's base_state.
+            view = self.aggregator._batch_view(batch, base_state_copy=shared_base_state)
             await self.aggregator.on_partial(view, frozenset(new_ids))
             is_complete = await self.aggregator.should_complete(view)
         else:
@@ -555,7 +619,7 @@ class BaseAgentNodeDef(
             # Fall through to re-attempt the completion path so the
             # aggregated return reaches the agent at-least-once. If the
             # batch isn't complete yet, drop as a normal duplicate.
-            view = self.aggregator._batch_view(batch)
+            view = self.aggregator._batch_view(batch, base_state_copy=shared_base_state)
             is_complete = await self.aggregator.should_complete(view)
             if not is_complete:
                 logger.debug(
@@ -592,17 +656,48 @@ class BaseAgentNodeDef(
 
             # The agent's frame is on top of the call stack (tool frames
             # were unwound when each tool returned). Re-stamp its identity
-            # with a fresh frame_id so the re-entering agent's
-            # ``current_frame.frame_id`` is distinct from the one that
-            # drove this batch's ``fan_out_id``. Without this, a
-            # subsequent parallel fan-out within the same invocation
-            # derives a colliding ``fan_out_id`` and hits
-            # ``was_recently_completed`` on the just-tombstoned key
-            # (silent skip, agent hangs).
+            # with a derived frame_id that satisfies two distinct
+            # invariants:
+            #
+            # (a) **Distinctness from the previous frame.** A subsequent
+            #     parallel fan-out within the same invocation derives its
+            #     ``fan_out_id`` from the inbound's frame_id; if we reused
+            #     the previous frame_id the new dispatch would collide
+            #     with the just-tombstoned key, hit
+            #     ``was_recently_completed`` and be silently skipped
+            #     (agent hangs forever).
+            #
+            # (b) **Determinism across handler retries.** NACK_ON_ERROR
+            #     redelivery means the same merged batch may re-enter the
+            #     completion publish path multiple times (e.g., a
+            #     transient broker failure between the agent-topic
+            #     publish and the tombstone). Each redelivery must produce
+            #     the SAME re-entry frame_id so downstream consumers
+            #     dedup correctly — a fresh ``uuid7()`` would emit a
+            #     distinct re-entry envelope on every retry and any
+            #     downstream stateful sink would treat them as distinct
+            #     work items.
+            #
+            # SHA-256 of ``"re-entry:" + previous_frame_id`` satisfies
+            # both: a hash differs structurally from the input (no
+            # collision in case (a)) and is pure-functional on the
+            # input (case (b)). The "re-entry:" prefix prevents accidental
+            # collision against any other frame_id derivation that might
+            # hash a frame_id directly.
             re_entry_state = envelope.internal_workflow_state.model_copy(deep=True)
             previous_frame = re_entry_state.unwind_frame()
-            new_frame = dataclasses.replace(previous_frame, frame_id=uuid_utils.uuid7().hex)
+            new_frame_id = hashlib.sha256(f"re-entry:{previous_frame.frame_id}".encode()).hexdigest()[:32]
+            new_frame = dataclasses.replace(previous_frame, frame_id=new_frame_id)
             re_entry_state.call_stack.push(new_frame)
+            # Structured log for chain reconstruction: operators can grep
+            # by parent_frame to trace the full agent-invocation lineage
+            # across re-entries.
+            logger.info(
+                "[%s] agent re-entry frame=%s parent_frame=%s",
+                correlation_id[:8],
+                new_frame_id,
+                previous_frame.frame_id,
+            )
 
             publish_envelope = Envelope(
                 context=SessionRunContext(state=merged.state, deps=envelope.context.deps),

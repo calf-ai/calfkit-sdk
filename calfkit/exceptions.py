@@ -13,3 +13,21 @@ class CalfkitError(Exception):
 
 class DeserializationError(CalfkitError):
     """Raised when client-side output deserialization fails."""
+
+
+class DurabilityConfigError(CalfkitError):
+    """Raised when the Kafka producer configuration would compromise the
+    durability invariants the fan-out aggregator relies on.
+
+    The aggregator writes its state to a compacted Kafka topic via the
+    same FastStream producer that publishes inter-node messages. If the
+    producer is configured with ``acks!="all"`` or
+    ``enable_idempotence=False`` a single-broker outage between the
+    leader's ack and follower catch-up can silently drop a state-topic
+    write — leaving the aggregator's in-memory cache out of sync with
+    the durable log and surfacing as inconsistent recovery on the next
+    rebalance.
+
+    :meth:`calfkit.client.base.BaseClient.connect` raises this when the
+    user-supplied ``broker_kwargs`` would weaken the contract.
+    """

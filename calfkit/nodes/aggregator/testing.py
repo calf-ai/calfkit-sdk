@@ -433,16 +433,26 @@ class InMemoryAggregator(FanOutAggregator):
                 return AggregatedReturn(state=default.state, degraded=True)
             raise
 
-    def _batch_view(self, batch: _InFlightBatch) -> AggregatorBatch:
+    def _batch_view(
+        self,
+        batch: _InFlightBatch,
+        *,
+        base_state_copy: State | None = None,
+    ) -> AggregatorBatch:
         # Deep-copy ``base_state`` (matches production ``FanOutAggregator.
         # _batch_view``): a user ``merge`` that mutates ``batch.base_state``
         # in-place must not be able to corrupt the cached _InFlightBatch.
+        # ``base_state_copy`` mirrors the production signature so a caller
+        # that pre-computes one copy per handler invocation can share it
+        # across the three override calls.
+        if base_state_copy is None:
+            base_state_copy = batch.base_state.model_copy(deep=True)
         return AggregatorBatch(
             correlation_id=batch.correlation_id,
             fan_out_id=batch.fan_out_id,
             expected_tool_call_ids=batch.expected_tool_call_ids,
             received=MappingProxyType(dict(batch.received)),
-            base_state=batch.base_state.model_copy(deep=True),
+            base_state=base_state_copy,
             started_at_ms=batch.started_at_ms,
             last_updated_ms=batch.last_updated_ms,
         )

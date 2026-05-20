@@ -364,6 +364,68 @@ async def test_run_forwards_extra_run_args_to_faststream() -> None:
     faststream_run_mock.assert_awaited_once_with(log_level="INFO", another="arg")
 
 
+async def test_worker_warns_on_low_rehydration_timeout(caplog: object) -> None:
+    """A worker that owns aggregator state-store partitions must finish
+    rehydration before the broker considers it dead, otherwise it
+    triggers a rebalance storm. Worker startup must surface a WARN when
+    the configured rebalance_timeout_ms is below the recommended floor."""
+    import logging
+
+    from calfkit._vendor.pydantic_ai.models.function import FunctionModel
+    from calfkit.nodes.agent import BaseAgentNodeDef
+
+    kafka_config = KafkaConfig(
+        bootstrap_servers="broker:9092",
+        client_kwargs={"rebalance_timeout_ms": 30_000},
+    )
+    client = _client_with_kafka_config(kafka_config=kafka_config)
+
+    agent = BaseAgentNodeDef(
+        node_id="planner",
+        subscribe_topics="planner.input",
+        model_client=FunctionModel(lambda messages, info: None),  # type: ignore[arg-type]
+    )
+    agent.aggregator.setup = AsyncMock()  # type: ignore[method-assign]
+
+    worker = Worker(client, nodes=[agent])
+    with caplog.at_level(logging.WARNING, logger="calfkit.client.kafka_config"):  # type: ignore[attr-defined]
+        await worker._prepare_aggregators()
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]  # type: ignore[attr-defined]
+    assert warnings, "expected a WARN when rebalance_timeout_ms is below floor with an aggregator wired"
+    assert any("rebalance_timeout_ms" in r.getMessage() for r in warnings)
+
+
+async def test_worker_no_warn_when_no_aggregator(caplog: object) -> None:
+    """Non-aggregator workers don't pay the rehydration cost, so the
+    floor doesn't apply — warning them would be noise that drowns out
+    actionable warnings on aggregator-wired workers."""
+    import logging
+
+    from calfkit.models import NodeResult, ReturnCall, State
+    from calfkit.models.session_context import SessionRunContext
+    from calfkit.nodes import BaseNodeDef
+
+    class _StubNode(BaseNodeDef):
+        async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
+            return ReturnCall(state=ctx.state)
+
+    kafka_config = KafkaConfig(
+        bootstrap_servers="broker:9092",
+        client_kwargs={"rebalance_timeout_ms": 30_000},
+    )
+    client = _client_with_kafka_config(kafka_config=kafka_config)
+    worker = Worker(client, nodes=[_StubNode(node_id="n", subscribe_topics=["t"])])
+
+    with caplog.at_level(logging.WARNING, logger="calfkit.client.kafka_config"):  # type: ignore[attr-defined]
+        await worker._prepare_aggregators()
+
+    # No aggregator => no warning, even with a too-low rebalance_timeout_ms.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]  # type: ignore[attr-defined]
+    rehydration_warnings = [r for r in warnings if "rebalance_timeout_ms" in r.getMessage()]
+    assert rehydration_warnings == []
+
+
 def test_add_nodes_extends_node_list() -> None:
     from calfkit.models import NodeResult, ReturnCall, State
     from calfkit.models.session_context import SessionRunContext

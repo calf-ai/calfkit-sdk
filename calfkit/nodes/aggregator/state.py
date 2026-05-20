@@ -22,9 +22,16 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from calfkit.models.state import State
+
+_MIN_SUPPORTED_SCHEMA_VERSION = 1
+"""The lowest :attr:`FanOutState.schema_version` this build will deserialise.
+
+Framework-internal (leading underscore) — not a tuning knob for end users.
+See :class:`FanOutState` docstring for the rollout protocol when bumping
+this value."""
 
 
 class FanOutState(BaseModel):
@@ -43,9 +50,57 @@ class FanOutState(BaseModel):
     Frozen so a parsed wire record cannot drift from what was published —
     the aggregator's invariant is "publish then update cache" and any
     in-place tweak to a deserialised state would violate that.
+
+    Wire-format versioning
+    ----------------------
+    :attr:`schema_version` (default ``1``) is the explicit version marker
+    for this record's wire format. Two compatibility rules apply:
+
+    * **Forward compatibility (higher writer / lower reader).** Receivers
+      tolerate records with a ``schema_version`` greater than they know
+      about, plus any unknown extra fields, via ``extra="ignore"``. A
+      newer writer that adds optional fields can publish to a topic read
+      by older deployments without breaking deserialisation.
+    * **Backward compatibility (lower writer / higher reader).** Receivers
+      MUST refuse to deserialise records with
+      ``schema_version < _MIN_SUPPORTED_SCHEMA_VERSION``. The
+      ``@model_validator`` below enforces this — the resulting
+      ``ValidationError`` surfaces at the rehydration call site (state
+      store ``_apply_record``), aborting partition activation rather than
+      silently corrupting in-flight batches.
+
+    Rollout protocol for adding a new REQUIRED field
+    ------------------------------------------------
+    Adding a required field is a true wire-format break. Stage it across
+    two releases so old readers stay compatible during the overlap:
+
+    1. **Release N (writer bump only).** Add the new field with a default
+       so old records still deserialise. Bump the writer to publish the
+       new field. Leave ``_MIN_SUPPORTED_SCHEMA_VERSION`` at the OLD
+       value so deployments still running the previous build can read
+       records produced by the new writer. Bump
+       :attr:`schema_version`'s default to the new value (e.g. ``2``).
+    2. **Release N+1 (reader cutover).** Once all writers in the fleet
+       are on release N or later, bump
+       ``_MIN_SUPPORTED_SCHEMA_VERSION`` to the new value. From here on,
+       readers refuse pre-N records — safe because no writer is still
+       producing them.
+
+    A no-op schema bump (e.g. renaming a field with backward-compatible
+    aliasing) does not need this dance; just bump the default version.
     """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
+
+    schema_version: int = 1
+    """Wire-format version for this record. Defaults to ``1``.
+
+    Defaulted (not required) so legacy records written before this field
+    existed deserialise cleanly during rehydration — Pydantic would treat
+    a missing required field as a ``ValidationError`` and abort partition
+    activation, which would be a worse outcome than tolerating an
+    implicit ``schema_version=1``. See the class docstring for the
+    forward/backward compatibility contract and rollout protocol."""
 
     correlation_id: str
     """The logical run's correlation_id. Same as the inbound message's correlation_id."""
@@ -102,6 +157,25 @@ class FanOutState(BaseModel):
 
     tracestate: str | None = None
     """W3C OTel ``tracestate`` header captured at dispatch time."""
+
+    @model_validator(mode="after")
+    def _enforce_min_schema_version(self) -> FanOutState:
+        """Refuse to deserialise records older than this build supports.
+
+        Raises ``ValueError`` (wrapped by Pydantic into ``ValidationError``)
+        when ``schema_version < _MIN_SUPPORTED_SCHEMA_VERSION``. The
+        rehydration path treats this as a fatal partition-activation
+        failure rather than silently dropping the record — see the
+        ``_KafkaStateStore._apply_record`` callsite for handling.
+        """
+        if self.schema_version < _MIN_SUPPORTED_SCHEMA_VERSION:
+            raise ValueError(
+                f"FanOutState schema_version={self.schema_version} is below the "
+                f"minimum supported version {_MIN_SUPPORTED_SCHEMA_VERSION}; "
+                "this record was written by a build older than the current "
+                "reader's compatibility window."
+            )
+        return self
 
 
 @dataclass(frozen=True)

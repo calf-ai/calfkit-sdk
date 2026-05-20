@@ -51,6 +51,16 @@ class _KafkaStateStore:
     # partition with partial state.
     _REHYDRATE_MAX_EMPTY_POLLS: int = 5
 
+    # End-offset re-poll budget. The previous owner of a partition may
+    # still be flushing in-flight writes when the new owner snapshots
+    # end_offsets — those writes land *after* the snapshot but *before*
+    # the read completes, and would be silently missed without a re-poll.
+    # After draining to the initial end_offsets, we re-poll; if offsets
+    # advanced, we read the new tail and re-poll again. This bounds the
+    # loop against an active producer that the new owner cannot safely
+    # race against (rebalance listener has no producer-drain barrier).
+    _REHYDRATE_MAX_ENDOFFSET_REPOLLS: int = 3
+
     def __init__(
         self,
         broker: KafkaBroker,
@@ -248,33 +258,79 @@ class _KafkaStateStore:
             tps = [TopicPartition(self._state_topic, pid) for pid in partition_ids]
             consumer.assign(tps)
             await consumer.seek_to_beginning(*tps)
-            end_offsets = await consumer.end_offsets(tps)
 
-            # Empty partitions (end_offset == 0) have nothing to read.
-            remaining: dict[TopicPartition, int] = {tp: end_offsets[tp] for tp in tps if end_offsets[tp] > 0}
+            # Track the highest observed end-offset per partition across
+            # re-polls; we only need to read records whose offset is below
+            # this watermark. When the post-read re-poll surfaces a higher
+            # offset, we extend the watermark and resume reading.
+            observed_end_offsets: dict[TopicPartition, int] = await consumer.end_offsets(tps)
+
+            # Empty partitions (end_offset == 0) have nothing to read on
+            # this iteration; they're still re-polled in case the previous
+            # owner publishes after we snapshotted.
+            remaining: dict[TopicPartition, int] = {tp: observed_end_offsets[tp] for tp in tps if observed_end_offsets[tp] > 0}
 
             empty_polls = 0
-            while remaining:
-                batch_records = await consumer.getmany(timeout_ms=1000, max_records=500)
-                progressed = False
-                for tp, records in batch_records.items():
-                    for record in records:
-                        self._apply_record(tp.partition, record.key, record.value)
-                        if record.offset + 1 >= remaining.get(tp, 0):
-                            remaining.pop(tp, None)
-                        progressed = True
-                if progressed:
-                    empty_polls = 0
-                else:
-                    empty_polls += 1
-                    if empty_polls >= self._REHYDRATE_MAX_EMPTY_POLLS:
-                        raise AggregatorStateStoreError(
-                            f"rehydration stalled after {empty_polls}s on state-topic "
-                            f"partitions={sorted(tp.partition for tp in remaining)}; "
-                            f"broker may be unhealthy or partition leadership in flux. "
-                            f"Refusing to activate partition assignment with partial state.",
-                            state_topic=self._state_topic,
-                        )
+            endoffset_repolls = 0
+            while True:
+                # Drain to the current watermark for each partition.
+                while remaining:
+                    batch_records = await consumer.getmany(timeout_ms=1000, max_records=500)
+                    progressed = False
+                    for tp, records in batch_records.items():
+                        for record in records:
+                            self._apply_record(tp.partition, record.key, record.value, record.offset)
+                            if record.offset + 1 >= remaining.get(tp, 0):
+                                remaining.pop(tp, None)
+                            progressed = True
+                    if progressed:
+                        empty_polls = 0
+                    else:
+                        empty_polls += 1
+                        if empty_polls >= self._REHYDRATE_MAX_EMPTY_POLLS:
+                            raise AggregatorStateStoreError(
+                                f"rehydration stalled after {empty_polls}s on state-topic "
+                                f"partitions={sorted(tp.partition for tp in remaining)}; "
+                                f"broker may be unhealthy or partition leadership in flux. "
+                                f"Refusing to activate partition assignment with partial state.",
+                                state_topic=self._state_topic,
+                            )
+
+                # Drain complete to the previously observed watermark.
+                # Re-poll end_offsets to detect writes that landed after
+                # our initial snapshot (the previous owner may still be
+                # flushing in-flight publishes). If new offsets are higher
+                # for any partition, resume reading from the previous end.
+                latest_end_offsets: dict[TopicPartition, int] = await consumer.end_offsets(tps)
+                advanced: dict[TopicPartition, int] = {tp: latest_end_offsets[tp] for tp in tps if latest_end_offsets[tp] > observed_end_offsets[tp]}
+                if not advanced:
+                    break
+
+                endoffset_repolls += 1
+                if endoffset_repolls >= self._REHYDRATE_MAX_ENDOFFSET_REPOLLS:
+                    # An active producer is still writing — the previous
+                    # owner has not flushed and released its publish
+                    # pipeline. We cannot safely race against that
+                    # producer; refuse to activate.
+                    raise AggregatorStateStoreError(
+                        f"rehydration end_offsets failed to stabilise after "
+                        f"{endoffset_repolls} re-polls on state-topic "
+                        f"partitions={sorted(tp.partition for tp in advanced)}; "
+                        f"a producer is still writing during rebalance. "
+                        f"Refusing to activate partition assignment with state "
+                        f"that may already be stale. Last observed offsets: "
+                        f"{ {tp.partition: latest_end_offsets[tp] for tp in tps} }",
+                        state_topic=self._state_topic,
+                    )
+
+                # Extend the watermark and resume reading. We already
+                # consumed up to observed_end_offsets[tp] for each
+                # partition; the consumer's position is at that point,
+                # so feeding the new gap into ``remaining`` is sufficient
+                # — getmany will continue from where it left off.
+                remaining = advanced
+                observed_end_offsets = latest_end_offsets
+                empty_polls = 0
         finally:
             await consumer.stop()
 
@@ -309,33 +365,47 @@ class _KafkaStateStore:
         partition: int,
         key_bytes: bytes | None,
         value_bytes: Any,
+        offset: int = -1,
     ) -> None:
         """Apply a single state-topic record to the in-memory cache.
 
         ``value_bytes is None`` → tombstone (remove from cache, add to
         recently-completed). Otherwise parse as :class:`FanOutState` JSON.
+
+        ``offset`` is included in diagnostic error messages when a poison
+        or contaminating record forces partition activation to abort; it
+        defaults to ``-1`` for synthetic test calls that don't model a
+        durable offset.
         """
         if key_bytes is None:
             # Null-key records on the state topic should never come from
-            # this aggregator. Skip with a loud ERROR so the operator sees
-            # the anomaly without aborting partition activation for an
-            # unrelated stray record.
-            logger.error(
-                "state-topic record with null key on partition=%d; skipping (unexpected: aggregator writes always have composite keys)",
-                partition,
+            # this aggregator (all writes use composite keys). Their
+            # presence violates the topic's trust invariant — something
+            # other than this aggregator is producing to the state topic.
+            # Refuse to activate the partition; the rebalance listener
+            # evicts any partial state and re-raises so the operator can
+            # diagnose the contamination before durable state is trusted.
+            raise AggregatorStateStoreError(
+                f"state-topic record with null key on partition={partition} "
+                f"offset={offset}; aggregator writes always use composite "
+                f"keys, so this record indicates the state topic has been "
+                f"written by something other than this aggregator. "
+                f"Refusing to activate partition with contaminated state.",
+                state_topic=self._state_topic,
             )
-            return
         try:
             key = parse_composite_key(key_bytes)
         except ValueError as exc:
-            logger.error(
-                "state-topic record with malformed key %r on partition=%d: %s; skipping (no aggregator state can be tied to this record)",
-                key_bytes,
-                partition,
-                exc,
-                exc_info=exc,
-            )
-            return
+            # Same rationale as the null-key branch: a malformed composite
+            # key cannot be produced by this aggregator's write path. Trust
+            # invariant violated; refuse activation rather than silently
+            # skipping records that may be tied to real in-flight batches.
+            raise AggregatorStateStoreError(
+                f"state-topic record with malformed key {key_bytes!r} on "
+                f"partition={partition} offset={offset}: {exc}. "
+                f"Refusing to activate partition with contaminated state.",
+                state_topic=self._state_topic,
+            ) from exc
 
         if value_bytes is None:
             self._cache.pop(key, None)
@@ -353,7 +423,7 @@ class _KafkaStateStore:
             # Raise so the rebalance listener evicts and re-raises, surfacing
             # the corruption to the operator.
             raise AggregatorStateStoreError(
-                f"failed to parse FanOutState on partition={partition} key={key!r}: {exc}. "
+                f"failed to parse FanOutState on partition={partition} offset={offset} key={key!r}: {exc}. "
                 f"Refusing to activate partition with corrupt durable state.",
                 state_topic=self._state_topic,
             ) from exc

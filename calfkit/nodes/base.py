@@ -301,8 +301,6 @@ class BaseNodeDef(BaseNodeSchema):
 
         if isinstance(output, list) and all(isinstance(item, Call) for item in output):
             # Parallel fan-out: publish each Call with independent workflow_state.
-            # Subclasses that need aggregator semantics override _publish_action
-            # to intercept this branch before delegating back.
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
                 wf_copy.invoke_frame(call, self.subscribe_topics[0])
@@ -346,8 +344,9 @@ class BaseNodeDef(BaseNodeSchema):
                 topic=frame.callback_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
-                # Forward HDR_FANOUT_ID/HDR_FRAME_ID so the aggregator can
-                # identify which fan-out batch a tool's return belongs to.
+                # HDR_FANOUT_ID / HDR_FRAME_ID are the batch key for a tool's
+                # ReturnCall — forwarded on every Call so returns carry the
+                # identity needed to route them back to the right batch.
                 headers=self._publish_headers(inbound_headers, forward_fanout=True),
             )
 
