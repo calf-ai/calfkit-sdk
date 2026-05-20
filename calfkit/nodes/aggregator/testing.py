@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 from calfkit.models.state import State
@@ -36,6 +38,15 @@ if TYPE_CHECKING:
     from faststream.kafka import KafkaBroker
 
     from calfkit.nodes.agent import BaseAgentNodeDef
+
+
+logger = logging.getLogger(__name__)
+
+# Sentinel state_topic threaded into AggregatorMergeError raises from the
+# harness. InMemoryAggregator has no Kafka runtime — operator-visible
+# context is replaced with a marker so test assertions can distinguish a
+# harness-origin error from a production one.
+_INMEMORY_STATE_TOPIC = "<in-memory>"
 
 
 class RestartSimulatedError(Exception):
@@ -381,6 +392,7 @@ class InMemoryAggregator(FanOutAggregator):
                     f"merge() raised for key={key}",
                     correlation_id=key[0],
                     fan_out_id=key[1],
+                    state_topic=_INMEMORY_STATE_TOPIC,
                 ) from exc
             if self.merge_error_policy == MergeErrorPolicy.RETRY:
                 try:
@@ -390,19 +402,47 @@ class InMemoryAggregator(FanOutAggregator):
                         f"merge() raised on retry for key={key}",
                         correlation_id=key[0],
                         fan_out_id=key[1],
+                        state_topic=_INMEMORY_STATE_TOPIC,
                     ) from exc2
             if self.merge_error_policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT:
-                # Fall back to default merge so the batch still completes.
-                return await FanOutAggregator.merge(self, view)
+                logger.exception(
+                    "[%s] merge() raised; FALLBACK_TO_DEFAULT policy -> default merge key=%s",
+                    key[0][:8],
+                    key,
+                )
+                # The default merge can itself raise (e.g., a broken
+                # ``State.add_tool_result`` or a malformed received result).
+                # Mirror production ``_handle_merge_error``: treat the
+                # double-failure as ABORT so callers see a structured
+                # ``AggregatorMergeError`` rather than a raw exception
+                # bypassing the configured policy.
+                try:
+                    default = await FanOutAggregator.merge(self, view)
+                except Exception as exc2:
+                    logger.exception(
+                        "[%s] FALLBACK_TO_DEFAULT: default merge ALSO raised key=%s; treating as ABORT",
+                        key[0][:8],
+                        key,
+                    )
+                    raise AggregatorMergeError(
+                        f"default merge() raised under FALLBACK_TO_DEFAULT for key={key}",
+                        correlation_id=key[0],
+                        fan_out_id=key[1],
+                        state_topic=_INMEMORY_STATE_TOPIC,
+                    ) from exc2
+                return AggregatedReturn(state=default.state, degraded=True)
             raise
 
     def _batch_view(self, batch: _InFlightBatch) -> AggregatorBatch:
+        # Deep-copy ``base_state`` (matches production ``FanOutAggregator.
+        # _batch_view``): a user ``merge`` that mutates ``batch.base_state``
+        # in-place must not be able to corrupt the cached _InFlightBatch.
         return AggregatorBatch(
             correlation_id=batch.correlation_id,
             fan_out_id=batch.fan_out_id,
             expected_tool_call_ids=batch.expected_tool_call_ids,
-            received=dict(batch.received),
-            base_state=batch.base_state,
+            received=MappingProxyType(dict(batch.received)),
+            base_state=batch.base_state.model_copy(deep=True),
             started_at_ms=batch.started_at_ms,
             last_updated_ms=batch.last_updated_ms,
         )

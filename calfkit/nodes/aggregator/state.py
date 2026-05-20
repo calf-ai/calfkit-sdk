@@ -88,6 +88,14 @@ class FanOutState(BaseModel):
     published here on batch completion (so the agent re-enters with the
     merged state)."""
 
+    degraded: bool = False
+    """True when this batch was marked degraded at dispatch time (currently
+    set on the drift-overwrite path that discards prior received results).
+    Survives rehydration: the completion publish stamps
+    :data:`HDR_DEGRADED_MERGE` if either this OR
+    :attr:`AggregatedReturn.degraded` is True, so a worker restart between
+    dispatch and completion cannot lose the degraded signal."""
+
     traceparent: str | None = None
     """W3C OTel ``traceparent`` header captured at dispatch time. Propagated
     through the aggregator so the entire fan-out lives in one trace."""

@@ -109,6 +109,15 @@ class BaseAgentNodeDef(
     def kafka_subscriptions(self) -> list[_KafkaSubscription]:
         """Return the agent's main subscription plus the aggregator's returns subscription.
 
+        The agent's main subscription is force-set to
+        :data:`AckPolicy.NACK_ON_ERROR` (overriding
+        :class:`BaseNodeDef`'s default): the dispatch path's durable
+        state-store write and per-Call publish loop must rewind the
+        inbound offset on raise — otherwise an inbound is
+        committed-then-lost and the user-facing request hangs forever.
+        Only agents have this invariant; other node kinds keep their
+        defaults.
+
         The aggregator subscription is always included (using well-known
         topic names derived from ``node_id``) so :meth:`Worker.register_handlers`
         registers it regardless of whether
@@ -119,7 +128,11 @@ class BaseAgentNodeDef(
         absent — which is correct because the test harness doesn't simulate
         partition rebalances.
         """
-        subscriptions = list(super().kafka_subscriptions())
+        base_subscriptions = list(super().kafka_subscriptions())
+        subscriptions = [
+            dataclasses.replace(sub, ack_policy=AckPolicy.NACK_ON_ERROR) if sub.topics == list(self.subscribe_topics) else sub
+            for sub in base_subscriptions
+        ]
         # The rebalance listener is set on the aggregator's runtime by
         # setup(); it's None in test paths that haven't run setup yet
         # (TestKafkaBroker), and the subscription's listener field
@@ -401,22 +414,24 @@ class BaseAgentNodeDef(
                 len(expected_tool_call_ids),
             )
         else:
-            if existing is not None:
+            drifted = existing is not None
+            if drifted:
                 # The agent loop produced a different set of tool calls on
                 # re-entry. Surface loudly and overwrite the stale state.
-                # Flag the key as degraded so the eventual completion publish
-                # carries HDR_DEGRADED_MERGE — downstream observability gets
-                # a quantifiable signal for the silent data loss.
+                # The fresh batch is born degraded so the eventual completion
+                # publish carries HDR_DEGRADED_MERGE — downstream observability
+                # gets a quantifiable signal for the silent data loss. Storing
+                # the flag ON the durable batch (not in a process-local set)
+                # is what lets it survive worker restart and NACK redelivery.
                 logger.error(
                     "[%s] fan-out key=%s redispatch with different expected_tool_call_ids "
                     "(prev=%s new=%s); overwriting (discarded_received_count=%d)",
                     correlation_id[:8],
                     key,
-                    sorted(existing.expected_tool_call_ids),
+                    sorted(existing.expected_tool_call_ids),  # type: ignore[union-attr]
                     sorted(expected_tool_call_ids),
-                    len(existing.received),
+                    len(existing.received),  # type: ignore[union-attr]
                 )
-                self.aggregator._degraded_keys.add(key)
             now_ms = int(time.time() * 1000)
             initial_batch = _InFlightBatch(
                 correlation_id=correlation_id,
@@ -427,6 +442,7 @@ class BaseAgentNodeDef(
                 started_at_ms=now_ms,
                 last_updated_ms=now_ms,
                 agent_topic=self.subscribe_topics[0],
+                degraded=drifted,
             )
             await state_store.put(key, initial_batch, partition=partition)
 
@@ -598,9 +614,10 @@ class BaseAgentNodeDef(
             }
             # Stamp HDR_DEGRADED_MERGE if either the merge itself produced a
             # degraded result (FALLBACK_TO_DEFAULT path) OR the dispatch path
-            # flagged the key as degraded (drifted-redispatch overwrite that
-            # discarded prior received results).
-            if merged.degraded or key in self.aggregator._degraded_keys:
+            # flagged the batch as degraded (drifted-redispatch overwrite that
+            # discarded prior received results). The dispatch-time flag lives
+            # ON the durable batch record so it survives worker restart.
+            if merged.degraded or batch.degraded:
                 outbound_headers[HDR_DEGRADED_MERGE] = "1"
             await broker.publish(
                 publish_envelope,
@@ -612,9 +629,6 @@ class BaseAgentNodeDef(
 
             # Tombstone the batch so late returns are recognised.
             await state_store.tombstone(key, partition=partition)
-            # Drop the degraded flag now that the marked completion has been
-            # published — keeps the set bounded by the in-flight key count.
-            self.aggregator._degraded_keys.discard(key)
 
         return Response(envelope, headers=self._emitter_headers())
 
@@ -627,6 +641,7 @@ class BaseAgentNodeDef(
         """Apply the configured :class:`MergeErrorPolicy`. Returns the merged
         result on success, or ``None`` to signal the caller to re-raise."""
         policy = self.aggregator.merge_error_policy
+        state_topic = self.aggregator.runtime.state_topic
         if policy == MergeErrorPolicy.RETRY:
             try:
                 return await self.aggregator.merge(view)
@@ -634,7 +649,12 @@ class BaseAgentNodeDef(
                 # The caller's `raise AggregatorMergeError(...) from exc` chains
                 # the FIRST exception, not the retry exception. Log the retry
                 # traceback here so the retry's cause isn't invisible.
-                logger.exception("[%s] merge() raised on retry key=%s", key[0][:8], key)
+                logger.exception(
+                    "[%s] merge() raised on retry key=%s state_topic=%s",
+                    key[0][:8],
+                    key,
+                    state_topic,
+                )
                 return None
         if policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT:
             # Fall back to the default merge so the batch still completes,
@@ -644,10 +664,10 @@ class BaseAgentNodeDef(
             # logged here because FALLBACK_TO_DEFAULT doesn't re-raise;
             # this is the only operator-visible signal.
             logger.exception(
-                "[%s] merge() raised; FALLBACK_TO_DEFAULT policy -> default merge key=%s (downstream envelope will carry %s=1)",
+                "[%s] merge() raised; FALLBACK_TO_DEFAULT policy -> attempting default merge key=%s state_topic=%s",
                 key[0][:8],
                 key,
-                HDR_DEGRADED_MERGE,
+                state_topic,
             )
             # The default merge can itself raise (e.g., a broken
             # ``State.add_tool_result`` or a malformed received result).
@@ -661,9 +681,10 @@ class BaseAgentNodeDef(
                 default = await FanOutAggregator.merge(self.aggregator, view)
             except Exception:
                 logger.exception(
-                    "[%s] FALLBACK_TO_DEFAULT: default merge ALSO raised key=%s; treating as ABORT",
+                    "[%s] FALLBACK_TO_DEFAULT: default merge ALSO raised key=%s state_topic=%s; treating as ABORT",
                     key[0][:8],
                     key,
+                    state_topic,
                 )
                 return None
             return AggregatedReturn(state=default.state, degraded=True)

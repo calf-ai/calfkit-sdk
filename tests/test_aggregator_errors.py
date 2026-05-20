@@ -68,6 +68,50 @@ def test_state_store_error_carries_state_topic() -> None:
     assert err.state_topic == "planner.fanout-state"
 
 
+def test_aggregator_merge_error_repr_includes_structured_attributes() -> None:
+    """``repr(err)`` must expose the structured attributes so they're visible
+    in Sentry payloads and stringified tracebacks without an operator having
+    to manually inspect the exception object."""
+    err = AggregatorMergeError(
+        "merge() raised",
+        correlation_id="corr-abc",
+        fan_out_id="fan-xyz",
+        state_topic="agent.fanout-state",
+    )
+    rendered = repr(err)
+    assert "AggregatorMergeError" in rendered
+    assert "merge() raised" in rendered
+    assert "corr-abc" in rendered
+    assert "fan-xyz" in rendered
+    assert "agent.fanout-state" in rendered
+
+
+def test_aggregator_merge_error_repr_with_default_attributes() -> None:
+    """``repr(err)`` must still render when the structured attributes default
+    to None — historical raise sites without batch context must not break."""
+    err = AggregatorMergeError("generic boom")
+    rendered = repr(err)
+    assert "AggregatorMergeError" in rendered
+    assert "generic boom" in rendered
+    assert "correlation_id=None" in rendered
+    assert "fan_out_id=None" in rendered
+    assert "state_topic=None" in rendered
+
+
+def test_aggregator_state_store_error_repr_includes_state_topic() -> None:
+    """``repr(err)`` on AggregatorStateStoreError must expose ``state_topic``
+    so an operator triaging a multi-agent worker can attribute the failure
+    to the right agent without manually inspecting the exception object."""
+    err = AggregatorStateStoreError(
+        "broker stalled",
+        state_topic="planner.fanout-state",
+    )
+    rendered = repr(err)
+    assert "AggregatorStateStoreError" in rendered
+    assert "broker stalled" in rendered
+    assert "planner.fanout-state" in rendered
+
+
 def test_aggregator_errors_inherit_from_calfkit_base() -> None:
     """All aggregator errors must be catchable via the CalfkitError base —
     the SDK contract for users wanting a single except clause for all

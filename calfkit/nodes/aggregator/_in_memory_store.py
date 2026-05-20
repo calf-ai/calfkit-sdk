@@ -41,6 +41,7 @@ class _InFlightBatch:
     started_at_ms: int
     last_updated_ms: int
     agent_topic: str
+    degraded: bool = False
     received: Mapping[str, Any] = field(default_factory=dict)
     traceparent: str | None = None
     tracestate: str | None = None
@@ -60,6 +61,7 @@ class _InFlightBatch:
             started_at_ms=self.started_at_ms,
             last_updated_ms=self.last_updated_ms,
             agent_topic=self.agent_topic,
+            degraded=self.degraded,
             traceparent=self.traceparent,
             tracestate=self.tracestate,
         )
@@ -75,6 +77,7 @@ class _InFlightBatch:
             started_at_ms=state.started_at_ms,
             last_updated_ms=state.last_updated_ms,
             agent_topic=state.agent_topic,
+            degraded=state.degraded,
             traceparent=state.traceparent,
             tracestate=state.tracestate,
         )
@@ -104,6 +107,7 @@ class _InFlightBatch:
             started_at_ms=self.started_at_ms,
             last_updated_ms=last_updated_ms,
             agent_topic=self.agent_topic,
+            degraded=self.degraded,
             traceparent=self.traceparent,
             tracestate=self.tracestate,
         )
@@ -117,9 +121,11 @@ class _TtlSet:
     returns. Tests inject a fake clock via the ``clock`` argument for
     deterministic TTL tests.
 
-    Entries are swept on every membership check (``__contains__``) and
-    periodically during ``add`` so a steady stream of writes without
-    interleaved reads cannot grow the set unboundedly between sweeps.
+    Expiry handling: ``__contains__`` performs an O(1) per-key expiry
+    check (dropping the key if its TTL has lapsed). Bulk sweeping happens
+    periodically on ``add`` (every ``_SWEEP_EVERY_N_ADDS`` writes),
+    bounding memory growth even under add-heavy workloads with no
+    intervening reads.
     """
 
     _SWEEP_EVERY_N_ADDS = 64

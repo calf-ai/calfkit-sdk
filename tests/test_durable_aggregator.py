@@ -1271,6 +1271,34 @@ def test_aggregator_subscription_uses_nack_on_error_policy(agent: object) -> Non
     )
 
 
+def test_agent_main_subscription_uses_nack_on_error_policy(agent: object) -> None:
+    """The agent's MAIN inbound subscription MUST set ack_policy=NACK_ON_ERROR.
+
+    The default ACK_FIRST commits the inbound offset BEFORE the handler
+    runs. If ``_publish_parallel_with_aggregator`` then raises (e.g., the
+    durable ``state_store.put`` errors, or the per-Call publish loop
+    fails mid-flight) the inbound is committed-then-lost: tool dispatch
+    silently disappears and the user-facing request hangs forever.
+
+    NACK_ON_ERROR rewinds the consumer offset on raise so the inbound is
+    redelivered within the same consumer session, preserving the durable
+    state-store correctness invariant ("publish then update cache" must
+    be atomic from the consumer's perspective).
+    """
+    from faststream import AckPolicy
+
+    subs = agent.kafka_subscriptions()  # type: ignore[attr-defined]
+    main_subs = [s for s in subs if "test_agent.input" in s.topics]
+    assert len(main_subs) == 1
+    sub = main_subs[0]
+    assert sub.ack_policy is AckPolicy.NACK_ON_ERROR, (
+        f"agent main subscription must set ack_policy=NACK_ON_ERROR, "
+        f"got {sub.ack_policy!r}. Without this, FastStream defaults to "
+        f"ACK_FIRST and a raise in _publish_parallel_with_aggregator "
+        f"would commit-then-lose the inbound."
+    )
+
+
 async def test_handler_state_store_failure_propagates_without_committing_offset(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:
@@ -1403,6 +1431,108 @@ async def test_drifted_expected_ids_overwrite_stamps_degraded_header(
         f"Drifted-redispatch overwrite must mark the resulting completion as "
         f"degraded so observability sees the data-loss signal. Headers: "
         f"{publish_headers}"
+    )
+
+    # The degraded flag must live ON the durable batch record itself — not
+    # only in a process-local set — so it survives worker restart.
+    overwritten_batch = state_store.get(key)
+    if overwritten_batch is not None:
+        # The completion path tombstones the key once the publish lands.
+        # If get() still returns a batch (e.g., a future change defers the
+        # tombstone), assert degraded is set. If the key is already gone,
+        # the rehydration test below covers the durability invariant.
+        assert overwritten_batch.degraded is True
+
+
+async def test_degraded_flag_survives_rehydration_and_completion_still_stamps_header(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """Architectural invariant: ``degraded`` must travel WITH the durable
+    batch record on the compacted state topic — not in a process-local
+    set. After a worker crash + NACK redelivery, a fresh worker rehydrates
+    from the durable log and MUST still stamp HDR_DEGRADED_MERGE on the
+    completion publish. Otherwise operators see one degraded completion +
+    one clean completion for the same logical batch → mis-attribution of
+    silent data loss.
+    """
+    from calfkit._protocol import HDR_DEGRADED_MERGE
+    from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
+
+    agent, broker = primed_state_store
+
+    correlation_id = "corr-rehydrate"
+    fan_out_id = "fan-rehydrate"
+    key = (correlation_id, fan_out_id)
+
+    # Simulate a drifted-overwrite batch that was flagged degraded at
+    # dispatch time and durably persisted. The degraded flag is ON the
+    # batch (not in a process-local set).
+    drifted_batch = _InFlightBatch(
+        correlation_id=correlation_id,
+        fan_out_id=fan_out_id,
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={},
+        started_at_ms=1000,
+        last_updated_ms=2000,
+        agent_topic="test_agent.input",
+        degraded=True,
+    )
+
+    # Serialize to wire format and rehydrate into a fresh state store —
+    # this models worker restart: process-local memory wiped, durable log
+    # replayed.
+    wire_record = drifted_batch.to_fanout_state()
+    assert wire_record.degraded is True, "wire format must carry the degraded flag"
+
+    fresh_store = _KafkaStateStore(
+        broker=broker,
+        state_topic="test_agent.fanout-state",
+        bootstrap_servers="localhost:9092",
+        partition_count=6,
+    )
+    # Manually replay the durable record as the rehydration path would.
+    key_bytes = f"{correlation_id}|{fan_out_id}".encode()
+    fresh_store._apply_record(
+        partition=0,
+        key_bytes=key_bytes,
+        value_bytes=wire_record.model_dump_json().encode(),
+    )
+
+    rehydrated = fresh_store.get(key)
+    assert rehydrated is not None
+    assert rehydrated.degraded is True, "rehydrated batch must preserve degraded=True"
+
+    # Swap the agent's state store for the freshly rehydrated one — models
+    # the post-restart worker picking up where the previous one died.
+    # ``_FanOutRuntime`` is a frozen dataclass; use ``dataclasses.replace``.
+    import dataclasses as _dc
+
+    agent.aggregator._runtime = _dc.replace(  # type: ignore[attr-defined]
+        agent.aggregator._runtime,  # type: ignore[attr-defined]
+        state_store=fresh_store,
+    )
+
+    # Drive the batch to completion on the rehydrated worker.
+    return_envelope = _make_envelope(
+        correlation_id,
+        state=_state_with_results({"t1": "r1", "t2": "r2"}),
+    )
+    headers = {"x-calf-fanout-id": fan_out_id}
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        return_envelope,
+        correlation_id=correlation_id,
+        headers=headers,
+        broker=broker,
+    )
+
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    assert len(agent_topic_publishes) == 1
+    publish_headers = agent_topic_publishes[0].kwargs["headers"]
+    assert publish_headers.get(HDR_DEGRADED_MERGE) == "1", (
+        f"Degraded flag must survive worker restart via the durable log. "
+        f"The rehydrated completion publish lost the degraded signal. "
+        f"Headers: {publish_headers}"
     )
 
 

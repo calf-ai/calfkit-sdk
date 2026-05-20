@@ -129,6 +129,41 @@ async def test_custom_merge_synthesizes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _batch_view defensive copy
+# ---------------------------------------------------------------------------
+
+
+async def test_inmemory_batch_view_deep_copies_base_state() -> None:
+    """Mirrors production ``FanOutAggregator._batch_view``: the view passed
+    to user overrides must deep-copy ``base_state`` so a user ``merge``
+    that mutates ``batch.base_state`` in-place cannot corrupt the
+    framework's cached :class:`_InFlightBatch.base_state`. Without this
+    deep copy the harness silently allows code that would corrupt the
+    cache in production.
+    """
+    from calfkit._vendor.pydantic_ai.messages import ModelRequest
+
+    agg = InMemoryAggregator(persist_to_disk=False)
+    seed_state = State()
+    await agg.initialize_batch(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=DEFAULT_EXPECTED,
+        base_state=seed_state,
+    )
+    # Drive one return so an _InFlightBatch is materialised in the store.
+    await agg.submit_return("c1", "f1", "t1", "r1")
+
+    cached = agg._store.get(("c1", "f1"))
+    assert cached is not None
+
+    view = agg._batch_view(cached)
+    view.base_state.message_history.append(ModelRequest(parts=[]))
+
+    assert cached.base_state.message_history == []
+
+
+# ---------------------------------------------------------------------------
 # Merge error policies
 # ---------------------------------------------------------------------------
 
@@ -205,6 +240,59 @@ async def test_merge_error_fallback_to_default_logs_and_completes() -> None:
     # still lands on state.
     assert result is not None
     assert result.state.tool_results == {"t1": "value"}
+
+
+async def test_inmemory_fallback_to_default_when_default_also_raises_propagates_as_aggregator_merge_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors production's
+    ``test_fallback_to_default_when_default_also_raises_falls_through_to_abort``.
+
+    When the user's ``merge`` raises and the configured policy is
+    FALLBACK_TO_DEFAULT, the harness must fall back to the framework
+    default merge. If THAT default merge also raises, the harness must
+    NOT let the inner exception escape unwrapped — it must treat the
+    double-failure as ABORT and surface a structured
+    :class:`AggregatorMergeError`.
+    """
+    base = FailingMergeAggregator(merge_error_policy=MergeErrorPolicy.FALLBACK_TO_DEFAULT)
+    agg = InMemoryAggregator.wrap(
+        base,
+        persist_to_disk=False,
+        merge_error_policy=MergeErrorPolicy.FALLBACK_TO_DEFAULT,
+    )
+    await _init_batch(agg, expected=frozenset({"t1"}))
+
+    async def default_boom(self: FanOutAggregator, batch: AggregatorBatch) -> AggregatedReturn:
+        raise RuntimeError("default merge also boom")
+
+    monkeypatch.setattr(FanOutAggregator, "merge", default_boom)
+
+    with pytest.raises(AggregatorMergeError) as excinfo:
+        await agg.submit_return("c1", "f1", "t1", "value")
+
+    assert excinfo.value.correlation_id == "c1"
+    assert excinfo.value.fan_out_id == "f1"
+
+
+async def test_inmemory_aggregator_merge_error_includes_correlation_and_fanout_id() -> None:
+    """ABORT-branch ``AggregatorMergeError`` must carry the structured
+    batch identity (``correlation_id``, ``fan_out_id``) so test assertions
+    can mirror production's operator-visible context.
+    """
+    base = FailingMergeAggregator(merge_error_policy=MergeErrorPolicy.ABORT)
+    agg = InMemoryAggregator.wrap(
+        base,
+        persist_to_disk=False,
+        merge_error_policy=MergeErrorPolicy.ABORT,
+    )
+    await _init_batch(agg, corr="corr-xyz", fan_out="fan-xyz", expected=frozenset({"t1"}))
+
+    with pytest.raises(AggregatorMergeError) as excinfo:
+        await agg.submit_return("corr-xyz", "fan-xyz", "t1", "value")
+
+    assert excinfo.value.correlation_id == "corr-xyz"
+    assert excinfo.value.fan_out_id == "fan-xyz"
 
 
 # ---------------------------------------------------------------------------

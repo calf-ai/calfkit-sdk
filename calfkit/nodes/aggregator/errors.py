@@ -43,6 +43,15 @@ class AggregatorMergeError(AggregatorError):
         self.fan_out_id = fan_out_id
         self.state_topic = state_topic
 
+    def __repr__(self) -> str:
+        message = self.args[0] if self.args else ""
+        return (
+            f"{type(self).__name__}({message!r}, "
+            f"correlation_id={self.correlation_id!r}, "
+            f"fan_out_id={self.fan_out_id!r}, "
+            f"state_topic={self.state_topic!r})"
+        )
+
 
 class AggregatorStateStoreError(AggregatorError):
     """Raised when the aggregator's state store cannot be initialised or maintained.
@@ -68,3 +77,10 @@ class AggregatorStateStoreError(AggregatorError):
     ) -> None:
         super().__init__(message)
         self.state_topic = state_topic
+
+    def __repr__(self) -> str:
+        message = self.args[0] if self.args else ""
+        return (
+            f"{type(self).__name__}({message!r}, "
+            f"state_topic={self.state_topic!r})"
+        )

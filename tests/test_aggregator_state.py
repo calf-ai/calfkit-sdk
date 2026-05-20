@@ -184,3 +184,48 @@ def test_fanout_state_deserialises_round_trip() -> None:
     assert rebuilt.received == {"t1": "r1"}
     assert rebuilt.correlation_id == "c"
     assert rebuilt.agent_topic == "agent.in"
+
+
+def test_fanout_state_degraded_round_trips_via_json() -> None:
+    """The ``degraded`` flag is the durable signal for "this batch's
+    completion publish must carry HDR_DEGRADED_MERGE". It MUST survive
+    a JSON round-trip so worker-restart rehydration preserves the
+    degraded marker; otherwise a process-local set would not survive
+    NACK redelivery after a crash.
+    """
+    degraded_state = _make_fanout_state(degraded=True)
+    rebuilt_degraded = FanOutState.model_validate_json(degraded_state.model_dump_json())
+    assert rebuilt_degraded.degraded is True
+
+    clean_state = _make_fanout_state()  # default
+    rebuilt_clean = FanOutState.model_validate_json(clean_state.model_dump_json())
+    assert rebuilt_clean.degraded is False
+
+
+def test_inflight_batch_degraded_propagates_through_fanout_state() -> None:
+    """``_InFlightBatch.degraded`` must convert to/from ``FanOutState.degraded``
+    so the durable wire format and the in-memory representation agree.
+    ``with_received`` must preserve the flag — the dispatch path sets
+    degraded=True once; subsequent merge updates must NOT clear it."""
+    batch = _InFlightBatch(
+        correlation_id="c",
+        fan_out_id="f",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        started_at_ms=1000,
+        last_updated_ms=1000,
+        agent_topic="agent.in",
+        degraded=True,
+    )
+
+    wire = batch.to_fanout_state()
+    assert wire.degraded is True
+
+    rebuilt = _InFlightBatch.from_fanout_state(wire)
+    assert rebuilt.degraded is True
+
+    advanced = batch.with_received({"t1": "r1"}, last_updated_ms=2000)
+    assert advanced.degraded is True, (
+        "with_received must preserve degraded; otherwise the next state-topic "
+        "write would silently un-degrade the batch on the first tool return."
+    )

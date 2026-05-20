@@ -542,3 +542,120 @@ async def test_returns_topic_does_not_validate_configs() -> None:
     # describe_configs may be called for the state topic, but never for returns.
     described_topics = [resource.name for call in admin.describe_configs.await_args_list for resource in call.args[0]]
     assert "agent.fanout-returns" not in described_topics
+
+
+# ---------------------------------------------------------------------------
+# describe_configs per-resource error_code handling
+# ---------------------------------------------------------------------------
+
+
+def _describe_configs_response_with_error(topic: str, error_code: int) -> Any:
+    """Build a mock DescribeConfigsResponse where the resource carries a
+    non-zero ``error_code`` (broker auth failure, invalid topic, etc.).
+
+    Mirrors the aiokafka response shape; the broker returns the topic name
+    and an empty config_entries list alongside the error code.
+    """
+    resource = (error_code, "", 2, topic, [])
+    return MagicMock(resources=[resource])
+
+
+async def test_describe_topic_configs_raises_on_authorization_failure() -> None:
+    """When ``describe_configs`` returns a per-resource error_code (e.g.,
+    TOPIC_AUTHORIZATION_FAILED = 29), the aggregator must surface the failure
+    as an actionable :class:`AggregatorStateStoreError` rather than silently
+    returning an empty config dict and reporting a misleading
+    "cleanup.policy=None" mismatch downstream."""
+    admin = AsyncMock()
+
+    async def describe_topics(topic_names: list[str]) -> list[dict[str, Any]]:
+        # main topic + existing state/returns topics so we reach the
+        # config-validation branch in _ensure_topic.
+        return [_topic_metadata(name, 6) for name in topic_names]
+
+    async def describe_configs(config_resources: list[Any]) -> list[Any]:
+        return [_describe_configs_response_with_error(resource.name, 29) for resource in config_resources]
+
+    admin.describe_topics = AsyncMock(side_effect=describe_topics)
+    admin.describe_configs = AsyncMock(side_effect=describe_configs)
+    admin.create_topics = AsyncMock()
+    broker = _broker_with_admin(admin)
+
+    with pytest.raises(AggregatorStateStoreError) as exc_info:
+        await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
+
+    message = str(exc_info.value)
+    # The canonical Kafka protocol error name must surface so an operator can
+    # search broker docs / logs for it directly.
+    assert "TOPIC_AUTHORIZATION_FAILED" in message
+    assert "agent.fanout-state" in message
+    # Clear "describe_configs failed" wording disambiguates this failure
+    # from the cleanup.policy-mismatch error path.
+    assert "describe_configs" in message
+
+
+async def test_describe_topic_configs_raises_with_state_topic_context() -> None:
+    """The raised error must carry ``state_topic`` so structured handlers
+    (Sentry / metric tags) can attribute the failure to the right agent."""
+    admin = AsyncMock()
+
+    async def describe_topics(topic_names: list[str]) -> list[dict[str, Any]]:
+        return [_topic_metadata(name, 6) for name in topic_names]
+
+    async def describe_configs(config_resources: list[Any]) -> list[Any]:
+        return [_describe_configs_response_with_error(resource.name, 29) for resource in config_resources]
+
+    admin.describe_topics = AsyncMock(side_effect=describe_topics)
+    admin.describe_configs = AsyncMock(side_effect=describe_configs)
+    admin.create_topics = AsyncMock()
+    broker = _broker_with_admin(admin)
+
+    with pytest.raises(AggregatorStateStoreError) as exc_info:
+        await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
+
+    assert exc_info.value.state_topic == "agent.fanout-state"
+
+
+async def test_describe_topic_configs_succeeds_on_zero_error_code() -> None:
+    """Sanity check: when ``error_code=0``, the happy path returns configs
+    correctly and aggregator topic provisioning succeeds without raising."""
+    admin = _make_admin(
+        {
+            "agent.in": 6,
+            "agent.fanout-state": 6,
+            "agent.fanout-returns": 6,
+        },
+        topic_configs={
+            "agent.fanout-state": dict(STATE_TOPIC_CONFIG),
+        },
+    )
+    broker = _broker_with_admin(admin)
+
+    await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
+
+    assert admin.create_topics.await_count == 0
+    admin.describe_configs.assert_awaited()
+
+
+async def test_describe_topic_configs_raises_on_unresolvable_error_code() -> None:
+    """If the broker returns an error code that aiokafka can't map to a known
+    class, the message must still cite the numeric code so operators have a
+    grep target — ``for_code`` is documented to return ``UnknownError`` for
+    unmapped codes, so the implementation must always include the raw int."""
+    admin = AsyncMock()
+
+    async def describe_topics(topic_names: list[str]) -> list[dict[str, Any]]:
+        return [_topic_metadata(name, 6) for name in topic_names]
+
+    async def describe_configs(config_resources: list[Any]) -> list[Any]:
+        return [_describe_configs_response_with_error(resource.name, 12345) for resource in config_resources]
+
+    admin.describe_topics = AsyncMock(side_effect=describe_topics)
+    admin.describe_configs = AsyncMock(side_effect=describe_configs)
+    admin.create_topics = AsyncMock()
+    broker = _broker_with_admin(admin)
+
+    with pytest.raises(AggregatorStateStoreError) as exc_info:
+        await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
+
+    assert "12345" in str(exc_info.value)

@@ -22,6 +22,7 @@ from aiokafka.admin.config_resource import (  # type: ignore[import-untyped]
 from aiokafka.errors import (  # type: ignore[import-untyped]
     TopicAlreadyExistsError,
     UnknownTopicOrPartitionError,
+    for_code,
 )
 from faststream.kafka import KafkaBroker
 
@@ -280,6 +281,14 @@ async def _describe_topic_configs(admin: Any, topic: str) -> dict[str, str]:
     holds tuples of ``(error_code, error_message, resource_type,
     resource_name, config_entries)``, where each ``config_entries`` row is
     a tuple beginning with ``(config_name, config_value, ...)``.
+
+    A non-zero per-resource ``error_code`` (e.g., ``TOPIC_AUTHORIZATION_FAILED``,
+    ``UNKNOWN_TOPIC_OR_PARTITION``) is surfaced as
+    :class:`AggregatorStateStoreError` rather than silently returning an
+    empty config dict — otherwise downstream validation in
+    :func:`_ensure_topic` would report a misleading
+    ``cleanup.policy=None`` mismatch when the real failure is broker
+    authorization or a topic-disappeared race.
     """
     resource = ConfigResource(ConfigResourceType.TOPIC, topic)
     try:
@@ -294,8 +303,36 @@ async def _describe_topic_configs(admin: Any, topic: str) -> dict[str, str]:
     for response in responses:
         for resource_row in getattr(response, "resources", []):
             error_code, _error_message, _resource_type, resource_name, config_entries = resource_row[:5]
-            if resource_name != topic or error_code != 0:
+            if resource_name != topic:
                 continue
+            if error_code != 0:
+                error_label = _resolve_kafka_error_label(error_code)
+                raise AggregatorStateStoreError(
+                    f"describe_configs failed for topic {topic!r} with broker "
+                    f"error {error_label}; aggregator cannot validate "
+                    f"cleanup.policy without broker authorization. "
+                    f"Verify the worker's Kafka credentials grant "
+                    f"'DescribeConfigs' on this topic, or confirm the topic "
+                    f"still exists before restarting.",
+                    state_topic=topic,
+                )
             for entry in config_entries:
                 configs[entry[0]] = entry[1]
     return configs
+
+
+def _resolve_kafka_error_label(error_code: int) -> str:
+    """Resolve an aiokafka error code to an operator-friendly label.
+
+    Returns a string of the form ``"TOPIC_AUTHORIZATION_FAILED (29)"`` so
+    operators can grep Kafka broker docs/logs for the canonical protocol
+    name *and* the numeric code. Falls back to ``"error_code=<n>"`` when
+    aiokafka can't resolve the code at all (defensive against future
+    protocol additions).
+    """
+    try:
+        error_class = for_code(error_code)
+        canonical = getattr(error_class, "message", None) or error_class.__name__
+        return f"{canonical} ({error_code})"
+    except Exception:
+        return f"error_code={error_code}"

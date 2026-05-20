@@ -83,7 +83,19 @@ class MergeErrorPolicy(str, enum.Enum):
     RETRY = "retry"
     """Retry the merge once. Useful for transient failures (e.g., a
     downstream LLM call that times out). If the retry also raises,
-    behaves as :data:`ABORT`."""
+    behaves as :data:`ABORT`.
+
+    .. warning::
+
+       The user-provided :meth:`FanOutAggregator.merge` is awaited without
+       a framework-level timeout. A hanging merge (e.g., a downstream
+       LLM/DB call that never returns) blocks the aggregator handler for
+       the affected partition for the entire consumer session, stalling
+       all in-flight returns on that partition. Wrap your merge logic in
+       :func:`asyncio.wait_for` (or equivalent) if downstream calls can
+       hang. A framework-level merge-timeout option is tracked as a
+       future enhancement in ``ROADMAP.md``.
+    """
 
     FALLBACK_TO_DEFAULT = "fallback_to_default"
     """Log the error and complete the batch via the framework's default merge
@@ -140,15 +152,6 @@ class FanOutAggregator:
         # pre-setup, used by ``kafka_subscriptions`` which can run before
         # ``setup()``).
         self._runtime: _FanOutRuntime | None = None
-        # Process-local set of batch keys flagged as degraded by the
-        # dispatch path — currently populated when a redispatch arrives
-        # with a different ``expected_tool_call_ids`` set than the cached
-        # batch (a real upstream bug we surface but tolerate by overwriting
-        # the stale state). The aggregator handler reads this on completion
-        # so the published envelope carries :data:`HDR_DEGRADED_MERGE`,
-        # giving operators a signal that prior received results were
-        # silently discarded. Cleared when the matching batch tombstones.
-        self._degraded_keys: set[tuple[str, str]] = set()
 
     @property
     def runtime(self) -> _FanOutRuntime:

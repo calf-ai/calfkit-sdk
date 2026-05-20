@@ -43,15 +43,27 @@ durable aggregation.
 """
 
 HDR_DEGRADED_MERGE = "x-calf-degraded-merge"
-"""Kafka header stamped on the aggregated fan-out return when the user's
-custom :meth:`FanOutAggregator.merge` raised and the configured
-``merge_error_policy`` is :data:`MergeErrorPolicy.FALLBACK_TO_DEFAULT`.
+"""Kafka header stamped on the aggregated fan-out return when the batch's
+completion is known to be degraded.
 
-Value is the string ``"1"`` when set. Operators / observability tooling can
-filter on this header to surface fan-out batches whose downstream state was
-produced by the framework's default merge instead of the user's overridden
-behaviour — without this signal the FALLBACK_TO_DEFAULT policy silently
-delivers potentially-incomplete state to the agent.
+Value is the string ``"1"`` when set. Stamped on two distinct paths:
+
+1. **User merge raised under FALLBACK_TO_DEFAULT.** The user's custom
+   :meth:`FanOutAggregator.merge` raised and ``merge_error_policy`` is
+   :data:`MergeErrorPolicy.FALLBACK_TO_DEFAULT`; the framework fell back
+   to the default merge. Signalled via ``AggregatedReturn.degraded=True``
+   on the fallback return (process-local; computed at completion time).
+2. **Batch overwritten on drift detection.** A redelivered inbound
+   dispatched a different ``expected_tool_call_ids`` set than the durable
+   cached batch; the framework overwrites the stale state, silently
+   discarding prior received results. Signalled via
+   ``FanOutState.degraded=True`` set at overwrite time and persisted to
+   the compacted state log — survives worker restart and NACK redelivery
+   so the completion publish stamps this header even on a rehydrated
+   batch.
+
+Operators / observability tooling filter on this header to surface batches
+whose downstream state may be incomplete relative to the user's intent.
 """
 
 
