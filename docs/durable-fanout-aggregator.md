@@ -68,7 +68,7 @@ scope: Canonical merged design for the durable fan-out aggregator — public API
 
 ## 1. Executive summary
 
-`BaseAgentNodeDef._pending_batches` is an in-process Python dict that holds the join-state of a parallel tool fan-out. It vanishes on process restart and on Kafka consumer-group rebalance — a known correctness hole acknowledged in the existing `RuntimeError` at `calfkit/nodes/agent.py:117-127`. This design replaces it with a durable, Kafka-backed aggregator that is:
+`BaseAgentNodeDef._pending_batches` *was* an in-process Python dict that held the join-state of a parallel tool fan-out — both the dict and the explanatory `RuntimeError` it raised on cache-miss have been removed by the shipped design. It vanished on process restart and on Kafka consumer-group rebalance — the known correctness hole this design replaces with a durable, Kafka-backed aggregator that is:
 
 - **Invisible by default.** Hello-world agent code does not change. The framework auto-constructs a `FanOutAggregator()` and the Worker wires its subscriber without user involvement.
 - **Customizable through three override methods.** `merge`, `should_complete`, `on_partial`. All have sensible defaults; users override only when they need short-circuit completion, custom merging, or progress-event emission.
@@ -380,7 +380,7 @@ The agent's main `subscribe_topics` already handles `ReturnCall` envelopes from 
 Per-agent topics co-partition cleanly with the agent's main subscribe topic — the same `correlation_id` lands on the same partition on both. This makes read-modify-write on the aggregator a linearisable single-consumer problem (no distributed lock). A shared global topic would require additional partition coordination across agents.
 
 **Why retarget tool returns to the aggregator topic, not to the main topic?**
-We rewrite the `callback_topic` field of the tool's `CallFrame` to `{node_id}.fanout-returns` at dispatch time (only in the parallel case; the single-tool sequential path still uses the main topic, unchanged). When the tool calls `ReturnCall(state=...)`, the existing `_publish_action` logic at `base.py:201-215` pops the frame and publishes to `frame.callback_topic` — which is now the aggregator topic. This is a one-line change inside the parallel branch of `_publish_action` and keeps the rest of the call-stack semantics intact.
+We rewrite the `callback_topic` field of the tool's `CallFrame` to `{node_id}.fanout-returns` at dispatch time (only in the parallel case; the single-tool sequential path still uses the main topic, unchanged). When the tool calls `ReturnCall(state=...)`, the existing `_publish_action` logic in `base.py::BaseNodeDef._publish_action` (the `ReturnCall` branch) pops the frame and publishes to `frame.callback_topic` — which is now the aggregator topic. This is a one-line change inside the parallel branch of `_publish_action` and keeps the rest of the call-stack semantics intact.
 
 ---
 
@@ -468,7 +468,8 @@ HDR_FANOUT_ID = "x-calf-fanout-id"
 Present on:
   - Every outbound tool Call dispatched as part of a parallel batch.
   - Every ReturnCall from a tool participating in a parallel batch (because the
-    tool republishes inbound headers via Response, see base.py:278).
+    tool republishes inbound headers via Response, see
+    base.py::BaseNodeDef.handler).
   - Every aggregator-emitted re-entry to the agent's main topic.
 
 Absent on:
@@ -504,7 +505,7 @@ Header summary, by message:
 | Aggregator re-entry — normal | {agent.node_id} | `agent` | (synthesised new frame) | absent | absent | (carried from base) |
 | Aggregator re-entry — DROP fallback | {agent.node_id} | `agent` | (synthesised new frame) | absent | `"1"` | (carried from base) |
 
-**Echoing rule:** the existing `BaseNodeDef.handler` returns `Response(body, headers=self._emitter_headers())` at `base.py:278`. The Response headers include `HDR_EMITTER` and `HDR_EMITTER_KIND`. The fan-out and frame headers ride only on the outbound `broker.publish(...)` call sites at `base.py:176-181, 194-199, 209-214, 227-232`. Tools do not need to know they're in a fan-out — `_publish_action` reads them from the inbound `headers` dict (via FastStream `Context("message.headers")`) and forwards them.
+**Echoing rule:** the existing `BaseNodeDef.handler` returns `Response(body, headers=self._emitter_headers())`. The Response headers include `HDR_EMITTER` and `HDR_EMITTER_KIND`. The fan-out and frame headers ride only on the outbound `broker.publish(...)` call sites inside `base.py::BaseNodeDef._publish_action`. Tools do not need to know they're in a fan-out — `_publish_action` reads them from the inbound `headers` dict (via FastStream `Context("message.headers")`) and forwards them.
 
 Concretely: a small helper `_emit_headers(envelope, inbound_headers)` builds the outbound header dict by composing `_emitter_headers(envelope)` (with `HDR_FRAME_ID` added per the existing frame_id memory) with any inbound `x-calf-fanout-id` / `traceparent` / `tracestate` carried forward. This is a refactor of the existing four call sites.
 
@@ -573,7 +574,7 @@ Together these make per-key writes linearisable across the cluster.
 
 ### 7.2 Co-partitioning with the agent's main topic
 
-The agent's main `subscribe_topics` and `fanout-returns` are partitioned by `correlation_id` (the existing `_publish_action` already does `key=correlation_id.encode()` at `base.py:180, 198, 213, 231`). If the agent's main topic has 6 partitions, `fanout-returns` has 6 partitions; both use the default murmur2 partitioner; the same correlation_id lands on the same partition number on both topics.
+The agent's main `subscribe_topics` and `fanout-returns` are partitioned by `correlation_id` (the existing `_publish_action` already does `key=correlation_id.encode()` on every outbound call inside `base.py::BaseNodeDef._publish_action`). If the agent's main topic has 6 partitions, `fanout-returns` has 6 partitions; both use the `FanOutAggregatorPartitioner` installed at `Client.connect`; the same correlation_id lands on the same partition number on both topics.
 
 **Consequence:** the aggregator consumer-group member that owns partition 3 of `fanout-returns` is the one whose aggregator instance handles all returns for correlation IDs hashing to partition 3. The agent worker that owns partition 3 of the main topic resumes those correlations. Co-location of state and processing is automatic.
 
@@ -618,7 +619,7 @@ The composite key for dedup is `(correlation_id, fan_out_id, tool_call_id)`.
 5. Call `aggregator.should_complete(batch_view)`. If true, run §8.4 completion path.
 
 **Outbound dispatch dedup — the shipped idempotent-dispatch check**
-(at `calfkit/nodes/agent.py::BaseAgentNodeDef._publish_parallel_fanout`):
+(at `calfkit/nodes/agent.py::BaseAgentNodeDef._publish_parallel_with_aggregator`):
 
 A redelivered inbound on the agent's main topic re-runs `run()` and re-emits
 the parallel `list[Call]`. Without dedup, this would publish N more tool
@@ -651,13 +652,13 @@ for at-least-once correctness.
 
 ### 8.1 Dispatch (parallel fan-out begins)
 
-Shipped at `calfkit/nodes/agent.py::BaseAgentNodeDef._publish_parallel_fanout`:
+Shipped at `calfkit/nodes/agent.py::BaseAgentNodeDef._publish_parallel_with_aggregator`:
 
 ```
 agent.run() returns list[Call]
   |
   v
-_publish_parallel_fanout(calls, envelope, correlation_id, broker, partition):
+_publish_parallel_with_aggregator(calls, envelope, correlation_id, broker, partition):
   |
   +--- fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
   +--- expected_tool_call_ids = frozenset of call.input_args[0] for each call
@@ -957,7 +958,7 @@ topic) would close the gap; that is a v2 consideration (§17.2).
 The aggregator MUST be idempotent under at-least-once delivery on the following keys:
 
 - **Same tool return arrives twice**: dedup via `tool_call_id in batch.received` check. Drop the second.
-- **Same dispatch happens twice**: dedup via idempotent-dispatch check at `_publish_parallel_fanout` (see §7.5). Recently-completed → skip; in-flight matching → preserve and re-publish; in-flight drifted → log ERROR and overwrite.
+- **Same dispatch happens twice**: dedup via idempotent-dispatch check at `_publish_parallel_with_aggregator` (see §7.5). Recently-completed → skip; in-flight matching → preserve and re-publish; in-flight drifted → log ERROR and overwrite.
 - **Same completion publish happens twice**: the agent's main topic handler must be idempotent on `correlation_id`. The agent's next LLM iteration sees a deduped inbound and produces a single resume. This is the existing calfkit contract for redelivery on any handler.
 
 ### 9.3 Late-return policy
@@ -1198,14 +1199,14 @@ the load-bearing choices.
 - `_pending_batches`, `_parallel_state_aggregation`, and the `RuntimeError` about lost state are removed.
 - `__init__` gains an `aggregator: FanOutAggregator | None = None` kwarg; default-constructs `FanOutAggregator()` when omitted.
 - `kafka_subscriptions` overrides `BaseNodeDef.kafka_subscriptions` to append the aggregator returns subscription (`max_workers=1`, listener from `runtime.rebalance_listener` when `setup()` has run).
-- New `_publish_parallel_fanout` method (called from `_publish_action`'s parallel branch) handles the durable-dispatch path — see §7.5 and §8.1.
+- New `_publish_parallel_with_aggregator` method (called from `_publish_action`'s parallel branch) handles the durable-dispatch path — see §7.5 and §8.1.
 - New `_aggregator_handler` method — the FastStream handler for `fanout-returns` — see §8.3.
 - New `_ensure_aggregator_ready` method for lazy `setup()` on test paths that bypass `Worker.run()`.
 
 #### `calfkit/nodes/base.py`
 
 - Adds `BaseNodeDef.kafka_subscriptions(self) -> list[_KafkaSubscription]` — default returns one subscription for the main handler. `BaseAgentNodeDef` (in `agent.py`) overrides to extend with the aggregator's returns subscription.
-- The parallel branch of `_publish_action` delegates to `BaseAgentNodeDef._publish_parallel_fanout` (defined in `agent.py`) when the node is an agent; non-agents keep the existing list-of-Calls behaviour.
+- The parallel branch of `_publish_action` delegates to `BaseAgentNodeDef._publish_parallel_with_aggregator` (defined in `agent.py`) when the node is an agent; non-agents keep the existing list-of-Calls behaviour.
 - `_emitter_headers` is unchanged in signature (`dict[str, str]`); the aggregator headers (`HDR_FANOUT_ID`, `HDR_FRAME_ID`, `HDR_DEGRADED_MERGE`) are added explicitly at the publish call sites that need them, not folded into the base method.
 
 #### `calfkit/_protocol.py`
@@ -1362,7 +1363,7 @@ Requires real broker or careful FastStream simulation. May land as a docker-comp
 1. Pathological: LLM returns `DeferredToolRequests(calls=[])`.
 2. Assert: no `FanOutState` record is written; no aggregator subscriber is triggered; the agent continues normally (likely with a final answer).
 
-Implementation note: the dispatch code path guards against this — `list[Call]` with zero elements is not the parallel path; in `agent.py:191-204` the single-tool fast path requires `pending_tool_calls` non-empty. If empty, the agent should fall through to final answer.
+Implementation note: the dispatch code path guards against this — `list[Call]` with zero elements is not the parallel path; the single-tool fast path in `BaseAgentNodeDef.run` requires `pending_tool_calls` non-empty. If empty, the agent should fall through to final answer.
 
 ### 13.7 Single-tool fan-out
 
@@ -1371,7 +1372,7 @@ Implementation note: the dispatch code path guards against this — `list[Call]`
 1. LLM returns exactly one tool call.
 2. Assert: no `FanOutState` record written; the single-Call path (existing) is used.
 
-The existing code at `agent.py:191-204` short-circuits for `len(pending_tool_calls) == 1` to the single-tool path. We preserve this. The aggregator subscriber still exists but is unused for this turn.
+The existing code in `BaseAgentNodeDef.run` short-circuits for `len(pending_tool_calls) == 1` to the single-tool path. We preserve this. The aggregator subscriber still exists but is unused for this turn.
 
 ### 13.8 Tool error in batch
 
@@ -1743,7 +1744,7 @@ Key sites in `calfkit/`:
 - `nodes/aggregator/_rebalance.py::_StateStoreRebalanceListener` — rebalance hooks driving `rehydrate_partitions` / `evict_partitions`.
 - `nodes/aggregator/errors.py::AggregatorMergeError` (`correlation_id` / `fan_out_id` attrs), `AggregatorStateStoreError` (`state_topic` attr).
 - `nodes/agent.py::BaseAgentNodeDef.kafka_subscriptions` — registers the aggregator returns subscriber with `max_workers=1`.
-- `nodes/agent.py::BaseAgentNodeDef._publish_parallel_fanout` — the dispatch path with idempotent-dispatch branching (§7.5).
+- `nodes/agent.py::BaseAgentNodeDef._publish_parallel_with_aggregator` — the dispatch path with idempotent-dispatch branching (§7.5).
 - `nodes/agent.py::BaseAgentNodeDef._aggregator_handler` — the returns handler.
 - `nodes/agent.py::BaseAgentNodeDef._ensure_aggregator_ready` — lazy `setup()` for test paths that bypass `Worker.run()`.
 - `worker/worker.py::Worker._prepare_aggregators` and `Worker.run` — startup wiring.
