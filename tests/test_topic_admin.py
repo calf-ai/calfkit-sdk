@@ -540,9 +540,5 @@ async def test_returns_topic_does_not_validate_configs() -> None:
     await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
 
     # describe_configs may be called for the state topic, but never for returns.
-    described_topics = [
-        resource.name
-        for call in admin.describe_configs.await_args_list
-        for resource in call.args[0]
-    ]
+    described_topics = [resource.name for call in admin.describe_configs.await_args_list for resource in call.args[0]]
     assert "agent.fanout-returns" not in described_topics

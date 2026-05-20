@@ -1235,8 +1235,7 @@ async def test_aggregator_reentry_redelivery_is_idempotent(
 
     state_publishes_second = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.fanout-state"]
     assert len(state_publishes_second) == 0, (
-        "Redelivery must NOT write a new state-topic record; the existing "
-        "in-flight batch is preserved (in-flight redelivery branch)."
+        "Redelivery must NOT write a new state-topic record; the existing in-flight batch is preserved (in-flight redelivery branch)."
     )
     tool_publishes_second = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "tool.input"]
     assert len(tool_publishes_second) == 2
@@ -1262,9 +1261,7 @@ def test_aggregator_subscription_uses_nack_on_error_policy(agent: object) -> Non
     from faststream import AckPolicy
 
     subs = agent.kafka_subscriptions()  # type: ignore[attr-defined]
-    fanout_returns_subs = [
-        s for s in subs if "test_agent.fanout-returns" in s.topics
-    ]
+    fanout_returns_subs = [s for s in subs if "test_agent.fanout-returns" in s.topics]
     assert len(fanout_returns_subs) == 1
     sub = fanout_returns_subs[0]
     assert sub.ack_policy is AckPolicy.NACK_ON_ERROR, (
@@ -1665,6 +1662,5 @@ async def test_user_merge_mutating_base_state_does_not_corrupt_cache(
     # The cached _InFlightBatch.base_state must be UNCHANGED — the framework
     # owns the cache and a user merge should never reach into it.
     assert len(seeded_state.message_history) == 1, (
-        "User merge mutated framework-cached base_state. The _batch_view must "
-        "deep-copy base_state so user merge can't corrupt the cache."
+        "User merge mutated framework-cached base_state. The _batch_view must deep-copy base_state so user merge can't corrupt the cache."
     )

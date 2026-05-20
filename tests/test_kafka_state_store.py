@@ -522,8 +522,7 @@ async def test_late_return_after_redispatched_batch_is_not_dropped() -> None:
     # silently dropped on agent.py:486 and the agent hangs.
     key = ("c1", "f1")
     assert not store.was_recently_completed(key), (
-        "key was tombstoned then re-put during rehydration; the live batch "
-        "must be reachable — recently_completed must NOT shadow it"
+        "key was tombstoned then re-put during rehydration; the live batch must be reachable — recently_completed must NOT shadow it"
     )
     assert store.get(key) is not None
 
