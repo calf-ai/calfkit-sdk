@@ -404,6 +404,41 @@ async def test_worker_raises_on_low_rehydration_timeout() -> None:
     assert exc_info.value.offending_value == 30_000
 
 
+async def test_worker_does_not_connect_broker_when_rehydration_timeout_check_raises() -> None:
+    """Issue 7 regression: ``assert_rehydration_timeout_ok`` must run
+    BEFORE ``broker.connect()``. If the assertion raises after connect,
+    the broker is left connected and never closed — aiokafka emits
+    'unclosed' warnings on process exit. Pin the ordering so a future
+    refactor can't silently regress it."""
+    from calfkit._vendor.pydantic_ai.models.function import FunctionModel
+    from calfkit.exceptions import DurabilityConfigError
+    from calfkit.nodes.agent import BaseAgentNodeDef
+
+    kafka_config = KafkaConfig(
+        bootstrap_servers="broker:9092",
+        client_kwargs={"rebalance_timeout_ms": 30_000},
+    )
+    client = _client_with_kafka_config(kafka_config=kafka_config)
+
+    agent = BaseAgentNodeDef(
+        node_id="planner",
+        subscribe_topics="planner.input",
+        model_client=FunctionModel(lambda messages, info: None),  # type: ignore[arg-type]
+    )
+    agent.aggregator.setup = AsyncMock()  # type: ignore[method-assign]
+
+    worker = Worker(client, nodes=[agent])
+    with pytest.raises(DurabilityConfigError):
+        await worker._prepare_aggregators()
+
+    # Critical assertion: broker.connect() must NOT have been called
+    # because the validation check raised first. If a future refactor
+    # reorders this, the broker would be leaked. ``_connection`` is
+    # typed ``KafkaBroker`` but is a ``MagicMock`` in this test helper,
+    # so ``.connect`` is a mock with ``assert_not_called``.
+    client._connection.connect.assert_not_called()  # type: ignore[attr-defined]
+
+
 async def test_worker_no_raise_when_no_aggregator() -> None:
     """Non-aggregator workers don't pay the rehydration cost, so the
     floor doesn't apply — raising on them would be a false alarm. The

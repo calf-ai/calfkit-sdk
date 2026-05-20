@@ -8,6 +8,30 @@ etc.).
 
 from typing import Any
 
+# Maximum length for an ``offending_value`` repr embedded in a
+# :class:`DurabilityConfigError` message. ``KafkaConfig.ssl_context`` is
+# typed ``Any | None`` and an ``ssl.SSLContext`` repr can drag in
+# multi-kilobyte certificate dumps; without truncation a single bad
+# config could log 5KB+ per raise and overwhelm log aggregation. 256
+# chars is generous for typical scalars (numbers, short strings) but
+# bounded enough to keep noisy reprs from dominating the log line.
+_OFFENDING_VALUE_REPR_MAX_LEN: int = 256
+
+
+def _safe_repr(value: Any, max_len: int = _OFFENDING_VALUE_REPR_MAX_LEN) -> str:
+    """Return ``repr(value)`` truncated to ``max_len`` characters.
+
+    Used at :class:`DurabilityConfigError` raise sites to bound the size
+    of the embedded offending-value repr. Truncation keeps the trailing
+    ``"..."`` sentinel inside the budget so the total length is
+    ``<= max_len``.
+    """
+    text = repr(value)
+    if len(text) <= max_len:
+        return text
+    # Reserve 3 chars for the ellipsis sentinel so the total stays bounded.
+    return text[: max_len - 3] + "..."
+
 
 class CalfkitError(Exception):
     """Base class for all exceptions raised by the calfkit SDK."""

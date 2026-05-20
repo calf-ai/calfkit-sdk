@@ -186,6 +186,51 @@ def test_fanout_state_deserialises_round_trip() -> None:
     assert rebuilt.agent_topic == "agent.in"
 
 
+def test_fanout_state_model_copy_deep_works() -> None:
+    """Pydantic's default ``model_copy(deep=True)`` cannot survive the
+    :class:`MappingProxyType` on :attr:`FanOutState.received` (raises
+    ``TypeError: cannot ... 'mappingproxy' object``). The custom
+    ``__deepcopy__`` override unwraps, deep-copies, and reconstructs so the
+    rebalance/restart-safety paths that lean on ``model_copy(deep=True)``
+    don't crash.
+
+    The clone must still satisfy the immutability contract — the validator
+    re-fires during construction of the new instance and re-wraps
+    ``received`` in :class:`MappingProxyType`. Otherwise a defensive
+    deepcopy would silently downgrade the safety guarantee.
+    """
+    state = _make_fanout_state(received={"t1": "r1"})
+    cloned = state.model_copy(deep=True)
+
+    assert cloned is not state
+    assert cloned.received is not state.received
+    assert cloned.received == {"t1": "r1"}
+    assert isinstance(cloned.received, MappingProxyType)
+    with pytest.raises(TypeError):
+        cloned.received["new_key"] = "tampered"  # type: ignore[index]
+
+
+def test_fanout_state_deepcopy_via_copy_module() -> None:
+    """``copy.deepcopy(fs)`` is a natural defensive idiom anywhere a
+    caller wants to snapshot a wire record without sharing references
+    back to the cache. The override must yield a fresh instance whose
+    ``received`` is a fresh, still-immutable mapping.
+    """
+    state = _make_fanout_state(received={"t1": ["nested-list"]})  # nested mutable
+    cloned = copy.deepcopy(state)
+
+    assert cloned is not state
+    assert cloned.received is not state.received
+    assert isinstance(cloned.received, MappingProxyType)
+    with pytest.raises(TypeError):
+        cloned.received["t2"] = "tampered"  # type: ignore[index]
+
+    # Nested values were deep-copied (not shared) — mutating the clone's
+    # nested list does NOT mutate the original's.
+    cloned.received["t1"].append("extra")  # type: ignore[attr-defined]
+    assert state.received["t1"] == ["nested-list"]
+
+
 def test_fanout_state_received_is_immutable_after_construction() -> None:
     """The ``received`` mapping on a :class:`FanOutState` must be wrapped
     in :class:`MappingProxyType` so the durable wire-format record cannot

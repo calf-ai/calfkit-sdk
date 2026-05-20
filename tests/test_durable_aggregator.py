@@ -2232,6 +2232,10 @@ async def test_fallback_to_default_does_not_preserve_partial_user_mutation(
     agent, broker = primed_state_store
     state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
     agent.aggregator.merge_error_policy = MergeErrorPolicy.FALLBACK_TO_DEFAULT  # type: ignore[attr-defined]
+    assert agent.aggregator.merge_error_policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT, (
+        "regression guard: this test specifically exercises the FALLBACK_TO_DEFAULT path; "
+        "if the default policy changes again, this assertion catches drift."
+    )
 
     # Carry a sentinel marker in the cached base_state's message_history so
     # an "as-built" state is distinguishable from a polluted one in the

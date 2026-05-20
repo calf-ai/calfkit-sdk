@@ -275,6 +275,83 @@ async def test_inmemory_fallback_to_default_when_default_also_raises_propagates_
     assert excinfo.value.fan_out_id == "f1"
 
 
+class _PollutingMergeAggregator(FanOutAggregator):
+    """User merge that partially mutates ``view.base_state`` then raises.
+
+    Exact analogue of the buggy custom merge from production's
+    ``test_fallback_to_default_does_not_preserve_partial_user_mutation``:
+    appends a sentinel message to the shared view, then raises mid-merge.
+    The FALLBACK_TO_DEFAULT path MUST NOT carry the partial mutation
+    forward — it must rebuild a fresh view from the durable batch's
+    untouched ``base_state`` before invoking the default merge.
+    """
+
+    async def merge(self, batch: AggregatorBatch) -> AggregatedReturn:
+        from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
+
+        batch.base_state.message_history.append(ModelRequest(parts=[UserPromptPart(content="POLLUTION_FROM_FAILED_USER_MERGE")]))
+        raise RuntimeError("user merge boom mid-mutation")
+
+
+async def test_inmemory_fallback_does_not_preserve_partial_user_mutation() -> None:
+    """Harness analogue of production's
+    ``test_fallback_to_default_does_not_preserve_partial_user_mutation``.
+
+    When the user merge partially mutates ``view.base_state`` (e.g.,
+    appends to ``message_history``) and then raises, the
+    ``FALLBACK_TO_DEFAULT`` path must rebuild a fresh view from the
+    durable ``_InFlightBatch.base_state`` before invoking the default
+    merge — otherwise the default merge's own ``model_copy(deep=True)``
+    faithfully clones the polluted state and the returned
+    ``AggregatedReturn`` secretly carries the failed user's partial work.
+
+    This test exists because a previous harness implementation reused the
+    same (potentially polluted) view across the FALLBACK path, silently
+    letting a code change that broke in production pass tests here.
+    """
+    from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    base = _PollutingMergeAggregator(merge_error_policy=MergeErrorPolicy.FALLBACK_TO_DEFAULT)
+    agg = InMemoryAggregator.wrap(
+        base,
+        persist_to_disk=False,
+        merge_error_policy=MergeErrorPolicy.FALLBACK_TO_DEFAULT,
+    )
+    assert agg.merge_error_policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT, (
+        "regression guard: this test specifically exercises the FALLBACK_TO_DEFAULT path; "
+        "if the default policy changes again, this assertion catches drift."
+    )
+
+    # Seed the batch with a known-clean sentinel marker so the published
+    # state can be checked for both the absence of pollution AND the
+    # presence of the original — proving the fallback DID produce a real
+    # merge (not just an empty state).
+    sentinel_marker = ModelRequest(parts=[UserPromptPart(content="ORIGINAL_BASE_STATE_MARKER")])
+    seeded_state = State()
+    seeded_state.message_history.append(sentinel_marker)
+    await agg.initialize_batch(
+        correlation_id="c-mutfb",
+        fan_out_id="f-mutfb",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=seeded_state,
+    )
+
+    result = await agg.submit_return("c-mutfb", "f-mutfb", "t1", "value")
+    assert result is not None, "FALLBACK_TO_DEFAULT must produce a result"
+    assert result.degraded is True, "FALLBACK_TO_DEFAULT path must mark the result as degraded so the published envelope carries HDR_DEGRADED_MERGE."
+
+    published_history = result.state.message_history
+    polluted_messages = [
+        m for m in published_history if any("POLLUTION_FROM_FAILED_USER_MERGE" in getattr(p, "content", "") for p in getattr(m, "parts", []))
+    ]
+    assert polluted_messages == [], (
+        f"FALLBACK_TO_DEFAULT leaked a failed user merge's partial mutation into the result. published message_history: {published_history!r}"
+    )
+
+    sentinels = [m for m in published_history if any("ORIGINAL_BASE_STATE_MARKER" in getattr(p, "content", "") for p in getattr(m, "parts", []))]
+    assert len(sentinels) == 1, "fallback must produce a real merge over the original base_state"
+
+
 async def test_inmemory_aggregator_merge_error_includes_correlation_and_fanout_id() -> None:
     """ABORT-branch ``AggregatorMergeError`` must carry the structured
     batch identity (``correlation_id``, ``fan_out_id``) so test assertions

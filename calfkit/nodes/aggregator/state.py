@@ -113,11 +113,19 @@ class FanOutState(BaseModel):
     expected_tool_call_ids: frozenset[str]
     """The set of tool_call_ids the agent dispatched for this batch."""
 
-    received: dict[str, Any] = Field(default_factory=dict)
+    received: Mapping[str, Any] = Field(default_factory=dict)
     """Map of tool_call_id → tool result, accumulated as tool returns arrive.
 
+    Annotated as :class:`collections.abc.Mapping` (covariant, read-only)
+    rather than ``dict`` because the runtime value after construction is
+    a :class:`types.MappingProxyType` — annotating as ``dict`` would
+    silently lie to mypy and let access-site mutations like
+    ``state.received[k] = v`` pass type-checking even though they fail at
+    runtime. The ``Mapping`` annotation makes the read-only contract
+    statically enforceable.
+
     Pydantic's ``frozen=True`` prevents reassigning the field to a
-    different dict. After model construction (and after deserialisation
+    different mapping. After model construction (and after deserialisation
     via ``model_validate`` / ``model_validate_json``) the inner mapping
     is wrapped in :class:`types.MappingProxyType` by the
     ``_wrap_received_immutable`` validator below, so it cannot be mutated
@@ -160,6 +168,37 @@ class FanOutState(BaseModel):
 
     tracestate: str | None = None
     """W3C OTel ``tracestate`` header captured at dispatch time."""
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> FanOutState:
+        # MappingProxyType isn't supported by Pydantic's default deepcopy
+        # path (raises ``TypeError: cannot ... 'mappingproxy' object``).
+        # Without this override ``copy.deepcopy(fs)`` AND ``fs.model_copy
+        # (deep=True)`` both crash — the latter is the production rebalance /
+        # restart-safety path. Mirrors :meth:`AggregatorBatch.__deepcopy__`:
+        # unwrap the proxy, deep-copy each field, construct a fresh
+        # ``FanOutState``. The ``@model_validator(mode="after")`` re-wraps
+        # ``received`` on the new instance so immutability is preserved.
+        #
+        # ``memo`` defaults to ``None`` because Pydantic's
+        # ``BaseModel.model_copy(deep=True)`` invokes ``__deepcopy__()``
+        # with no argument; the stdlib ``copy.deepcopy()`` always passes a
+        # memo dict. Either path must work.
+        if memo is None:
+            memo = {}
+        return FanOutState(
+            schema_version=self.schema_version,
+            correlation_id=self.correlation_id,
+            fan_out_id=self.fan_out_id,
+            expected_tool_call_ids=self.expected_tool_call_ids,
+            received=deepcopy(dict(self.received), memo),
+            base_state=deepcopy(self.base_state, memo),
+            started_at_ms=self.started_at_ms,
+            last_updated_ms=self.last_updated_ms,
+            agent_topic=self.agent_topic,
+            degraded=self.degraded,
+            traceparent=self.traceparent,
+            tracestate=self.tracestate,
+        )
 
     @model_validator(mode="after")
     def _wrap_received_immutable(self) -> FanOutState:

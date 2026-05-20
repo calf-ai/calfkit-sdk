@@ -13,7 +13,7 @@ from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.kafka_config import _PRODUCER_ONLY_KWARGS, KafkaConfig
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
-from calfkit.exceptions import DurabilityConfigError
+from calfkit.exceptions import DurabilityConfigError, _safe_repr
 from calfkit.models import State
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
@@ -71,7 +71,7 @@ def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
     # replicas" setting; both are durability-safe.
     if acks is not None and acks != "all" and acks != -1:
         raise DurabilityConfigError(
-            f"broker_kwargs['acks']={acks!r} is not durable enough for the "
+            f"broker_kwargs['acks']={_safe_repr(acks)} is not durable enough for the "
             "fan-out aggregator. State-topic writes must survive a single-broker "
             "outage between leader ack and replica catch-up, which requires "
             "acks='all' (or the synonym acks=-1). Remove the acks override or "
@@ -82,6 +82,10 @@ def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
         )
     if acks is None:
         broker_kwargs["acks"] = "all"
+        # INFO so the audit-trail surfaces by default; suppress in
+        # high-volume scenarios (test loops, etc.) via
+        # ``logging.getLogger("calfkit.client.base").setLevel(logging.WARNING)``.
+        # See ``Client.connect`` docstring "Logging" section.
         logger.info(
             "Client.connect: injected broker_kwarg acks=%r for durable aggregator support; pass explicitly to suppress this message.",
             "all",
@@ -101,6 +105,8 @@ def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
         )
     if enable_idempotence is None:
         broker_kwargs["enable_idempotence"] = True
+        # Same suppression mechanism as the acks injection above; see
+        # ``Client.connect`` docstring "Logging" section for details.
         logger.info(
             "Client.connect: injected broker_kwarg enable_idempotence=%r for durable aggregator support; pass explicitly to suppress this message.",
             True,
@@ -233,12 +239,32 @@ class BaseClient:
                 :class:`~calfkit.client.kafka_config.KafkaConfig` construction
                 if ``broker_kwargs`` carries a typed-field name overlap (see
                 :class:`KafkaConfig` for the list of typed fields).
-                :meth:`~calfkit.client.kafka_config.KafkaConfig.assert_rehydration_timeout_ok`
-                raises this from :class:`~calfkit.worker.worker.Worker`
-                startup when ``rebalance_timeout_ms`` is below the
-                recommended floor and an aggregator is wired.
             ValueError: when ``broker_kwargs`` contains ``partitioner``
                 (the SDK installs its own).
+
+        Note:
+            The rehydration-timeout floor check
+            (:meth:`~calfkit.client.kafka_config.KafkaConfig.assert_rehydration_timeout_ok`)
+            does NOT fire from ``Client.connect`` — it runs later, in
+            :meth:`~calfkit.worker.worker.Worker._prepare_aggregators`
+            at worker startup. A caller wrapping ``Client.connect`` in
+            ``try/except DurabilityConfigError`` will NOT catch a
+            ``rebalance_timeout_ms`` floor violation; wrap the
+            ``Worker.run`` (or ``Worker._prepare_aggregators``) call to
+            handle that case.
+
+        Logging:
+            Emits INFO log lines on the ``calfkit.client.base`` logger
+            for each injected durability default (``acks`` and
+            ``enable_idempotence``). To suppress these in test loops or
+            other high-volume scenarios, raise the logger's effective
+            level::
+
+                logging.getLogger("calfkit.client.base").setLevel(logging.WARNING)
+
+            Per-call suppression flags are intentionally not exposed:
+            this is a logging concern best handled with the stdlib
+            ``logging`` configuration, not by widening the public API.
         """
         if server_urls is None:
             server_urls = os.getenv("CALF_HOST_URL") or "localhost"

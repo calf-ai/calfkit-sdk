@@ -1317,6 +1317,35 @@ The user's `merge()` can raise. The policy is `merge_error_policy` on the
   is therefore discarded before the default merge runs. The framework's
   default merge applies `batch.received` to a clean base state every time.
 
+### 9.5 Known limitations
+
+- **Duplicate LLM inference cost under at-least-once redelivery.** When
+  the broker redelivers an inbound to an agent (e.g., during
+  `NACK_ON_ERROR` or a consumer-group rebalance mid-handler), the agent's
+  `run()` re-executes, including the LLM call inside it. The framework
+  deduplicates downstream *effects* of that re-execution — tool dispatches
+  via the deterministic `fan_out_id` (§7.5) and completion publishes via
+  the tombstone + `_recently_completed` window (§9.3) — but it does NOT
+  deduplicate the LLM call itself. For long-context agents this can
+  double inference cost during in-flight redelivery windows.
+
+  Mitigations available today:
+
+  - `acks="all"` + `enable_idempotence=True` are enforced at
+    `Client.connect` (`calfkit/client/base.py::BaseClient.connect` raises
+    `DurabilityConfigError` on unsafe overrides), which minimises the
+    producer-side redelivery surface.
+  - `was_recently_completed` (`§9.3`) short-circuits agent re-entry for
+    already-completed batches *before* any LLM work happens — once the
+    aggregator has published its merged envelope and tombstoned the
+    state record, redelivery of the agent inbound bypasses `run()`.
+  - Keep handler-side time-to-first-side-effect minimal: shorter handlers
+    shrink the window in which a rebalance can re-enter `run()`.
+
+  Closing this gap requires a transactional producer wrapping
+  read-process-write across the agent's inbound consume, the LLM call,
+  and any downstream publishes — tracked as future work in §17.2.
+
 ---
 
 ## 10. State store internals
@@ -2061,11 +2090,32 @@ infrastructure is in place.
 
 ### 17.2 Exactly-once via Kafka transactions
 
-The §9 analysis shows a small window of "stale state lingers in-cache for a completed batch" or "lost completion if tombstone+publish ordering reverses." Kafka transactions (`transactional.id`) would close this gap atomically.
+The §9 analysis shows a small window of "stale state lingers in-cache
+for a completed batch" or "lost completion if tombstone+publish ordering
+reverses." Kafka transactions (`transactional.id`) would close this gap
+atomically. The same machinery would also close the duplicate-LLM-cost
+limitation in §9.5 by making the agent's read-process-write (consume
+inbound → run LLM → publish downstream) a single atomic transaction
+that either commits as a whole or is rolled back on redelivery —
+eliminating the window in which `run()` (and its LLM call) can execute
+twice for the same inbound.
 
-Cost: meaningful complexity (transactional producer, isolation level on consumers, write order constraints). Benefit: eliminates the stale-state observability artifact.
+Concretely, this means: adopt aiokafka's transactional producer +
+read-process-write transaction wrapping for both the agent handler and
+`_aggregator_handler`, set `isolation_level=read_committed` on
+consumers, and serialise tombstone-and-publish through the same
+transaction so the §9.1 last-two-rows redelivery cases collapse to a
+single atomic commit.
 
-**v1 recommendation:** skip transactions. Live with the small operational artifact. Document loudly. Revisit in v2 if real users hit it.
+Cost: meaningful complexity (transactional producer, isolation level on
+consumers, write-order constraints, investigating aiokafka transaction
+support maturity and the FastStream integration surface). Benefit:
+eliminates the stale-state observability artifact AND the duplicate
+LLM-inference cost.
+
+**v1 recommendation:** skip transactions. Live with the small
+operational artifact and the duplicate-LLM-cost window (§9.5).
+Document loudly. Revisit in v2 if real users hit either symptom.
 
 ### 17.3 DLQ for late arrivals
 
@@ -2192,7 +2242,7 @@ Key sites in `calfkit/`:
 - ``nodes/agent.py::BaseAgentNodeDef._ensure_aggregator_ready`` — strict validation that ``setup()`` has run; raises ``AggregatorStateStoreError`` pointing at ``calfkit.nodes.aggregator.testing.setup_for_tests`` when the runtime is missing. No lazy synthesis.
 - `worker/worker.py::Worker._prepare_aggregators` and `Worker.run` — startup wiring.
 - `client/base.py::BaseClient.connect` — installs `FanOutAggregatorPartitioner` broker-wide, captures `KafkaConfig`, **and enforces producer durability**. `Client.connect` injects `acks="all"` and `enable_idempotence=True` into the broker kwargs when the user did not set them (logging the injection at INFO so silent defaulting is observable); if the user explicitly set unsafe values (`acks` other than `"all"`/`-1`, or `enable_idempotence=False`) it raises `DurabilityConfigError` (in `calfkit/exceptions.py`). The durable aggregator's correctness assumes every state-store publish lands on a quorum and is not silently de-duplicated by aiokafka's idempotent producer path; previously these settings were undefended and a misconfigured user could lose committed state writes on broker failover. `Worker._prepare_aggregators` additionally calls `kafka_config.assert_rehydration_timeout_ok()` once when at least one aggregator is wired, which **raises** `DurabilityConfigError` if `rebalance_timeout_ms` is below `REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS = 300_000` (5 min) — rehydration of large state topics can exceed aiokafka's 30s default and trigger a rebalance storm, so the worker fails fast at startup rather than risking the storm in production.
-- `client/kafka_config.py::KafkaConfig` — typed snapshot of bootstrap servers, `security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`, plus `client_kwargs` as the escape hatch for any aiokafka kwarg not promoted to a typed field. Provides `to_consumer_kwargs()` (merged kwarg dict for `AIOKafkaConsumer(...)`, with typed fields winning on collision, None values excluded, and producer-only kwargs filtered) and `assert_rehydration_timeout_ok()` (raises `DurabilityConfigError` if `rebalance_timeout_ms` below `REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS = 300_000`). The constructor raises `DurabilityConfigError` on collisions between typed fields and `client_kwargs`; `client_kwargs` is itself wrapped in `MappingProxyType` so the captured dict cannot be mutated post-construction.
+- `client/kafka_config.py::KafkaConfig` — typed snapshot of bootstrap servers, `security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`, plus `client_kwargs` as the escape hatch for any aiokafka kwarg not promoted to a typed field. Provides `to_consumer_kwargs()` (merged kwarg dict for `AIOKafkaConsumer(...)`, None values excluded, and producer-only kwargs filtered) and `assert_rehydration_timeout_ok()` (raises `DurabilityConfigError` if `rebalance_timeout_ms` below `REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS = 300_000`). The constructor raises `DurabilityConfigError` on collisions between typed fields and `client_kwargs`; `client_kwargs` is itself wrapped in `MappingProxyType` so the captured dict cannot be mutated post-construction.
 - ``_protocol.py::HDR_FANOUT_ID``, ``HDR_FRAME_ID``, ``HDR_DEGRADED_MERGE`` — added headers.
 - ``nodes/aggregator/testing.py::InMemoryAggregator`` — in-memory harness; mirrors production ``_batch_view`` (accepts ``base_state_copy=`` so the harness shares the single-deep-copy-per-handler contract) and ``_run_merge`` (try/except around the ``FALLBACK_TO_DEFAULT`` default-merge fallback). ``persist_to_disk=True`` by default.
 - ``nodes/aggregator/testing.py::RestartSimulatedError`` — raised by harness ``wait_for_completion`` / ``wait_for_partial_state`` waiters when ``simulate_restart()`` fires mid-await. Defined in ``testing.py`` (not ``errors.py``) so production code catching ``AggregatorError`` cannot accidentally swallow it.

@@ -32,7 +32,7 @@ from calfkit.nodes.aggregator import FanOutAggregator
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
 from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
 from calfkit.nodes.aggregator.errors import AggregatorMergeError, AggregatorStateStoreError
-from calfkit.nodes.aggregator.state import AggregatedReturn
+from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
 from calfkit.nodes.base import BaseNodeDef, GateFunction, _KafkaSubscription
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -741,7 +741,7 @@ class BaseAgentNodeDef(
 
     async def _handle_merge_error(
         self,
-        view: Any,
+        view: AggregatorBatch,
         key: tuple[str, str],
         exc: Exception,
         batch: _InFlightBatch,

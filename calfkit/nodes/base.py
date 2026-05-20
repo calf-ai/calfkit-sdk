@@ -236,15 +236,28 @@ class BaseNodeDef(BaseNodeSchema):
 
         Always stamps :data:`HDR_EMITTER` and :data:`HDR_EMITTER_KIND`.
         When ``forward_fanout=True``, also forwards :data:`HDR_FANOUT_ID`
-        and :data:`HDR_FRAME_ID` from ``inbound_headers`` (if present) —
-        used by the ``ReturnCall`` publish path so a tool's return carries
-        the same fan-out identity as the inbound ``Call`` from the agent.
+        and :data:`HDR_FRAME_ID` from ``inbound_headers`` (if present and
+        non-empty) — used by the ``ReturnCall`` publish path so a tool's
+        return carries the same fan-out identity as the inbound ``Call``
+        from the agent.
+
+        Empty-string values are dropped (not forwarded). Both headers are
+        routing/correlation identifiers — an empty value cannot identify a
+        batch, so propagating it would only push malformed bytes onto the
+        wire. The receiver-side validation in
+        :meth:`~calfkit.nodes.agent.Agent._aggregator_handler` rejects empty
+        :data:`HDR_FANOUT_ID` on inbound; this guard is the matching
+        outbound-side hygiene check that keeps the wire clean in the first
+        place.
         """
         headers = self._emitter_headers()
         if forward_fanout and inbound_headers is not None:
             for fwd in (HDR_FANOUT_ID, HDR_FRAME_ID):
                 value = decode_header_str(inbound_headers.get(fwd))
-                if value is not None:
+                # ``if value`` rejects both ``None`` (header absent or
+                # non-string/bytes) and ``""`` (header present but blank,
+                # e.g. ``b""``). See docstring above for rationale.
+                if value:
                     headers[fwd] = value
         return headers
 

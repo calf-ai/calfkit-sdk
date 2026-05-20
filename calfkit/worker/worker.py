@@ -38,10 +38,16 @@ class Worker:
         Requires the broker to be connected (so ``broker.config.admin_client``
         is available). Called from :meth:`run` before
         :meth:`register_handlers`.
+
+        Order of operations matters here: all configuration validation
+        (kafka_config presence, rehydration timeout floor) runs BEFORE
+        ``broker.connect()`` so that a validation failure does not leak
+        a connected (and never-closed) broker — aiokafka emits
+        "unclosed" warnings on Python exit when that happens.
+        ``assert_rehydration_timeout_ok`` reads only KafkaConfig
+        attributes; it has no dependency on broker state.
         """
         broker = self._client._connection
-        # Ensure broker is connected so admin_client is available.
-        await broker.connect()
 
         # Aggregators need the broker's bootstrap servers + security kwargs
         # to construct their transient AIOKafkaConsumer for state-topic
@@ -67,8 +73,17 @@ class Worker:
         # at worker startup is correct because the alternative (a
         # rebalance storm on first reassignment) is operationally severe
         # and requires a restart to recover anyway.
+        #
+        # MUST run before ``broker.connect()`` (Issue 7): if the
+        # assertion raises after connect, the broker is left connected
+        # and never closed, producing aiokafka "unclosed" warnings on
+        # process exit.
         if has_agent_node and kafka_config is not None:
             kafka_config.assert_rehydration_timeout_ok()
+
+        # Connect only after validation passes so a config failure
+        # doesn't leak broker resources.
+        await broker.connect()
 
         for node in self._nodes:
             if isinstance(node, BaseAgentNodeDef):

@@ -12,11 +12,12 @@ setup -> _KafkaStateStore.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from calfkit.exceptions import DurabilityConfigError
+from calfkit.exceptions import DurabilityConfigError, _safe_repr
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,8 @@ logger = logging.getLogger(__name__)
 REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS: int = 300_000
 
 
-# aiokafka kwargs accepted by ``AIOKafkaProducer`` but rejected by
-# ``AIOKafkaConsumer.__init__`` with ``TypeError: __init__() got an
+# aiokafka kwargs accepted by ``AIOKafkaProducer.__init__`` but rejected
+# by ``AIOKafkaConsumer.__init__`` with ``TypeError: __init__() got an
 # unexpected keyword argument ...``.
 #
 # WHY this matters: ``KafkaConfig`` is the *consumer-side* snapshot used
@@ -54,24 +55,25 @@ REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS: int = 300_000
 # or a regression in ``client.base._build_kafka_config``) the
 # rehydration consumer construction would ``TypeError`` on first deploy.
 #
-# Source: cross-referenced against the ``AIOKafkaProducer.__init__``
-# signature in aiokafka (see https://aiokafka.readthedocs.io/en/stable/
-# api.html#producer-class). Keep this list conservative — adding a
-# consumer-accepted kwarg here would silently strip it from the
-# rehydration consumer config.
+# Derived empirically from
+# ``set(AIOKafkaProducer.__init__ kwargs) - set(AIOKafkaConsumer.__init__ kwargs)``
+# against aiokafka 0.13.0. ``partitioner`` is also producer-only but is
+# rejected upstream in ``Client.connect`` so it is omitted here.
+# Update this list (and the pinned version) when bumping aiokafka.
+# A meta-test in ``tests/test_kafka_config.py`` introspects the live
+# signatures and will fail if this list ever drifts from reality.
 _PRODUCER_ONLY_KWARGS: frozenset[str] = frozenset(
     {
         "acks",
-        "enable_idempotence",
-        "linger_ms",
         "compression_type",
-        "transactional_id",
-        "max_request_size",
-        "delivery_timeout_ms",
+        "enable_idempotence",
+        "key_serializer",
+        "linger_ms",
         "max_batch_size",
-        "buffer_memory",
-        "send_backoff_ms",
+        "max_request_size",
         "transaction_timeout_ms",
+        "transactional_id",
+        "value_serializer",
     }
 )
 
@@ -97,10 +99,14 @@ class KafkaConfig:
     The common Kafka client options are surfaced as typed fields for
     discoverability and static-type checking. ``client_kwargs`` is the
     escape hatch for kwargs not covered by typed fields (e.g.
-    ``rebalance_timeout_ms``, ``session_timeout_ms``). Keys that overlap
-    typed-field names raise :class:`DurabilityConfigError` at
-    construction — there is no precedence rule; collisions are
-    misconfigurations.
+    ``rebalance_timeout_ms``, ``session_timeout_ms``). A key that
+    overlaps a typed-field name AND is also set as the typed field with
+    a DIFFERENT value raises :class:`DurabilityConfigError` at
+    construction — there is no precedence rule for conflicting values.
+    If the typed field is unset (``None``), the same key in
+    ``client_kwargs`` is treated as escape-hatch usage; if both are set
+    and equal, the duplicate is silently stripped (see
+    "``dataclasses.replace`` support" below).
 
     ``client_kwargs`` is defensively copied and wrapped in
     :class:`types.MappingProxyType` at construction time so the captured
@@ -111,6 +117,17 @@ class KafkaConfig:
     transient :class:`AIOKafkaConsumer` the aggregator's state store
     spins up during rehydration. Without this snapshot, rehydration
     cannot inherit the broker's security / SASL / SSL settings.
+
+    ``dataclasses.replace`` support
+    -------------------------------
+    Because ``client_kwargs`` from the original instance is carried
+    forward by ``dataclasses.replace`` (the user can't simultaneously
+    rewrite it through the replace kwargs interface), the typed-field /
+    ``client_kwargs`` collision check is relaxed to allow a no-op
+    collision: when the new typed-field value equals the value already
+    present in ``client_kwargs``, the duplicate is silently stripped
+    from ``client_kwargs`` instead of raising. Different values still
+    raise — those are genuine misconfigurations.
     """
 
     bootstrap_servers: str | list[str]
@@ -126,32 +143,69 @@ class KafkaConfig:
     # overlap typed-field names raise ``DurabilityConfigError`` at
     # construction. Defensively copied + wrapped in MappingProxyType
     # in ``__post_init__`` so the snapshot is immutable after build.
-    client_kwargs: dict[str, Any] = field(default_factory=dict)
+    #
+    # Annotated as ``Mapping`` (read-only, covariant) rather than
+    # ``dict`` because the runtime value after ``__post_init__`` is a
+    # ``MappingProxyType``; the dict annotation lied to mypy and forced
+    # ``# type: ignore[index]`` at every test-side mutation attempt,
+    # masking the very real-world bugs the runtime guard exists to
+    # catch. ``default_factory=dict`` still works — ``Mapping`` is the
+    # supertype of ``dict``.
+    client_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Issue 12: typed field / client_kwargs collisions are
-        # misconfigurations, not silently-resolved precedence rules.
-        # Detect at construction so the failure surfaces at
-        # ``Client.connect`` (the user's call site) rather than at
-        # rehydration time (operationally far away).
+        # Issue 12 + Issue 11: typed-field / client_kwargs collisions
+        # are misconfigurations when the values disagree. There are
+        # three cases:
+        #
+        #   1. typed_value is None, kwargs has it set: the caller used
+        #      the escape hatch (client_kwargs) for a kwarg that also
+        #      has a typed slot. This is the legacy / pre-typed-field
+        #      shape and must continue to work — otherwise existing
+        #      users break. Keep the kwarg in client_kwargs untouched.
+        #
+        #   2. Both set, values equal: no-op collision. Silently strip
+        #      the duplicate from client_kwargs (Issue 11 carve-out for
+        #      ``dataclasses.replace(cfg, X=value)`` where the original
+        #      cfg's client_kwargs carries the same X value forward).
+        #      Safe because the merged consumer kwargs would be the
+        #      same either way.
+        #
+        #   3. Both set, values DIFFER: real misconfiguration — the
+        #      operator set the same kwarg twice with conflicting
+        #      values. Raise so the failure surfaces at the user's
+        #      call site rather than during rehydration.
+        sanitized: dict[str, Any] = dict(self.client_kwargs)
         for name in _KAFKA_CONFIG_TYPED_FIELDS:
-            if name in self.client_kwargs:
-                raise DurabilityConfigError(
-                    f"KafkaConfig: {name!r} is set both as a typed field "
-                    f"({getattr(self, name)!r}) and in client_kwargs "
-                    f"({self.client_kwargs[name]!r}); remove it from "
-                    "client_kwargs and use the typed field.",
-                    kwarg_name=name,
-                    offending_value=self.client_kwargs[name],
-                    expected_value=getattr(self, name),
-                )
+            if name not in sanitized:
+                continue
+            typed_value = getattr(self, name)
+            kwargs_value = sanitized[name]
+            if typed_value is None:
+                # Case 1: escape-hatch usage. Leave it alone.
+                continue
+            if typed_value == kwargs_value:
+                # Case 2: no-op collision. Safe silent strip — the
+                # merged consumer kwargs are identical either way.
+                del sanitized[name]
+                continue
+            # Case 3: conflicting values — genuine misconfiguration.
+            raise DurabilityConfigError(
+                f"KafkaConfig: {name!r} is set both as a typed field "
+                f"({_safe_repr(typed_value)}) and in client_kwargs "
+                f"({_safe_repr(kwargs_value)}); remove it from "
+                "client_kwargs and use the typed field.",
+                kwarg_name=name,
+                offending_value=kwargs_value,
+                expected_value=typed_value,
+            )
 
         # Issue 17 (KafkaConfig): defensive copy + immutable view so the
         # snapshot cannot be tampered with after construction. The
         # dataclass is frozen, but a plain dict would still expose
         # ``client_kwargs["k"] = v`` mutation. ``object.__setattr__``
         # is needed because ``frozen=True`` blocks normal assignment.
-        object.__setattr__(self, "client_kwargs", MappingProxyType(dict(self.client_kwargs)))
+        object.__setattr__(self, "client_kwargs", MappingProxyType(sanitized))
 
     def to_consumer_kwargs(self) -> dict[str, Any]:
         """Return the merged kwargs dict for ``AIOKafkaConsumer(**kwargs)``.

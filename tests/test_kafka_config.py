@@ -10,6 +10,7 @@ fails on any production cluster with SASL/SSL auth.
 
 from __future__ import annotations
 
+import dataclasses
 from unittest.mock import patch
 
 import pytest
@@ -69,6 +70,9 @@ def test_client_connect_kafka_config_is_independent_of_broker_kwargs() -> None:
     # mutate it raises TypeError. Verify that AND that the captured
     # kwarg made it into KafkaBroker.
     with pytest.raises(TypeError):
+        # mypy now catches this assignment (client_kwargs is annotated
+        # ``Mapping[str, Any]``); the type: ignore is the static signal
+        # that mirrors the runtime ``MappingProxyType`` rejection.
         client.kafka_config.client_kwargs["mutated"] = True  # type: ignore[index]
     broker_kwargs = mock_broker_cls.call_args.kwargs
     assert broker_kwargs.get("request_timeout_ms") == 5000
@@ -211,6 +215,70 @@ def test_to_consumer_kwargs_strips_producer_only_kwargs() -> None:
     assert result["bootstrap_servers"] == "broker:9092"
 
 
+def test_producer_only_kwargs_strips_key_serializer() -> None:
+    """``key_serializer`` is a real ``AIOKafkaProducer`` kwarg that
+    ``AIOKafkaConsumer.__init__`` rejects with ``TypeError``. It MUST be
+    stripped from the consumer-side snapshot. Regression for the round-4
+    denylist that omitted this entry."""
+    config = KafkaConfig(
+        bootstrap_servers="broker:9092",
+        client_kwargs={"key_serializer": lambda x: x},
+    )
+    result = config.to_consumer_kwargs()
+    assert "key_serializer" not in result
+
+
+def test_producer_only_kwargs_strips_value_serializer() -> None:
+    """``value_serializer`` is a real ``AIOKafkaProducer`` kwarg that
+    ``AIOKafkaConsumer.__init__`` rejects with ``TypeError``. Regression
+    for the round-4 denylist that omitted this entry."""
+    config = KafkaConfig(
+        bootstrap_servers="broker:9092",
+        client_kwargs={"value_serializer": lambda x: x},
+    )
+    result = config.to_consumer_kwargs()
+    assert "value_serializer" not in result
+
+
+def test_producer_only_kwargs_list_matches_aiokafka_introspection() -> None:
+    """Meta-test: ``_PRODUCER_ONLY_KWARGS`` must be a subset of the real
+    producer-only kwargs derived from aiokafka introspection. If aiokafka
+    drops one of these (or we drift the list), the rehydration consumer
+    will either reject a legal kwarg or accept an illegal one — both
+    are silent bugs at deploy time. ``partitioner`` is intentionally
+    omitted from the denylist because ``Client.connect`` rejects it
+    upstream.
+
+    Wrapped in try/except so the rest of the suite still runs if
+    aiokafka isn't importable at collection time (shouldn't happen in
+    a healthy env, but defensive)."""
+    try:
+        import inspect
+
+        from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+    except Exception:
+        pytest.skip("aiokafka not importable; cannot run signature introspection")
+
+    from calfkit.client.kafka_config import _PRODUCER_ONLY_KWARGS
+
+    prod_params = set(inspect.signature(AIOKafkaProducer.__init__).parameters.keys())
+    cons_params = set(inspect.signature(AIOKafkaConsumer.__init__).parameters.keys())
+    real_producer_only = prod_params - cons_params
+
+    # The denylist must be a subset of REAL producer-only kwargs: no
+    # phantoms allowed. ``partitioner`` is excluded by design (upstream
+    # rejection in Client.connect), so allow that one omission.
+    drift = _PRODUCER_ONLY_KWARGS - real_producer_only
+    assert drift == set(), f"_PRODUCER_ONLY_KWARGS contains kwargs that aren't actually producer-only in this aiokafka: {drift}"
+
+    # Every real producer-only kwarg should be in the denylist except
+    # the ones we intentionally handle elsewhere (currently:
+    # ``partitioner`` is upstream-rejected in Client.connect).
+    expected_excluded = {"partitioner"}
+    missing = real_producer_only - _PRODUCER_ONLY_KWARGS - expected_excluded
+    assert missing == set(), f"_PRODUCER_ONLY_KWARGS is missing real producer-only kwargs: {missing}"
+
+
 def test_client_kwargs_is_immutable_after_construction() -> None:
     """KafkaConfig wraps client_kwargs in MappingProxyType so the
     snapshot cannot be mutated post-construction. A plain dict would
@@ -290,3 +358,74 @@ def test_assert_rehydration_timeout_ok_silent_above_floor() -> None:
     )
     # No exception expected.
     config.assert_rehydration_timeout_ok()
+
+
+# ----------------------------------------------------------------------
+# DurabilityConfigError repr safety (Issue 10)
+# ----------------------------------------------------------------------
+
+
+def test_durability_config_error_repr_truncated() -> None:
+    """``KafkaConfig.ssl_context`` is typed ``Any | None`` and a real
+    ``ssl.SSLContext`` repr can drag in multi-kilobyte cert dumps. The
+    embedded offending-value repr in the exception message MUST be
+    bounded so a single bad config can't flood log aggregation."""
+    huge_value = "x" * 10_000
+    with pytest.raises(DurabilityConfigError) as exc_info:
+        KafkaConfig(
+            bootstrap_servers="broker:9092",
+            security_protocol="SASL_SSL",
+            client_kwargs={"security_protocol": huge_value},
+        )
+    # The structured attribute still carries the FULL value (for
+    # programmatic access), but the message string repr is truncated.
+    assert exc_info.value.offending_value == huge_value
+    # Bound the str of the exception conservatively: the message
+    # template + two truncated reprs should still come in well under
+    # 1KB for a 10KB input.
+    assert len(str(exc_info.value)) < 1024
+
+
+# ----------------------------------------------------------------------
+# dataclasses.replace support (Issue 11)
+# ----------------------------------------------------------------------
+
+
+def test_kafka_config_dataclasses_replace_typed_field() -> None:
+    """``dataclasses.replace(cfg, security_protocol="X")`` re-runs
+    ``__post_init__`` with the OLD ``client_kwargs`` carried forward.
+    Common upgrade pattern: a caller starts with ``client_kwargs``
+    carrying a now-typed kwarg, then later does ``replace`` to move it
+    into the typed slot. With value equality the duplicate is silently
+    stripped so the operation succeeds."""
+    # NOTE: constructing with security_protocol ONLY in client_kwargs
+    # (typed field unset / None) is legal — the collision only fires
+    # when BOTH are set.
+    cfg = KafkaConfig(
+        bootstrap_servers="broker:9092",
+        client_kwargs={"security_protocol": "SASL_SSL"},
+    )
+    assert cfg.security_protocol is None
+    assert cfg.client_kwargs["security_protocol"] == "SASL_SSL"
+
+    # Now migrate via dataclasses.replace — equal values, so it must
+    # NOT raise. The duplicate is silently stripped from client_kwargs.
+    new_cfg = dataclasses.replace(cfg, security_protocol="SASL_SSL")
+    assert new_cfg.security_protocol == "SASL_SSL"
+    assert "security_protocol" not in new_cfg.client_kwargs
+
+
+def test_kafka_config_dataclasses_replace_value_mismatch_still_raises() -> None:
+    """A real misconfiguration — the typed-field value differs from the
+    client_kwargs value — MUST still raise. The silent-strip carve-out
+    is only safe when both values are equal (no observable behaviour
+    change)."""
+    cfg = KafkaConfig(
+        bootstrap_servers="broker:9092",
+        client_kwargs={"security_protocol": "SASL_SSL"},
+    )
+    with pytest.raises(DurabilityConfigError) as exc_info:
+        dataclasses.replace(cfg, security_protocol="PLAINTEXT")
+    assert exc_info.value.kwarg_name == "security_protocol"
+    assert exc_info.value.offending_value == "SASL_SSL"
+    assert exc_info.value.expected_value == "PLAINTEXT"

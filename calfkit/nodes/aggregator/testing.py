@@ -367,7 +367,7 @@ class InMemoryAggregator(FanOutAggregator):
         await self.on_partial(view, frozenset([tool_call_id]))
 
         if await self.should_complete(view):
-            merged = await self._run_merge(view, key)
+            merged = await self._run_merge(view, key, batch)
             self._store.tombstone(key)
             self._persist_tombstone(key)
             if key in self._completion_events:
@@ -382,8 +382,24 @@ class InMemoryAggregator(FanOutAggregator):
         self,
         view: AggregatorBatch,
         key: tuple[str, str],
+        batch: _InFlightBatch,
     ) -> AggregatedReturn:
-        """Invoke :meth:`merge` honouring the configured :class:`MergeErrorPolicy`."""
+        """Invoke :meth:`merge` honouring the configured :class:`MergeErrorPolicy`.
+
+        Mirrors production :meth:`BaseAgentNodeDef._handle_merge_error`. The
+        ``batch`` argument is the durable, frozen :class:`_InFlightBatch`
+        from the in-memory store — the source of truth for the un-mutated
+        ``base_state``. The ``FALLBACK_TO_DEFAULT`` branch uses it to
+        rebuild a fresh view before invoking the framework's default merge,
+        because the failed user merge MAY have partially mutated
+        ``view.base_state`` (e.g., appended to ``message_history``) before
+        raising; reusing the polluted view would let the default merge's
+        own ``model_copy(deep=True)`` faithfully clone the partial work
+        into the published "fallback" result. The production handler does
+        the same rebuild for the same reason — keeping the harness in lock
+        step with production avoids test drift where a regression breaks
+        only in production.
+        """
         try:
             return await self.merge(view)
         except Exception as exc:
@@ -410,6 +426,15 @@ class InMemoryAggregator(FanOutAggregator):
                     key[0][:8],
                     key,
                 )
+                # Rebuild a clean view from the durable ``batch.base_state``
+                # before invoking the default merge — the user merge may
+                # have mutated ``view.base_state`` before raising and the
+                # default merge's own ``model_copy(deep=True)`` would
+                # otherwise clone the pollution into the fallback result.
+                # Matches the production ``_handle_merge_error`` fix at
+                # ``agent.py``.
+                clean_base_state = batch.base_state.model_copy(deep=True)
+                fresh_view = self._batch_view(batch, base_state_copy=clean_base_state)
                 # The default merge can itself raise (e.g., a broken
                 # ``State.add_tool_result`` or a malformed received result).
                 # Mirror production ``_handle_merge_error``: treat the
@@ -417,7 +442,7 @@ class InMemoryAggregator(FanOutAggregator):
                 # ``AggregatorMergeError`` rather than a raw exception
                 # bypassing the configured policy.
                 try:
-                    default = await FanOutAggregator.merge(self, view)
+                    default = await FanOutAggregator.merge(self, fresh_view)
                 except Exception as exc2:
                     logger.exception(
                         "[%s] FALLBACK_TO_DEFAULT: default merge ALSO raised key=%s; treating as ABORT",
