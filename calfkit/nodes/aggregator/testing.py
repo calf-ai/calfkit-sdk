@@ -20,7 +20,7 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from calfkit.models.state import State
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch, _InMemoryStateStore
@@ -32,6 +32,64 @@ from calfkit.nodes.aggregator.state import (
     FanOutState,
     ToolCallId,
 )
+
+if TYPE_CHECKING:
+    from faststream.kafka import KafkaBroker
+
+    from calfkit.nodes.agent import BaseAgentNodeDef
+
+
+async def setup_for_tests(
+    agent: BaseAgentNodeDef,
+    broker: KafkaBroker,
+    *,
+    bootstrap_servers: str = "localhost:9092",
+    client_kwargs: dict[str, Any] | None = None,
+) -> None:
+    """Run :meth:`FanOutAggregator.setup` for ``agent`` with a test-fixture
+    :class:`KafkaConfig`.
+
+    Use in pytest fixtures or test setup paths that bypass
+    :meth:`Worker.run` (typically ``TestKafkaBroker`` flows). Production
+    code should rely on ``Worker.run()`` — it pulls ``kafka_config`` from
+    the live :class:`Client` and threads it through ``FanOutAggregator.
+    setup`` automatically.
+
+    The transient :class:`AIOKafkaConsumer` the aggregator constructs for
+    state-topic rehydration is never actually invoked under
+    ``TestKafkaBroker`` (its in-memory simulator handles partition
+    assignment differently), so the placeholder ``bootstrap_servers``
+    never reaches a real broker.
+
+    Idempotent: a second call for the same agent is a no-op
+    (matches ``FanOutAggregator.setup``).
+
+    Args:
+        agent: The agent whose aggregator runtime needs to be wired up.
+        broker: The :class:`KafkaBroker` (usually a ``TestKafkaBroker``)
+            the test is exercising.
+        bootstrap_servers: Placeholder used to construct the unused
+            rehydration consumer. Defaults to ``"localhost:9092"``.
+        client_kwargs: Extra kwargs to forward to the rehydration
+            consumer (e.g., security settings). Defaults to empty.
+    """
+    # Local import to avoid a circular at module-load time — this helper
+    # lives in the aggregator package; importing the agent at the top
+    # would make ``calfkit.nodes.agent`` a leaf dependency.
+    from calfkit.client.kafka_config import KafkaConfig
+
+    if agent.aggregator._runtime is not None:
+        return  # idempotent
+
+    await agent.aggregator.setup(
+        broker,
+        node_id=agent.node_id,
+        main_topic=agent.subscribe_topics[0],
+        kafka_config=KafkaConfig(
+            bootstrap_servers=bootstrap_servers,
+            client_kwargs=client_kwargs or {},
+        ),
+    )
 
 
 class InMemoryAggregator(FanOutAggregator):

@@ -168,5 +168,14 @@ class WorkerProvider(Provider):
 
 
 def prepare_worker(container):
+    """Register handlers on the Worker. Does NOT run aggregator setup —
+    that has to happen INSIDE the test's ``async with TestKafkaBroker(...)``
+    block so the test broker is the one wired to ``broker.config.admin_client``.
+
+    Tests that exercise parallel-tool fan-out must additionally call
+    ``await setup_for_tests(agent, test_broker)`` from inside the
+    TestKafkaBroker context. Tests that only use single-tool / no-tool
+    flows don't need it (``_ensure_aggregator_ready`` never fires).
+    """
     worker: Worker = container.get(Worker)
     worker.register_handlers()

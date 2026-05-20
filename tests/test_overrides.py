@@ -1,6 +1,7 @@
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit.client import Client
+from calfkit.nodes.aggregator.testing import setup_for_tests
 from tests.providers import NO_TOOLS_RESPONSE_TEXT, prepare_worker
 from tests.utils import find_last_tool_call_message
 
@@ -11,7 +12,8 @@ async def test_agent_tools_overrides_none(container, deploy_function_agent, depl
 
     client = container.get(Client)
 
-    async with TestKafkaBroker(container.get(KafkaBroker)) as _:
+    async with TestKafkaBroker(container.get(KafkaBroker)) as test_broker:
+        await setup_for_tests(deploy_function_agent, test_broker)
         result = await client.execute_node(
             "Hey! Call all your tools concurrently right now", deploy_function_agent.subscribe_topics[0], tool_overrides=None
         )
@@ -29,7 +31,8 @@ async def test_agent_tools_overrides_empty(container, deploy_function_agent, dep
 
     client = container.get(Client)
 
-    async with TestKafkaBroker(container.get(KafkaBroker)) as _:
+    async with TestKafkaBroker(container.get(KafkaBroker)) as test_broker:
+        await setup_for_tests(deploy_function_agent, test_broker)
         result = await client.execute_node(
             "Hey! Call all your tools concurrently right now again.", deploy_function_agent.subscribe_topics[0], tool_overrides=[]
         )
@@ -43,7 +46,8 @@ async def test_agent_tools_overrides_new_tools(container, deploy_function_agent,
 
     client = container.get(Client)
 
-    async with TestKafkaBroker(container.get(KafkaBroker)) as _:
+    async with TestKafkaBroker(container.get(KafkaBroker)) as test_broker:
+        await setup_for_tests(deploy_function_agent, test_broker)
         result = await client.execute_node(
             "Hey! Call all your tools concurrently right now", deploy_function_agent.subscribe_topics[0], tool_overrides=deploy_no_arg_tools
         )

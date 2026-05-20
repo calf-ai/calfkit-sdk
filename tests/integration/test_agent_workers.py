@@ -3,6 +3,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit.client import Client
+from calfkit.nodes.aggregator.testing import setup_for_tests
 from tests.providers import (
     Response,
     agent_name,
@@ -61,7 +62,8 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
     broker = container.get(KafkaBroker)
     client = container.get(Client)
 
-    async with TestKafkaBroker(broker) as _:
+    async with TestKafkaBroker(broker) as test_broker:
+        await setup_for_tests(deploy_agent, test_broker)
         result = await client.execute_node(
             "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?", "test_agent.input", output_type=str
         )
@@ -84,7 +86,8 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
     broker = container.get(KafkaBroker)
     client = container.get(Client)
 
-    async with TestKafkaBroker(broker) as _:
+    async with TestKafkaBroker(broker) as test_broker:
+        await setup_for_tests(deploy_agent, test_broker)
         result = await client.execute_node("Do you know my name?", "test_agent.input")
 
         assert result.output is not None

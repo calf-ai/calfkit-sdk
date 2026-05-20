@@ -26,6 +26,7 @@ from calfkit.client import Client
 from calfkit.models import SessionRunContext
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, BaseToolNodeDef, agent_tool
+from calfkit.nodes.aggregator.testing import setup_for_tests
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -313,7 +314,8 @@ async def test_parallel_fan_out_carries_emitter_per_call(container):
     broker = container.get(KafkaBroker)
     client = container.get(Client)
 
-    async with TestKafkaBroker(broker):
+    async with TestKafkaBroker(broker) as test_broker:
+        await setup_for_tests(agent, test_broker)
         await client.execute_node("call all tools", "test_parallel_emitter.input", timeout=10)
 
     assert _parallel_capture == {"a": agent.node_id, "b": agent.node_id, "c": agent.node_id}

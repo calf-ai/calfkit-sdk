@@ -5,6 +5,7 @@ from faker import Faker
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit.client import Client
+from calfkit.nodes.aggregator.testing import setup_for_tests
 from tests.providers import prepare_worker
 from tests.utils import find_last_tool_call_message, print_message_history
 
@@ -15,7 +16,12 @@ async def test_concurrent_tool_calling(container, deploy_function_agent, deploy_
 
     client = container.get(Client)
 
-    async with TestKafkaBroker(container.get(KafkaBroker)) as _:
+    async with TestKafkaBroker(container.get(KafkaBroker)) as test_broker:
+        # Worker.run() is bypassed in this test (we use TestKafkaBroker
+        # directly), so the agent's aggregator runtime would otherwise
+        # be uninitialised when the parallel-fan-out dispatch fires.
+        await setup_for_tests(deploy_function_agent, test_broker)
+
         random_num = random.randint(1, 100)
         random_str = "".join(random.choices(string.ascii_letters, k=20))  # 20 char random string
         random_city = Faker().city()

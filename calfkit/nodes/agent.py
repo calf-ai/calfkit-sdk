@@ -29,7 +29,7 @@ from calfkit.models.session_context import SessionRunContext
 from calfkit.nodes.aggregator import FanOutAggregator
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
 from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
-from calfkit.nodes.aggregator.errors import AggregatorMergeError
+from calfkit.nodes.aggregator.errors import AggregatorMergeError, AggregatorStateStoreError
 from calfkit.nodes.aggregator.state import AggregatedReturn, ToolCallId
 from calfkit.nodes.base import BaseNodeDef, GateFunction, _KafkaSubscription
 from calfkit.nodes.tool import ToolNodeDef
@@ -137,30 +137,25 @@ class BaseAgentNodeDef(
         )
         return subscriptions
 
-    async def _ensure_aggregator_ready(self, broker: BrokerAnnotation) -> None:
-        """Lazily run :meth:`FanOutAggregator.setup` if it hasn't been called yet.
+    def _ensure_aggregator_ready(self) -> None:
+        """Assert that :meth:`FanOutAggregator.setup` has run.
 
-        The Worker pre-runs setup in production; this fallback covers test
-        paths that bypass ``Worker.run()`` (``TestKafkaBroker`` flows) so the
-        first parallel fan-out can construct the state store on demand.
-        Idempotent: subsequent calls are no-ops.
+        Called from the two hot paths that depend on the aggregator's
+        runtime (the parallel-fan-out dispatcher and the fanout-returns
+        handler). Pure validation — no test-fixture synthesis in
+        production code.
 
-        Test paths don't have a :class:`KafkaConfig` threaded through, so
-        we synthesise a placeholder here. The transient
-        :class:`AIOKafkaConsumer` constructed with it is never invoked
-        under ``TestKafkaBroker`` (which simulates Kafka in memory), so
-        the placeholder values never reach a real broker.
+        Worker.run() handles setup automatically at startup. Tests that
+        bypass Worker.run() must set up explicitly via
+        :func:`calfkit.nodes.aggregator.testing.setup_for_tests`.
         """
         if self.aggregator._runtime is None:
-            # Local import to avoid a circular at module-load time
-            # (calfkit.client imports calfkit.nodes via partitioner).
-            from calfkit.client.kafka_config import KafkaConfig
-
-            await self.aggregator.setup(
-                broker,
-                node_id=self.node_id,
-                main_topic=self.subscribe_topics[0],
-                kafka_config=KafkaConfig(bootstrap_servers="localhost:9092", client_kwargs={}),
+            raise AggregatorStateStoreError(
+                f"FanOutAggregator.setup() has not been called for agent "
+                f"{self.node_id!r}. Worker.run() handles this in "
+                f"production; tests bypassing Worker.run() must call "
+                f"calfkit.nodes.aggregator.testing.setup_for_tests("
+                f"agent, broker)."
             )
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
@@ -318,7 +313,7 @@ class BaseAgentNodeDef(
         through to :meth:`BaseNodeDef._publish_action` unchanged.
         """
         if isinstance(output, list) and output and all(isinstance(item, Call) for item in output):
-            await self._ensure_aggregator_ready(broker)
+            self._ensure_aggregator_ready()
             await self._publish_parallel_with_aggregator(
                 output,
                 envelope,
@@ -469,8 +464,9 @@ class BaseAgentNodeDef(
         partition this worker owns (co-partitioned via
         :class:`FanOutAggregatorPartitioner`).
         """
-        # Lazy setup so test paths that bypass Worker.run() still work.
-        await self._ensure_aggregator_ready(broker)
+        # Validate setup ran; Worker.run() handles this in production
+        # and tests must call setup_for_tests() explicitly.
+        self._ensure_aggregator_ready()
 
         fan_out_id = decode_header_str(headers.get(HDR_FANOUT_ID))
         if fan_out_id is None:
