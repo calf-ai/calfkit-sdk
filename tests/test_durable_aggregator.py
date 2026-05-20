@@ -869,18 +869,12 @@ async def test_redelivery_after_failed_downstream_publish_re_attempts_completion
 
     # The handler must re-publish the merged return to the agent topic
     # and tombstone the batch.
-    agent_topic_publishes = [
-        c for c in broker.publish.await_args_list
-        if c.kwargs.get("topic") == "test_agent.input"
-    ]
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
     assert len(agent_topic_publishes) == 1, (
         "Expected the handler to re-publish the merged result on redelivery; "
         "without this the durable record is orphaned and the agent never re-enters"
     )
-    state_topic_publishes = [
-        c for c in broker.publish.await_args_list
-        if c.kwargs.get("topic") == "test_agent.fanout-state"
-    ]
+    state_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.fanout-state"]
     tombstones = [c for c in state_topic_publishes if c.args[0] is None]
     assert len(tombstones) == 1, "Expected the handler to tombstone the batch"
 

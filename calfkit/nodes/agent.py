@@ -423,7 +423,6 @@ class BaseAgentNodeDef(
             self.name,
         )
 
-
         for call in calls:
             wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
             wf_copy.invoke_frame(call, returns_topic)
@@ -532,8 +531,7 @@ class BaseAgentNodeDef(
                 )
                 return Response(envelope, headers=self._emitter_headers())
             logger.info(
-                "[%s] re-attempting completion for already-merged batch key=%s "
-                "(redelivery after a failed downstream publish or tombstone)",
+                "[%s] re-attempting completion for already-merged batch key=%s (redelivery after a failed downstream publish or tombstone)",
                 correlation_id[:8],
                 key,
             )
