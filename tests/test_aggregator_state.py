@@ -186,6 +186,36 @@ def test_fanout_state_deserialises_round_trip() -> None:
     assert rebuilt.agent_topic == "agent.in"
 
 
+def test_fanout_state_received_is_immutable_after_construction() -> None:
+    """The ``received`` mapping on a :class:`FanOutState` must be wrapped
+    in :class:`MappingProxyType` so the durable wire-format record cannot
+    be mutated in place. ``frozen=True`` blocks REASSIGNING the field
+    (covered by ``test_fanout_state_is_frozen``); this test guards the
+    second half — preventing direct ``state.received["k"] = v`` mutations
+    that would otherwise leave the field reference unchanged but corrupt
+    the underlying dict.
+
+    Also exercises the deserialisation path: ``model_validate_json`` must
+    re-wrap the inner mapping after parsing because the
+    ``@model_validator(mode='after')`` runs on both fresh construction
+    and on validation-from-JSON.
+    """
+    state = _make_fanout_state(received={"t1": "r1"})
+    assert isinstance(state.received, MappingProxyType)
+    with pytest.raises(TypeError):
+        state.received["new_key"] = "tampered"  # type: ignore[index]
+
+    # Deserialise from JSON and assert the rehydrated instance is also
+    # wrapped. The rehydration call site (state-store ``_apply_record``)
+    # depends on this — otherwise an attacker / buggy operator with raw
+    # broker access could mutate the in-memory cached batch by reaching
+    # into ``state.received``.
+    rebuilt = FanOutState.model_validate_json(state.model_dump_json())
+    assert isinstance(rebuilt.received, MappingProxyType)
+    with pytest.raises(TypeError):
+        rebuilt.received["t2"] = "tampered"  # type: ignore[index]
+
+
 def test_fanout_state_degraded_round_trips_via_json() -> None:
     """The ``degraded`` flag is the durable signal for "this batch's
     completion publish must carry HDR_DEGRADED_MERGE". It MUST survive

@@ -10,7 +10,7 @@ from typing_extensions import Self
 from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
-from calfkit.client.kafka_config import KafkaConfig
+from calfkit.client.kafka_config import _PRODUCER_ONLY_KWARGS, KafkaConfig
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.exceptions import DurabilityConfigError
@@ -60,6 +60,11 @@ def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
     single-broker outage between the leader's ack and follower catch-up
     can silently drop a state-topic write, leaving the durable log out
     of sync with the in-memory cache.
+
+    Raises:
+        DurabilityConfigError: when the caller supplied ``acks`` or
+            ``enable_idempotence`` values that weaken the producer
+            durability contract.
     """
     acks = broker_kwargs.get("acks")
     # Kafka accepts both "all" and -1 as the "wait for all in-sync
@@ -70,10 +75,17 @@ def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
             "fan-out aggregator. State-topic writes must survive a single-broker "
             "outage between leader ack and replica catch-up, which requires "
             "acks='all' (or the synonym acks=-1). Remove the acks override or "
-            "set it to 'all'."
+            "set it to 'all'.",
+            kwarg_name="acks",
+            offending_value=acks,
+            expected_value="'all' or -1",
         )
     if acks is None:
         broker_kwargs["acks"] = "all"
+        logger.info(
+            "Client.connect: injected broker_kwarg acks=%r for durable aggregator support; pass explicitly to suppress this message.",
+            "all",
+        )
 
     enable_idempotence = broker_kwargs.get("enable_idempotence")
     if enable_idempotence is False:
@@ -82,10 +94,17 @@ def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
             "fan-out aggregator's at-least-once delivery contract — producer "
             "retries without idempotence can produce duplicate state-topic "
             "writes that the compactor cannot reliably deduplicate. Remove the "
-            "override or set enable_idempotence=True."
+            "override or set enable_idempotence=True.",
+            kwarg_name="enable_idempotence",
+            offending_value=enable_idempotence,
+            expected_value=True,
         )
     if enable_idempotence is None:
         broker_kwargs["enable_idempotence"] = True
+        logger.info(
+            "Client.connect: injected broker_kwarg enable_idempotence=%r for durable aggregator support; pass explicitly to suppress this message.",
+            True,
+        )
 
 
 def _build_kafka_config(
@@ -98,12 +117,28 @@ def _build_kafka_config(
     ``broker_kwargs`` into their explicit slots; anything else stays in
     ``client_kwargs``. The input dict is not mutated — KafkaBroker still
     receives the full unmodified kwargs.
+
+    Producer-only kwargs (see :data:`_PRODUCER_ONLY_KWARGS`) are excluded
+    from ``client_kwargs``: ``KafkaConfig`` is a consumer-side snapshot
+    used to construct the transient ``AIOKafkaConsumer`` the aggregator
+    state store spins up during rehydration, and the consumer's
+    ``__init__`` rejects these kwargs with ``TypeError``. The producer
+    still receives them via ``KafkaBroker(**broker_kwargs)`` — FastStream
+    forwards them to its internal ``AIOKafkaProducer`` — they're just
+    kept out of the consumer-side snapshot.
     """
     residual: dict[str, Any] = dict(broker_kwargs)
     typed_values: dict[str, Any] = {}
     for field_name in _KAFKA_CONFIG_TYPED_FIELDS:
         if field_name in residual:
             typed_values[field_name] = residual.pop(field_name)
+    # Exclude producer-only kwargs from the consumer-side snapshot.
+    # See module-level docstring on ``_PRODUCER_ONLY_KWARGS`` for the
+    # WHY: AIOKafkaConsumer.__init__ rejects these, and KafkaConfig is
+    # the consumer-side snapshot. The producer still receives them via
+    # broker_kwargs (unmodified) when KafkaBroker(...) is built below.
+    for producer_kwarg in _PRODUCER_ONLY_KWARGS:
+        residual.pop(producer_kwarg, None)
     return KafkaConfig(
         bootstrap_servers=bootstrap_servers,
         client_kwargs=residual,
@@ -181,11 +216,29 @@ class BaseClient:
             reply_topic: Explicit reply topic name. When ``None`` (default), a
                 unique topic is generated using a uuid7 client ID.
             **broker_kwargs: Additional keyword arguments forwarded to
-                ``KafkaBroker`` (e.g. ``security``, ``client_id``).
+                ``KafkaBroker`` (e.g. ``security``, ``client_id``). ``acks`` and
+                ``enable_idempotence`` are validated for producer durability;
+                durability-safe defaults (``acks="all"``,
+                ``enable_idempotence=True``) are injected when not set, with an
+                INFO log on each injection. See :class:`DurabilityConfigError`.
 
         Returns:
             A new client instance ready for use. Call ``broker.start()`` or use
             the client as an async context manager before invoking nodes.
+
+        Raises:
+            DurabilityConfigError: from :func:`_enforce_durability_config` when
+                ``acks`` or ``enable_idempotence`` would weaken the fan-out
+                aggregator's durability contract. Also raised by
+                :class:`~calfkit.client.kafka_config.KafkaConfig` construction
+                if ``broker_kwargs`` carries a typed-field name overlap (see
+                :class:`KafkaConfig` for the list of typed fields).
+                :meth:`~calfkit.client.kafka_config.KafkaConfig.assert_rehydration_timeout_ok`
+                raises this from :class:`~calfkit.worker.worker.Worker`
+                startup when ``rebalance_timeout_ms`` is below the
+                recommended floor and an aggregator is wired.
+            ValueError: when ``broker_kwargs`` contains ``partitioner``
+                (the SDK installs its own).
         """
         if server_urls is None:
             server_urls = os.getenv("CALF_HOST_URL") or "localhost"

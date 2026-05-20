@@ -90,7 +90,16 @@ class MergeErrorPolicy(str, enum.Enum):
     RETRY = "retry"
     """Retry the merge once. Useful for transient failures (e.g., a
     downstream LLM call that times out). If the retry also raises,
-    behaves as :data:`ABORT`.
+    behaves as :data:`ABORT` (raises :class:`AggregatorMergeError`; the
+    chained traceback carries the FIRST exception, and the retry
+    exception is logged via ``logger.exception`` so neither is lost).
+
+    Retry SUCCESS — first attempt raised, second succeeded — is logged
+    at WARN. The merge result is published normally (no
+    :data:`HDR_DEGRADED_MERGE` header); the WARN is the sole signal that
+    a transient instability occurred. Operators monitoring this log line
+    can spot a flapping downstream before it crosses into permanent
+    failure.
 
     .. warning::
 
@@ -135,6 +144,20 @@ class FanOutAggregator:
     view. The defaults below cover the typical "wait for all tools, then
     apply every result to state" behaviour, so most users instantiate
     :class:`FanOutAggregator` directly without subclassing.
+
+    Monitoring
+    ----------
+    When :data:`merge_error_policy` is
+    :data:`MergeErrorPolicy.FALLBACK_TO_DEFAULT` (the default), batches that
+    recovered via the default-merge fallback carry the
+    :data:`~calfkit.HDR_DEGRADED_MERGE` header on the published envelope.
+    Wire your reply consumer to increment a counter so silent degradation
+    is observable::
+
+        from calfkit import HDR_DEGRADED_MERGE
+
+        if message.headers.get(HDR_DEGRADED_MERGE) == b"1":
+            metrics.incr("calfkit.aggregator.degraded")
     """
 
     def __init__(
@@ -334,11 +357,19 @@ class FanOutAggregator:
         ``base_state`` from an observer would silently corrupt the view
         that ``merge`` later sees.
 
-        The default ``merge`` does its own ``model_copy(deep=True)``
-        defensively so the FALLBACK_TO_DEFAULT recovery path (which reuses
-        the view after a user override raised) still sees a clean state
-        even if the failed user override partially mutated ``base_state``
-        before raising.
+        The default ``merge`` does its own ``model_copy(deep=True)`` on
+        the way in so direct callers (e.g., a user override delegating to
+        ``await super().merge(batch)``) cannot observe its subsequent
+        write-into-``state`` mutations bleed back through the shared
+        view. That inner copy does NOT sanitise the input: if
+        ``view.base_state`` was already polluted by a failed user
+        override (FALLBACK_TO_DEFAULT path) the copy would faithfully
+        clone the pollution. The framework's FALLBACK_TO_DEFAULT recovery
+        path rebuilds a fresh view from the immutable
+        ``_InFlightBatch.base_state`` BEFORE invoking this default
+        precisely to avoid that scenario — so callers of the default
+        merge via that path see clean state. Direct callers from user
+        code are responsible for not handing in a pre-mutated view.
 
         Args:
             batch: Immutable view of the batch at completion time.

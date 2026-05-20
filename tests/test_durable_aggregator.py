@@ -2055,11 +2055,16 @@ async def test_reentry_logs_parent_chain(
 def test_kafka_subscriptions_applies_nack_on_handler_identity(agent: object) -> None:
     """The NACK_ON_ERROR override is applied by matching on the handler
     reference, not by checking topic-list equality. We verify this by
-    patching ``BaseNodeDef.kafka_subscriptions`` to return a subscription
-    whose ``topics`` differs from ``self.subscribe_topics`` but whose
-    ``handler`` is still ``self.handler``. The old equality-on-topics
-    check would miss that subscription and silently leave it on the
-    (unsafe) default ack policy.
+    patching ``BaseNodeDef.kafka_subscriptions`` to return TWO
+    subscriptions: one whose ``handler`` is ``self.handler`` (with a
+    different topic list than ``self.subscribe_topics``) and one whose
+    ``handler`` is an unrelated callable. The first must receive
+    ``NACK_ON_ERROR`` via handler-identity match; the second must retain
+    whatever ack policy the base spec set (``None`` here — inherit the
+    Worker default). The old equality-on-topics check would either miss
+    the first subscription (silently leaving it on the unsafe default
+    ack policy) or, equally bad, blanket-apply ``NACK_ON_ERROR`` to all
+    subscriptions and break unrelated auxiliary subscribers.
     """
     from unittest.mock import patch
 
@@ -2067,18 +2072,29 @@ def test_kafka_subscriptions_applies_nack_on_handler_identity(agent: object) -> 
 
     from calfkit.nodes.base import BaseNodeDef, _KafkaSubscription
 
-    # Build a base subscription that uses the same handler instance as the
-    # agent's main handler but advertises a different topic list. This
-    # simulates a future subclass that decorates topics post-hoc, or a
-    # framework feature that rewrites the topic list before the agent's
-    # ``kafka_subscriptions`` runs.
+    # An unrelated async callable — simulates a future auxiliary
+    # subscription on the base class (e.g., a sidecar handler) whose ack
+    # semantics are independent of the main inbound handler.
+    async def unrelated_handler(*args: object, **kwargs: object) -> None:
+        return None
+
+    # Build a base subscription list that includes the agent's main
+    # handler (with a different topic list to prove the match is
+    # handler-identity-based, not topic-list-based) AND an unrelated
+    # handler whose ack policy must stay untouched.
     def fake_base_kafka_subscriptions(self: BaseNodeDef) -> list[_KafkaSubscription]:
         return [
             _KafkaSubscription(
                 topics=["totally.different.topic"],
                 handler=self.handler,  # identical reference; equal under bound-method ==
                 publish_topic=None,
-            )
+            ),
+            _KafkaSubscription(
+                topics=["unrelated.aux.topic"],
+                handler=unrelated_handler,
+                publish_topic=None,
+                # ack_policy left as default (None) — inherit Worker default.
+            ),
         ]
 
     with patch.object(BaseNodeDef, "kafka_subscriptions", fake_base_kafka_subscriptions):
@@ -2092,6 +2108,20 @@ def test_kafka_subscriptions_applies_nack_on_handler_identity(agent: object) -> 
     )
     assert sub.ack_policy is AckPolicy.NACK_ON_ERROR, (
         f"main-handler subscription must receive NACK_ON_ERROR via handler-identity match; got {sub.ack_policy!r} on topics={sub.topics!r}"
+    )
+
+    # Negative case — the auxiliary subscription whose handler is NOT
+    # ``self.handler`` must retain its original ack policy. This is the
+    # regression guard: a buggy implementation that applied
+    # ``NACK_ON_ERROR`` unconditionally (e.g., dropped the handler-identity
+    # check) would pass the positive assertion above but fail this one.
+    aux_subs = [s for s in subs if s.handler is unrelated_handler]
+    assert len(aux_subs) == 1, f"expected exactly one auxiliary-handler subscription; got {len(aux_subs)}"
+    aux_sub = aux_subs[0]
+    assert aux_sub.topics == ["unrelated.aux.topic"], f"auxiliary subscription topics should be preserved verbatim; got {aux_sub.topics!r}"
+    assert aux_sub.ack_policy is None, (
+        f"auxiliary subscription must retain its original ack policy (None — inherit Worker default); got {aux_sub.ack_policy!r}. "
+        "This guards against a regression where NACK_ON_ERROR is applied unconditionally instead of handler-identity-matched."
     )
 
 
@@ -2170,3 +2200,215 @@ async def test_aggregator_batch_view_reuses_single_deep_copy(
         f"Expected at most one framework deep copy of base_state per handler invocation; "
         f"got {deep_copy_count[0]}. Per-call-site _batch_view deep-copy regressed."
     )
+
+
+# ---------------------------------------------------------------------------
+# FALLBACK_TO_DEFAULT must not preserve a failed user-merge's partial mutations
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_to_default_does_not_preserve_partial_user_mutation(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """Critical regression guard: when ``merge_error_policy=FALLBACK_TO_DEFAULT``
+    fires after a user :meth:`merge` partially mutates ``view.base_state``
+    before raising, the framework MUST rebuild a clean view from the
+    durable :class:`_InFlightBatch.base_state` before invoking the default
+    merge. Otherwise the default merge's own ``model_copy(deep=True)``
+    faithfully clones the polluted state and the published envelope
+    secretly carries the failed user's partial work.
+
+    The previous implementation shared a single deep-copied ``base_state``
+    across all override calls in a handler invocation, so when the user
+    merge mutated it and then raised, the FALLBACK path re-merged on top
+    of the pollution. Re-deriving the view from
+    ``_InFlightBatch.base_state`` (frozen, untouched by user code) is the
+    only way to guarantee a clean fallback result.
+    """
+    from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.FALLBACK_TO_DEFAULT  # type: ignore[attr-defined]
+
+    # Carry a sentinel marker in the cached base_state's message_history so
+    # an "as-built" state is distinguishable from a polluted one in the
+    # published envelope. The user merge will try to inject an additional
+    # message; the fallback MUST NOT carry it forward.
+    sentinel_request = ModelRequest(parts=[UserPromptPart(content="ORIGINAL_BASE_STATE_MARKER")])
+    seeded_state = State()
+    seeded_state.message_history.append(sentinel_request)
+
+    async def mutate_then_boom(batch: AggregatorBatch) -> AggregatedReturn:
+        # Simulate a buggy user merge that does partial work into the
+        # shared view, then raises — the exact failure mode the fallback
+        # path must defend against.
+        batch.base_state.message_history.append(ModelRequest(parts=[UserPromptPart(content="POLLUTION_FROM_FAILED_USER_MERGE")]))
+        raise RuntimeError("user merge boom mid-mutation")
+
+    agent.aggregator.merge = mutate_then_boom  # type: ignore[attr-defined,method-assign]
+
+    key = ("corr-mutfb", "fan-mutfb")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-mutfb",
+        fan_out_id="fan-mutfb",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=seeded_state,
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(
+        "corr-mutfb",
+        state=_state_with_results({"t1": "r1"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-mutfb"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-mutfb",
+        headers=headers,
+        broker=broker,
+    )
+
+    # The agent-topic publish must carry the merged state. Inspect the
+    # message_history on the published envelope.
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    assert len(agent_topic_publishes) == 1
+    publish_envelope = agent_topic_publishes[0].args[0]
+    published_message_history = publish_envelope.context.state.message_history
+
+    # The published message_history must contain ONLY the original
+    # sentinel marker — the user's partial mutation must NOT leak into
+    # the fallback result.
+    polluted_messages = [
+        m for m in published_message_history if any("POLLUTION_FROM_FAILED_USER_MERGE" in getattr(p, "content", "") for p in getattr(m, "parts", []))
+    ]
+    assert polluted_messages == [], (
+        f"FALLBACK_TO_DEFAULT leaked a failed user merge's partial mutation into the published "
+        f"envelope. published message_history: {published_message_history!r}"
+    )
+
+    # Sanity: the original sentinel IS present, proving the fallback DID
+    # produce a real merge (not just an empty state).
+    sentinels = [
+        m for m in published_message_history if any("ORIGINAL_BASE_STATE_MARKER" in getattr(p, "content", "") for p in getattr(m, "parts", []))
+    ]
+    assert len(sentinels) == 1, "fallback must produce a real merge over the original base_state"
+
+
+# ---------------------------------------------------------------------------
+# Empty-string HDR_FANOUT_ID is treated like missing (issue 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_empty_fanout_id_header_raises(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """An HDR_FANOUT_ID header present but empty (``b""``) is just as much
+    a protocol violation as a missing header. A bare ``is None`` guard
+    would let it through; the empty string would then be carried into the
+    state-store key as ``(correlation_id, "")``, silently producing a
+    collision class for every empty-id return on the partition.
+
+    The exception message must mention 'missing or empty' so operators
+    can distinguish from the bare-missing case in their logs.
+    """
+    from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
+
+    agent, broker = primed_state_store
+
+    envelope = _make_envelope(
+        "corr-emptyhdr",
+        state=_state_with_results({"t1": "r1"}),
+    )
+    # The producer side stamps the header as bytes; decode_header_str maps
+    # b"" → "" which would have slipped past ``fan_out_id is None``.
+    headers = {"x-calf-fanout-id": b""}
+
+    with pytest.raises(AggregatorStateStoreError, match="missing or empty"):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-emptyhdr",
+            headers=headers,
+            broker=broker,
+        )
+
+    broker.publish.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# RETRY success logs WARN (issue 7)
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_success_logs_warning(
+    primed_state_store: tuple[object, MagicMock],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When ``merge_error_policy=RETRY`` and the first attempt raises but
+    the second attempt succeeds, the framework MUST emit a WARN log line
+    naming the key + state_topic. This is the only signal operators get
+    that a transient merge instability occurred — without it, a flapping
+    downstream is invisible until it fails permanently.
+
+    The published envelope itself looks identical to a clean completion
+    (no :data:`HDR_DEGRADED_MERGE` header) because the result IS clean;
+    the WARN is the dedicated observability hook.
+    """
+    import logging as _logging
+
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.RETRY  # type: ignore[attr-defined]
+
+    call_count = [0]
+
+    async def flaky(batch: AggregatorBatch) -> AggregatedReturn:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("transient downstream blip")
+        return AggregatedReturn(state=batch.base_state)
+
+    agent.aggregator.merge = flaky  # type: ignore[attr-defined,method-assign]
+
+    key = ("corr-retrywarn", "fan-retrywarn")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-retrywarn",
+        fan_out_id="fan-retrywarn",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope("corr-retrywarn", state=_state_with_results({"t1": "r1"}))
+    headers = {"x-calf-fanout-id": "fan-retrywarn"}
+
+    with caplog.at_level(_logging.WARNING, logger="calfkit.nodes.agent"):
+        await agent._aggregator_handler(  # type: ignore[attr-defined]
+            envelope,
+            correlation_id="corr-retrywarn",
+            headers=headers,
+            broker=broker,
+        )
+
+    assert call_count[0] == 2, "retry success path expects exactly two merge calls"
+
+    warn_records = [r for r in caplog.records if r.levelno == _logging.WARNING and "succeeded on retry" in r.getMessage()]
+    assert len(warn_records) == 1, (
+        f"expected exactly one 'succeeded on retry' WARN log line; got {len(warn_records)}: {[r.getMessage() for r in caplog.records]}"
+    )
+    msg = warn_records[0].getMessage()
+    assert "corr-ret"[:8] in msg or "corr-retr"[:8] in msg, f"WARN log must include the correlation_id prefix; got: {msg!r}"
+    # State topic is identifying context for the operator.
+    assert "test_agent.fanout-state" in msg, f"WARN log must include the state_topic; got: {msg!r}"

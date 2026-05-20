@@ -249,12 +249,12 @@ class BaseNodeDef(BaseNodeSchema):
         return headers
 
     def kafka_subscriptions(self) -> list[_KafkaSubscription]:
-        """Return the list of Kafka subscriber registrations this node needs.
+        """Return the Kafka subscriptions this node needs at worker registration time.
 
-        Default: one subscription mirroring today's behavior — ``self.handler`` on
-        ``self.subscribe_topics`` with the optional ``self.publish_topic`` wrapper.
-        Subclasses that need additional subscribers (e.g., agents owning a fan-out
-        aggregator's returns subscriber) override this to return multiple specs.
+        By default each entry in ``subscribe_topics`` yields one subscription whose
+        handler is ``self.handler`` and whose publish wrapper is ``self.publish_topic``.
+        Override to add additional subscribers or to customize per-subscription
+        properties such as ack policy, consumer group id, or listener.
 
         The Worker iterates the returned list and registers each spec as an
         independent FastStream ``@broker.subscriber``.
@@ -276,15 +276,19 @@ class BaseNodeDef(BaseNodeSchema):
         inbound_headers: dict[str, Any] | None = None,
         inbound_partition: int | None = None,
     ) -> Envelope:
-        """Publish the framework-level result of a ``run()`` invocation.
+        """Publish the action emitted by this node's ``run()`` to the
+        appropriate downstream topic(s).
 
-        Subclasses (e.g. :class:`BaseAgentNodeDef`) override this to inject
-        aggregator semantics on the ``list[Call]`` parallel-fan-out branch
-        before delegating back here for everything else.
+        Dispatches on the shape of ``output``: a single :class:`~calfkit.models.actions.Call`
+        pushes a frame and publishes to the call's target topic; a list of ``Call``
+        instances publishes each call independently as a parallel fan-out; a
+        :class:`~calfkit.models.actions.ReturnCall` unwinds the current frame and
+        publishes back to the caller. Override to inject pre-publish hooks, custom
+        routing, or aggregator semantics on the parallel-fan-out branch.
 
         ``inbound_headers``: the headers of the message that triggered this
         invocation. Used to forward :data:`HDR_FANOUT_ID` /
-        :data:`HDR_FRAME_ID` from the inbound to ``ReturnCall`` publishes,
+        :data:`HDR_FRAME_ID` from the inbound to ``ReturnCall`` publishes
         so tools returning to an agent's fan-out carry the right batch
         identity for the aggregator. Forward only on ``ReturnCall``; other
         publish kinds either generate new identity (parallel fan-out) or

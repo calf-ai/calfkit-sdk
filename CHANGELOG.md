@@ -9,7 +9,7 @@
 * `BaseAgentNodeDef._pending_batches` removed (internal). Parallel tool fan-outs are now durably managed by `FanOutAggregator` backed by a compacted Kafka state topic.
 * `sequential_only_mode=True` constructor flag on `Agent` now emits `DeprecationWarning`. Use the default parallel mode plus `FanOutAggregator` for durable fan-out aggregation.
 * `MergeErrorPolicy` default changed from `ABORT` to `FALLBACK_TO_DEFAULT`. Users who relied on ABORT must opt in explicitly via `FanOutAggregator(merge_error_policy=MergeErrorPolicy.ABORT)`. The change makes the safe path the default — ABORT combined with `NACK_ON_ERROR` and no DLQ caused infinite redelivery loops on non-transient `merge()` failures.
-* `Client.connect` now enforces producer durability. Construction with `broker_kwargs` that sets `acks` to anything other than `"all"` / `-1`, or sets `enable_idempotence=False`, is rejected with `DurabilityConfigError` (new, under `CalfkitError`). When these keys are unset, durable defaults are injected.
+* `Client.connect` now enforces producer durability. Construction with `broker_kwargs` that sets `acks` to anything other than `"all"` / `-1`, or sets `enable_idempotence=False`, is rejected with `DurabilityConfigError` (new, under `CalfkitError`; importable from `calfkit` or `calfkit.exceptions`, and also re-exported from `calfkit.client`). When these keys are unset, durable defaults are injected.
 * `KafkaConfig` gained typed fields (`security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`). Backwards-compatible — existing constructions still work. Use `KafkaConfig.to_consumer_kwargs()` to obtain the merged kwarg dict for forwarding to `AIOKafkaConsumer`.
 
 

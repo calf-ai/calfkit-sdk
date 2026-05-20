@@ -10,14 +10,16 @@ fails on any production cluster with SASL/SSL auth.
 
 from __future__ import annotations
 
-import logging
 from unittest.mock import patch
+
+import pytest
 
 from calfkit.client import Client
 from calfkit.client.kafka_config import (
-    _REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS,
+    REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS,
     KafkaConfig,
 )
+from calfkit.exceptions import DurabilityConfigError
 
 
 def test_client_connect_captures_kafka_config() -> None:
@@ -55,16 +57,21 @@ def test_client_connect_captures_security_kwargs() -> None:
 def test_client_connect_kafka_config_is_independent_of_broker_kwargs() -> None:
     """The captured client_kwargs dict must be a copy -- not a reference
     to the dict KafkaBroker received -- so neither side can mutate the
-    other's view."""
+    other's view. KafkaConfig also wraps the snapshot in MappingProxyType,
+    so any mutation attempt raises TypeError (verified separately)."""
     with patch("calfkit.client.base.KafkaBroker") as mock_broker_cls:
-        # Pass a non-typed kwarg so client_kwargs is non-empty; mutating
-        # it must not affect KafkaBroker's kwargs.
+        # Pass a non-typed kwarg so client_kwargs is non-empty; the
+        # snapshot's contents must not leak back into KafkaBroker's
+        # kwargs even if MappingProxyType were swapped out.
         client = Client.connect("kafka.example:9092", request_timeout_ms=5000)
     assert client.kafka_config is not None
-    # Mutating the captured dict must not affect what was passed to KafkaBroker.
-    client.kafka_config.client_kwargs["mutated"] = True
+    # The snapshot is now immutable (MappingProxyType); attempting to
+    # mutate it raises TypeError. Verify that AND that the captured
+    # kwarg made it into KafkaBroker.
+    with pytest.raises(TypeError):
+        client.kafka_config.client_kwargs["mutated"] = True  # type: ignore[index]
     broker_kwargs = mock_broker_cls.call_args.kwargs
-    assert "mutated" not in broker_kwargs
+    assert broker_kwargs.get("request_timeout_ms") == 5000
 
 
 async def test_security_kwargs_reach_rehydration_consumer_end_to_end() -> None:
@@ -163,17 +170,55 @@ def test_to_consumer_kwargs_with_typed_fields() -> None:
     assert result["client_id"] == "aggregator-rehydrate"
 
 
-def test_to_consumer_kwargs_typed_wins_over_client_kwargs() -> None:
-    """Typed fields are explicit user intent; client_kwargs is the
-    escape hatch. On collision, typed must win — otherwise the escape
-    hatch could silently override the user's typed configuration."""
+def test_kafka_config_typed_field_collision_raises() -> None:
+    """Typed fields and client_kwargs cannot overlap: such a collision
+    means the operator set the same kwarg twice, which is ambiguous
+    enough to be a misconfiguration rather than a precedence question.
+    Raising at construction surfaces the bug at Client.connect (the
+    user's call site) rather than at rehydration."""
+    with pytest.raises(DurabilityConfigError) as exc_info:
+        KafkaConfig(
+            bootstrap_servers="broker:9092",
+            security_protocol="SASL_SSL",
+            client_kwargs={"security_protocol": "PLAINTEXT"},
+        )
+    assert exc_info.value.kwarg_name == "security_protocol"
+    assert exc_info.value.offending_value == "PLAINTEXT"
+    assert exc_info.value.expected_value == "SASL_SSL"
+
+
+def test_to_consumer_kwargs_strips_producer_only_kwargs() -> None:
+    """Defense in depth: even if a caller constructs KafkaConfig
+    directly with producer-only kwargs in client_kwargs (bypassing the
+    Client.connect partitioning), to_consumer_kwargs() must strip them.
+    AIOKafkaConsumer.__init__ rejects producer kwargs with TypeError;
+    surfacing that on a deployed worker would be catastrophic."""
     config = KafkaConfig(
         bootstrap_servers="broker:9092",
-        security_protocol="SASL_SSL",
-        client_kwargs={"security_protocol": "PLAINTEXT"},
+        client_kwargs={
+            "acks": "all",
+            "enable_idempotence": True,
+            "linger_ms": 5,
+            "request_timeout_ms": 5000,
+        },
     )
     result = config.to_consumer_kwargs()
-    assert result["security_protocol"] == "SASL_SSL"
+    assert "acks" not in result
+    assert "enable_idempotence" not in result
+    assert "linger_ms" not in result
+    # Non-producer kwargs and bootstrap_servers survive intact.
+    assert result["request_timeout_ms"] == 5000
+    assert result["bootstrap_servers"] == "broker:9092"
+
+
+def test_client_kwargs_is_immutable_after_construction() -> None:
+    """KafkaConfig wraps client_kwargs in MappingProxyType so the
+    snapshot cannot be mutated post-construction. A plain dict would
+    still expose ``cfg.client_kwargs["k"] = v`` even though the frozen
+    dataclass blocks attribute reassignment."""
+    cfg = KafkaConfig(bootstrap_servers="broker:9092", client_kwargs={"a": 1})
+    with pytest.raises(TypeError):
+        cfg.client_kwargs["b"] = 2  # type: ignore[index]
 
 
 def test_to_consumer_kwargs_excludes_none() -> None:
@@ -204,47 +249,44 @@ def test_to_consumer_kwargs_preserves_extra_client_kwargs() -> None:
 
 
 # ----------------------------------------------------------------------
-# check_rehydration_timeout_floor() coverage
+# assert_rehydration_timeout_ok() coverage
 # ----------------------------------------------------------------------
 
 
-def test_check_rehydration_timeout_floor_warns_when_below(caplog: object) -> None:
+def test_assert_rehydration_timeout_ok_raises_when_below_floor() -> None:
     """If the worker can't finish rehydration before rebalance_timeout_ms
     expires, the broker triggers another rebalance — the rebalance-storm
-    risk operators need to know about."""
+    risk is severe enough to fail fast at startup. The exception carries
+    structured ``kwarg_name``/``offending_value`` so operators can branch
+    programmatically."""
     config = KafkaConfig(
         bootstrap_servers="broker:9092",
         client_kwargs={"rebalance_timeout_ms": 30_000},
     )
-    with caplog.at_level(logging.WARNING, logger="calfkit.client.kafka_config"):  # type: ignore[attr-defined]
-        config.check_rehydration_timeout_floor()
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]  # type: ignore[attr-defined]
-    assert warnings, "expected a WARN log when rebalance_timeout_ms is below floor"
-    message = warnings[0].getMessage()
-    assert "rebalance_timeout_ms" in message
-    assert "rebalance" in message.lower()
+    with pytest.raises(DurabilityConfigError) as exc_info:
+        config.assert_rehydration_timeout_ok()
+    assert exc_info.value.kwarg_name == "rebalance_timeout_ms"
+    assert exc_info.value.offending_value == 30_000
+    assert isinstance(exc_info.value.expected_value, str)
+    assert str(REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS) in exc_info.value.expected_value
 
 
-def test_check_rehydration_timeout_floor_silent_at_floor(caplog: object) -> None:
-    """At exactly the floor, no warning should fire — the floor is
+def test_assert_rehydration_timeout_ok_silent_at_floor() -> None:
+    """At exactly the floor, no error should fire — the floor is
     inclusive on the safe side."""
     config = KafkaConfig(
         bootstrap_servers="broker:9092",
-        client_kwargs={"rebalance_timeout_ms": _REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS},
+        client_kwargs={"rebalance_timeout_ms": REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS},
     )
-    with caplog.at_level(logging.WARNING, logger="calfkit.client.kafka_config"):  # type: ignore[attr-defined]
-        config.check_rehydration_timeout_floor()
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]  # type: ignore[attr-defined]
-    assert warnings == []
+    # No exception expected.
+    config.assert_rehydration_timeout_ok()
 
 
-def test_check_rehydration_timeout_floor_silent_above_floor(caplog: object) -> None:
-    """Above the floor is the recommended config; must not warn."""
+def test_assert_rehydration_timeout_ok_silent_above_floor() -> None:
+    """Above the floor is the recommended config; must not raise."""
     config = KafkaConfig(
         bootstrap_servers="broker:9092",
-        client_kwargs={"rebalance_timeout_ms": _REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS + 60_000},
+        client_kwargs={"rebalance_timeout_ms": REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS + 60_000},
     )
-    with caplog.at_level(logging.WARNING, logger="calfkit.client.kafka_config"):  # type: ignore[attr-defined]
-        config.check_rehydration_timeout_floor()
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]  # type: ignore[attr-defined]
-    assert warnings == []
+    # No exception expected.
+    config.assert_rehydration_timeout_ok()

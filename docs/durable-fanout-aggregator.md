@@ -1187,10 +1187,14 @@ which delegates to
    context) on a null-key record or a malformed composite key — these
    indicate either a misconfigured topic or a corrupt write, and
    silently skipping them would activate a partition with an
-   incomplete cache. After `_REHYDRATE_MAX_EMPTY_POLLS=5` consecutive
-   empty polls with partitions still outstanding,
-   `rehydrate_partitions` raises `AggregatorStateStoreError` rather
-   than silently activating the partition with partial state.
+   incomplete cache. The empty-poll counter accumulates across the
+   inner getmany loop AND across `end_offsets` re-polls (see step 4)
+   so a slow broker can't silently extend the stall budget by
+   advancing end offsets between polls. After
+   `_REHYDRATE_MAX_EMPTY_POLLS=5` cumulative empty polls with
+   partitions still outstanding, `rehydrate_partitions` raises
+   `AggregatorStateStoreError` rather than silently activating the
+   partition with partial state.
 4. **Re-poll end_offsets until stable.** A previous owner of the
    partition may still be in the middle of flushing committed-but-not-
    yet-visible writes when rehydration begins; reading to a snapshot
@@ -1306,6 +1310,12 @@ The user's `merge()` can raise. The policy is `merge_error_policy` on the
   safer-by-default choice for v1: without a DLQ, surfacing the failure
   via `HDR_DEGRADED_MERGE` and proceeding beats wedging the partition
   on a permanent bug.
+
+  The fallback rebuilds the `AggregatorBatch` view from a fresh deep copy
+  of the **immutable** `_InFlightBatch.base_state` (not the view the user's
+  `merge` was handed); a partially-mutated state from the failed user merge
+  is therefore discarded before the default merge runs. The framework's
+  default merge applies `batch.received` to a clean base state every time.
 
 ---
 
@@ -1437,6 +1447,7 @@ metrics yet. Treat as a design target, not a contract.
 | Rehydration complete (per-rebalance) | INFO | `partition_ids`, `cached_keys` |
 | State-topic poison record | ERROR | `partition`, `key`, `error` (raises `AggregatorStateStoreError`) |
 | Merge error | ERROR | `correlation_id`, `fan_out_id`, `error`, `policy_applied` |
+| Merge succeeded on retry (RETRY policy) | WARN | `correlation_id`, `key`, `state_topic` |
 | Merge degraded (FALLBACK_TO_DEFAULT fallback) | WARN | `correlation_id`, `fan_out_id`, `error` |
 
 Idle-timed-out logging is intentionally absent — see §17.11.
@@ -1535,7 +1546,7 @@ authoritative module structure see §4.3.
 | `calfkit/nodes/aggregator/_partitioner.py` | `FanOutAggregatorPartitioner`, `build_composite_key`, `parse_composite_key`, `has_composite_delimiter`. |
 | `calfkit/nodes/aggregator/_rebalance.py` | `_StateStoreRebalanceListener`. |
 | `calfkit/nodes/aggregator/testing.py` | `InMemoryAggregator` (drop-in `FanOutAggregator` for unit tests). |
-| `calfkit/client/kafka_config.py` | `KafkaConfig` dataclass — snapshot of bootstrap servers plus typed connection fields (`security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`) and a `client_kwargs` escape hatch for additional aiokafka kwargs. Exposes `to_consumer_kwargs()` for the transient rehydration consumer and `check_rehydration_timeout_floor()` for the worker's startup-time warning. Captured by `Client.connect`. |
+| `calfkit/client/kafka_config.py` | `KafkaConfig` dataclass — snapshot of bootstrap servers plus typed connection fields (`security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`) and a `client_kwargs` escape hatch for additional aiokafka kwargs. Exposes `to_consumer_kwargs()` for the transient rehydration consumer (strips producer-only kwargs that AIOKafkaConsumer rejects) and `assert_rehydration_timeout_ok()` for the worker's startup-time fail-fast check. Raises `DurabilityConfigError` on `rebalance_timeout_ms` below the recommended floor and on typed-field / `client_kwargs` collisions. Captured by `Client.connect`. |
 | `tests/test_durable_aggregator.py` and friends | Test suite (see §13). |
 
 Earlier drafts of this section detailed pseudo-code for each new file. Read
@@ -1764,7 +1775,7 @@ The existing code in `BaseAgentNodeDef.run` short-circuits for `len(pending_tool
 
 Three sub-tests, one per `MergeErrorPolicy`:
 
-- `test_merge_error_abort`: default `merge_error_policy=ABORT`; user `merge()` raises; assert `AggregatorMergeError` (with `correlation_id` / `fan_out_id` attributes) propagates; assert FastStream message is nacked.
+- `test_merge_error_abort`: opt-in `merge_error_policy=ABORT` (the shipped default is `FALLBACK_TO_DEFAULT`); user `merge()` raises; assert `AggregatorMergeError` (with `correlation_id` / `fan_out_id` attributes) propagates; assert FastStream message is nacked.
 - `test_merge_error_retry`: `merge_error_policy=RETRY`; `merge()` raises once then succeeds; assert batch completes after exactly one retry. Retry count is fixed at one — no `merge_retry_count` knob.
 - `test_merge_error_fallback_to_default`: `merge_error_policy=FALLBACK_TO_DEFAULT`; `merge()` raises; assert the default merge runs as fallback; assert published envelope carries `HDR_DEGRADED_MERGE=1`; assert tombstone written; assert agent resumes with default-merged state.
 - `test_fallback_to_default_when_default_also_raises_falls_through_to_abort`: `merge_error_policy=FALLBACK_TO_DEFAULT`; user merge raises; framework default merge ALSO raises; assert `AggregatorMergeError` propagates (treated as ABORT) rather than the inner exception leaking out.
@@ -1833,10 +1844,12 @@ to production:
   production ``_handle_merge_error``: ``ABORT`` and post-RETRY failures
   raise ``AggregatorMergeError`` (with ``correlation_id`` /
   ``fan_out_id`` / ``state_topic`` attrs);
-  ``FALLBACK_TO_DEFAULT`` wraps the default-merge fallback in
-  try/except and treats a double-failure as ``ABORT`` rather than
-  letting the inner exception leak out and bypass the configured
-  policy.
+  ``FALLBACK_TO_DEFAULT`` rebuilds the view from a fresh deep copy of
+  the immutable ``_InFlightBatch.base_state`` (so a partial mutation
+  left behind by the failed user merge is discarded before the default
+  merge runs) and wraps the default-merge fallback in try/except,
+  treating a double-failure as ``ABORT`` rather than letting the inner
+  exception leak out and bypass the configured policy.
 
 These were a source of test-vs-prod drift in earlier iterations and
 are now load-bearing harness invariants. Tests that rely on the merge
@@ -2178,8 +2191,8 @@ Key sites in `calfkit/`:
 - `nodes/agent.py::BaseAgentNodeDef._aggregator_handler` — the returns handler.
 - ``nodes/agent.py::BaseAgentNodeDef._ensure_aggregator_ready`` — strict validation that ``setup()`` has run; raises ``AggregatorStateStoreError`` pointing at ``calfkit.nodes.aggregator.testing.setup_for_tests`` when the runtime is missing. No lazy synthesis.
 - `worker/worker.py::Worker._prepare_aggregators` and `Worker.run` — startup wiring.
-- `client/base.py::BaseClient.connect` — installs `FanOutAggregatorPartitioner` broker-wide, captures `KafkaConfig`, **and enforces producer durability**. `Client.connect` injects `acks="all"` and `enable_idempotence=True` into the broker kwargs when the user did not set them; if the user explicitly set unsafe values (`acks` other than `"all"`/`-1`, or `enable_idempotence=False`) it raises `DurabilityConfigError` (in `calfkit/exceptions.py`). The durable aggregator's correctness assumes every state-store publish lands on a quorum and is not silently de-duplicated by aiokafka's idempotent producer path; previously these settings were undefended and a misconfigured user could lose committed state writes on broker failover. `Worker._prepare_aggregators` additionally calls `kafka_config.check_rehydration_timeout_floor()` once when at least one aggregator is wired, which logs WARN if `rebalance_timeout_ms` is below `_REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS = 300_000` (5 min) — rehydration of large state topics can exceed aiokafka's 30s default and trigger a rebalance storm.
-- `client/kafka_config.py::KafkaConfig` — typed snapshot of bootstrap servers, `security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`, plus `client_kwargs` as the escape hatch for any aiokafka kwarg not promoted to a typed field. Provides `to_consumer_kwargs()` (merged kwarg dict for `AIOKafkaConsumer(...)`, with typed fields winning on collision and None values excluded) and `check_rehydration_timeout_floor()` (WARN if `rebalance_timeout_ms` below `_REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS = 300_000`).
+- `client/base.py::BaseClient.connect` — installs `FanOutAggregatorPartitioner` broker-wide, captures `KafkaConfig`, **and enforces producer durability**. `Client.connect` injects `acks="all"` and `enable_idempotence=True` into the broker kwargs when the user did not set them (logging the injection at INFO so silent defaulting is observable); if the user explicitly set unsafe values (`acks` other than `"all"`/`-1`, or `enable_idempotence=False`) it raises `DurabilityConfigError` (in `calfkit/exceptions.py`). The durable aggregator's correctness assumes every state-store publish lands on a quorum and is not silently de-duplicated by aiokafka's idempotent producer path; previously these settings were undefended and a misconfigured user could lose committed state writes on broker failover. `Worker._prepare_aggregators` additionally calls `kafka_config.assert_rehydration_timeout_ok()` once when at least one aggregator is wired, which **raises** `DurabilityConfigError` if `rebalance_timeout_ms` is below `REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS = 300_000` (5 min) — rehydration of large state topics can exceed aiokafka's 30s default and trigger a rebalance storm, so the worker fails fast at startup rather than risking the storm in production.
+- `client/kafka_config.py::KafkaConfig` — typed snapshot of bootstrap servers, `security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`, plus `client_kwargs` as the escape hatch for any aiokafka kwarg not promoted to a typed field. Provides `to_consumer_kwargs()` (merged kwarg dict for `AIOKafkaConsumer(...)`, with typed fields winning on collision, None values excluded, and producer-only kwargs filtered) and `assert_rehydration_timeout_ok()` (raises `DurabilityConfigError` if `rebalance_timeout_ms` below `REHYDRATE_REBALANCE_TIMEOUT_FLOOR_MS = 300_000`). The constructor raises `DurabilityConfigError` on collisions between typed fields and `client_kwargs`; `client_kwargs` is itself wrapped in `MappingProxyType` so the captured dict cannot be mutated post-construction.
 - ``_protocol.py::HDR_FANOUT_ID``, ``HDR_FRAME_ID``, ``HDR_DEGRADED_MERGE`` — added headers.
 - ``nodes/aggregator/testing.py::InMemoryAggregator`` — in-memory harness; mirrors production ``_batch_view`` (accepts ``base_state_copy=`` so the harness shares the single-deep-copy-per-handler contract) and ``_run_merge`` (try/except around the ``FALLBACK_TO_DEFAULT`` default-merge fallback). ``persist_to_disk=True`` by default.
 - ``nodes/aggregator/testing.py::RestartSimulatedError`` — raised by harness ``wait_for_completion`` / ``wait_for_partial_state`` waiters when ``simulate_restart()`` fires mid-await. Defined in ``testing.py`` (not ``errors.py``) so production code catching ``AggregatorError`` cannot accidentally swallow it.

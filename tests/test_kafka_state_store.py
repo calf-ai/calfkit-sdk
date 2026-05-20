@@ -242,8 +242,19 @@ async def test_rehydrate_raises_on_stalled_poll() -> None:
         "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
         return_value=mock_consumer,
     ):
-        with pytest.raises(AggregatorStateStoreError, match="rehydration stalled"):
+        with pytest.raises(AggregatorStateStoreError) as exc_info:
             await store.rehydrate_partitions({0})
+
+    # Message phrasing is operator-facing: must report the count as
+    # "empty polls" with an explicit upper-bound qualifier (the ~Xs
+    # figure is only accurate when every poll consumed its full 1s
+    # timeout). Falsely presenting the count as exact seconds would
+    # mislead operators reading the log.
+    msg = str(exc_info.value)
+    assert "rehydration stalled" in msg
+    assert "empty polls" in msg
+    assert "upper-bound" in msg
+    assert "getmany timeout=1s" in msg
 
     # The store must NOT have activated partition 0 — owned_partitions
     # is updated only AFTER successful drain.
@@ -685,6 +696,99 @@ async def test_rehydrate_raises_after_exactly_max_empty_polls() -> None:
             await store.rehydrate_partitions({0})
 
     assert mock_consumer.getmany.await_count == _KafkaStateStore._REHYDRATE_MAX_EMPTY_POLLS
+
+
+async def test_rehydrate_empty_polls_accumulate_across_repolls() -> None:
+    """Empty-poll budget is cumulative across end_offsets re-polls — a
+    stalled poll counts toward the budget even when a subsequent re-poll
+    surfaces an advanced offset on a sibling watermark. Without
+    accumulation, a slow broker that advances one offset per re-poll
+    would silently exhaust ``_REHYDRATE_MAX_EMPTY_POLLS`` ×
+    ``_REHYDRATE_MAX_ENDOFFSET_REPOLLS`` cumulative empties before the
+    cap fires — multiplying the stall budget by the re-poll budget.
+
+    Scenario: initial end=1, drain reads record 0 (counter resets to 0
+    on progress), then 4 empty polls (no new records, no progress).
+    First re-poll shows end=2 → outer loop continues, empty_polls is
+    NOT reset, drain enters with counter at 4. The next empty poll
+    (cumulative #5) must trigger the cap, not start a fresh budget.
+    """
+    from aiokafka import TopicPartition
+
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    tp = TopicPartition("agent.fanout-state", 0)
+
+    state = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f0",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=0,
+        last_updated_ms=0,
+        agent_topic="agent.in",
+    )
+
+    class _Rec:
+        def __init__(self, key: bytes, value: bytes, offset: int) -> None:
+            self.key = key
+            self.value = value
+            self.offset = offset
+
+    rec_0 = _Rec(b"c1|f0", state.model_dump_json().encode(), 0)
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+
+    # end_offsets sequence: initial=1 (drain reads record 0), re-poll=2
+    # (one more record landed; outer loop continues). The drain then
+    # finds no records on every subsequent getmany — the cumulative
+    # empty count must trigger the cap, not silently extend it.
+    mock_consumer.end_offsets = AsyncMock(side_effect=[{tp: 1}, {tp: 2}, {tp: 2}])
+
+    cap = _KafkaStateStore._REHYDRATE_MAX_EMPTY_POLLS
+    # After record 0 is delivered, counter resets to 0. We then run
+    # (cap - 1) empty polls inside the first drain loop (which exits
+    # because `remaining` was emptied by the record delivery, so really
+    # the empties are inside the second drain loop). Adjust: the inner
+    # `while remaining:` loop exits as soon as `remaining` is empty —
+    # so the cap-counting empties must happen in the SECOND drain after
+    # the re-poll surfaces end=2.
+    #
+    # Sequence inside the test:
+    # - getmany #1: delivers rec_0 → progress, empty_polls reset to 0,
+    #   record 0+1 >= remaining[tp]=1 → remaining drained, inner loop exits.
+    # - outer re-poll: end_offsets returns 2 → advanced, remaining={tp: 2},
+    #   empty_polls NOT reset (still 0).
+    # - inner drain re-enters with remaining={tp: 2}. Now every getmany
+    #   returns empty. The (cap)th cumulative empty must raise.
+    poll_sequence: list[dict[TopicPartition, list[_Rec]]] = [{tp: [rec_0]}]
+    poll_sequence.extend({} for _ in range(cap))
+    mock_consumer.getmany = AsyncMock(side_effect=poll_sequence)
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        with pytest.raises(AggregatorStateStoreError, match="rehydration stalled"):
+            await store.rehydrate_partitions({0})
+
+    # Verify the raise fired at the cumulative cap, not after a silent
+    # reset extended it: the total getmany call count is the delivery
+    # poll (1) plus exactly `cap` empty polls. If the counter had reset
+    # on re-poll, we'd have observed at least cap+1 empty polls before
+    # the raise (cap empties not enough to trip a fresh budget).
+    assert mock_consumer.getmany.await_count == 1 + cap
+    # Partition was not activated.
+    assert 0 not in store.owned_partitions
+    mock_consumer.stop.assert_awaited()
 
 
 async def test_rehydrate_empty_poll_counter_resets_on_progress() -> None:

@@ -62,9 +62,13 @@ class Worker:
         # Only check the rehydration timeout floor when at least one
         # agent node will register a state-store rebalance listener.
         # Workers without aggregators don't pay the rehydration cost, so
-        # the floor doesn't apply.
+        # the floor doesn't apply. The assertion raises
+        # ``DurabilityConfigError`` if the floor is breached — fail-fast
+        # at worker startup is correct because the alternative (a
+        # rebalance storm on first reassignment) is operationally severe
+        # and requires a restart to recover anyway.
         if has_agent_node and kafka_config is not None:
-            kafka_config.check_rehydration_timeout_floor()
+            kafka_config.assert_rehydration_timeout_ok()
 
         for node in self._nodes:
             if isinstance(node, BaseAgentNodeDef):

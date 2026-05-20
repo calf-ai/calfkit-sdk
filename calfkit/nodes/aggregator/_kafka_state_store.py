@@ -49,7 +49,13 @@ class _KafkaStateStore:
     # this many consecutive empty polls with offsets still outstanding,
     # rehydrate_partitions raises rather than silently activating the
     # partition with partial state.
-    _REHYDRATE_MAX_EMPTY_POLLS: int = 5
+    #
+    # The budget is CUMULATIVE across end_offsets re-polls — see
+    # rehydrate_partitions for rationale. The value is sized for the
+    # worst-case wall-clock budget when combined with
+    # _REHYDRATE_MAX_ENDOFFSET_REPOLLS so a slow stream that advances
+    # one partition per re-poll cannot silently exhaust multiple budgets.
+    _REHYDRATE_MAX_EMPTY_POLLS: int = 15
 
     # End-offset re-poll budget. The previous owner of a partition may
     # still be flushing in-flight writes when the new owner snapshots
@@ -119,9 +125,13 @@ class _KafkaStateStore:
         """True if ``key`` was tombstoned within the last
         ``completion_ttl_seconds`` (default 60s).
 
-        Used to distinguish late returns (drop with INFO) from orphan
-        returns (drop with WARN) — both are dropped, but the distinction
-        helps debugging.
+        Lookup used by the returns handler to classify a return that
+        finds no in-flight batch in the cache: ``True`` means this is a
+        legitimate late return for a batch the aggregator already
+        completed (the handler drops it at INFO); ``False`` means this is
+        an orphan return with no associated batch on an owned partition
+        (the handler raises ``AggregatorStateStoreError``). The handler
+        owns the policy decision; this method only answers the lookup.
         """
         return key in self._recently_completed
 
@@ -289,8 +299,10 @@ class _KafkaStateStore:
                         empty_polls += 1
                         if empty_polls >= self._REHYDRATE_MAX_EMPTY_POLLS:
                             raise AggregatorStateStoreError(
-                                f"rehydration stalled after {empty_polls}s on state-topic "
-                                f"partitions={sorted(tp.partition for tp in remaining)}; "
+                                f"rehydration stalled after {empty_polls} empty polls "
+                                f"(~{empty_polls}s upper-bound, getmany timeout=1s) on "
+                                f"state-topic partitions="
+                                f"{sorted(tp.partition for tp in remaining)}; "
                                 f"broker may be unhealthy or partition leadership in flux. "
                                 f"Refusing to activate partition assignment with partial state.",
                                 state_topic=self._state_topic,
@@ -328,9 +340,18 @@ class _KafkaStateStore:
                 # partition; the consumer's position is at that point,
                 # so feeding the new gap into ``remaining`` is sufficient
                 # — getmany will continue from where it left off.
+                #
+                # empty_polls is intentionally NOT reset here: it
+                # accumulates across re-polls. A stalled poll counts
+                # toward the budget even if a sibling partition advanced
+                # on the next re-poll; resetting per-repoll would let a
+                # slow stream silently exhaust the budget repeatedly
+                # (max budget * max re-polls cumulative empties before
+                # the cap fires). The progress-based reset inside the
+                # inner drain loop still triggers on every record, so
+                # genuine forward progress does refresh the counter.
                 remaining = advanced
                 observed_end_offsets = latest_end_offsets
-                empty_polls = 0
         finally:
             await consumer.stop()
 

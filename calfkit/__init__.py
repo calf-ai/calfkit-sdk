@@ -1,6 +1,14 @@
 from importlib.metadata import version
 
+# Wire-protocol header constants are exported at the top level for
+# consumer-side monitoring (e.g., counting degraded merges via the
+# HDR_DEGRADED_MERGE header on aggregator-published envelopes). They live
+# in calfkit._protocol so the wire constants stay free of circular import
+# dependencies, but the public surface is re-exported here so users have
+# a stable import path.
+from calfkit._protocol import HDR_DEGRADED_MERGE, HDR_FANOUT_ID, HDR_FRAME_ID
 from calfkit.client import Client, InvocationHandle, KafkaConfig, NodeResult
+from calfkit.exceptions import CalfkitError, DurabilityConfigError
 from calfkit.models import ToolContext
 from calfkit.nodes import (
     Agent,
@@ -40,6 +48,9 @@ __all__ = [
     "InvocationHandle",
     "KafkaConfig",
     "NodeResult",
+    # exceptions
+    "CalfkitError",
+    "DurabilityConfigError",
     # models
     "ToolContext",
     # nodes
@@ -53,6 +64,10 @@ __all__ = [
     "ToolNodeDef",
     "agent_tool",
     "consumer",
+    # protocol header constants
+    "HDR_DEGRADED_MERGE",
+    "HDR_FANOUT_ID",
+    "HDR_FRAME_ID",
     # providers
     "AnthropicModelClient",
     "OpenAIModelClient",

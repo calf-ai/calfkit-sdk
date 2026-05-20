@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from calfkit.models.state import State
 
@@ -117,9 +117,12 @@ class FanOutState(BaseModel):
     """Map of tool_call_id → tool result, accumulated as tool returns arrive.
 
     Pydantic's ``frozen=True`` prevents reassigning the field to a
-    different dict; the inner dict itself remains mutable but is never
-    mutated by framework code (each update writes a new
-    :class:`FanOutState` via :class:`_InFlightBatch.with_received`)."""
+    different dict. After model construction (and after deserialisation
+    via ``model_validate`` / ``model_validate_json``) the inner mapping
+    is wrapped in :class:`types.MappingProxyType` by the
+    ``_wrap_received_immutable`` validator below, so it cannot be mutated
+    by accident — each update writes a NEW :class:`FanOutState` via
+    :class:`_InFlightBatch.with_received`."""
 
     base_state: State
     """Snapshot of :class:`State` at dispatch time, before any results arrived.
@@ -157,6 +160,41 @@ class FanOutState(BaseModel):
 
     tracestate: str | None = None
     """W3C OTel ``tracestate`` header captured at dispatch time."""
+
+    @model_validator(mode="after")
+    def _wrap_received_immutable(self) -> FanOutState:
+        """Wrap :attr:`received` in :class:`MappingProxyType` after
+        construction so the inner mapping cannot be mutated.
+
+        Mirrors the pattern in :meth:`AggregatorBatch.__post_init__`. The
+        model is frozen (``model_config.frozen=True``) so direct assignment
+        would raise; ``object.__setattr__`` bypasses the frozen guard the
+        same way Pydantic's own ``__init__`` does. Runs on both fresh
+        construction and on ``model_validate`` / ``model_validate_json``
+        because Pydantic invokes ``@model_validator(mode="after")``
+        validators in both paths.
+        """
+        if not isinstance(self.received, MappingProxyType):
+            # Defensive ``dict(...)`` copy first: the caller may have
+            # passed a reference they continue to mutate, and we want the
+            # proxy to view our own snapshot, not theirs.
+            object.__setattr__(self, "received", MappingProxyType(dict(self.received)))
+        return self
+
+    @field_serializer("received")
+    def _serialize_received(self, received: Mapping[str, Any]) -> dict[str, Any]:
+        """Render :attr:`received` as a plain ``dict`` on serialisation.
+
+        Pydantic's JSON serialiser does not natively support
+        :class:`MappingProxyType` (raises ``PydanticSerializationError:
+        Unable to serialize unknown type: mappingproxy``). The validator
+        above wraps the field in a proxy for runtime immutability; this
+        serializer unwraps it on the way out so ``model_dump`` /
+        ``model_dump_json`` produce a normal dict the durable log can
+        carry. The round-trip via ``model_validate_json`` re-wraps it
+        because the validator runs again on deserialise.
+        """
+        return dict(received)
 
     @model_validator(mode="after")
     def _enforce_min_schema_version(self) -> FanOutState:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -43,25 +44,33 @@ async def test_invoke_rejects_correlation_id_with_pipe_delimiter() -> None:
 def test_connect_rejects_acks_one() -> None:
     """acks=1 acknowledges as soon as the leader writes locally, before
     replication. A leader crash between ack and replica catch-up would
-    silently drop a state-topic write."""
+    silently drop a state-topic write. Verify via the structured
+    ``kwarg_name`` attribute instead of regex match — operators branch
+    on the attribute programmatically."""
     with patch("calfkit.client.base.KafkaBroker"):
-        with pytest.raises(DurabilityConfigError, match="acks"):
+        with pytest.raises(DurabilityConfigError) as exc_info:
             Client.connect("kafka.example:9092", acks=1)
+    assert exc_info.value.kwarg_name == "acks"
+    assert exc_info.value.offending_value == 1
 
 
 def test_connect_rejects_acks_zero() -> None:
     """acks=0 is fire-and-forget; no durability whatsoever."""
     with patch("calfkit.client.base.KafkaBroker"):
-        with pytest.raises(DurabilityConfigError, match="acks"):
+        with pytest.raises(DurabilityConfigError) as exc_info:
             Client.connect("kafka.example:9092", acks=0)
+    assert exc_info.value.kwarg_name == "acks"
+    assert exc_info.value.offending_value == 0
 
 
 def test_connect_rejects_enable_idempotence_false() -> None:
     """Without idempotence, producer retries can produce duplicate state
     records that compaction cannot reliably deduplicate."""
     with patch("calfkit.client.base.KafkaBroker"):
-        with pytest.raises(DurabilityConfigError, match="enable_idempotence"):
+        with pytest.raises(DurabilityConfigError) as exc_info:
             Client.connect("kafka.example:9092", enable_idempotence=False)
+    assert exc_info.value.kwarg_name == "enable_idempotence"
+    assert exc_info.value.offending_value is False
 
 
 def test_connect_injects_acks_all_when_missing() -> None:
@@ -103,14 +112,73 @@ def test_connect_accepts_acks_minus_one() -> None:
     assert kwargs["acks"] == -1
 
 
-def test_connect_kafka_config_reflects_injected_durability() -> None:
-    """The KafkaConfig snapshot must reflect what KafkaBroker actually
-    received, including auto-injected acks="all". Without this, the
-    rehydration consumer could see a different view than the producer
-    and the durability contract would be split across two configs."""
-    with patch("calfkit.client.base.KafkaBroker"):
+def test_connect_kafka_config_excludes_producer_kwargs_but_broker_gets_them() -> None:
+    """``KafkaConfig`` is the consumer-side snapshot used to construct
+    the rehydration ``AIOKafkaConsumer``; producer-only kwargs (acks,
+    enable_idempotence) MUST be stripped from ``client_kwargs`` because
+    ``AIOKafkaConsumer.__init__`` raises ``TypeError`` on them. They
+    still reach the producer via ``KafkaBroker(**broker_kwargs)``."""
+    with patch("calfkit.client.base.KafkaBroker") as mock_broker_cls:
         client = Client.connect("kafka.example:9092")
     assert client.kafka_config is not None
-    # acks lives in client_kwargs (not a typed field on KafkaConfig).
-    assert client.kafka_config.client_kwargs.get("acks") == "all"
-    assert client.kafka_config.client_kwargs.get("enable_idempotence") is True
+    # Producer-only kwargs are stripped from the consumer-side snapshot.
+    assert "acks" not in client.kafka_config.client_kwargs
+    assert "enable_idempotence" not in client.kafka_config.client_kwargs
+    # But they DO reach KafkaBroker (the producer-side path).
+    broker_kwargs = mock_broker_cls.call_args.kwargs
+    assert broker_kwargs["acks"] == "all"
+    assert broker_kwargs["enable_idempotence"] is True
+
+
+def test_build_kafka_config_excludes_producer_kwargs_from_client_kwargs() -> None:
+    """Producer-only kwargs the user explicitly passes (e.g.
+    ``compression_type``) belong on the producer; ``KafkaConfig`` is
+    the consumer-side snapshot. They must reach ``KafkaBroker`` intact
+    but stay out of ``client_kwargs``."""
+    with patch("calfkit.client.base.KafkaBroker") as mock_broker_cls:
+        client = Client.connect(
+            "kafka.example:9092",
+            acks="all",
+            compression_type="lz4",
+        )
+    assert client.kafka_config is not None
+    assert "acks" not in client.kafka_config.client_kwargs
+    assert "compression_type" not in client.kafka_config.client_kwargs
+    broker_kwargs = mock_broker_cls.call_args.kwargs
+    assert broker_kwargs["acks"] == "all"
+    assert broker_kwargs["compression_type"] == "lz4"
+
+
+def test_durability_config_error_carries_kwarg_attributes() -> None:
+    """The structured ``kwarg_name`` / ``offending_value`` /
+    ``expected_value`` attributes let operators branch on the failure
+    programmatically instead of regex-matching error messages."""
+    with patch("calfkit.client.base.KafkaBroker"):
+        with pytest.raises(DurabilityConfigError) as exc_info:
+            Client.connect("kafka.example:9092", acks=1)
+    assert exc_info.value.kwarg_name == "acks"
+    assert exc_info.value.offending_value == 1
+    # Expected value is a docs string mentioning "all" or -1.
+    assert exc_info.value.expected_value is not None
+    expected_str = str(exc_info.value.expected_value)
+    assert "all" in expected_str or "-1" in expected_str
+
+
+def test_connect_logs_injected_acks_all(caplog: pytest.LogCaptureFixture) -> None:
+    """When acks isn't supplied, Client.connect injects acks='all' for
+    durability and surfaces an INFO log so the operator can audit the
+    auto-injection (and suppress it by passing the kwarg explicitly)."""
+    with patch("calfkit.client.base.KafkaBroker"):
+        with caplog.at_level(logging.INFO, logger="calfkit.client.base"):
+            Client.connect("kafka.example:9092")
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO and "injected broker_kwarg acks" in r.getMessage()]
+    assert info_records, "expected an INFO log for the injected acks default"
+
+
+def test_connect_logs_injected_enable_idempotence(caplog: pytest.LogCaptureFixture) -> None:
+    """Same audit-trail INFO for the enable_idempotence default injection."""
+    with patch("calfkit.client.base.KafkaBroker"):
+        with caplog.at_level(logging.INFO, logger="calfkit.client.base"):
+            Client.connect("kafka.example:9092")
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO and "injected broker_kwarg enable_idempotence" in r.getMessage()]
+    assert info_records, "expected an INFO log for the injected enable_idempotence default"
