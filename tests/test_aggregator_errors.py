@@ -40,6 +40,22 @@ def test_merge_error_attributes_default_to_none() -> None:
     err = AggregatorMergeError("generic boom")
     assert err.correlation_id is None
     assert err.fan_out_id is None
+    assert err.state_topic is None
+
+
+def test_aggregator_merge_error_carries_state_topic() -> None:
+    """AggregatorMergeError carries state_topic so multi-agent operators
+    alerting on merge failures across multiple agents in the same worker
+    can attribute the failure to the right agent's aggregator."""
+    err = AggregatorMergeError(
+        "merge() raised",
+        correlation_id="corr-abc",
+        fan_out_id="fan-xyz",
+        state_topic="agent.fanout-state",
+    )
+    assert err.state_topic == "agent.fanout-state"
+    assert err.correlation_id == "corr-abc"
+    assert err.fan_out_id == "fan-xyz"
 
 
 def test_state_store_error_carries_state_topic() -> None:

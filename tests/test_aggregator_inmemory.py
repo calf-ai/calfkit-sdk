@@ -1,8 +1,9 @@
 """Pure-Python tests for InMemoryAggregator behavior — no Kafka required.
 
 Exercises FanOutAggregator's three behavior overrides (merge,
-should_complete, on_partial), all MergeErrorPolicy modes, persist-to-disk
-semantics, the clock injection helper, and the async wait helpers.
+should_complete, on_partial), all MergeErrorPolicy modes
+(ABORT / RETRY / FALLBACK_TO_DEFAULT), persist-to-disk semantics, the
+clock injection helper, and the async wait helpers.
 """
 
 import asyncio
@@ -189,18 +190,19 @@ async def test_merge_error_retry_succeeds() -> None:
     assert result.state.tool_results == {"t1": "x"}
 
 
-async def test_merge_error_drop_logs_and_completes() -> None:
-    base = FailingMergeAggregator(merge_error_policy=MergeErrorPolicy.DROP)
+async def test_merge_error_fallback_to_default_logs_and_completes() -> None:
+    base = FailingMergeAggregator(merge_error_policy=MergeErrorPolicy.FALLBACK_TO_DEFAULT)
     agg = InMemoryAggregator.wrap(
         base,
         persist_to_disk=False,
-        merge_error_policy=MergeErrorPolicy.DROP,
+        merge_error_policy=MergeErrorPolicy.FALLBACK_TO_DEFAULT,
     )
     await _init_batch(agg, expected=frozenset({"t1"}))
 
     result = await agg.submit_return("c1", "f1", "t1", "value")
 
-    # DROP falls back to the default merge; the tool result still lands on state.
+    # FALLBACK_TO_DEFAULT falls back to the default merge; the tool result
+    # still lands on state.
     assert result is not None
     assert result.state.tool_results == {"t1": "value"}
 
@@ -319,7 +321,7 @@ async def test_simulate_restart_cancels_pending_completion_waiter() -> None:
     hang forever on the wiped event reference."""
     import pytest
 
-    from calfkit.nodes.aggregator.errors import RestartSimulatedError
+    from calfkit.nodes.aggregator.testing import RestartSimulatedError
 
     agg = InMemoryAggregator(persist_to_disk=False)
     await _init_batch(agg, expected=frozenset({"t1"}))
@@ -339,7 +341,7 @@ async def test_simulate_restart_cancels_pending_partial_state_waiter() -> None:
     as a typed exception, not a hang."""
     import pytest
 
-    from calfkit.nodes.aggregator.errors import RestartSimulatedError
+    from calfkit.nodes.aggregator.testing import RestartSimulatedError
 
     agg = InMemoryAggregator(persist_to_disk=False)
     await _init_batch(agg)

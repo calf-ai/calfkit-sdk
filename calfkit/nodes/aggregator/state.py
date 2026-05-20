@@ -7,6 +7,11 @@ batch, keyed by ``(correlation_id, fan_out_id)``. The value is a serialised
 User code never sees ``FanOutState`` directly — :class:`FanOutAggregator`
 overrides receive an immutable :class:`AggregatorBatch` view, and the
 completion path returns an :class:`AggregatedReturn`.
+
+Tool call IDs (the LLM-assigned identifier of a single tool invocation) are
+plain ``str`` throughout. Conceptually distinct from ``correlation_id`` (per
+logical agent run) and ``fan_out_id`` (per parallel-fan-out batch); together
+they form the dedup triple ``(correlation_id, fan_out_id, tool_call_id)``.
 """
 
 from __future__ import annotations
@@ -15,19 +20,11 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, NewType
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from calfkit.models.state import State
-
-ToolCallId = NewType("ToolCallId", str)
-"""Type alias for the LLM-assigned identifier of a single tool call.
-
-Distinct from ``correlation_id`` (per logical agent run) and ``fan_out_id``
-(per parallel-fan-out batch within a run); together they form the dedup
-triple ``(correlation_id, fan_out_id, tool_call_id)``.
-"""
 
 
 class FanOutState(BaseModel):
@@ -42,9 +39,13 @@ class FanOutState(BaseModel):
     Uses plain ``BaseModel`` (not ``CompactBaseModel``) because every field
     is load-bearing and we don't want ``exclude_unset`` / ``exclude_none``
     serialisation gotchas in a durable wire format.
+
+    Frozen so a parsed wire record cannot drift from what was published —
+    the aggregator's invariant is "publish then update cache" and any
+    in-place tweak to a deserialised state would violate that.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     correlation_id: str
     """The logical run's correlation_id. Same as the inbound message's correlation_id."""
@@ -54,22 +55,33 @@ class FanOutState(BaseModel):
     the agent's inbound :attr:`CallFrame.frame_id` so redelivered inbounds
     produce the same fan-out_id (idempotent dispatch)."""
 
-    expected_tool_call_ids: frozenset[ToolCallId]
+    expected_tool_call_ids: frozenset[str]
     """The set of tool_call_ids the agent dispatched for this batch."""
 
-    received: dict[ToolCallId, Any] = Field(default_factory=dict)
-    """Map of tool_call_id → tool result, accumulated as tool returns arrive."""
+    received: dict[str, Any] = Field(default_factory=dict)
+    """Map of tool_call_id → tool result, accumulated as tool returns arrive.
+
+    Pydantic's ``frozen=True`` prevents reassigning the field to a
+    different dict; the inner dict itself remains mutable but is never
+    mutated by framework code (each update writes a new
+    :class:`FanOutState` via :class:`_InFlightBatch.with_received`)."""
 
     base_state: State
     """Snapshot of :class:`State` at dispatch time, before any results arrived.
     The completion path merges :attr:`received` into a copy of this state."""
 
     started_at_ms: int
-    """Monotonic millisecond timestamp at dispatch time. For lag metrics."""
+    """Wall-clock millisecond timestamp (epoch ms) at dispatch time.
+
+    Wall-clock — not monotonic — so timestamps remain comparable across
+    processes (producer, aggregator, and any consumer reading the
+    durable log). Used for lag and batch-age metrics."""
 
     last_updated_ms: int
-    """Monotonic millisecond timestamp of the most recent ``received`` mutation.
-    Recorded for observability (lag, batch-age metrics)."""
+    """Wall-clock millisecond timestamp (epoch ms) of the most recent
+    ``received`` mutation. Same cross-process comparability rationale as
+    :attr:`started_at_ms`. Recorded for observability (lag, batch-age
+    metrics)."""
 
     agent_topic: str
     """The agent's main input topic. The aggregated ``AggregatedReturn`` is
@@ -97,8 +109,8 @@ class AggregatorBatch:
 
     correlation_id: str
     fan_out_id: str
-    expected_tool_call_ids: frozenset[ToolCallId]
-    received: Mapping[ToolCallId, Any]
+    expected_tool_call_ids: frozenset[str]
+    received: Mapping[str, Any]
     base_state: State
     started_at_ms: int
     last_updated_ms: int
@@ -140,7 +152,7 @@ class AggregatorBatch:
         return self.expected_tool_call_ids <= frozenset(self.received.keys())
 
     @property
-    def missing_tool_call_ids(self) -> frozenset[ToolCallId]:
+    def missing_tool_call_ids(self) -> frozenset[str]:
         """Tool_call_ids that were dispatched but haven't returned yet."""
         return self.expected_tool_call_ids - frozenset(self.received.keys())
 
@@ -160,9 +172,9 @@ class AggregatedReturn:
 
     degraded: bool = False
     """``True`` when this result came from the
-    :data:`MergeErrorPolicy.DROP` fallback path (user's :meth:`merge`
-    raised; framework fell back to the default merge). The framework
-    stamps :data:`HDR_DEGRADED_MERGE` on the published envelope so
-    operators can detect silently-degraded batches; users overriding
+    :data:`MergeErrorPolicy.FALLBACK_TO_DEFAULT` fallback path (user's
+    :meth:`merge` raised; framework fell back to the default merge). The
+    framework stamps :data:`HDR_DEGRADED_MERGE` on the published envelope
+    so operators can detect silently-degraded batches; users overriding
     :meth:`merge` and returning ``AggregatedReturn`` directly can also
     set this flag to signal a known-degraded result."""

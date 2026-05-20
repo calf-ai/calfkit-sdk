@@ -15,6 +15,10 @@ import logging
 from typing import Any, cast
 
 from aiokafka.admin import NewTopic  # type: ignore[import-untyped]
+from aiokafka.admin.config_resource import (  # type: ignore[import-untyped]
+    ConfigResource,
+    ConfigResourceType,
+)
 from aiokafka.errors import (  # type: ignore[import-untyped]
     TopicAlreadyExistsError,
     UnknownTopicOrPartitionError,
@@ -136,10 +140,23 @@ async def _resolve_partition_count(
         ) from exc
 
     for desc in descriptions:
-        if desc.get("topic") == main_topic and not desc.get("error"):
-            partitions = desc.get("partitions", [])
-            if partitions:
-                return len(partitions)
+        if desc.get("topic") != main_topic:
+            continue
+        error_code = desc.get("error_code", 0)
+        if error_code != 0:
+            logger.warning(
+                "main topic %r returned error_code=%d from describe_topics; "
+                "treating as not found and falling back to default partitions. "
+                "If the broker is reporting an auth or invalid-topic error, the "
+                "operator must fix that before aggregator co-partitioning can be "
+                "guaranteed.",
+                main_topic,
+                error_code,
+            )
+            continue
+        partitions = desc.get("partitions", [])
+        if partitions:
+            return len(partitions)
 
     logger.warning(
         "main topic %r not found or has no partitions; defaulting to %d for "
@@ -176,6 +193,17 @@ async def _ensure_topic(
                 f"restarting.",
                 state_topic=topic,
             )
+        if configs:
+            actual_configs = await _describe_topic_configs(admin, topic)
+            for key, expected_val in configs.items():
+                actual_val = actual_configs.get(key)
+                if actual_val != expected_val:
+                    raise AggregatorStateStoreError(
+                        f"topic {topic!r} has config {key}={actual_val!r} but "
+                        f"the aggregator requires {key}={expected_val!r}. "
+                        f"Reconfigure the topic or recreate before restarting.",
+                        state_topic=topic,
+                    )
         logger.debug("topic %s already exists with %d partitions", topic, partitions)
         return
 
@@ -189,8 +217,26 @@ async def _ensure_topic(
         await admin.create_topics([new_topic], validate_only=False)
     except TopicAlreadyExistsError:
         # Multi-worker startup race: another worker created the topic
-        # between our describe + create. Fall through to validate.
-        logger.debug("topic %s race-created by another worker; continuing", topic)
+        # between our describe + create. Re-describe and validate that the
+        # peer used the same partition count — config drift here silently
+        # breaks co-partitioning, so failing loudly is required.
+        existing = await _try_describe(admin, topic)
+        if existing is None:
+            raise AggregatorStateStoreError(
+                f"topic {topic!r} reported as race-created but cannot be re-described; "
+                f"workers may have inconsistent broker access or the broker is unstable.",
+                state_topic=topic,
+            ) from None
+        existing_partitions = len(existing.get("partitions", []))
+        if existing_partitions != partitions:
+            raise AggregatorStateStoreError(
+                f"topic {topic!r} race-created by peer with {existing_partitions} partitions "
+                f"but the aggregator requires {partitions} (must match main topic). "
+                f"Workers have inconsistent aggregator configuration; align partition counts "
+                f"or default_partitions across workers before restarting.",
+                state_topic=topic,
+            ) from None
+        logger.debug("topic %s race-created by another worker; partition count matches", topic)
         return
     except Exception as exc:
         raise AggregatorStateStoreError(
@@ -218,6 +264,38 @@ async def _try_describe(admin: Any, topic: str) -> dict[str, Any] | None:
             state_topic=topic,
         ) from exc
     for desc in descriptions:
-        if desc.get("topic") == topic and not desc.get("error"):
-            return cast("dict[str, Any]", desc)
+        if desc.get("topic") != topic:
+            continue
+        if desc.get("error_code", 0) != 0:
+            continue
+        return cast("dict[str, Any]", desc)
     return None
+
+
+async def _describe_topic_configs(admin: Any, topic: str) -> dict[str, str]:
+    """Return the topic's current Kafka configuration as a key→value dict.
+
+    Wraps ``AIOKafkaAdminClient.describe_configs`` for a single topic. The
+    underlying response is a list of structs whose ``resources`` attribute
+    holds tuples of ``(error_code, error_message, resource_type,
+    resource_name, config_entries)``, where each ``config_entries`` row is
+    a tuple beginning with ``(config_name, config_value, ...)``.
+    """
+    resource = ConfigResource(ConfigResourceType.TOPIC, topic)
+    try:
+        responses = await admin.describe_configs([resource])
+    except Exception as exc:
+        raise AggregatorStateStoreError(
+            f"failed to describe configs for topic {topic!r}: {exc}",
+            state_topic=topic,
+        ) from exc
+
+    configs: dict[str, str] = {}
+    for response in responses:
+        for resource_row in getattr(response, "resources", []):
+            error_code, _error_message, _resource_type, resource_name, config_entries = resource_row[:5]
+            if resource_name != topic or error_code != 0:
+                continue
+            for entry in config_entries:
+                configs[entry[0]] = entry[1]
+    return configs

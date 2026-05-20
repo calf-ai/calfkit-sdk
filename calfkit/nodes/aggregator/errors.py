@@ -19,7 +19,15 @@ class AggregatorMergeError(AggregatorError):
     ``merge_error_policy`` is :data:`MergeErrorPolicy.ABORT` (or RETRY exhausted).
 
     Attributes ``correlation_id`` and ``fan_out_id`` identify the affected
-    batch so a Sentry / Statsig handler can group failures by run or batch.
+    batch so a Sentry / Statsig handler can group failures by run or batch;
+    ``state_topic`` identifies which agent's aggregator the failure came
+    from, so an operator alerting across multiple agents in the same worker
+    can attribute the failure to the right agent.
+
+    All structured attributes default to ``None`` so existing raise sites
+    that haven't been updated to thread the full context continue to work;
+    new raise sites should pass ``correlation_id``, ``fan_out_id``, and
+    ``state_topic`` whenever the batch identity is in scope.
     """
 
     def __init__(
@@ -28,10 +36,12 @@ class AggregatorMergeError(AggregatorError):
         *,
         correlation_id: str | None = None,
         fan_out_id: str | None = None,
+        state_topic: str | None = None,
     ) -> None:
         super().__init__(message)
         self.correlation_id = correlation_id
         self.fan_out_id = fan_out_id
+        self.state_topic = state_topic
 
 
 class AggregatorStateStoreError(AggregatorError):
@@ -58,15 +68,3 @@ class AggregatorStateStoreError(AggregatorError):
     ) -> None:
         super().__init__(message)
         self.state_topic = state_topic
-
-
-class RestartSimulatedError(AggregatorError):
-    """Raised by :class:`~calfkit.nodes.aggregator.testing.InMemoryAggregator`'s
-    async waiters when :meth:`InMemoryAggregator.simulate_restart` fires
-    while a test was awaiting :meth:`wait_for_completion` or
-    :meth:`wait_for_partial_state`.
-
-    Tests that expect simulate_restart to fire mid-await should catch
-    this; tests that don't expect it will see the exception propagate
-    and fail clearly instead of hanging forever on a wiped event.
-    """

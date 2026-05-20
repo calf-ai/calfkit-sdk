@@ -55,9 +55,9 @@ scope: Canonical merged design for the durable fan-out aggregator — public API
 >    `correlation_id` / `fan_out_id`; `AggregatorStateStoreError` carries
 >    `state_topic` (`calfkit/nodes/aggregator/errors.py`).
 > 9. **`HDR_DEGRADED_MERGE`** (`calfkit/_protocol.py`) is stamped on the
->    aggregated return when `MergeErrorPolicy.DROP` is in effect and the
->    user's `merge()` raised. Operators can filter on this header to
->    surface silently-degraded batches.
+>    aggregated return when `MergeErrorPolicy.FALLBACK_TO_DEFAULT` is in
+>    effect and the user's `merge()` raised. Operators can filter on this
+>    header to surface silently-degraded batches.
 > 10. **`idle_timeout_seconds` and `FanOutTimeoutError` are removed.**
 >    The reaper was never built; rather than ship dead code, the parameter
 >    and exception were dropped. The follow-up design is registered in
@@ -281,7 +281,7 @@ class FanOutAggregator:
 |---|---|
 | `ABORT` (default) | Raise `AggregatorMergeError` and let FastStream nack/redeliver. |
 | `RETRY` | Retry `merge()` exactly once; fall back to ABORT on the second failure. Not configurable beyond on/off. |
-| `DROP` | Log the error, fall back to the default merge, stamp `HDR_DEGRADED_MERGE=1` on the published envelope, complete normally. |
+| `FALLBACK_TO_DEFAULT` | Log the error, fall back to the default merge, stamp `HDR_DEGRADED_MERGE=1` on the published envelope, complete normally. The fallback merge itself is wrapped in try/except — if the default merge also raises, the framework treats it as `ABORT`. |
 
 Topic names are derived from `node_id` (`{node_id}.fanout-state`,
 `{node_id}.fanout-returns`); compacted-topic config is the
@@ -489,10 +489,11 @@ is the canonical cross-hop dedup key under at-least-once delivery.
 
 A third aggregator-specific header is added in this branch
 (`calfkit/_protocol.py::HDR_DEGRADED_MERGE`, value `"x-calf-degraded-merge"`).
-It is stamped on the aggregated return ONLY when `MergeErrorPolicy.DROP`
-fell back to the default merge after the user's `merge()` raised; value is
-the string `"1"`. Operators and observability tooling filter on this
-header to surface silently-degraded batches.
+It is stamped on the aggregated return ONLY when
+`MergeErrorPolicy.FALLBACK_TO_DEFAULT` fell back to the default merge
+after the user's `merge()` raised; value is the string `"1"`. Operators
+and observability tooling filter on this header to surface silently-
+degraded batches.
 
 Header summary, by message:
 
@@ -503,7 +504,7 @@ Header summary, by message:
 | Agent parallel dispatch (one per call) | {agent.node_id} | `agent` | (from frame, distinct per call) | {fan_out_id} | absent | (propagated) |
 | Tool ReturnCall (parallel) | {tool.node_id} | `tool` | (from new frame) | {fan_out_id} (echoed) | absent | (propagated) |
 | Aggregator re-entry — normal | {agent.node_id} | `agent` | (synthesised new frame) | absent | absent | (carried from base) |
-| Aggregator re-entry — DROP fallback | {agent.node_id} | `agent` | (synthesised new frame) | absent | `"1"` | (carried from base) |
+| Aggregator re-entry — FALLBACK_TO_DEFAULT fallback | {agent.node_id} | `agent` | (synthesised new frame) | absent | `"1"` | (carried from base) |
 
 **Echoing rule:** the existing `BaseNodeDef.handler` returns `Response(body, headers=self._emitter_headers())`. The Response headers include `HDR_EMITTER` and `HDR_EMITTER_KIND`. The fan-out and frame headers ride only on the outbound `broker.publish(...)` call sites inside `base.py::BaseNodeDef._publish_action`. Tools do not need to know they're in a fan-out — `_publish_action` reads them from the inbound `headers` dict (via FastStream `Context("message.headers")`) and forwards them.
 
@@ -727,67 +728,65 @@ The tool node has no knowledge of the aggregator. The rewritten `callback_topic`
 ### 8.3 Aggregator handler (per return)
 
 ```
-aggregator_handler(envelope, correlation_id, headers, broker):
+aggregator_handler(envelope, correlation_id, headers, broker, partition):
   |
   +--- fan_out_id = decode_header_str(headers[HDR_FANOUT_ID])
   |    if fan_out_id is None: log WARN "missing fanout-id"; drop
   |
   +--- key = (correlation_id, fan_out_id)
   |
-  +--- batch = self._cache.get(key)
+  +--- if state_store.was_recently_completed(key):
+  |       log INFO "late return after completion"; drop
+  |       return
+  |
+  +--- batch = state_store.get(key)
   |    if batch is None:
-  |       # not in cache — possibly tombstoned, possibly orphan
-  |       # check the recently-tombstoned set
-  |       if key in self._recently_completed:
-  |          log INFO "late return after completion"; drop
-  |          # optional v2: forward to DLQ topic
-  |          return
-  |       # not in cache, not tombstoned — orphan
+  |       # not in cache, not recently completed — orphan
   |       log WARN "orphan return"; drop
   |       return
   |
   +--- # Extract the new tool result
-  |    new_returns = {tcid: r for tcid, r in envelope.context.state.tool_results.items()
-  |                  if tcid in batch.expected_tool_call_ids
-  |                  and tcid not in batch.received}
+  |    new_ids = {tcid for tcid in envelope.context.state.tool_results
+  |              if tcid in batch.expected_tool_call_ids
+  |              and tcid not in batch.received}
   |
-  +--- if not new_returns:
-  |       # dedup hit (already collected) or no expected matches (bug)
-  |       log DEBUG "no new returns; dedup or no-match"; ack and return
+  +--- if new_ids:
+  |       # Build the post-merge batch via copy-on-write
+  |       updated_batch = batch.with_received({**batch.received, **new_results},
+  |                                           last_updated_ms=now_ms)
+  |       # Write-through to compacted topic, then update the cache
+  |       await state_store.put(key, updated_batch, partition=partition)
+  |       batch = updated_batch
+  |       view = self.aggregator._batch_view(batch)
+  |       # Exceptions from on_partial propagate (no try/except wrapper in the
+  |       # framework) — they abort the batch and FastStream redelivers the
+  |       # inbound. on_partial is expected to be a thin observability hook;
+  |       # if it does work that can fail, the user owns the try/except.
+  |       await self.aggregator.on_partial(view, frozenset(new_ids))
+  |    else:
+  |       # No new tcids. Could be a plain duplicate, OR a redelivery after
+  |       # a previously-merged batch failed to publish or tombstone (the
+  |       # durable record already has all results). Build the view and let
+  |       # should_complete decide which path to take.
+  |       view = self.aggregator._batch_view(batch)
+  |       if not await self.aggregator.should_complete(view):
+  |          log DEBUG "duplicate/empty return; idempotent drop"; return
+  |       log INFO "re-attempting completion for already-merged batch (redelivery)"
+  |       # fall through to completion path
   |
-  +--- # Build the post-merge batch via copy-on-write
-  |    next_batch = batch.with_received({**batch.received, **new_returns},
-  |                                     last_updated_ms=now_ms)
-  |
-  +--- # Write-through to compacted topic, then update the cache
-  |    await state_store.put(key, next_batch, partition=msg_partition)
-  |
-  +--- # Build immutable view for user hooks
-  |    view = AggregatorBatch(
-  |       correlation_id=corr, expected_tool_call_ids=next_batch.expected_tool_call_ids,
-  |       received=MappingProxyType(dict(next_batch.received)),
-  |       base_state=batch.base_state, started_at_ms=batch.started_at_ms,
-  |    )
-  |
-  +--- # Call user hook
-  |    latest = AggregatedReturn(
-  |       tool_call_id=tcid,                 # only one expected per return
-  |       tool_name=batch.base_state.tool_calls[tcid].tool_name,
-  |       base_state=next_batch.base_state, started_at_ms=next_batch.started_at_ms,
-  |       last_updated_ms=next_batch.last_updated_ms,
-  |    )
-  |    newly_received = frozenset(new_returns.keys())
-  |    try:
-  |       await self.aggregator.on_partial(view, newly_received)
-  |    except Exception:
-  |       log ERROR "on_partial raised"; continue (do not block completion)
-  |
-  +--- # Check completion
+  +--- # Check completion (either freshly advanced or redelivered-and-already-complete)
   |    if await self.aggregator.should_complete(view):
   |       go to §8.4 completion path
   |    else:
   |       ack and return (wait for more)
 ```
+
+The `AggregatorBatch` view exposes the fields shipped on the dataclass
+(see `calfkit/nodes/aggregator/state.py`):
+`correlation_id`, `fan_out_id`, `expected_tool_call_ids`, `received`,
+`base_state`, `started_at_ms`, `last_updated_ms`. `AggregatedReturn`
+carries only `state` and `degraded` — the framework needs no other
+fields to publish the re-entry envelope.
 
 ### 8.4 Completion path
 
@@ -799,42 +798,79 @@ aggregator_handler(envelope, correlation_id, headers, broker):
   |       # aggregated is an AggregatedReturn(state=..., degraded=False)
   |    except Exception as e:
   |       handle per aggregator.merge_error_policy:
-  |         ABORT:  raise AggregatorMergeError(correlation_id=..., fan_out_id=...)
-  |                 FastStream nacks/redelivers
-  |         RETRY:  retry merge() exactly once; on second failure, fall through to ABORT
-  |         DROP:   log; fall back to the default merge (apply received to base_state);
-  |                 set degraded=True so HDR_DEGRADED_MERGE is stamped on the published envelope
+  |         ABORT:               raise AggregatorMergeError(correlation_id=..., fan_out_id=...)
+  |                              FastStream nacks/redelivers
+  |         RETRY:               retry merge() exactly once; on second failure, fall through to ABORT
+  |         FALLBACK_TO_DEFAULT: log; fall back to the default merge (apply received to base_state);
+  |                              set degraded=True so HDR_DEGRADED_MERGE is stamped on the published envelope;
+  |                              if the default merge also raises, fall through to ABORT
   |
   +--- # Build the re-entry envelope.
   |    re_entry_envelope = Envelope(
-  |       context=SessionRunContext(state=aggregated.state, deps=...),
-  |       internal_workflow_state=...,
+  |       context=SessionRunContext(state=aggregated.state, deps=envelope.context.deps),
+  |       internal_workflow_state=envelope.internal_workflow_state,
   |    )
   |
-  +--- # Tombstone fanout-state record FIRST (durable write), then publish re-entry.
-  |    # On crash between the two: the durable log says "completed"; the agent
-  |    # never resumes — observable via stuck pending_batches. The reverse order
-  |    # is worse: a stale state record outlives a successful re-entry and
-  |    # confuses subsequent rebalances. See §9.1 last row.
-  |    await state_store.tombstone(key, partition=msg_partition)
-  |
-  +--- # Publish to agent's main topic (FanOutState.agent_topic).
+  +--- # Publish to agent's main topic (FanOutState.agent_topic) FIRST,
+  |    # then tombstone. Rationale below.
   |    headers = {
   |       HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: "agent",
-  |       HDR_FRAME_ID: new_frame_id,
   |       # HDR_FANOUT_ID is absent — the batch is done, this is a resumption
   |       # If aggregated.degraded: HDR_DEGRADED_MERGE = "1"
-  |       # traceparent / tracestate carried from batch
   |    }
   |    await broker.publish(re_entry_envelope, topic=batch.agent_topic,
   |                         correlation_id=correlation_id,
   |                         key=correlation_id.encode(), headers=headers)
   |
-  +--- log INFO "batch completed"; emit metric
+  +--- # Tombstone the fanout-state record so late returns are recognised
+  |    # as late and the recently-completed TTL window starts ticking.
+  |    await state_store.tombstone(key, partition=msg_partition)
+  |
+  +--- log INFO "batch completed"
   +--- ack and return
 ```
 
 A subtle property: **the merged state goes to the agent's main topic, not to the original caller.** The agent then runs its next LLM iteration. The caller's reply only happens when the agent eventually returns a `ReturnCall` after all LLM iterations are done.
+
+**Why publish-first, tombstone-second.** Earlier drafts of this design
+specified tombstone-first ordering on the theory that the durable log
+should never contradict itself — a stale state record outliving a
+successful re-entry would, in principle, confuse subsequent
+rebalances. In practice, shipping the tombstone-first ordering exposed
+a worse failure mode: if `state_store.put` succeeded on a prior
+delivery but the downstream agent-topic publish then failed,
+FastStream redelivered the inbound tool return to the aggregator
+handler. On redelivery, `new_ids` was empty (every tcid was already in
+`batch.received`) and the handler short-circuited on the
+duplicate-return drop — the merged record sat orphaned in the durable
+log and the agent never re-entered. Operators saw a stuck batch with
+no way to drive it forward short of manual intervention.
+
+The shipped ordering — **publish first, tombstone second** — makes
+the completion path idempotent under at-least-once redelivery. If the
+publish or tombstone fails, FastStream redelivers; the aggregator
+handler reaches a code path (`agent.py` lines 516-537) that detects
+"no new tcids but `should_complete` is True" and **re-attempts merge
+→ publish → tombstone**. Genuine duplicates (where `should_complete`
+is still False) still take the drop path. The trade-off is described
+in the §9.1 failure-mode matrix and the dedup contract in §9.2.
+
+The downstream cost is that the agent's main-topic handler must be
+idempotent on `correlation_id` for the merged-state envelope, since a
+crash between publish and tombstone (or between two redelivered
+completion attempts) can result in the same merged envelope being
+delivered to the agent twice. The dedup mechanism is the existing
+idempotent-dispatch check at `agent.py::_publish_parallel_with_aggregator`
+lines 375-393: redelivery hits `state_store.was_recently_completed(key)`
+or `existing.expected_tool_call_ids == expected_tool_call_ids` and
+short-circuits the second dispatch. The same check covers the
+publish-twice case: the agent re-enters with the merged state on the
+first delivery, computes its next LLM iteration, dispatches a new
+fan-out (or returns); when the second copy of the merged envelope
+arrives, the agent's resumed run already advanced past that
+correlation-id state, and the duplicate is either deduped at the
+state-store layer or handled idempotently by the agent loop's own
+contract.
 
 ### 8.5 Worker startup and rehydration
 
@@ -938,20 +974,26 @@ Restated and consolidated from §7 plus new failure scenarios:
 |---|---|---|---|
 | Agent process crashes after writing FanOutState, before any tool dispatch | Inbound redelivered; idempotent dispatch check finds prior state | Re-dispatch tool Calls (per simpler alternative in §8.1) | Tool runs once or twice (idempotency required); batch completes normally |
 | Agent process crashes after dispatching some tools, before all | Some tool Calls were published; others were not. Inbound redelivered. | Re-dispatch; deduped via tool's own idempotency on `(correlation_id, tool_call_id)` | Some tools run twice; results converge |
-| Tool process crashes mid-execution | No return arrives | Batch remains pending until partition rebalance evicts it (v1 has no idle-timeout reaper — see `ROADMAP.md` follow-up). Operator-visible via stuck `pending_batches`. | Batch stays in-flight; operator must redrive or rely on rebalance eviction |
+| Tool process crashes mid-execution | No return arrives | Batch remains pending until partition rebalance evicts it (v1 has no idle-timeout reaper — see §17.11). Operator-visible via stuck `pending_batches`. | Batch stays in-flight; operator must redrive or rely on rebalance eviction |
 | Aggregator process crashes after receiving return, before write-through | Return's consumer offset never committed; redelivered to next owner | Next owner re-receives; dedup based on `tool_call_id` not in `batch.received` (post-rehydration); proceeds | None |
 | Aggregator process crashes after write-through, before completion check | Cache lost; rebalance rehydration finds updated state; should_complete re-runs | Completion fires (if applicable); re-entry happens | Slight delay; correct outcome |
-| Aggregator process crashes after tombstone, before completion publish | The durable log says "completed" but no re-entry reached the agent's main topic | On rehydration, the key is in `_recently_completed`. The agent never resumes. Observable via stuck `pending_batches` metric. | Lost work in this narrow window — the v1 trade for the simpler ordering. Kafka transactions would close the gap (§17.2). |
+| Aggregator process crashes after re-entry publish, before tombstone | The durable record still says "in flight" (no tombstone); the merged envelope did reach the agent topic. Inbound redelivered to aggregator handler after rebalance. | Handler re-runs: `new_ids` is empty (all results already in `batch.received`) but `should_complete` is True → re-attempts merge → publish → tombstone (`agent.py` lines 516-537). | Merged-state envelope is delivered to the agent topic again; agent dedups by `correlation_id` (existing calfkit contract). |
+| Aggregator process crashes after merge / before re-entry publish | Same as above — the durable record still says "in flight", no envelope reached the agent. | Same redelivery path re-attempts merge → publish → tombstone idempotently. | None — the merged envelope is delivered exactly the same as a non-crash path. |
 
-The last row is the trickiest. The atomicity gap between "tombstone write"
-and "re-entry publish" cannot be closed without Kafka transactions. The
-shipped order is **tombstone first, then publish re-entry**: this
-guarantees the durable log never contradicts itself (no stale state
-record outlives a successful re-entry). The trade is that a crash in
-this exact narrow window loses the re-entry — the agent stays
-unresumed, observable via metrics. Kafka transactions
-(atomic write-and-publish across `fanout-state` and the agent's main
-topic) would close the gap; that is a v2 consideration (§17.2).
+The last two rows are why the shipped ordering is **publish-first,
+then tombstone**, and why the handler distinguishes "no new tcids and
+not yet complete" (idempotent drop) from "no new tcids and already
+complete" (re-attempt completion). Earlier drafts specified
+tombstone-first ordering for log-self-consistency reasons; in practice
+that ordering produced a stuck-batch failure mode (durable record
+tombstoned, agent never re-entered) with no automated recovery path.
+The publish-first ordering trades that for at-least-once re-entry on
+the agent topic — the agent's main handler is responsible for dedup
+on the merged envelope, which is the same contract calfkit already
+relies on for redelivery of any inbound (see §9.2). Atomic
+write-and-publish across `fanout-state` and the agent's main topic
+would close the gap and remove the dedup requirement; that is a v2
+consideration (§17.2).
 
 ### 9.2 The dedup contract restated
 
@@ -981,11 +1023,14 @@ The user's `merge()` can raise. The policy is `merge_error_policy` on the
   transient downstream call (e.g., LLM timeout). On the second failure,
   behaves as `ABORT`. There is no `merge_retry_count` knob — retry
   count is fixed at one.
-- `MergeErrorPolicy.DROP`: log the error, fall back to the default merge
-  (apply `batch.received` to a copy of `batch.base_state`), complete
-  normally, and stamp `HDR_DEGRADED_MERGE=1` on the published envelope
-  so operators can detect silently-degraded batches. The agent resumes
-  with default-merged state.
+- `MergeErrorPolicy.FALLBACK_TO_DEFAULT`: log the error, fall back to the
+  default merge (apply `batch.received` to a copy of `batch.base_state`),
+  complete normally, and stamp `HDR_DEGRADED_MERGE=1` on the published
+  envelope so operators can detect silently-degraded batches. The agent
+  resumes with default-merged state. The fallback merge is itself wrapped
+  in try/except — if the framework's default merge also raises (e.g., a
+  broken ``State.add_tool_result``), the framework treats it as `ABORT`
+  rather than letting the exception escape silently.
 
 ---
 
@@ -1104,11 +1149,21 @@ metrics yet. Treat as a design target, not a contract.
 | Rehydration complete (per-rebalance) | INFO | `partition_ids`, `cached_keys` |
 | State-topic poison record | ERROR | `partition`, `key`, `error` (raises `AggregatorStateStoreError`) |
 | Merge error | ERROR | `correlation_id`, `fan_out_id`, `error`, `policy_applied` |
-| Merge degraded (DROP fallback) | WARN | `correlation_id`, `fan_out_id`, `error` |
+| Merge degraded (FALLBACK_TO_DEFAULT fallback) | WARN | `correlation_id`, `fan_out_id`, `error` |
 
 Idle-timed-out logging is intentionally absent — see §17.11.
 
 ### 11.2 OTel spans
+
+The span / trace-propagation design below is a **design target — not
+shipped**. The shipped aggregator does not open any OTel spans and does
+not propagate `traceparent` / `tracestate` end-to-end. The
+`FanOutState.traceparent` and `FanOutState.tracestate` fields exist in
+the durable wire format (see `calfkit/nodes/aggregator/state.py`) so a
+future OTel integration can carry them through the fan-out without a
+schema migration on the compacted topic — but no code path currently
+reads or writes them. Treat this section as the intended end-state for
+operators evaluating the shape of future traces.
 
 The aggregator emits one span per batch lifecycle: `calfkit.aggregator.batch`.
 
@@ -1153,7 +1208,7 @@ calfkit_aggregator_returns_orphan_total{node_id="..."}                   counter
 calfkit_aggregator_pending_batches{node_id="..."}                        gauge
 calfkit_aggregator_state_store_writes_total{node_id="...", kind="..."}   counter   # kind=put|tombstone
 calfkit_aggregator_state_store_write_errors_total{node_id="..."}         counter
-calfkit_aggregator_degraded_merges_total{node_id="..."}                  counter   # MergeErrorPolicy.DROP fallbacks
+calfkit_aggregator_degraded_merges_total{node_id="..."}                  counter   # MergeErrorPolicy.FALLBACK_TO_DEFAULT fallbacks
 ```
 
 Low cardinality. No `correlation_id` or `tool_call_id` labels. Operators answer "is anything stuck?" with `pending_batches > 0 and rate(returns) == 0`.
@@ -1387,7 +1442,8 @@ Three sub-tests, one per `MergeErrorPolicy`:
 
 - `test_merge_error_abort`: default `merge_error_policy=ABORT`; user `merge()` raises; assert `AggregatorMergeError` (with `correlation_id` / `fan_out_id` attributes) propagates; assert FastStream message is nacked.
 - `test_merge_error_retry`: `merge_error_policy=RETRY`; `merge()` raises once then succeeds; assert batch completes after exactly one retry. Retry count is fixed at one — no `merge_retry_count` knob.
-- `test_merge_error_drop`: `merge_error_policy=DROP`; `merge()` raises; assert the default merge runs as fallback; assert published envelope carries `HDR_DEGRADED_MERGE=1`; assert tombstone written; assert agent resumes with default-merged state.
+- `test_merge_error_fallback_to_default`: `merge_error_policy=FALLBACK_TO_DEFAULT`; `merge()` raises; assert the default merge runs as fallback; assert published envelope carries `HDR_DEGRADED_MERGE=1`; assert tombstone written; assert agent resumes with default-merged state.
+- `test_fallback_to_default_when_default_also_raises_falls_through_to_abort`: `merge_error_policy=FALLBACK_TO_DEFAULT`; user merge raises; framework default merge ALSO raises; assert `AggregatorMergeError` propagates (treated as ABORT) rather than the inner exception leaking out.
 
 ### 13.10 Custom `should_complete`
 
@@ -1692,10 +1748,10 @@ deterministic test plumbing — non-trivial enough that shipping the
 parameter without a working reaper would have been ship-dead-code.
 `last_updated_ms` is still recorded on `FanOutState` for observability.
 
-The proper implementation (partition-scoped periodic sweep, async task
-lifecycle, test plumbing) is tracked in
-[`docs/fanout-idle-timeout-reaper.md`](./fanout-idle-timeout-reaper.md)
-via `ROADMAP.md`.
+A proper implementation (partition-scoped periodic sweep, async task
+lifecycle, test plumbing) is deferred to a follow-up; if and when it
+is prioritised, a design doc will be added under `docs/` and linked
+from `ROADMAP.md`.
 
 ---
 
@@ -1732,11 +1788,11 @@ Grounding facts for this design come from the agent-memory artifacts at `/Users/
 Key sites in `calfkit/`:
 
 - `nodes/aggregator/aggregator.py::FanOutAggregator` — public class (overrides + `merge_error_policy` + `setup`).
-- `nodes/aggregator/aggregator.py::MergeErrorPolicy` — `ABORT` / `RETRY` / `DROP`.
+- `nodes/aggregator/aggregator.py::MergeErrorPolicy` — `ABORT` / `RETRY` / `FALLBACK_TO_DEFAULT`.
 - `nodes/aggregator/_runtime.py::_FanOutRuntime` — framework-managed runtime state behind `FanOutAggregator._runtime`.
 - `nodes/aggregator/state.py::FanOutState` — wire format on `{node_id}.fanout-state`.
 - `nodes/aggregator/state.py::AggregatorBatch` — immutable view passed to overrides.
-- `nodes/aggregator/state.py::AggregatedReturn` — return shape of `merge` (with `degraded: bool` for DROP-fallback signalling).
+- `nodes/aggregator/state.py::AggregatedReturn` — return shape of `merge` (with `degraded: bool` for FALLBACK_TO_DEFAULT-fallback signalling).
 - `nodes/aggregator/_kafka_state_store.py::_KafkaStateStore` — durable store + partition-scoped cache + rehydration.
 - `nodes/aggregator/_in_memory_store.py::_InFlightBatch` — mutable in-memory shape; `with_received` for copy-on-write mutation.
 - `nodes/aggregator/_topic_admin.py::ensure_aggregator_topics` and `STATE_TOPIC_CONFIG` — topic provisioning and the 4-key compacted-topic config.

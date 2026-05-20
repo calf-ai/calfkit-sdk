@@ -631,7 +631,7 @@ async def test_publish_failure_leaves_cache_unchanged(
 
 
 # ---------------------------------------------------------------------------
-# MergeErrorPolicy.DROP — degraded-merge header
+# MergeErrorPolicy.FALLBACK_TO_DEFAULT — degraded-merge header
 # ---------------------------------------------------------------------------
 
 
@@ -639,8 +639,10 @@ async def test_abort_policy_re_raises_as_aggregator_merge_error(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:
     """ABORT (default policy): user's merge raises → handler re-raises
-    AggregatorMergeError with structured correlation_id/fan_out_id so
-    FastStream redelivers and the late-return path eventually drops it."""
+    AggregatorMergeError with structured correlation_id/fan_out_id.
+    FastStream's ack_policy=NACK_ON_ERROR (set on the fanout-returns
+    subscription) then rewinds the offset so the message is redelivered
+    and the merge is re-attempted on the next consume."""
     from calfkit.nodes.aggregator.errors import AggregatorMergeError
     from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
 
@@ -769,12 +771,12 @@ async def test_retry_policy_exhausted_raises(
         )
 
 
-async def test_drop_policy_stamps_degraded_header_on_publish(
+async def test_fallback_to_default_policy_stamps_degraded_header_on_publish(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:
-    """When the user's merge raises and MergeErrorPolicy.DROP fires, the
-    aggregator falls back to the default merge so the batch still
-    completes — but the published envelope MUST carry
+    """When the user's merge raises and MergeErrorPolicy.FALLBACK_TO_DEFAULT
+    fires, the aggregator falls back to the default merge so the batch
+    still completes — but the published envelope MUST carry
     HDR_DEGRADED_MERGE so operators can detect silently-degraded
     batches."""
     from calfkit._protocol import HDR_DEGRADED_MERGE
@@ -783,7 +785,7 @@ async def test_drop_policy_stamps_degraded_header_on_publish(
 
     agent, broker = primed_state_store
     state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
-    agent.aggregator.merge_error_policy = MergeErrorPolicy.DROP  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.FALLBACK_TO_DEFAULT  # type: ignore[attr-defined]
 
     # Replace merge with a callable that always raises.
     async def boom(batch: AggregatorBatch) -> AggregatedReturn:
@@ -791,10 +793,10 @@ async def test_drop_policy_stamps_degraded_header_on_publish(
 
     agent.aggregator.merge = boom  # type: ignore[attr-defined,method-assign]
 
-    key = ("corr-drop", "fan-drop")
+    key = ("corr-fb2d", "fan-fb2d")
     state_store._cache[key] = _InFlightBatch(
-        correlation_id="corr-drop",
-        fan_out_id="fan-drop",
+        correlation_id="corr-fb2d",
+        fan_out_id="fan-fb2d",
         expected_tool_call_ids=frozenset({"t1", "t2"}),
         base_state=State(),
         received={"t1": "r1"},
@@ -804,14 +806,14 @@ async def test_drop_policy_stamps_degraded_header_on_publish(
     )
 
     envelope = _make_envelope(
-        "corr-drop",
+        "corr-fb2d",
         state=_state_with_results({"t1": "r1", "t2": "r2"}),
     )
-    headers = {"x-calf-fanout-id": "fan-drop"}
+    headers = {"x-calf-fanout-id": "fan-fb2d"}
 
     await agent._aggregator_handler(  # type: ignore[attr-defined]
         envelope,
-        correlation_id="corr-drop",
+        correlation_id="corr-fb2d",
         headers=headers,
         broker=broker,
     )
@@ -960,3 +962,709 @@ async def test_redispatch_with_drifted_tool_call_ids_overwrites(
     overwritten = state_store._cache[key]
     assert overwritten.expected_tool_call_ids == frozenset({"t1", "t2", "t3"})
     assert overwritten.received == {}  # fresh batch, stale received discarded
+
+
+# ---------------------------------------------------------------------------
+# Re-entry frame synthesis (fan_out_id distinctness across LLM turns)
+# ---------------------------------------------------------------------------
+
+
+async def test_aggregator_reentry_synthesizes_new_frame(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When the aggregator completes a batch and re-publishes to the agent's
+    main topic, the re-entry envelope's ``current_frame.frame_id`` MUST be
+    a fresh value, not the inbound's frame_id. This is what prevents
+    fan_out_id collisions across consecutive LLM turns within a single
+    invocation."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    inbound_frame_id = "inbound-frame-XYZ"
+    key = ("corr-newframe", "fan-newframe")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-newframe",
+        fan_out_id="fan-newframe",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(
+        "corr-newframe",
+        state=_state_with_results({"t1": "r1"}),
+        frame_id=inbound_frame_id,
+    )
+    headers = {"x-calf-fanout-id": "fan-newframe"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-newframe",
+        headers=headers,
+        broker=broker,
+    )
+
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    assert len(agent_topic_publishes) == 1
+    publish_envelope = agent_topic_publishes[0].args[0]
+    re_entry_frame_id = publish_envelope.internal_workflow_state.current_frame.frame_id
+
+    assert re_entry_frame_id != inbound_frame_id, (
+        "Re-entry envelope MUST have a fresh frame_id; otherwise a subsequent "
+        "parallel fan-out within the same invocation will derive a colliding "
+        "fan_out_id and hit was_recently_completed → silent skip → agent hangs."
+    )
+
+    inbound_frame = envelope.internal_workflow_state.current_frame
+    re_entry_frame = publish_envelope.internal_workflow_state.current_frame
+    assert re_entry_frame.target_topic == inbound_frame.target_topic
+    assert re_entry_frame.callback_topic == inbound_frame.callback_topic
+
+
+async def test_aggregator_reentry_stamps_new_frame_id_header(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """The HDR_FRAME_ID on the re-entry publish must match the synthesized
+    frame's frame_id (not the inbound's), so external dedup / tracing
+    sees the fresh hop identity."""
+    from calfkit._protocol import HDR_FRAME_ID
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    inbound_frame_id = "inbound-frame-HDR"
+    key = ("corr-hdrframe", "fan-hdrframe")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-hdrframe",
+        fan_out_id="fan-hdrframe",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(
+        "corr-hdrframe",
+        state=_state_with_results({"t1": "r1"}),
+        frame_id=inbound_frame_id,
+    )
+    headers = {"x-calf-fanout-id": "fan-hdrframe"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-hdrframe",
+        headers=headers,
+        broker=broker,
+    )
+
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    publish_envelope = agent_topic_publishes[0].args[0]
+    publish_headers = agent_topic_publishes[0].kwargs["headers"]
+    expected_frame_id = publish_envelope.internal_workflow_state.current_frame.frame_id
+
+    assert publish_headers.get(HDR_FRAME_ID) == expected_frame_id
+    assert publish_headers.get(HDR_FRAME_ID) != inbound_frame_id
+
+
+async def test_multi_turn_parallel_fanout_within_single_invocation(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """Simulate two consecutive parallel fan-outs within ONE invocation
+    (same correlation_id, simulating two consecutive LLM turns). After the
+    first batch completes and tombstones, the second batch must dispatch
+    successfully — NOT be skipped via was_recently_completed because the
+    re-entry frame_id differs from the inbound's.
+    """
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    correlation_id = "corr-multi"
+    initial_frame_id = "frame-turn-1"
+
+    # ---- Turn 1: agent receives initial inbound and dispatches parallel fan-out.
+    envelope_turn_1 = _make_envelope(correlation_id, frame_id=initial_frame_id)
+    calls_turn_1 = _make_calls("t1a", "t1b")
+
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls_turn_1,
+        envelope_turn_1,
+        correlation_id,
+        broker,
+        partition=0,
+    )
+
+    # The batch is now in-flight under key=(corr, initial_frame_id).
+    key_turn_1 = (correlation_id, initial_frame_id)
+    assert state_store.get(key_turn_1) is not None
+
+    # ---- Turn 1 completion: simulate both tools returning. The aggregator
+    # handler accumulates and on the second return publishes the merged
+    # state back to the agent topic + tombstones the batch.
+    tool_return_1 = _make_envelope(
+        correlation_id,
+        state=_state_with_results({"t1a": "r1a", "t1b": "r1b"}),
+        frame_id=initial_frame_id,  # tool unwound, agent frame on top
+    )
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        tool_return_1,
+        correlation_id=correlation_id,
+        headers={"x-calf-fanout-id": initial_frame_id},
+        broker=broker,
+    )
+    assert state_store.was_recently_completed(key_turn_1)
+
+    # Capture the re-entry envelope the aggregator just published to the
+    # agent's main topic.
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    assert len(agent_topic_publishes) == 1
+    re_entry_envelope = agent_topic_publishes[0].args[0]
+    turn_2_frame_id = re_entry_envelope.internal_workflow_state.current_frame.frame_id
+
+    # ---- Turn 2: the agent has re-entered. Same correlation_id, but the
+    # re-entry envelope MUST carry a different frame_id (otherwise this
+    # fan-out's fan_out_id collides with turn 1's tombstoned key and the
+    # dispatch is silently skipped).
+    assert turn_2_frame_id != initial_frame_id
+
+    broker.publish.reset_mock()  # focus assertions on turn 2
+    calls_turn_2 = _make_calls("t2a", "t2b")
+
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls_turn_2,
+        re_entry_envelope,
+        correlation_id,
+        broker,
+        partition=0,
+    )
+
+    # Turn 2 must actually dispatch (not skip on was_recently_completed).
+    tool_publishes_turn_2 = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "tool.input"]
+    assert len(tool_publishes_turn_2) == 2, (
+        "Turn-2 parallel fan-out must dispatch all tool Calls; observed "
+        f"{len(tool_publishes_turn_2)}. Most likely the re-entry frame_id "
+        f"collided with turn-1's tombstoned key, causing silent skip."
+    )
+
+    # Turn 2's batch is now active under a key distinct from turn 1's.
+    key_turn_2 = (correlation_id, turn_2_frame_id)
+    assert key_turn_2 != key_turn_1
+    assert state_store.get(key_turn_2) is not None
+
+
+async def test_aggregator_reentry_redelivery_is_idempotent(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When the aggregator's re-entry message is redelivered by Kafka
+    (e.g., FastStream NACK_ON_ERROR fires between aggregator publish and
+    handler ack), the redelivered envelope carries the SAME synthesized
+    frame_id. The agent's redelivery handling at
+    ``_publish_parallel_with_aggregator`` must recognise the second
+    delivery as a redelivery for the in-flight batch (or
+    recently-completed if turn-2 already finished) — NOT as a fresh
+    dispatch.
+    """
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    correlation_id = "corr-reidx"
+    inbound_frame_id = "frame-reidx"
+
+    # Drive a complete turn-1 cycle to capture the re-entry envelope.
+    state_store._cache[(correlation_id, inbound_frame_id)] = _InFlightBatch(
+        correlation_id=correlation_id,
+        fan_out_id=inbound_frame_id,
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+    inbound_envelope = _make_envelope(
+        correlation_id,
+        state=_state_with_results({"t1": "r1"}),
+        frame_id=inbound_frame_id,
+    )
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        inbound_envelope,
+        correlation_id=correlation_id,
+        headers={"x-calf-fanout-id": inbound_frame_id},
+        broker=broker,
+    )
+
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    re_entry_envelope = agent_topic_publishes[0].args[0]
+    re_entry_frame_id = re_entry_envelope.internal_workflow_state.current_frame.frame_id
+
+    # ---- First delivery of the re-entry envelope: agent emits parallel
+    # fan-out. First-time dispatch persists initial batch.
+    broker.publish.reset_mock()
+    calls = _make_calls("ta", "tb")
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls,
+        re_entry_envelope,
+        correlation_id,
+        broker,
+        partition=0,
+    )
+
+    new_key = (correlation_id, re_entry_frame_id)
+    persisted = state_store.get(new_key)
+    assert persisted is not None
+    # Verify first-time dispatch wrote the durable batch (state-topic publish).
+    state_publishes_first = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.fanout-state"]
+    assert len(state_publishes_first) == 1, "first delivery must persist the initial batch"
+
+    # ---- Second delivery (FastStream redelivery): same envelope, same
+    # frame_id. Must hit the "in-flight redelivery" branch — NO new
+    # state-topic publish, just re-publish the tool Calls.
+    broker.publish.reset_mock()
+    calls_redelivered = _make_calls("ta", "tb")
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        calls_redelivered,
+        re_entry_envelope,
+        correlation_id,
+        broker,
+        partition=0,
+    )
+
+    state_publishes_second = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.fanout-state"]
+    assert len(state_publishes_second) == 0, (
+        "Redelivery must NOT write a new state-topic record; the existing "
+        "in-flight batch is preserved (in-flight redelivery branch)."
+    )
+    tool_publishes_second = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "tool.input"]
+    assert len(tool_publishes_second) == 2
+
+
+# ---------------------------------------------------------------------------
+# Acknowledgement policy on fanout-returns subscription
+# ---------------------------------------------------------------------------
+
+
+def test_aggregator_subscription_uses_nack_on_error_policy(agent: object) -> None:
+    """The fanout-returns subscription MUST set ack_policy=NACK_ON_ERROR.
+
+    Several handler paths (ABORT merge policy, publish-failure recovery,
+    redelivery-after-failed-completion) rely on FastStream redelivering
+    when the handler raises. The default ACK_FIRST commits the offset
+    BEFORE the handler runs, so raises do not produce redelivery — those
+    recovery paths would silently drop the merge.
+
+    NACK_ON_ERROR seeks the consumer back so the message is redelivered
+    immediately (within the same consumer session, no restart required).
+    """
+    from faststream import AckPolicy
+
+    subs = agent.kafka_subscriptions()  # type: ignore[attr-defined]
+    fanout_returns_subs = [
+        s for s in subs if "test_agent.fanout-returns" in s.topics
+    ]
+    assert len(fanout_returns_subs) == 1
+    sub = fanout_returns_subs[0]
+    assert sub.ack_policy is AckPolicy.NACK_ON_ERROR, (
+        f"fanout-returns subscription must set ack_policy=NACK_ON_ERROR, "
+        f"got {sub.ack_policy!r}. Without this, FastStream defaults to "
+        f"ACK_FIRST and handler raises will not trigger redelivery."
+    )
+
+
+async def test_handler_state_store_failure_propagates_without_committing_offset(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """If state_store.put raises, the exception must propagate from the
+    handler. The ack_policy=NACK_ON_ERROR (configured on the subscription)
+    then ensures Kafka rewinds the offset so the message is redelivered.
+
+    This test exercises the propagation half (the subscription-level ack
+    policy is verified separately by
+    test_aggregator_subscription_uses_nack_on_error_policy).
+    """
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    key = ("corr-sserr", "fan-sserr")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-sserr",
+        fan_out_id="fan-sserr",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    original_put = state_store.put
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("state store outage")
+
+    state_store.put = boom  # type: ignore[method-assign]
+    try:
+        envelope = _make_envelope("corr-sserr", state=_state_with_results({"t1": "r1"}))
+        headers = {"x-calf-fanout-id": "fan-sserr"}
+        with pytest.raises(RuntimeError, match="state store outage"):
+            await agent._aggregator_handler(  # type: ignore[attr-defined]
+                envelope,
+                correlation_id="corr-sserr",
+                headers=headers,
+                broker=broker,
+            )
+    finally:
+        state_store.put = original_put  # type: ignore[method-assign]
+
+    # Cache is unchanged — the failed put didn't mutate state.
+    assert state_store.get(key) is not None
+    assert state_store.get(key).received == {}
+
+
+# ---------------------------------------------------------------------------
+# Drifted expected_tool_call_ids overwrite -> stamp degraded header
+# ---------------------------------------------------------------------------
+
+
+async def test_drifted_expected_ids_overwrite_stamps_degraded_header(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When a redelivered inbound dispatch carries a DIFFERENT
+    ``expected_tool_call_ids`` set than the durable cached batch (a real
+    upstream bug surfaced by the agent loop), the framework currently
+    overwrites the stale state with the fresh dispatch. Any already-merged
+    tool results in the previous ``received`` map are silently discarded.
+
+    The eventual completion publish for the new batch MUST stamp
+    :data:`HDR_DEGRADED_MERGE` so downstream observability captures the
+    data-loss signal — operators inspecting the agent topic see the merge
+    came from a path that discarded prior work.
+    """
+    from calfkit._protocol import HDR_DEGRADED_MERGE
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    correlation_id = "corr-drift"
+    frame_id = "frame-drift"
+    key = (correlation_id, frame_id)
+
+    # Pre-seed an in-flight batch with some received returns; these will
+    # be silently discarded by the drifted overwrite.
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id=correlation_id,
+        fan_out_id=frame_id,
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={"t1": "stale-result"},
+        started_at_ms=1000,
+        last_updated_ms=2000,
+        agent_topic="test_agent.input",
+    )
+
+    # Drift: re-dispatch with a different tool-call set.
+    inbound_envelope = _make_envelope(correlation_id, frame_id=frame_id)
+    new_calls = _make_calls("t3", "t4")
+    await agent._publish_parallel_with_aggregator(  # type: ignore[attr-defined]
+        new_calls,
+        inbound_envelope,
+        correlation_id,
+        broker,
+        partition=0,
+    )
+
+    # The cache should now reflect the fresh dispatch (drifted overwrite).
+    overwritten = state_store._cache[key]
+    assert overwritten.expected_tool_call_ids == frozenset({"t3", "t4"})
+    assert overwritten.received == {}
+
+    # Drive the new batch to completion: receive both returns.
+    broker.publish.reset_mock()
+    return_envelope = _make_envelope(
+        correlation_id,
+        state=_state_with_results({"t3": "r3", "t4": "r4"}),
+    )
+    headers = {"x-calf-fanout-id": frame_id}
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        return_envelope,
+        correlation_id=correlation_id,
+        headers=headers,
+        broker=broker,
+    )
+
+    # The completion publish MUST stamp HDR_DEGRADED_MERGE because the new
+    # batch was born from a drifted-overwrite that discarded prior received
+    # results. Downstream consumers / dashboards need this signal to
+    # quantify the silent data loss.
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    assert len(agent_topic_publishes) == 1
+    publish_headers = agent_topic_publishes[0].kwargs["headers"]
+    assert publish_headers.get(HDR_DEGRADED_MERGE) == "1", (
+        f"Drifted-redispatch overwrite must mark the resulting completion as "
+        f"degraded so observability sees the data-loss signal. Headers: "
+        f"{publish_headers}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FALLBACK_TO_DEFAULT — defensive try/except around the fallback merge
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_to_default_when_default_also_raises_falls_through_to_abort(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """When ``merge_error_policy=FALLBACK_TO_DEFAULT`` is configured, the
+    user's :meth:`merge` raising triggers a fallback to the framework's
+    default merge. If THAT default merge also raises (e.g., a broken
+    ``State.add_tool_result``, malformed result), the framework MUST NOT
+    let the inner exception escape — it should treat the situation as
+    ABORT so the operator sees a structured ``AggregatorMergeError`` and
+    Kafka NACK redelivers the inbound.
+
+    Without the defensive try/except wrap, the inner exception bypasses
+    the policy entirely: the user configured FALLBACK_TO_DEFAULT expecting
+    'log and continue,' yet they would get a raw exception with no
+    AggregatorMergeError wrapping, no degraded-merge stamp, and no
+    operator-visible context.
+    """
+    from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
+    from calfkit.nodes.aggregator.errors import AggregatorMergeError
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+    agent.aggregator.merge_error_policy = MergeErrorPolicy.FALLBACK_TO_DEFAULT  # type: ignore[attr-defined]
+
+    # Both the user merge and the framework default merge raise. The
+    # default merge sits on FanOutAggregator.merge; we monkey-patch it on
+    # the instance so the FALLBACK_TO_DEFAULT branch's
+    # ``FanOutAggregator.merge(self.aggregator, view)`` call hits a raise.
+    async def user_boom(batch: AggregatorBatch) -> AggregatedReturn:
+        raise RuntimeError("user merge boom")
+
+    # Make the default merge also raise: patch it on the FanOutAggregator
+    # class (unbound) since the handler calls
+    # ``FanOutAggregator.merge(self.aggregator, view)`` explicitly.
+    from calfkit.nodes.aggregator import FanOutAggregator
+
+    original_default_merge = FanOutAggregator.merge
+
+    async def default_boom(self: FanOutAggregator, batch: AggregatorBatch) -> AggregatedReturn:
+        raise RuntimeError("default merge also boom")
+
+    FanOutAggregator.merge = default_boom  # type: ignore[method-assign]
+
+    try:
+        agent.aggregator.merge = user_boom  # type: ignore[attr-defined,method-assign]
+
+        key = ("corr-double", "fan-double")
+        state_store._cache[key] = _InFlightBatch(
+            correlation_id="corr-double",
+            fan_out_id="fan-double",
+            expected_tool_call_ids=frozenset({"t1"}),
+            base_state=State(),
+            received={},
+            started_at_ms=int(time.time() * 1000),
+            last_updated_ms=int(time.time() * 1000),
+            agent_topic="test_agent.input",
+        )
+
+        envelope = _make_envelope("corr-double", state=_state_with_results({"t1": "r1"}))
+        headers = {"x-calf-fanout-id": "fan-double"}
+
+        # Expect AggregatorMergeError (ABORT-style propagation), NOT the
+        # raw RuntimeError leaking from the fallback default merge.
+        with pytest.raises(AggregatorMergeError) as excinfo:
+            await agent._aggregator_handler(  # type: ignore[attr-defined]
+                envelope,
+                correlation_id="corr-double",
+                headers=headers,
+                broker=broker,
+            )
+
+        assert excinfo.value.correlation_id == "corr-double"
+        assert excinfo.value.fan_out_id == "fan-double"
+    finally:
+        FanOutAggregator.merge = original_default_merge  # type: ignore[method-assign]
+
+
+# ---------------------------------------------------------------------------
+# should_complete is invoked exactly once per handler call
+# ---------------------------------------------------------------------------
+
+
+async def test_should_complete_called_once_on_no_new_tcids_redelivery(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """The no-new-tcids redelivery branch (used to re-attempt completion
+    after a failed downstream publish) must not invoke ``should_complete``
+    twice. User overrides may carry side effects (logging, metrics, a
+    cached LLM call); double-invocation is observable and surprising.
+    """
+    from calfkit.nodes.aggregator.state import AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    call_count = [0]
+
+    async def counting_should_complete(batch: AggregatorBatch) -> bool:
+        call_count[0] += 1
+        return batch.is_complete_by_count
+
+    agent.aggregator.should_complete = counting_should_complete  # type: ignore[attr-defined,method-assign]
+
+    # Seed a fully-merged batch that hasn't been tombstoned yet — simulates
+    # the state after a successful state-store put whose downstream publish
+    # or tombstone failed, triggering FastStream redelivery.
+    key = ("corr-sc1", "fan-sc1")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-sc1",
+        fan_out_id="fan-sc1",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={"t1": "r1", "t2": "r2"},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    # Redelivered envelope: all tcids already in batch.received → new_ids = {}.
+    envelope = _make_envelope(
+        "corr-sc1",
+        state=_state_with_results({"t1": "r1", "t2": "r2"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-sc1"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-sc1",
+        headers=headers,
+        broker=broker,
+    )
+
+    assert call_count[0] == 1, (
+        f"should_complete must be invoked exactly once per handler call; "
+        f"observed {call_count[0]} invocations. The no-new-tcids redelivery "
+        f"branch was double-calling it."
+    )
+
+
+async def test_should_complete_called_once_on_new_tcid_completion(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """Sanity check for the new-tcid completion path: ``should_complete`` is
+    invoked exactly once per handler call, after ``on_partial`` updates the
+    view."""
+    from calfkit.nodes.aggregator.state import AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    call_count = [0]
+
+    async def counting_should_complete(batch: AggregatorBatch) -> bool:
+        call_count[0] += 1
+        return batch.is_complete_by_count
+
+    agent.aggregator.should_complete = counting_should_complete  # type: ignore[attr-defined,method-assign]
+
+    key = ("corr-sc2", "fan-sc2")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-sc2",
+        fan_out_id="fan-sc2",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={"t1": "r1"},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    envelope = _make_envelope(
+        "corr-sc2",
+        state=_state_with_results({"t1": "r1", "t2": "r2"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-sc2"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-sc2",
+        headers=headers,
+        broker=broker,
+    )
+
+    assert call_count[0] == 1, f"should_complete invoked {call_count[0]} times; expected 1"
+
+
+# ---------------------------------------------------------------------------
+# _batch_view defensive deep-copy of base_state
+# ---------------------------------------------------------------------------
+
+
+async def test_user_merge_mutating_base_state_does_not_corrupt_cache(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """The :class:`AggregatorBatch` view passed to user overrides is documented
+    as immutable, but ``base_state`` is a mutable Pydantic model. A buggy user
+    ``merge()`` that mutates ``batch.base_state`` (instead of operating on a
+    copy) must NOT corrupt the framework's cached ``_InFlightBatch.base_state``.
+
+    Without a defensive deep-copy in ``_batch_view``, the user merge shares the
+    same ``State`` object reference with the cache; a mutation there would
+    bleed into any subsequent rehydration / retry / re-merge attempt.
+    """
+    from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
+    from calfkit.nodes.aggregator.state import AggregatedReturn, AggregatorBatch
+
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    # Seed cache with a batch whose base_state has a non-trivial message_history
+    # so mutation is observable.
+    seeded_state = State()
+    seeded_state.message_history.append(
+        ModelRequest(parts=[UserPromptPart(content="original")]),
+    )
+    key = ("corr-mut", "fan-mut")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-mut",
+        fan_out_id="fan-mut",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=seeded_state,
+        received={},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    # User merge mutates batch.base_state directly — a coding mistake we want
+    # to defend against, not require the user to avoid.
+    async def buggy_merge(batch: AggregatorBatch) -> AggregatedReturn:
+        batch.base_state.message_history.append(
+            ModelRequest(parts=[UserPromptPart(content="injected by merge")]),
+        )
+        return AggregatedReturn(state=batch.base_state)
+
+    agent.aggregator.merge = buggy_merge  # type: ignore[attr-defined,method-assign]
+
+    envelope = _make_envelope("corr-mut", state=_state_with_results({"t1": "r1"}))
+    headers = {"x-calf-fanout-id": "fan-mut"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-mut",
+        headers=headers,
+        broker=broker,
+    )
+
+    # The cached _InFlightBatch.base_state must be UNCHANGED — the framework
+    # owns the cache and a user merge should never reach into it.
+    assert len(seeded_state.message_history) == 1, (
+        "User merge mutated framework-cached base_state. The _batch_view must "
+        "deep-copy base_state so user merge can't corrupt the cache."
+    )

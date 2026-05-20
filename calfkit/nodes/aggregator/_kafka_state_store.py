@@ -243,8 +243,8 @@ class _KafkaStateStore:
             enable_auto_commit=False,
             **self._client_kwargs,
         )
-        await consumer.start()
         try:
+            await consumer.start()
             tps = [TopicPartition(self._state_topic, pid) for pid in partition_ids]
             consumer.assign(tps)
             await consumer.seek_to_beginning(*tps)
@@ -359,5 +359,8 @@ class _KafkaStateStore:
             ) from exc
 
         batch = _InFlightBatch.from_fanout_state(state)
+        # A put after a tombstone for the same key resurrects an active batch;
+        # the completion marker must clear so returns aren't shadowed as 'late'.
+        self._recently_completed.discard(key)
         self._cache[key] = batch
         self._by_partition.setdefault(partition, set()).add(key)

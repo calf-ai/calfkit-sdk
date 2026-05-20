@@ -25,18 +25,34 @@ from typing import TYPE_CHECKING, Any, cast
 from calfkit.models.state import State
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch, _InMemoryStateStore
 from calfkit.nodes.aggregator.aggregator import FanOutAggregator, MergeErrorPolicy
-from calfkit.nodes.aggregator.errors import AggregatorMergeError, RestartSimulatedError
+from calfkit.nodes.aggregator.errors import AggregatorMergeError
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
     AggregatorBatch,
     FanOutState,
-    ToolCallId,
 )
 
 if TYPE_CHECKING:
     from faststream.kafka import KafkaBroker
 
     from calfkit.nodes.agent import BaseAgentNodeDef
+
+
+class RestartSimulatedError(Exception):
+    """Raised by :class:`InMemoryAggregator`'s async waiters when
+    :meth:`InMemoryAggregator.simulate_restart` fires while a test was
+    awaiting :meth:`InMemoryAggregator.wait_for_completion` or
+    :meth:`InMemoryAggregator.wait_for_partial_state`.
+
+    Test-harness-only. Lives here (in ``testing.py``) rather than
+    ``errors.py`` so production code catching :class:`AggregatorError`
+    cannot accidentally pick it up — a worker restart in production has
+    its own observable surface and never raises this type.
+
+    Tests that expect ``simulate_restart`` to fire mid-await should catch
+    this; tests that don't expect it will see the exception propagate and
+    fail clearly instead of hanging forever on a wiped event.
+    """
 
 
 async def setup_for_tests(
@@ -262,7 +278,7 @@ class InMemoryAggregator(FanOutAggregator):
         self,
         correlation_id: str,
         fan_out_id: str,
-        expected_tool_call_ids: frozenset[ToolCallId],
+        expected_tool_call_ids: frozenset[str],
         base_state: State,
         agent_topic: str = "agent.in",
         traceparent: str | None = None,
@@ -295,7 +311,7 @@ class InMemoryAggregator(FanOutAggregator):
         self,
         correlation_id: str,
         fan_out_id: str,
-        tool_call_id: ToolCallId,
+        tool_call_id: str,
         result: Any,
     ) -> AggregatedReturn | None:
         """Simulate a tool return arriving — drives the same handler path as
@@ -337,7 +353,7 @@ class InMemoryAggregator(FanOutAggregator):
         self._fire_partial_state_waiters(key, batch)
 
         view = self._batch_view(batch)
-        await self.on_partial(view, frozenset([ToolCallId(tool_call_id)]))
+        await self.on_partial(view, frozenset([tool_call_id]))
 
         if await self.should_complete(view):
             merged = await self._run_merge(view, key)
@@ -361,13 +377,21 @@ class InMemoryAggregator(FanOutAggregator):
             return await self.merge(view)
         except Exception as exc:
             if self.merge_error_policy == MergeErrorPolicy.ABORT:
-                raise AggregatorMergeError(f"merge() raised for key={key}") from exc
+                raise AggregatorMergeError(
+                    f"merge() raised for key={key}",
+                    correlation_id=key[0],
+                    fan_out_id=key[1],
+                ) from exc
             if self.merge_error_policy == MergeErrorPolicy.RETRY:
                 try:
                     return await self.merge(view)
                 except Exception as exc2:
-                    raise AggregatorMergeError(f"merge() raised on retry for key={key}") from exc2
-            if self.merge_error_policy == MergeErrorPolicy.DROP:
+                    raise AggregatorMergeError(
+                        f"merge() raised on retry for key={key}",
+                        correlation_id=key[0],
+                        fan_out_id=key[1],
+                    ) from exc2
+            if self.merge_error_policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT:
                 # Fall back to default merge so the batch still completes.
                 return await FanOutAggregator.merge(self, view)
             raise

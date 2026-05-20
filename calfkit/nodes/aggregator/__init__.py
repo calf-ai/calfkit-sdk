@@ -12,7 +12,6 @@ Public API:
 - :class:`AggregatedReturn` — value returned from :meth:`FanOutAggregator.merge`.
 - :class:`FanOutState` — durable wire-format record (advanced; primarily for
   test inspection).
-- :data:`ToolCallId` — type alias for tool_call_id strings.
 
 Exception hierarchy under :class:`~calfkit.exceptions.CalfkitError`:
 
@@ -35,7 +34,6 @@ from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
     AggregatorBatch,
     FanOutState,
-    ToolCallId,
 )
 
 __all__ = [
@@ -47,5 +45,4 @@ __all__ = [
     "FanOutAggregator",
     "FanOutState",
     "MergeErrorPolicy",
-    "ToolCallId",
 ]

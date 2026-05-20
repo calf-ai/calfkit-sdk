@@ -180,6 +180,38 @@ def test_get_returns_none_for_unknown_key() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_rehydrate_partitions_stops_consumer_when_start_raises() -> None:
+    """If ``AIOKafkaConsumer.start()`` raises (broker unreachable, auth
+    failure, no metadata), the transient consumer must still be cleaned up
+    via ``.stop()``. Without the finally guard around start(), the consumer
+    object leaks background tasks and sockets on every failed rehydration
+    attempt — on flaky brokers / repeated rebalance failures, this exhausts
+    file descriptors or grows memory unboundedly."""
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock(side_effect=RuntimeError("broker unreachable"))
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    mock_consumer.end_offsets = AsyncMock(return_value={})
+    mock_consumer.getmany = AsyncMock(return_value={})
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        with pytest.raises(RuntimeError, match="broker unreachable"):
+            await store.rehydrate_partitions({0})
+
+    # The consumer object exists; even though start() failed, stop() must
+    # have been invoked so its background tasks + client are released.
+    mock_consumer.stop.assert_awaited()
+    # Partition must NOT be activated since rehydration aborted.
+    assert 0 not in store.owned_partitions
+
+
 async def test_rehydrate_raises_on_stalled_poll() -> None:
     """When the broker returns no records for MAX_EMPTY_POLLS consecutive
     polls while offsets remain outstanding, rehydration must raise rather
@@ -311,6 +343,189 @@ def test_apply_record_valid_state_populates_cache() -> None:
     assert batch is not None
     assert batch.received == {"t1": "r1"}
     assert batch.expected_tool_call_ids == frozenset({"t1", "t2"})
+
+
+def test_apply_record_put_after_tombstone_clears_recently_completed() -> None:
+    """Replaying [put_1, tombstone, put_2] for the same key must leave the
+    cache holding put_2 AND clear the key from _recently_completed. Without
+    the discard, a return for the redispatched batch would be dropped as
+    'late' by was_recently_completed and the batch would hang forever."""
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    store, _ = _make_store()
+    key = ("c1", "f1")
+
+    state_1 = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={},
+        started_at_ms=1000,
+        last_updated_ms=1000,
+        agent_topic="agent.in",
+    )
+    state_2 = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t3", "t4"}),
+        base_state=State(),
+        received={},
+        started_at_ms=2000,
+        last_updated_ms=2000,
+        agent_topic="agent.in",
+    )
+
+    store._apply_record(partition=0, key_bytes=b"c1|f1", value_bytes=state_1.model_dump_json().encode())
+    store._apply_record(partition=0, key_bytes=b"c1|f1", value_bytes=None)
+    assert store.was_recently_completed(key)  # tombstone marker set
+
+    store._apply_record(partition=0, key_bytes=b"c1|f1", value_bytes=state_2.model_dump_json().encode())
+
+    rehydrated = store.get(key)
+    assert rehydrated is not None
+    assert rehydrated.expected_tool_call_ids == frozenset({"t3", "t4"})
+    assert not store.was_recently_completed(key)
+
+
+async def test_rehydration_with_interleaved_put_tombstone_put() -> None:
+    """End-to-end rehydration: a partition whose durable log contains
+    [put_1, tombstone, put_2] for the same key must rehydrate with put_2
+    in the cache and the key absent from _recently_completed."""
+    from aiokafka import TopicPartition
+
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    state_1 = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=1000,
+        last_updated_ms=1000,
+        agent_topic="agent.in",
+    )
+    state_2 = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t9"}),
+        base_state=State(),
+        received={},
+        started_at_ms=2000,
+        last_updated_ms=2000,
+        agent_topic="agent.in",
+    )
+
+    class _Rec:
+        def __init__(self, key: bytes, value: bytes | None, offset: int) -> None:
+            self.key = key
+            self.value = value
+            self.offset = offset
+
+    tp = TopicPartition("agent.fanout-state", 0)
+    records = [
+        _Rec(b"c1|f1", state_1.model_dump_json().encode(), 0),
+        _Rec(b"c1|f1", None, 1),
+        _Rec(b"c1|f1", state_2.model_dump_json().encode(), 2),
+    ]
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    mock_consumer.end_offsets = AsyncMock(return_value={tp: len(records)})
+    mock_consumer.getmany = AsyncMock(side_effect=[{tp: records}, {}])
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        await store.rehydrate_partitions({0})
+
+    key = ("c1", "f1")
+    rehydrated = store.get(key)
+    assert rehydrated is not None
+    assert rehydrated.expected_tool_call_ids == frozenset({"t9"})
+    assert not store.was_recently_completed(key)
+
+
+async def test_late_return_after_redispatched_batch_is_not_dropped() -> None:
+    """Higher-level: after rehydration of [put, tombstone, put] for the
+    same key, a return whose partition is freshly active must NOT be
+    classified as 'recently completed'. This is the scenario that hangs
+    the agent in the production bug — the durable log races a redelivery
+    after the 60s TTL, replay re-puts the key, but the in-memory completion
+    marker shadows the live batch.
+    """
+    from aiokafka import TopicPartition
+
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    state_old = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        received={},
+        started_at_ms=1000,
+        last_updated_ms=1000,
+        agent_topic="agent.in",
+    )
+    state_new = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t2"}),
+        base_state=State(),
+        received={},
+        started_at_ms=2000,
+        last_updated_ms=2000,
+        agent_topic="agent.in",
+    )
+
+    class _Rec:
+        def __init__(self, key: bytes, value: bytes | None, offset: int) -> None:
+            self.key = key
+            self.value = value
+            self.offset = offset
+
+    tp = TopicPartition("agent.fanout-state", 0)
+    records = [
+        _Rec(b"c1|f1", state_old.model_dump_json().encode(), 0),
+        _Rec(b"c1|f1", None, 1),
+        _Rec(b"c1|f1", state_new.model_dump_json().encode(), 2),
+    ]
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    mock_consumer.end_offsets = AsyncMock(return_value={tp: len(records)})
+    mock_consumer.getmany = AsyncMock(side_effect=[{tp: records}, {}])
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        await store.rehydrate_partitions({0})
+
+    # Simulate the aggregator handler's gate: a return for the redispatched
+    # batch must NOT be classified as 'recently completed', otherwise it is
+    # silently dropped on agent.py:486 and the agent hangs.
+    key = ("c1", "f1")
+    assert not store.was_recently_completed(key), (
+        "key was tombstoned then re-put during rehydration; the live batch "
+        "must be reachable — recently_completed must NOT shadow it"
+    )
+    assert store.get(key) is not None
 
 
 async def test_rehydrate_raises_after_exactly_max_empty_polls() -> None:
@@ -490,8 +705,10 @@ async def test_simulate_restart_rebuilds_cache_from_log() -> None:
         partition_count=4,
     )
     batch_1 = _make_batch("c1", "f1")
-    batch_2 = _make_batch("c2", "f2")
-    batch_2.received["t1"] = "result1"
+    batch_2 = _make_batch("c2", "f2").with_received(
+        {"t1": "result1"},
+        last_updated_ms=1000,
+    )
 
     await store_a.put(("c1", "f1"), batch_1, partition=0)
     await store_a.put(("c2", "f2"), batch_2, partition=0)

@@ -1,10 +1,12 @@
+import dataclasses
 import logging
 import time
 import warnings
 from collections.abc import Callable
 from typing import Annotated, Any, ClassVar, Generic, cast
 
-from faststream import Context, Response
+import uuid_utils
+from faststream import AckPolicy, Context, Response
 from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 
 from calfkit._protocol import (
@@ -30,7 +32,7 @@ from calfkit.nodes.aggregator import FanOutAggregator
 from calfkit.nodes.aggregator._in_memory_store import _InFlightBatch
 from calfkit.nodes.aggregator.aggregator import MergeErrorPolicy
 from calfkit.nodes.aggregator.errors import AggregatorMergeError, AggregatorStateStoreError
-from calfkit.nodes.aggregator.state import AggregatedReturn, ToolCallId
+from calfkit.nodes.aggregator.state import AggregatedReturn
 from calfkit.nodes.base import BaseNodeDef, GateFunction, _KafkaSubscription
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -133,6 +135,13 @@ class BaseAgentNodeDef(
                 # returns for this agent's partitions, so read-modify-write
                 # on the state store is linearizable.
                 max_workers=1,
+                # FastStream's default ACK_FIRST commits the offset BEFORE
+                # the handler runs, which would silently swallow handler
+                # raises (publish failures, transient state-store errors,
+                # ABORT merge raises). NACK_ON_ERROR rewinds the consumer
+                # offset on exception so the message is redelivered within
+                # the same consumer session.
+                ack_policy=AckPolicy.NACK_ON_ERROR,
             )
         )
         return subscriptions
@@ -395,13 +404,19 @@ class BaseAgentNodeDef(
             if existing is not None:
                 # The agent loop produced a different set of tool calls on
                 # re-entry. Surface loudly and overwrite the stale state.
+                # Flag the key as degraded so the eventual completion publish
+                # carries HDR_DEGRADED_MERGE — downstream observability gets
+                # a quantifiable signal for the silent data loss.
                 logger.error(
-                    "[%s] fan-out key=%s redispatch with different expected_tool_call_ids (prev=%s new=%s); overwriting",
+                    "[%s] fan-out key=%s redispatch with different expected_tool_call_ids "
+                    "(prev=%s new=%s); overwriting (discarded_received_count=%d)",
                     correlation_id[:8],
                     key,
                     sorted(existing.expected_tool_call_ids),
                     sorted(expected_tool_call_ids),
+                    len(existing.received),
                 )
+                self.aggregator._degraded_keys.add(key)
             now_ms = int(time.time() * 1000)
             initial_batch = _InFlightBatch(
                 correlation_id=correlation_id,
@@ -479,7 +494,8 @@ class BaseAgentNodeDef(
         # Late returns / orphan returns / duplicate returns all drop silently;
         # only new tool_call_ids advance the batch. The cache write is
         # deferred until the durable publish acks so a publish failure can be
-        # retried by FastStream redelivery without a phantom-merged state.
+        # redelivered (ack_policy=NACK_ON_ERROR on the subscription rewinds
+        # the offset on raise) without a phantom-merged state.
         key = (correlation_id, fan_out_id)
         state_store = self.aggregator.runtime.state_store
 
@@ -504,15 +520,16 @@ class BaseAgentNodeDef(
         new_ids = {tcid for tcid in incoming_results if tcid in batch.expected_tool_call_ids and tcid not in batch.received}
 
         if new_ids:
-            updated_received: dict[ToolCallId, Any] = {
+            updated_received: dict[str, Any] = {
                 **batch.received,
-                **{ToolCallId(tcid): incoming_results[tcid] for tcid in new_ids},
+                **{tcid: incoming_results[tcid] for tcid in new_ids},
             }
             updated_batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
             await state_store.put(key, updated_batch, partition=partition)
             batch = updated_batch
             view = self.aggregator._batch_view(batch)
-            await self.aggregator.on_partial(view, frozenset({ToolCallId(tcid) for tcid in new_ids}))
+            await self.aggregator.on_partial(view, frozenset(new_ids))
+            is_complete = await self.aggregator.should_complete(view)
         else:
             # No new tcids — but the batch may already be complete and
             # waiting on a redelivered completion. That happens when the
@@ -523,7 +540,8 @@ class BaseAgentNodeDef(
             # aggregated return reaches the agent at-least-once. If the
             # batch isn't complete yet, drop as a normal duplicate.
             view = self.aggregator._batch_view(batch)
-            if not await self.aggregator.should_complete(view):
+            is_complete = await self.aggregator.should_complete(view)
+            if not is_complete:
                 logger.debug(
                     "[%s] duplicate/empty return key=%s; idempotent drop",
                     correlation_id[:8],
@@ -536,32 +554,53 @@ class BaseAgentNodeDef(
                 key,
             )
 
-        if await self.aggregator.should_complete(view):
+        if is_complete:
             merged: AggregatedReturn
             try:
                 merged = await self.aggregator.merge(view)
             except Exception as exc:
                 fallback = await self._handle_merge_error(view, key, exc)
                 if fallback is None:
-                    # ABORT policy: re-raise so the broker delivers again
-                    # (and the late-return path eventually drops it).
+                    # ABORT policy: re-raise so FastStream's
+                    # ack_policy=NACK_ON_ERROR rewinds the consumer offset
+                    # and the message is redelivered. Each redelivery
+                    # re-attempts the merge until it succeeds (operator
+                    # fix) or the consumer is paused.
                     raise AggregatorMergeError(
                         f"merge() raised for key={key}",
                         correlation_id=key[0],
                         fan_out_id=key[1],
+                        state_topic=self.aggregator.runtime.state_topic,
                     ) from exc
                 merged = fallback
 
-            # Construct an envelope mirroring a normal ReturnCall back to
-            # the agent's main topic. The workflow_state already has the
-            # agent's frame on top (the tool frames were unwound when each
-            # tool returned), so the agent re-enters cleanly.
+            # The agent's frame is on top of the call stack (tool frames
+            # were unwound when each tool returned). Re-stamp its identity
+            # with a fresh frame_id so the re-entering agent's
+            # ``current_frame.frame_id`` is distinct from the one that
+            # drove this batch's ``fan_out_id``. Without this, a
+            # subsequent parallel fan-out within the same invocation
+            # derives a colliding ``fan_out_id`` and hits
+            # ``was_recently_completed`` on the just-tombstoned key
+            # (silent skip, agent hangs).
+            re_entry_state = envelope.internal_workflow_state.model_copy(deep=True)
+            previous_frame = re_entry_state.unwind_frame()
+            new_frame = dataclasses.replace(previous_frame, frame_id=uuid_utils.uuid7().hex)
+            re_entry_state.call_stack.push(new_frame)
+
             publish_envelope = Envelope(
                 context=SessionRunContext(state=merged.state, deps=envelope.context.deps),
-                internal_workflow_state=envelope.internal_workflow_state,
+                internal_workflow_state=re_entry_state,
             )
-            outbound_headers = self._emitter_headers()
-            if merged.degraded:
+            outbound_headers = {
+                **self._emitter_headers(),
+                HDR_FRAME_ID: new_frame.frame_id,
+            }
+            # Stamp HDR_DEGRADED_MERGE if either the merge itself produced a
+            # degraded result (FALLBACK_TO_DEFAULT path) OR the dispatch path
+            # flagged the key as degraded (drifted-redispatch overwrite that
+            # discarded prior received results).
+            if merged.degraded or key in self.aggregator._degraded_keys:
                 outbound_headers[HDR_DEGRADED_MERGE] = "1"
             await broker.publish(
                 publish_envelope,
@@ -573,6 +612,9 @@ class BaseAgentNodeDef(
 
             # Tombstone the batch so late returns are recognised.
             await state_store.tombstone(key, partition=partition)
+            # Drop the degraded flag now that the marked completion has been
+            # published — keeps the set bounded by the in-flight key count.
+            self.aggregator._degraded_keys.discard(key)
 
         return Response(envelope, headers=self._emitter_headers())
 
@@ -594,20 +636,36 @@ class BaseAgentNodeDef(
                 # traceback here so the retry's cause isn't invisible.
                 logger.exception("[%s] merge() raised on retry key=%s", key[0][:8], key)
                 return None
-        if policy == MergeErrorPolicy.DROP:
+        if policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT:
             # Fall back to the default merge so the batch still completes,
             # but mark the result as degraded so the published envelope
             # gets HDR_DEGRADED_MERGE — operators can detect that the
             # user's custom merge silently failed. The exception is
-            # logged here because DROP doesn't re-raise; this is the
-            # only operator-visible signal.
+            # logged here because FALLBACK_TO_DEFAULT doesn't re-raise;
+            # this is the only operator-visible signal.
             logger.exception(
-                "[%s] merge() raised; DROP policy → default merge key=%s (downstream envelope will carry %s=1)",
+                "[%s] merge() raised; FALLBACK_TO_DEFAULT policy -> default merge key=%s (downstream envelope will carry %s=1)",
                 key[0][:8],
                 key,
                 HDR_DEGRADED_MERGE,
             )
-            default = await FanOutAggregator.merge(self.aggregator, view)
+            # The default merge can itself raise (e.g., a broken
+            # ``State.add_tool_result`` or a malformed received result).
+            # Without this guard the inner exception bypasses the policy
+            # entirely: the user opted into FALLBACK_TO_DEFAULT expecting
+            # "log and continue," but would get a raw exception with no
+            # AggregatorMergeError wrapping and no degraded-merge stamp.
+            # Treat a double-failure as ABORT so the operator sees a
+            # structured AggregatorMergeError via NACK redelivery.
+            try:
+                default = await FanOutAggregator.merge(self.aggregator, view)
+            except Exception:
+                logger.exception(
+                    "[%s] FALLBACK_TO_DEFAULT: default merge ALSO raised key=%s; treating as ABORT",
+                    key[0][:8],
+                    key,
+                )
+                return None
             return AggregatedReturn(state=default.state, degraded=True)
         # ABORT: the caller's `raise AggregatorMergeError(...) from exc`
         # propagates the exception with the chained traceback; FastStream

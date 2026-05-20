@@ -9,40 +9,53 @@ with Kafka-backed durability.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from calfkit.models.state import State
-from calfkit.nodes.aggregator.state import FanOutState, ToolCallId
+from calfkit.nodes.aggregator.state import FanOutState
 
 
-@dataclass
+@dataclass(frozen=True)
 class _InFlightBatch:
-    """Mutable in-memory representation of an in-flight fan-out batch.
+    """Immutable in-memory representation of an in-flight fan-out batch.
 
-    Mirrors :class:`FanOutState` on the wire but lives in process memory for
-    hot-path mutation. The state store converts between the two when reading
-    from / writing to the compacted topic.
+    Mirrors :class:`FanOutState` on the wire but lives in process memory.
+    The state store converts between the two when reading from / writing
+    to the compacted topic.
+
+    Frozen and ``received`` exposed as a :class:`~collections.abc.Mapping`
+    (backed by :class:`types.MappingProxyType`) so the aggregator's
+    "publish then update cache" invariant cannot be undermined by an
+    in-place mutation: callers building an updated batch use
+    :meth:`with_received` to produce a new instance, leaving the original
+    intact if the durable publish fails.
     """
 
     correlation_id: str
     fan_out_id: str
-    expected_tool_call_ids: frozenset[ToolCallId]
+    expected_tool_call_ids: frozenset[str]
     base_state: State
-    received: dict[ToolCallId, Any] = field(default_factory=dict)
-    started_at_ms: int = 0
-    last_updated_ms: int = 0
-    agent_topic: str = ""
+    started_at_ms: int
+    last_updated_ms: int
+    agent_topic: str
+    received: Mapping[str, Any] = field(default_factory=dict)
     traceparent: str | None = None
     tracestate: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.received, MappingProxyType):
+            # ``object.__setattr__`` is needed because the dataclass is frozen.
+            object.__setattr__(self, "received", MappingProxyType(dict(self.received)))
 
     def to_fanout_state(self) -> FanOutState:
         return FanOutState(
             correlation_id=self.correlation_id,
             fan_out_id=self.fan_out_id,
             expected_tool_call_ids=self.expected_tool_call_ids,
-            received=self.received,
+            received=dict(self.received),
             base_state=self.base_state,
             started_at_ms=self.started_at_ms,
             last_updated_ms=self.last_updated_ms,
@@ -68,7 +81,7 @@ class _InFlightBatch:
 
     def with_received(
         self,
-        received: dict[ToolCallId, Any],
+        received: Mapping[str, Any],
         *,
         last_updated_ms: int,
     ) -> _InFlightBatch:
@@ -76,8 +89,9 @@ class _InFlightBatch:
 
         The aggregator handler uses this to build the post-merge batch
         BEFORE the durable publish, so a failed publish leaves the cached
-        batch unchanged (and FastStream's redelivery re-merges the return
-        cleanly). Mutating ``self.received`` in place would couple the
+        batch unchanged. Redelivery (driven by the fanout-returns
+        subscription's ack_policy=NACK_ON_ERROR) re-merges the return
+        cleanly. Mutating ``self.received`` in place would couple the
         cache to the in-flight modification and let a publish failure
         produce a phantom-merged result that no record reflects.
         """
@@ -137,6 +151,10 @@ class _TtlSet:
         return True
 
     def remove(self, key: Any) -> None:
+        self._entries.pop(key, None)
+
+    def discard(self, key: Any) -> None:
+        """Set-like discard: drop ``key`` if present, no-op otherwise."""
         self._entries.pop(key, None)
 
     def clear(self) -> None:

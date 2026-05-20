@@ -16,6 +16,17 @@ The aggregator is **process-local**. State held in ``__init__`` (e.g., an LLM
 client used by :meth:`merge`) is per-process; cross-process coordination
 happens via the ``{node_id}.fanout-state`` compacted topic, not via
 attributes on this object.
+
+.. warning::
+
+   The fanout-returns subscription is configured with
+   ``AckPolicy.NACK_ON_ERROR`` so handler raises rewind the offset for
+   redelivery. The default :data:`MergeErrorPolicy.ABORT` raises
+   :class:`AggregatorMergeError`, which under that ack policy triggers
+   indefinite redelivery for non-transient failures. The aggregator does
+   not yet ship a DLQ on ``{node_id}.fanout-returns``; deployments running
+   ABORT in production should provision their own DLQ or accept the
+   redelivery-loop risk (tracked in ``ROADMAP.md``).
 """
 
 from __future__ import annotations
@@ -31,7 +42,6 @@ from calfkit.nodes.aggregator.errors import AggregatorStateStoreError
 from calfkit.nodes.aggregator.state import (
     AggregatedReturn,
     AggregatorBatch,
-    ToolCallId,
 )
 
 if TYPE_CHECKING:
@@ -43,22 +53,45 @@ logger = logging.getLogger(__name__)
 
 
 class MergeErrorPolicy(str, enum.Enum):
-    """How the aggregator handles exceptions raised from :meth:`FanOutAggregator.merge`."""
+    """How the aggregator handles exceptions raised from :meth:`FanOutAggregator.merge`.
+
+    Process-local enum — values are never persisted to the durable state
+    topic, so the member names can evolve pre-1.0 without a wire-format
+    migration.
+
+    .. warning::
+
+       :data:`ABORT` (the default) raises :class:`AggregatorMergeError`
+       which, under the fanout-returns subscription's
+       ``AckPolicy.NACK_ON_ERROR``, triggers Kafka redelivery. If the merge
+       failure is non-transient (a bug in the user's :meth:`merge`), the
+       message redelivers indefinitely until an operator intervenes. The
+       aggregator does not yet ship a DLQ on ``{node_id}.fanout-returns``
+       (see ``ROADMAP.md``); deployments running ABORT in production should
+       provision their own DLQ or accept the redelivery-loop risk.
+    """
 
     ABORT = "abort"
-    """Raise :class:`AggregatorMergeError` and fail the batch loudly. Default."""
+    """Raise :class:`AggregatorMergeError` and fail the batch loudly. Default.
+
+    Under ``AckPolicy.NACK_ON_ERROR`` (the fanout-returns subscription
+    default) the raise causes Kafka to redeliver the inbound. A
+    non-transient failure therefore loops indefinitely without a DLQ — see
+    the class-level warning above and ``ROADMAP.md`` for the DLQ design.
+    """
 
     RETRY = "retry"
     """Retry the merge once. Useful for transient failures (e.g., a
     downstream LLM call that times out). If the retry also raises,
     behaves as :data:`ABORT`."""
 
-    DROP = "drop"
-    """Log the error and complete the batch via the default merge (apply all
-    received results to ``base_state``). Useful for best-effort aggregation
-    where falling back to the un-customised state is acceptable. The
-    framework stamps :data:`HDR_DEGRADED_MERGE` on the published envelope
-    so operators can detect silently-degraded batches."""
+    FALLBACK_TO_DEFAULT = "fallback_to_default"
+    """Log the error and complete the batch via the framework's default merge
+    (apply all received results to ``base_state``). Useful for best-effort
+    aggregation where falling back to the un-customised state is acceptable.
+    The framework stamps :data:`HDR_DEGRADED_MERGE` on the published envelope
+    so operators can detect silently-degraded batches. If the default merge
+    itself raises, the framework treats it as :data:`ABORT`."""
 
 
 class FanOutAggregator:
@@ -107,24 +140,37 @@ class FanOutAggregator:
         # pre-setup, used by ``kafka_subscriptions`` which can run before
         # ``setup()``).
         self._runtime: _FanOutRuntime | None = None
+        # Process-local set of batch keys flagged as degraded by the
+        # dispatch path — currently populated when a redispatch arrives
+        # with a different ``expected_tool_call_ids`` set than the cached
+        # batch (a real upstream bug we surface but tolerate by overwriting
+        # the stale state). The aggregator handler reads this on completion
+        # so the published envelope carries :data:`HDR_DEGRADED_MERGE`,
+        # giving operators a signal that prior received results were
+        # silently discarded. Cleared when the matching batch tombstones.
+        self._degraded_keys: set[tuple[str, str]] = set()
 
     @property
     def runtime(self) -> _FanOutRuntime:
         """Return the framework-managed runtime state, or raise.
 
-        Used by :class:`BaseAgentNodeDef`'s aggregator handler after
-        ``_ensure_aggregator_ready`` has ensured ``setup()`` has run.
-        Pre-setup access from non-handler paths (e.g.,
-        ``kafka_subscriptions`` building a subscription list) should
-        check ``self._runtime is not None`` instead — the property
-        intentionally raises so handler code stays terse.
+        Strict validation: raises :class:`AggregatorStateStoreError` if
+        :meth:`setup` has not run. :meth:`~calfkit.worker.worker.Worker.run`
+        handles setup automatically in production; tests bypassing
+        ``Worker.run()`` must call
+        :func:`calfkit.nodes.aggregator.testing.setup_for_tests` explicitly
+        before invoking handler paths.
+
+        Pre-setup access from non-handler paths (e.g., ``kafka_subscriptions``
+        building a subscription list) should check ``self._runtime is not None``
+        instead — the property intentionally raises so handler code stays terse.
         """
         if self._runtime is None:
             raise AggregatorStateStoreError(
                 "FanOutAggregator.setup() must run before runtime access. "
-                "Worker.run() runs setup at startup; test paths bypassing "
-                "Worker.run() rely on BaseAgentNodeDef._ensure_aggregator_ready "
-                "to lazily call setup() before the first parallel fan-out."
+                "Worker.run() runs setup at startup; tests bypassing Worker.run() "
+                "must call calfkit.nodes.aggregator.testing.setup_for_tests("
+                "agent, broker) before invoking handler paths."
             )
         return self._runtime
 
@@ -210,13 +256,20 @@ class FanOutAggregator:
     # ------------------------------------------------------------------
 
     def _batch_view(self, batch: _InFlightBatch) -> AggregatorBatch:
-        """Build the immutable :class:`AggregatorBatch` view passed to overrides."""
+        """Build the immutable :class:`AggregatorBatch` view passed to overrides.
+
+        ``base_state`` is deep-copied so a user :meth:`merge` that mutates
+        ``batch.base_state`` (instead of operating on a copy) cannot corrupt
+        the framework's cached :class:`_InFlightBatch.base_state`. The view's
+        ``received`` mapping is wrapped in ``MappingProxyType`` for the same
+        defensive reason.
+        """
         return AggregatorBatch(
             correlation_id=batch.correlation_id,
             fan_out_id=batch.fan_out_id,
             expected_tool_call_ids=batch.expected_tool_call_ids,
             received=MappingProxyType(dict(batch.received)),
-            base_state=batch.base_state,
+            base_state=batch.base_state.model_copy(deep=True),
             started_at_ms=batch.started_at_ms,
             last_updated_ms=batch.last_updated_ms,
         )
@@ -270,7 +323,7 @@ class FanOutAggregator:
     async def on_partial(
         self,
         batch: AggregatorBatch,
-        newly_received: frozenset[ToolCallId],
+        newly_received: frozenset[str],
     ) -> None:
         """Observe a partial-result moment.
 
