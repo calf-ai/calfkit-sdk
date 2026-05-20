@@ -596,7 +596,7 @@ completion publish) — they are not folded into
 ``_publish_action`` pathway, which carries ``HDR_FANOUT_ID`` through
 from the tool's inbound to its ``ReturnCall``.
 
-The shipped ``calfkit/_protocol.py`` defines ``_emitter_headers`` (which
+The shipped ``calfkit/nodes/base.py`` defines ``_emitter_headers`` (which
 returns only ``HDR_EMITTER`` and ``HDR_EMITTER_KIND``); no
 ``_emit_headers`` helper exists. ``traceparent`` / ``tracestate`` are
 not threaded by current code; the fields on ``FanOutState`` are
@@ -1021,9 +1021,10 @@ no way to drive it forward short of manual intervention.
 The shipped ordering — **publish first, tombstone second** — makes
 the completion path idempotent under at-least-once redelivery. If the
 publish or tombstone fails, FastStream redelivers; the aggregator
-handler reaches a code path (`agent.py` lines 516-537) that detects
-"no new tcids but `should_complete` is True" and **re-attempts merge
-→ publish → tombstone**. Genuine duplicates (where `should_complete`
+handler reaches a code path in
+`BaseAgentNodeDef._aggregator_handler` that detects "no new tcids but
+`should_complete` is True" and **re-attempts merge → publish →
+tombstone**. Genuine duplicates (where `should_complete`
 is still False) still take the drop path. The trade-off is described
 in the §9.1 failure-mode matrix and the dedup contract in §9.2.
 
@@ -1032,8 +1033,8 @@ idempotent on `correlation_id` for the merged-state envelope, since a
 crash between publish and tombstone (or between two redelivered
 completion attempts) can result in the same merged envelope being
 delivered to the agent twice. The dedup mechanism is the existing
-idempotent-dispatch check at `agent.py::_publish_parallel_with_aggregator`
-lines 375-393: redelivery hits `state_store.was_recently_completed(key)`
+idempotent-dispatch check at `agent.py::_publish_parallel_with_aggregator`'s
+redelivery branch: redelivery hits `state_store.was_recently_completed(key)`
 or `existing.expected_tool_call_ids == expected_tool_call_ids` and
 short-circuits the second dispatch. The same check covers the
 publish-twice case: the agent re-enters with the merged state on the
@@ -1149,7 +1150,7 @@ Restated and consolidated from §7 plus new failure scenarios:
 | Tool process crashes mid-execution | No return arrives | Batch remains pending until partition rebalance evicts it (v1 has no idle-timeout reaper — see §17.11). Operator-visible via stuck `pending_batches`. | Batch stays in-flight; operator must redrive or rely on rebalance eviction |
 | Aggregator process crashes after receiving return, before write-through | Return's consumer offset never committed; redelivered to next owner | Next owner re-receives; dedup based on `tool_call_id` not in `batch.received` (post-rehydration); proceeds | None |
 | Aggregator process crashes after write-through, before completion check | Cache lost; rebalance rehydration finds updated state; should_complete re-runs | Completion fires (if applicable); re-entry happens | Slight delay; correct outcome |
-| Aggregator process crashes after re-entry publish, before tombstone | The durable record still says "in flight" (no tombstone); the merged envelope did reach the agent topic. Inbound redelivered to aggregator handler after rebalance. | Handler re-runs: `new_ids` is empty (all results already in `batch.received`) but `should_complete` is True → re-attempts merge → publish → tombstone (`agent.py` lines 516-537). | Merged-state envelope is delivered to the agent topic again; agent dedups by `correlation_id` (existing calfkit contract). |
+| Aggregator process crashes after re-entry publish, before tombstone | The durable record still says "in flight" (no tombstone); the merged envelope did reach the agent topic. Inbound redelivered to aggregator handler after rebalance. | Handler re-runs: `new_ids` is empty (all results already in `batch.received`) but `should_complete` is True → re-attempts merge → publish → tombstone (see `BaseAgentNodeDef._aggregator_handler`). | Merged-state envelope is delivered to the agent topic again; agent dedups by `correlation_id` (existing calfkit contract). |
 | Aggregator process crashes after merge / before re-entry publish | Same as above — the durable record still says "in flight", no envelope reached the agent. | Same redelivery path re-attempts merge → publish → tombstone idempotently. | None — the merged envelope is delivered exactly the same as a non-crash path. |
 
 The last two rows are why the shipped ordering is **publish-first,
@@ -1899,8 +1900,8 @@ of the production path.
 
 **``RestartSimulatedError``.** When ``simulate_restart()`` fires, any
 in-flight ``await`` returned by the harness's completion or
-partial-state waiters (``await_completion(key)``,
-``await_partial_state(key, ...)``) is failed with
+partial-state waiters (``wait_for_completion(key)``,
+``wait_for_partial_state(key, ...)``) is failed with
 ``RestartSimulatedError`` rather than left hanging or silently
 cancelled. Tests that expect ``simulate_restart`` mid-await should
 catch the exception explicitly so a hang during refactor is impossible
@@ -2065,7 +2066,7 @@ Key sites in `calfkit/`:
 - `client/kafka_config.py::KafkaConfig` — bootstrap servers + client kwargs snapshot.
 - ``_protocol.py::HDR_FANOUT_ID``, ``HDR_FRAME_ID``, ``HDR_DEGRADED_MERGE`` — added headers.
 - ``nodes/aggregator/testing.py::InMemoryAggregator`` — in-memory harness; mirrors production ``_batch_view`` (deep-copy ``base_state``) and ``_run_merge`` (try/except around the ``FALLBACK_TO_DEFAULT`` default-merge fallback). ``persist_to_disk=True`` by default.
-- ``nodes/aggregator/testing.py::RestartSimulatedError`` — raised by harness ``await_completion`` / ``await_partial_state`` waiters when ``simulate_restart()`` fires mid-await. Defined in ``testing.py`` (not ``errors.py``) so production code catching ``AggregatorError`` cannot accidentally swallow it.
+- ``nodes/aggregator/testing.py::RestartSimulatedError`` — raised by harness ``wait_for_completion`` / ``wait_for_partial_state`` waiters when ``simulate_restart()`` fires mid-await. Defined in ``testing.py`` (not ``errors.py``) so production code catching ``AggregatorError`` cannot accidentally swallow it.
 
 ### 18.4 Glossary
 
