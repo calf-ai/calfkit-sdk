@@ -123,9 +123,9 @@ class InMemoryAggregator(FanOutAggregator):
         :class:`RestartSimulatedError` so the test fails clearly rather than
         hanging on the wiped event objects.
         """
-        # Cancel current waiters before clearing the event dicts; without
-        # this the awaiters hold references to the OLD asyncio.Event
-        # objects which will never be set, hanging the test forever.
+        # Cancel current waiters before clearing the registries; without
+        # this the awaiters hold references to the OLD asyncio.Future
+        # objects which would never be resolved, hanging the test forever.
         for fut in self._completion_events.values():
             if not fut.done():
                 fut.set_exception(RestartSimulatedError("simulate_restart() fired while a completion waiter was active"))
@@ -267,8 +267,12 @@ class InMemoryAggregator(FanOutAggregator):
         if tool_call_id in batch.received:
             return None  # duplicate — idempotent
 
-        batch.received[tool_call_id] = result
-        batch.last_updated_ms = int(time.time() * 1000)
+        # Build a new batch instance rather than mutating in place — mirrors
+        # the production ``_aggregator_handler`` invariant where the cache is
+        # written only after the durable publish acks. Keeps the in-memory
+        # harness behaviourally aligned with the real Kafka-backed flow.
+        updated_received = {**batch.received, tool_call_id: result}
+        batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
         self._store.put(key, batch)
         self._persist_put(key, batch)
 

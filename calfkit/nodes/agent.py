@@ -275,11 +275,12 @@ class BaseAgentNodeDef(
                     target_tool_call.tool_call_id,
                 )
             else:
-                # Parallel fan-out: emit list[Call]. The base class's
-                # _publish_action recognises the agent has an aggregator
-                # attached and (a) writes the initial FanOutState record
-                # to the compacted state topic and (b) routes each Call's
-                # callback to {node_id}.fanout-returns so the aggregator
+                # Parallel fan-out: emit list[Call]. The agent's
+                # ``_publish_action`` override intercepts this branch and
+                # delegates to ``_publish_parallel_with_aggregator``, which
+                # (a) writes the initial FanOutState record to the
+                # compacted state topic and (b) routes each Call's callback
+                # to ``{node_id}.fanout-returns`` so the aggregator
                 # collects the returns durably.
                 parallel_tool_calls = [
                     Call[State](
@@ -372,12 +373,10 @@ class BaseAgentNodeDef(
         state_store = runtime.state_store
         returns_topic = runtime.returns_topic
 
-        # 1. Deterministic fan_out_id from the inbound agent frame.
         fan_out_id = envelope.internal_workflow_state.current_frame.frame_id
         expected_tool_call_ids = frozenset({call.input_args[0] for call in calls if call.input_args is not None})
         key = (correlation_id, fan_out_id)
 
-        # 2. Idempotent dispatch — handle inbound redelivery cleanly.
         if state_store.was_recently_completed(key):
             logger.info(
                 "[%s] redelivered inbound for already-completed batch key=%s; skipping fan-out",
@@ -400,9 +399,7 @@ class BaseAgentNodeDef(
         else:
             if existing is not None:
                 # The agent loop produced a different set of tool calls on
-                # re-entry. This is a real upstream bug; surface it loudly
-                # and overwrite the stale state so the new dispatch can
-                # proceed.
+                # re-entry. Surface loudly and overwrite the stale state.
                 logger.error(
                     "[%s] fan-out key=%s redispatch with different expected_tool_call_ids (prev=%s new=%s); overwriting",
                     correlation_id[:8],
@@ -410,7 +407,6 @@ class BaseAgentNodeDef(
                     sorted(existing.expected_tool_call_ids),
                     sorted(expected_tool_call_ids),
                 )
-            # 3. First-time dispatch — build and durably persist the initial batch.
             now_ms = int(time.time() * 1000)
             initial_batch = _InFlightBatch(
                 correlation_id=correlation_id,
@@ -432,7 +428,7 @@ class BaseAgentNodeDef(
             self.name,
         )
 
-        # 4. Publish each tool Call with callback → fanout-returns.
+
         for call in calls:
             wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
             wf_copy.invoke_frame(call, returns_topic)
@@ -511,25 +507,40 @@ class BaseAgentNodeDef(
 
         incoming_results = envelope.context.state.tool_results
         new_ids = {tcid for tcid in incoming_results if tcid in batch.expected_tool_call_ids and tcid not in batch.received}
-        if not new_ids:
-            logger.debug(
-                "[%s] duplicate/empty return key=%s; idempotent drop",
+
+        if new_ids:
+            updated_received: dict[ToolCallId, Any] = {
+                **batch.received,
+                **{ToolCallId(tcid): incoming_results[tcid] for tcid in new_ids},
+            }
+            updated_batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
+            await state_store.put(key, updated_batch, partition=partition)
+            batch = updated_batch
+            view = self.aggregator._batch_view(batch)
+            await self.aggregator.on_partial(view, frozenset({ToolCallId(tcid) for tcid in new_ids}))
+        else:
+            # No new tcids — but the batch may already be complete and
+            # waiting on a redelivered completion. That happens when the
+            # previous attempt's agent-topic publish or tombstone failed
+            # after state_store.put succeeded: the durable record has all
+            # results, but the merge hasn't been delivered downstream.
+            # Fall through to re-attempt the completion path so the
+            # aggregated return reaches the agent at-least-once. If the
+            # batch isn't complete yet, drop as a normal duplicate.
+            view = self.aggregator._batch_view(batch)
+            if not await self.aggregator.should_complete(view):
+                logger.debug(
+                    "[%s] duplicate/empty return key=%s; idempotent drop",
+                    correlation_id[:8],
+                    key,
+                )
+                return Response(envelope, headers=self._emitter_headers())
+            logger.info(
+                "[%s] re-attempting completion for already-merged batch key=%s "
+                "(redelivery after a failed downstream publish or tombstone)",
                 correlation_id[:8],
                 key,
             )
-            return Response(envelope, headers=self._emitter_headers())
-
-        updated_received: dict[ToolCallId, Any] = {
-            **batch.received,
-            **{ToolCallId(tcid): incoming_results[tcid] for tcid in new_ids},
-        }
-        updated_batch = batch.with_received(updated_received, last_updated_ms=int(time.time() * 1000))
-
-        await state_store.put(key, updated_batch, partition=partition)
-        batch = updated_batch
-
-        view = self.aggregator._batch_view(batch)
-        await self.aggregator.on_partial(view, frozenset({ToolCallId(tcid) for tcid in new_ids}))
 
         if await self.aggregator.should_complete(view):
             merged: AggregatedReturn
@@ -584,13 +595,18 @@ class BaseAgentNodeDef(
             try:
                 return await self.aggregator.merge(view)
             except Exception:
+                # The caller's `raise AggregatorMergeError(...) from exc` chains
+                # the FIRST exception, not the retry exception. Log the retry
+                # traceback here so the retry's cause isn't invisible.
                 logger.exception("[%s] merge() raised on retry key=%s", key[0][:8], key)
                 return None
         if policy == MergeErrorPolicy.DROP:
             # Fall back to the default merge so the batch still completes,
             # but mark the result as degraded so the published envelope
             # gets HDR_DEGRADED_MERGE — operators can detect that the
-            # user's custom merge silently failed.
+            # user's custom merge silently failed. The exception is
+            # logged here because DROP doesn't re-raise; this is the
+            # only operator-visible signal.
             logger.exception(
                 "[%s] merge() raised; DROP policy → default merge key=%s (downstream envelope will carry %s=1)",
                 key[0][:8],
@@ -599,8 +615,10 @@ class BaseAgentNodeDef(
             )
             default = await FanOutAggregator.merge(self.aggregator, view)
             return AggregatedReturn(state=default.state, degraded=True)
-        # ABORT
-        logger.exception("[%s] merge() raised; ABORT policy key=%s", key[0][:8], key)
+        # ABORT: the caller's `raise AggregatorMergeError(...) from exc`
+        # propagates the exception with the chained traceback; FastStream
+        # will log it once at the framework boundary. Logging here would
+        # double-log the same stack.
         return None
 
     def add_tools(self, *tools: ToolNodeDef) -> None:

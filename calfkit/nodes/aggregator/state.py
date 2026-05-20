@@ -12,6 +12,7 @@ completion path returns an :class:`AggregatedReturn`.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, NewType
@@ -68,7 +69,7 @@ class FanOutState(BaseModel):
 
     last_updated_ms: int
     """Monotonic millisecond timestamp of the most recent ``received`` mutation.
-    Used by idle-timeout reaping and by observability."""
+    Recorded for observability (lag, batch-age metrics)."""
 
     agent_topic: str
     """The agent's main input topic. The aggregated ``AggregatedReturn`` is
@@ -107,6 +108,23 @@ class AggregatorBatch:
         # ``object.__setattr__`` is needed because the dataclass is frozen.
         if not isinstance(self.received, MappingProxyType):
             object.__setattr__(self, "received", MappingProxyType(dict(self.received)))
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> AggregatorBatch:
+        # MappingProxyType doesn't survive ``copy.deepcopy`` via the default
+        # mechanism (raises ``TypeError: cannot pickle 'mappingproxy'``).
+        # Users defensively snapshotting the view with ``copy.deepcopy(batch)``
+        # would otherwise crash. Re-wrap a deep copy of the underlying dict;
+        # the new instance goes through ``__post_init__`` and reinstates
+        # the MappingProxyType.
+        return AggregatorBatch(
+            correlation_id=self.correlation_id,
+            fan_out_id=self.fan_out_id,
+            expected_tool_call_ids=self.expected_tool_call_ids,
+            received=deepcopy(dict(self.received), memo),
+            base_state=deepcopy(self.base_state, memo),
+            started_at_ms=self.started_at_ms,
+            last_updated_ms=self.last_updated_ms,
+        )
 
     @property
     def num_expected(self) -> int:

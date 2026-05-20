@@ -47,8 +47,8 @@ class Worker:
         # to construct their transient AIOKafkaConsumer for state-topic
         # rehydration. Client.connect captures these; if a caller built the
         # client directly via BaseClient(...) and skipped the snapshot,
-        # we have to fail loudly rather than silently default to localhost
-        # (the previous _extract_bootstrap_servers behaviour).
+        # we fail loudly rather than silently defaulting to a localhost
+        # placeholder.
         kafka_config = self._client.kafka_config
         if kafka_config is None and any(isinstance(n, BaseAgentNodeDef) for n in self._nodes):
             raise AggregatorStateStoreError(

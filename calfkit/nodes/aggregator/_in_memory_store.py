@@ -123,8 +123,18 @@ class _TtlSet:
             self._sweep()
 
     def __contains__(self, key: Any) -> bool:
-        self._sweep()
-        return key in self._entries
+        # O(1) per-key expiry check. The full bulk sweep happens
+        # periodically on add() (every _SWEEP_EVERY_N_ADDS); on the
+        # hot read path we just check this one key's expiry.
+        # Sweeping the entire entries dict per __contains__ — the
+        # previous behaviour — would have been O(n) per inbound
+        # tool return.
+        if key not in self._entries:
+            return False
+        if self._entries[key] <= self._clock():
+            del self._entries[key]
+            return False
+        return True
 
     def remove(self, key: Any) -> None:
         self._entries.pop(key, None)

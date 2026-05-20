@@ -824,6 +824,67 @@ async def test_drop_policy_stamps_degraded_header_on_publish(
     assert headers_on_publish.get(HDR_DEGRADED_MERGE) == "1"
 
 
+async def test_redelivery_after_failed_downstream_publish_re_attempts_completion(
+    primed_state_store: tuple[object, MagicMock],
+) -> None:
+    """Critical regression guard: when state_store.put() succeeds and the
+    subsequent agent-topic publish (or tombstone) fails, FastStream
+    redelivers the inbound. On redelivery the handler sees no new tcids
+    (batch.received is fully populated) but MUST NOT short-circuit on the
+    duplicate-return drop — it must re-attempt the completion path so the
+    merged result reaches the agent at-least-once. Without this, the
+    durable record sits orphaned and the agent never re-enters."""
+    agent, broker = primed_state_store
+    state_store = agent.aggregator.runtime.state_store  # type: ignore[attr-defined]
+
+    # Seed: batch is fully merged (both t1 and t2 received) but not yet
+    # tombstoned — the state after a successful put() whose downstream
+    # publish or tombstone then failed and triggered FastStream redelivery.
+    key = ("corr-stuck", "fan-stuck")
+    state_store._cache[key] = _InFlightBatch(
+        correlation_id="corr-stuck",
+        fan_out_id="fan-stuck",
+        expected_tool_call_ids=frozenset({"t1", "t2"}),
+        base_state=State(),
+        received={"t1": "r1", "t2": "r2"},
+        started_at_ms=int(time.time() * 1000),
+        last_updated_ms=int(time.time() * 1000),
+        agent_topic="test_agent.input",
+    )
+
+    # Redelivery: the same envelope as the prior (failed) attempt.
+    # incoming_results tcids are already in batch.received → new_ids = {}.
+    envelope = _make_envelope(
+        "corr-stuck",
+        state=_state_with_results({"t1": "r1", "t2": "r2"}),
+    )
+    headers = {"x-calf-fanout-id": "fan-stuck"}
+
+    await agent._aggregator_handler(  # type: ignore[attr-defined]
+        envelope,
+        correlation_id="corr-stuck",
+        headers=headers,
+        broker=broker,
+    )
+
+    # The handler must re-publish the merged return to the agent topic
+    # and tombstone the batch.
+    agent_topic_publishes = [
+        c for c in broker.publish.await_args_list
+        if c.kwargs.get("topic") == "test_agent.input"
+    ]
+    assert len(agent_topic_publishes) == 1, (
+        "Expected the handler to re-publish the merged result on redelivery; "
+        "without this the durable record is orphaned and the agent never re-enters"
+    )
+    state_topic_publishes = [
+        c for c in broker.publish.await_args_list
+        if c.kwargs.get("topic") == "test_agent.fanout-state"
+    ]
+    tombstones = [c for c in state_topic_publishes if c.args[0] is None]
+    assert len(tombstones) == 1, "Expected the handler to tombstone the batch"
+
+
 async def test_normal_completion_does_not_stamp_degraded_header(
     primed_state_store: tuple[object, MagicMock],
 ) -> None:
