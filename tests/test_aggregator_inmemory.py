@@ -352,3 +352,52 @@ async def test_simulate_restart_cancels_pending_partial_state_waiter() -> None:
     with pytest.raises(RestartSimulatedError):
         await agg.wait_for_partial_state(("c1", "f1"), 2, timeout=1.0)
     await restart_task
+
+
+def test_ttl_set_sweeps_periodically_on_add_without_reads() -> None:
+    """A workload that only adds (e.g. a worker that tombstones many
+    batches but rarely reads ``was_recently_completed``) must still
+    bound _entries growth. The periodic sweep on add() — every
+    _SWEEP_EVERY_N_ADDS calls — is the guarantee."""
+    from calfkit.nodes.aggregator._in_memory_store import _TtlSet
+
+    fake_time = [0.0]
+
+    def clock() -> float:
+        return fake_time[0]
+
+    ttl_set = _TtlSet(ttl_seconds=10.0, clock=clock)
+
+    # Fill nearly to the sweep threshold; no reads in between.
+    for i in range(_TtlSet._SWEEP_EVERY_N_ADDS - 1):
+        ttl_set.add(f"key-{i}")
+    assert len(ttl_set._entries) == _TtlSet._SWEEP_EVERY_N_ADDS - 1
+
+    # Advance well past the TTL so the earlier entries are all stale.
+    fake_time[0] = 100.0
+
+    # The Nth add() triggers the periodic sweep; expired entries drop,
+    # leaving only the freshly-added one.
+    ttl_set.add("key-fresh")
+    assert len(ttl_set._entries) == 1
+    assert "key-fresh" in ttl_set._entries
+
+
+def test_ttl_set_contains_is_o1_and_evicts_expired_key() -> None:
+    """``__contains__`` does an O(1) per-key expiry check rather than
+    sweeping the full set on every call. An expired key still
+    correctly returns False, and the entry is removed on access so
+    later inspections see consistent state."""
+    from calfkit.nodes.aggregator._in_memory_store import _TtlSet
+
+    fake_time = [0.0]
+    ttl_set = _TtlSet(ttl_seconds=10.0, clock=lambda: fake_time[0])
+    ttl_set.add("k1")
+    ttl_set.add("k2")
+    assert "k1" in ttl_set  # not yet expired
+
+    fake_time[0] = 11.0
+    assert "k1" not in ttl_set  # expired → False, and evicted
+    assert "k1" not in ttl_set._entries  # removed on the previous check
+    # Other entries are NOT touched (no bulk sweep on the read path).
+    assert "k2" in ttl_set._entries

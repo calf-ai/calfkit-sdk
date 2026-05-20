@@ -313,6 +313,94 @@ def test_apply_record_valid_state_populates_cache() -> None:
     assert batch.expected_tool_call_ids == frozenset({"t1", "t2"})
 
 
+async def test_rehydrate_raises_after_exactly_max_empty_polls() -> None:
+    """Pin the retry budget value (``_REHYDRATE_MAX_EMPTY_POLLS``): the
+    loop must tolerate up to N-1 consecutive empty polls and only raise
+    on the Nth. A regression that shortened the budget to 1 (or removed
+    it altogether) would break this — the original ``test_rehydrate_raises_on_stalled_poll``
+    only checks that SOME number of empties raises, not which."""
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+
+    from aiokafka import TopicPartition
+
+    mock_consumer.end_offsets = AsyncMock(return_value={TopicPartition("agent.fanout-state", 0): 5})
+    mock_consumer.getmany = AsyncMock(return_value={})
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        with pytest.raises(AggregatorStateStoreError, match="rehydration stalled"):
+            await store.rehydrate_partitions({0})
+
+    assert mock_consumer.getmany.await_count == _KafkaStateStore._REHYDRATE_MAX_EMPTY_POLLS
+
+
+async def test_rehydrate_empty_poll_counter_resets_on_progress() -> None:
+    """A burst of empty polls followed by a successful poll must NOT
+    accumulate toward the budget — the counter resets when records
+    arrive. Without this reset, a long rehydration with occasional
+    empty polls would falsely raise."""
+    store, _ = _make_store()
+    store._partition_count = 4
+
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+
+    from aiokafka import TopicPartition
+
+    from calfkit.nodes.aggregator.state import FanOutState
+
+    tp = TopicPartition("agent.fanout-state", 0)
+    mock_consumer.end_offsets = AsyncMock(return_value={tp: 1})
+
+    # Build a single valid record.
+    state = FanOutState(
+        correlation_id="c1",
+        fan_out_id="f1",
+        expected_tool_call_ids=frozenset({"t1"}),
+        base_state=State(),
+        started_at_ms=0,
+        last_updated_ms=0,
+        agent_topic="agent.in",
+    )
+
+    class _Rec:
+        def __init__(self, key: bytes, value: bytes, offset: int) -> None:
+            self.key = key
+            self.value = value
+            self.offset = offset
+
+    record = _Rec(b"c1|f1", state.model_dump_json().encode(), 0)
+
+    # Sequence: (N-1) empty polls, then one successful poll that completes
+    # the partition. Counter should reset on the success and not raise.
+    empty_polls = _KafkaStateStore._REHYDRATE_MAX_EMPTY_POLLS - 1
+    poll_sequence: list[dict[TopicPartition, list[_Rec]]] = [{} for _ in range(empty_polls)]
+    poll_sequence.append({tp: [record]})
+    mock_consumer.getmany = AsyncMock(side_effect=poll_sequence)
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ):
+        # Must NOT raise — the success resets the counter.
+        await store.rehydrate_partitions({0})
+
+    assert 0 in store.owned_partitions
+    assert store.get(("c1", "f1")) is not None
+
+
 async def test_rehydrate_skips_empty_partitions() -> None:
     """Partitions with end_offset == 0 have nothing to read; they should
     be marked owned immediately without polling. This regression-checks

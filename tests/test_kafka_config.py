@@ -55,3 +55,62 @@ def test_client_connect_kafka_config_is_independent_of_broker_kwargs() -> None:
     client.kafka_config.client_kwargs["mutated"] = True
     broker_kwargs = mock_broker_cls.call_args.kwargs
     assert "mutated" not in broker_kwargs
+
+
+async def test_security_kwargs_reach_rehydration_consumer_end_to_end() -> None:
+    """End-to-end thread-through: user-supplied security_protocol /
+    sasl_* kwargs from Client.connect must reach the
+    AIOKafkaConsumer the state store constructs during rehydration.
+    Pure unit coverage of the dataclass capture (test_*_captures_*)
+    wouldn't catch a regression that broke the path between
+    ``KafkaConfig`` and ``_KafkaStateStore.__init__``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiokafka import TopicPartition
+
+    from calfkit.nodes.aggregator._kafka_state_store import _KafkaStateStore
+
+    with patch("calfkit.client.base.KafkaBroker"):
+        client = Client.connect(
+            "kafka.example:9092",
+            security_protocol="SASL_SSL",
+            sasl_mechanism="SCRAM-SHA-256",
+            sasl_plain_username="alice",
+            sasl_plain_password="hunter2",
+        )
+
+    assert client.kafka_config is not None
+
+    # Build the state store the way FanOutAggregator.setup would.
+    broker = MagicMock()
+    broker.publish = AsyncMock()
+    store = _KafkaStateStore(
+        broker=broker,
+        state_topic="agent.fanout-state",
+        bootstrap_servers=client.kafka_config.bootstrap_servers,
+        partition_count=4,
+        client_kwargs=client.kafka_config.client_kwargs,
+    )
+
+    # Trigger rehydration with a no-op partition so AIOKafkaConsumer is
+    # constructed but doesn't actually poll.
+    mock_consumer = AsyncMock()
+    mock_consumer.start = AsyncMock()
+    mock_consumer.stop = AsyncMock()
+    mock_consumer.assign = MagicMock()
+    mock_consumer.seek_to_beginning = AsyncMock()
+    mock_consumer.end_offsets = AsyncMock(return_value={TopicPartition("agent.fanout-state", 0): 0})
+    mock_consumer.getmany = AsyncMock(return_value={})
+
+    with patch(
+        "calfkit.nodes.aggregator._kafka_state_store.AIOKafkaConsumer",
+        return_value=mock_consumer,
+    ) as mock_cls:
+        await store.rehydrate_partitions({0})
+
+    construction_kwargs = mock_cls.call_args.kwargs
+    assert construction_kwargs["bootstrap_servers"] == "kafka.example:9092"
+    assert construction_kwargs["security_protocol"] == "SASL_SSL"
+    assert construction_kwargs["sasl_mechanism"] == "SCRAM-SHA-256"
+    assert construction_kwargs["sasl_plain_username"] == "alice"
+    assert construction_kwargs["sasl_plain_password"] == "hunter2"
