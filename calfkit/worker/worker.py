@@ -36,14 +36,24 @@ class Worker:
         else:
             for node in self._nodes:
                 group_id = self._group_id or node.name
+                # Subscribe to the node's public inboxes plus its
+                # framework-private return inbox. The latter is where tool
+                # ``Call`` returns and ``TailCall`` self-retries are addressed
+                # exclusively to this node instance — see
+                # ``BaseNodeDef._return_topic`` (issue #141). ``dict.fromkeys``
+                # preserves declared order while removing duplicates, so a
+                # user who manually lists ``f'{node_id}.private.return'`` in
+                # ``subscribe_topics`` doesn't end up with a duplicate entry
+                # in registration logs / AsyncAPI / observability tooling.
+                topics = list(dict.fromkeys([*node.subscribe_topics, node._return_topic]))
                 logger.info(
                     "registering node=%s subscribe=%s publish=%s",
                     node.name,
-                    node.subscribe_topics,
+                    topics,
                     node.publish_topic,
                 )
                 subscriber = self._client._connection.subscriber(
-                    *node.subscribe_topics,
+                    *topics,
                     group_id=group_id,
                     max_workers=self._max_workers,
                     **self._extra_subscribe_kwargs,

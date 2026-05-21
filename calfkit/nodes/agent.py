@@ -184,7 +184,7 @@ class BaseAgentNodeDef(
                 # TODO: maybe consider a node retry return type that doesn't require round trip to itself.
                 # Tailcall to itself is a roundtrip.
                 logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
-                return TailCall[State](target_topic=self.subscribe_topics[0], state=ctx.state)
+                return TailCall[State](target_topic=self._return_topic, state=ctx.state)
 
             pending_tool_calls = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
 
