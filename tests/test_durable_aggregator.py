@@ -1143,8 +1143,10 @@ async def test_multi_turn_parallel_fanout_within_single_invocation(
     assert state_store.was_recently_completed(key_turn_1)
 
     # Capture the re-entry envelope the aggregator just published to the
-    # agent's main topic.
-    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    # agent's per-instance return inbox. The aggregator stores `_return_topic`
+    # on `agent_topic` at dispatch time (issue #141 / PR #142), so the
+    # completion publish lands there — NOT on the shared subscribe_topics[0].
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == agent._return_topic]
     assert len(agent_topic_publishes) == 1
     re_entry_envelope = agent_topic_publishes[0].args[0]
     turn_2_frame_id = re_entry_envelope.internal_workflow_state.current_frame.frame_id
@@ -1448,7 +1450,10 @@ async def test_drifted_expected_ids_overwrite_stamps_degraded_header(
     # batch was born from a drifted-overwrite that discarded prior received
     # results. Downstream consumers / dashboards need this signal to
     # quantify the silent data loss.
-    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == "test_agent.input"]
+    # The aggregator re-enters via the agent's per-instance _return_topic
+    # (issue #141 / PR #142): the dispatch path stores `_return_topic` on
+    # the fresh batch's `agent_topic`, overwriting the test-seeded value.
+    agent_topic_publishes = [c for c in broker.publish.await_args_list if c.kwargs.get("topic") == agent._return_topic]
     assert len(agent_topic_publishes) == 1
     publish_headers = agent_topic_publishes[0].kwargs["headers"]
     assert publish_headers.get(HDR_DEGRADED_MERGE) == "1", (

@@ -1,41 +1,16 @@
 # Changelog
 
-## [0.4.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.1...v0.4.0) (2026-05-20)
-
-
-### ⚠ BREAKING CHANGES
-
-* `FanOutTimeoutError` removed. The durable aggregator does not use idle-timeout semantics; replace with `MergeErrorPolicy` configuration and `should_complete` overrides on `FanOutAggregator`.
-* `BaseAgentNodeDef._pending_batches` removed (internal). Parallel tool fan-outs are now durably managed by `FanOutAggregator` backed by a compacted Kafka state topic.
-* `sequential_only_mode=True` constructor flag on `Agent` now emits `DeprecationWarning`. Use the default parallel mode plus `FanOutAggregator` for durable fan-out aggregation.
-* `MergeErrorPolicy` default changed from `ABORT` to `FALLBACK_TO_DEFAULT`. Users who relied on ABORT must opt in explicitly via `FanOutAggregator(merge_error_policy=MergeErrorPolicy.ABORT)`. The change makes the safe path the default — ABORT combined with `NACK_ON_ERROR` and no DLQ caused infinite redelivery loops on non-transient `merge()` failures.
-* `Client.connect` now enforces producer durability. Construction with `broker_kwargs` that sets `acks` to anything other than `"all"` / `-1`, or sets `enable_idempotence=False`, is rejected with `DurabilityConfigError` (new, under `CalfkitError`; importable from `calfkit` or `calfkit.exceptions`, and also re-exported from `calfkit.client`). When these keys are unset, durable defaults are injected.
-* `KafkaConfig` gained typed fields (`security_protocol`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password`, `ssl_context`, `client_id`). Backwards-compatible — existing constructions still work. Use `KafkaConfig.to_consumer_kwargs()` to obtain the merged kwarg dict for forwarding to `AIOKafkaConsumer`.
-
-
-### Features
-
-* Durable Kafka-backed `FanOutAggregator` for parallel tool fan-outs. Per-agent topics `{node_id}.fanout-state` (compacted) and `{node_id}.fanout-returns`, co-partitioned with the agent's main topic. Survives worker restart and consumer-group rebalance.
-* New public API: `FanOutAggregator`, `MergeErrorPolicy`, `AggregatorBatch`, `AggregatedReturn`, `FanOutState`, `KafkaConfig`.
-* Override hooks on `FanOutAggregator`: `merge`, `should_complete`, `on_partial` for custom aggregation semantics.
-* `HDR_FANOUT_ID` and `HDR_FRAME_ID` Kafka headers for idempotent dispatch and per-hop identity.
-* `FanOutState` now carries a `schema_version` field (default `1`) for forward-compatible wire-format evolution. Receivers tolerate higher versions (`extra="ignore"`); records below the minimum supported version are rejected at deserialisation.
-* Test harness: `calfkit.nodes.aggregator.testing.InMemoryAggregator` with `simulate_restart()`, `wait_for_completion()`, `wait_for_partial_state()`, `set_clock()`.
+## [0.3.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.1...v0.3.2) (2026-05-21)
 
 
 ### Bug Fixes
 
-* Hardened silent-failure paths in the aggregator: orphan returns (cache-empty + partition owned), missing `HDR_FANOUT_ID` headers, and malformed or null-key state records now raise `AggregatorStateStoreError` instead of silently acking.
-* Re-entry `frame_id` is now derived deterministically (SHA-256 hash of the previous frame's id), so completion-handler retries produce identical re-entry envelopes and downstream dedup converges. Prevents duplicate fan-out chains under NACK redelivery.
-* Topic admin distinguishes auth failures from missing-topic errors. `TOPIC_AUTHORIZATION_FAILED` now raises instead of silently defaulting to 6 partitions (which would break co-partitioning).
-* Rehydration re-polls `end_offsets` until stable to avoid missing in-flight writes from the previous partition owner.
-* State topic config now sets `segment.ms=3600000` (1h) and `min.cleanable.dirty.ratio=0.1` so tombstones get compacted promptly.
+* route tool returns to private inbox to prevent co-tenant leak ([#142](https://github.com/calf-ai/calfkit-sdk/issues/142)) ([197463f](https://github.com/calf-ai/calfkit-sdk/commit/197463f2f7f338bae53bf144e3a86cf27373e350))
 
 
-### Refactor
+### Documentation
 
-* `AggregatorBatch` now built with a shared single deep-copy of `base_state` per `_aggregator_handler` invocation (was up to 3 copies across `merge` / `should_complete` / `on_partial`).
-* `kafka_subscriptions` matches on handler identity, not topic-list equality (fragile to subclass overrides).
+* integrate DX review into v1 design and add reviewer artifact ([#138](https://github.com/calf-ai/calfkit-sdk/issues/138)) ([29a7961](https://github.com/calf-ai/calfkit-sdk/commit/29a7961d5c2d4e46fcb7e2e4a81f43116c34feb3))
 
 ## [0.3.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.0...v0.3.1) (2026-05-19)
 

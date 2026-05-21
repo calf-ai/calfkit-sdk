@@ -287,7 +287,7 @@ class BaseAgentNodeDef(
             if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
                 # All tool calls were invalid; retry by tail-calling the agent.
                 logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
-                return TailCall[State](target_topic=self.subscribe_topics[0], state=ctx.state)
+                return TailCall[State](target_topic=self._return_topic, state=ctx.state)
 
             pending_tool_calls = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
 
@@ -455,7 +455,15 @@ class BaseAgentNodeDef(
                 received={},
                 started_at_ms=now_ms,
                 last_updated_ms=now_ms,
-                agent_topic=self.subscribe_topics[0],
+                # The aggregator's merged-completion publish (in
+                # _aggregator_handler) targets this topic to re-enter the
+                # agent. Use _return_topic, not subscribe_topics[0], so
+                # co-tenant agents sharing a public inbox don't all receive
+                # the merged completion — same routing pattern PR #142
+                # established for the non-aggregator path (issue #141).
+                # Worker.register_handlers subscribes the agent's main
+                # handler to _return_topic, so re-entry routes correctly.
+                agent_topic=self._return_topic,
                 degraded=drifted,
             )
             await state_store.put(key, initial_batch, partition=partition)

@@ -118,15 +118,35 @@ class Worker:
                 if sub.ack_policy is not None:
                     merged_extra_kwargs["ack_policy"] = sub.ack_policy
 
+                # Compose the topic list. Add the node's framework-private
+                # return inbox (``_return_topic``) to its MAIN public
+                # subscription only — where tool ``Call`` returns and
+                # ``TailCall`` self-retries are addressed exclusively to this
+                # node instance (issue #141 / PR #142). Auxiliary subscriptions
+                # (e.g., the aggregator's ``fanout-returns`` subscriber) own
+                # their own topics under a separate consumer group and must
+                # not also subscribe to ``_return_topic`` — that would split
+                # delivery across two consumer groups. Detection uses
+                # ``sub.handler == node.handler`` (bound-method ``==`` is
+                # semantic identity: same ``__self__`` and same ``__func__``).
+                # ``dict.fromkeys`` preserves declared order while removing
+                # duplicates, so a user who manually lists
+                # ``f'{node_id}.private.return'`` in ``subscribe_topics``
+                # doesn't end up with a duplicate registration.
+                if sub.handler == node.handler:
+                    topics = list(dict.fromkeys([*sub.topics, node._return_topic]))
+                else:
+                    topics = list(sub.topics)
+
                 logger.info(
                     "registering node=%s topics=%s group_id=%s publish=%s",
                     node.name,
-                    sub.topics,
+                    topics,
                     group_id,
                     sub.publish_topic,
                 )
                 subscriber = self._client._connection.subscriber(
-                    *sub.topics,
+                    *topics,
                     group_id=group_id,
                     max_workers=max_workers,
                     **merged_extra_kwargs,

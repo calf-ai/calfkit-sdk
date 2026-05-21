@@ -133,12 +133,22 @@ class BaseNodeDef(BaseNodeSchema):
         Args:
             node_id: Unique identifier for the node.
             subscribe_topics: One or more topics the node consumes from.
+                Must be non-empty — a node with no public inbox cannot be
+                invoked by any client or peer. Without the validation in
+                :meth:`BaseNodeSchema.__post_init__`, ``Worker.register_handlers``
+                would still wire the node up to ``_return_topic`` (issue #141
+                fix), so the node would "register" successfully while being
+                functionally unreachable from the outside.
             publish_topic: Optional default topic to publish results to.
             gates: Optional list of predicates evaluated in ``handler()`` before
                 ``run()``. Stack with AND semantics in registration order;
                 short-circuits on the first ``False``, exception, or non-bool.
                 Returning anything other than ``True`` rejects the message:
                 ``run()`` is skipped and the envelope is returned unchanged.
+
+        Raises:
+            ValueError: If ``subscribe_topics`` is empty. Enforced uniformly
+                across all node kinds in :meth:`BaseNodeSchema.__post_init__`.
         """
         super().__init__(
             node_id=node_id,
@@ -320,7 +330,7 @@ class BaseNodeDef(BaseNodeSchema):
             # Parallel fan-out: publish each Call with independent workflow_state.
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
-                wf_copy.invoke_frame(call, self.subscribe_topics[0])
+                wf_copy.invoke_frame(call, self._return_topic)
                 publish_envelope = Envelope(
                     context=SessionRunContext(state=call.state, deps=envelope.context.deps),
                     internal_workflow_state=wf_copy,
@@ -335,7 +345,8 @@ class BaseNodeDef(BaseNodeSchema):
             return envelope
 
         elif isinstance(output, Call):
-            envelope.internal_workflow_state.invoke_frame(output, self.subscribe_topics[0])
+            # push to callstack and call the target topic
+            envelope.internal_workflow_state.invoke_frame(output, self._return_topic)
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
@@ -447,4 +458,26 @@ class BaseNodeDef(BaseNodeSchema):
 
     @property
     def _return_topic(self) -> str:
+        """Framework-private return inbox for this node instance.
+
+        Used as the ``callback_topic`` written into the call frame when this
+        node issues a tool ``Call`` (so the tool's ``ReturnCall`` knows where
+        to route back), and as the ``target_topic`` for the framework's
+        built-in all-invalid ``TailCall`` self-retry in
+        :meth:`BaseAgentNodeDef.run`. Must be uniquely owned by this
+        ``node_id`` — sharing it with another node's consumer group would
+        re-introduce the co-tenant tool-return leak (issue #141).
+        :meth:`Worker.register_handlers` automatically subscribes the node to
+        this topic under the worker's configured ``group_id`` (defaults to
+        the node's own ``node_id``).
+
+        The value is recomputed from ``node_id`` on every access. Do not
+        mutate ``node_id`` after the node has been registered with a worker:
+        the worker's subscription is bound to the old topic, so tool
+        ``ReturnCall`` responses (which target the call frame's
+        ``callback_topic``) and built-in ``TailCall`` self-retries (which
+        target ``_return_topic`` directly) would silently route into a topic
+        with no consumer. Ordinary tool ``Call`` publishes are unaffected —
+        they target the tool's input topic, not ``_return_topic``.
+        """
         return f"{self.node_id}.private.return"
