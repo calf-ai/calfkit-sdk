@@ -49,7 +49,11 @@ class FanOutState(BaseModel):
 
     Frozen so a parsed wire record cannot drift from what was published —
     the aggregator's invariant is "publish then update cache" and any
-    in-place tweak to a deserialised state would violate that.
+    in-place tweak to a deserialised state would violate that. Both
+    ``copy.deepcopy(fan_out_state)`` and
+    ``fan_out_state.model_copy(deep=True)`` are supported despite the
+    immutable :class:`MappingProxyType` wrap on :attr:`received` (see
+    :meth:`__deepcopy__`).
 
     Wire-format versioning
     ----------------------
@@ -155,9 +159,10 @@ class FanOutState(BaseModel):
     merged state)."""
 
     degraded: bool = False
-    """True when this batch was marked degraded at dispatch time (currently
-    set on the drift-overwrite path that discards prior received results).
-    Survives rehydration: the completion publish stamps
+    """True when this batch was marked degraded at dispatch time. Today set
+    by the drift-overwrite path that discards prior received results; grep
+    for ``degraded=True`` rather than assume this docstring enumerates all
+    set sites. Survives rehydration: the completion publish stamps
     :data:`HDR_DEGRADED_MERGE` if either this OR
     :attr:`AggregatedReturn.degraded` is True, so a worker restart between
     dispatch and completion cannot lose the degraded signal."""
@@ -264,6 +269,10 @@ class AggregatorBatch:
     :attr:`num_received`, :attr:`missing_tool_call_ids`, etc.) cover the
     common decision shapes (count-based completion, "is the slow tool the
     one we're waiting on", etc.) without exposing the internal cache.
+
+    Both ``copy.deepcopy(batch)`` and standard deep-copy patterns are
+    supported despite the immutable :class:`MappingProxyType` wrap on
+    :attr:`received` (see :meth:`__deepcopy__`).
     """
 
     correlation_id: str
@@ -327,7 +336,13 @@ class AggregatedReturn:
     state: State
     """The merged state with all tool results (or a custom transformation
     thereof) applied. Sent to the agent's main topic as the aggregated
-    return."""
+    return.
+
+    Note: ``state`` is a mutable Pydantic model; the framework does not
+    defensively copy it post-construction. Callers MUST NOT mutate
+    ``state`` after returning it from :meth:`FanOutAggregator.merge`.
+    Tracked for hardening: when :class:`State` itself becomes frozen, this
+    invariant becomes type-enforced."""
 
     degraded: bool = False
     """``True`` when this result came from the

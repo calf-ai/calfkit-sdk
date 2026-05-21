@@ -426,21 +426,9 @@ class InMemoryAggregator(FanOutAggregator):
                     key[0][:8],
                     key,
                 )
-                # Rebuild a clean view from the durable ``batch.base_state``
-                # before invoking the default merge — the user merge may
-                # have mutated ``view.base_state`` before raising and the
-                # default merge's own ``model_copy(deep=True)`` would
-                # otherwise clone the pollution into the fallback result.
-                # Matches the production ``_handle_merge_error`` fix at
-                # ``agent.py``.
+                # Clean-view rebuild: see docstring contract above.
                 clean_base_state = batch.base_state.model_copy(deep=True)
                 fresh_view = self._batch_view(batch, base_state_copy=clean_base_state)
-                # The default merge can itself raise (e.g., a broken
-                # ``State.add_tool_result`` or a malformed received result).
-                # Mirror production ``_handle_merge_error``: treat the
-                # double-failure as ABORT so callers see a structured
-                # ``AggregatorMergeError`` rather than a raw exception
-                # bypassing the configured policy.
                 try:
                     default = await FanOutAggregator.merge(self, fresh_view)
                 except Exception as exc2:

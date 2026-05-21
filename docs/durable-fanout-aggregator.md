@@ -1335,10 +1335,11 @@ The user's `merge()` can raise. The policy is `merge_error_policy` on the
     `Client.connect` (`calfkit/client/base.py::BaseClient.connect` raises
     `DurabilityConfigError` on unsafe overrides), which minimises the
     producer-side redelivery surface.
-  - `was_recently_completed` (`§9.3`) short-circuits agent re-entry for
-    already-completed batches *before* any LLM work happens — once the
-    aggregator has published its merged envelope and tombstoned the
-    state record, redelivery of the agent inbound bypasses `run()`.
+  - `was_recently_completed` (`§9.3`) short-circuits the *tool-dispatch*
+    fan-out in `_publish_action` for already-completed batches, so
+    redelivery does not double the downstream tool work. However, `run()`
+    (and the LLM call inside it) DOES re-execute on inbound redelivery —
+    this is the cost the limitation describes.
   - Keep handler-side time-to-first-side-effect minimal: shorter handlers
     shrink the window in which a rebalance can re-enter `run()`.
 

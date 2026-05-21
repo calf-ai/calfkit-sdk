@@ -10,7 +10,7 @@ from typing_extensions import Self
 from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
-from calfkit.client.kafka_config import _PRODUCER_ONLY_KWARGS, KafkaConfig
+from calfkit.client.kafka_config import _KAFKA_CONFIG_TYPED_FIELDS, _PRODUCER_ONLY_KWARGS, KafkaConfig
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.exceptions import DurabilityConfigError, _safe_repr
@@ -35,20 +35,6 @@ def _new_client_emitter_id(client_id: str | None = None) -> str:
     (e.g. the one used for the reply topic) instead of minting a fresh one.
     """
     return f"client.{client_id if client_id is not None else uuid_utils.uuid7().hex}"
-
-
-# Names of the typed fields on :class:`KafkaConfig` that map 1:1 to
-# aiokafka producer/consumer kwargs. ``Client.connect`` extracts these
-# from the user-supplied ``broker_kwargs`` into KafkaConfig's explicit
-# slots; anything else stays in ``client_kwargs`` as an escape hatch.
-_KAFKA_CONFIG_TYPED_FIELDS = (
-    "security_protocol",
-    "sasl_mechanism",
-    "sasl_plain_username",
-    "sasl_plain_password",
-    "ssl_context",
-    "client_id",
-)
 
 
 def _enforce_durability_config(broker_kwargs: dict[str, Any]) -> None:
@@ -235,10 +221,7 @@ class BaseClient:
         Raises:
             DurabilityConfigError: from :func:`_enforce_durability_config` when
                 ``acks`` or ``enable_idempotence`` would weaken the fan-out
-                aggregator's durability contract. Also raised by
-                :class:`~calfkit.client.kafka_config.KafkaConfig` construction
-                if ``broker_kwargs`` carries a typed-field name overlap (see
-                :class:`KafkaConfig` for the list of typed fields).
+                aggregator's durability contract.
             ValueError: when ``broker_kwargs`` contains ``partitioner``
                 (the SDK installs its own).
 

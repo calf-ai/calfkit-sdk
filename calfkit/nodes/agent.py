@@ -644,20 +644,14 @@ class BaseAgentNodeDef(
             try:
                 merged = await self.aggregator.merge(view)
             except Exception as exc:
-                # Pass the durable ``batch`` (frozen ``_InFlightBatch``) to
-                # the error handler so the FALLBACK_TO_DEFAULT path can
-                # rebuild a fresh view from the immutable ``base_state``.
-                # The current ``view`` may have been partially mutated by
-                # the failed user merge before it raised; without an
-                # untainted source the fallback would re-merge over a
-                # polluted base.
+                # Pass the durable ``batch`` so the error handler can
+                # rebuild a clean view from the un-mutated ``base_state``
+                # — see ``_default_merge_with_clean_view`` for the why.
                 fallback = await self._handle_merge_error(view, key, exc, batch)
                 if fallback is None:
-                    # ABORT policy: re-raise so FastStream's
-                    # ack_policy=NACK_ON_ERROR rewinds the consumer offset
-                    # and the message is redelivered. Each redelivery
-                    # re-attempts the merge until it succeeds (operator
-                    # fix) or the consumer is paused.
+                    # ABORT policy: re-raise so ``ack_policy=NACK_ON_ERROR``
+                    # rewinds the offset and the message is redelivered
+                    # until the merge succeeds or the consumer is paused.
                     raise AggregatorMergeError(
                         f"merge() raised for key={key}",
                         correlation_id=key[0],
@@ -784,54 +778,63 @@ class BaseAgentNodeDef(
             )
             return retried
         if policy == MergeErrorPolicy.FALLBACK_TO_DEFAULT:
-            # Fall back to the default merge so the batch still completes,
-            # but mark the result as degraded so the published envelope
-            # gets HDR_DEGRADED_MERGE — operators can detect that the
-            # user's custom merge silently failed. The exception is
-            # logged here because FALLBACK_TO_DEFAULT doesn't re-raise;
-            # this is the only operator-visible signal.
+            # Log the original exception here because FALLBACK_TO_DEFAULT
+            # doesn't re-raise — this is the only operator-visible signal
+            # that the user's custom merge failed.
             logger.exception(
                 "[%s] merge() raised; FALLBACK_TO_DEFAULT policy -> attempting default merge key=%s state_topic=%s",
                 key[0][:8],
                 key,
                 state_topic,
             )
-            # Rebuild a clean view from the durable ``batch.base_state``
-            # before invoking the default merge. The user's merge MAY have
-            # mutated ``view.base_state`` (e.g., appended to
-            # ``message_history``) before raising; the default merge does
-            # ``state = batch.base_state.model_copy(deep=True)`` which
-            # would otherwise faithfully clone the polluted state and
-            # silently emit a degraded result that secretly carries the
-            # user's partial mutation. Using ``_InFlightBatch.base_state``
-            # (frozen, untouched by user code) is the only way to guarantee
-            # the fallback sees pristine input.
-            clean_base_state = batch.base_state.model_copy(deep=True)
-            fresh_view = self.aggregator._batch_view(batch, base_state_copy=clean_base_state)
-            # The default merge can itself raise (e.g., a broken
-            # ``State.add_tool_result`` or a malformed received result).
-            # Without this guard the inner exception bypasses the policy
-            # entirely: the user opted into FALLBACK_TO_DEFAULT expecting
-            # "log and continue," but would get a raw exception with no
-            # AggregatorMergeError wrapping and no degraded-merge stamp.
-            # Treat a double-failure as ABORT so the operator sees a
-            # structured AggregatorMergeError via NACK redelivery.
-            try:
-                default = await FanOutAggregator.merge(self.aggregator, fresh_view)
-            except Exception:
-                logger.exception(
-                    "[%s] FALLBACK_TO_DEFAULT: default merge ALSO raised key=%s state_topic=%s; treating as ABORT",
-                    key[0][:8],
-                    key,
-                    state_topic,
-                )
+            fallback = await self._default_merge_with_clean_view(batch, key)
+            if fallback is None:
+                # Double-failure: signal ABORT so the caller raises
+                # AggregatorMergeError via NACK redelivery.
                 return None
-            return AggregatedReturn(state=default.state, degraded=True)
+            return AggregatedReturn(state=fallback.state, degraded=True)
         # ABORT: the caller's `raise AggregatorMergeError(...) from exc`
         # propagates the exception with the chained traceback; FastStream
         # will log it once at the framework boundary. Logging here would
         # double-log the same stack.
         return None
+
+    async def _default_merge_with_clean_view(
+        self,
+        batch: _InFlightBatch,
+        key: tuple[str, str],
+    ) -> AggregatedReturn | None:
+        """Rebuild a fresh :class:`AggregatorBatch` view from the immutable
+        :attr:`_InFlightBatch.base_state` and invoke the framework's default
+        merge.
+
+        Returns the merged result, or ``None`` if the default merge itself
+        raised (signalling the caller should escalate to ABORT so the
+        wrapping :class:`AggregatorMergeError` is raised via NACK
+        redelivery).
+
+        The clean rebuild is required because a failed user merge may have
+        partially mutated ``view.base_state`` (e.g., appended to
+        ``message_history``) before raising. The default merge clones
+        ``batch.base_state`` via ``model_copy(deep=True)``; reusing the
+        polluted view here would faithfully clone the partial mutation
+        into the fallback result. Using the frozen
+        :class:`_InFlightBatch.base_state` directly is the only way to
+        guarantee the fallback sees pristine input.
+        """
+        state_topic = self.aggregator.runtime.state_topic
+        clean_base_state = batch.base_state.model_copy(deep=True)
+        fresh_view = self.aggregator._batch_view(batch, base_state_copy=clean_base_state)
+        try:
+            return await FanOutAggregator.merge(self.aggregator, fresh_view)
+        except Exception:
+            logger.exception(
+                "[%s] FALLBACK_TO_DEFAULT: default merge ALSO raised key=%s state_topic=%s; treating as ABORT",
+                key[0][:8],
+                key,
+                state_topic,
+            )
+            return None
 
     def add_tools(self, *tools: ToolNodeDef) -> None:
         self.tools.extend(tools)

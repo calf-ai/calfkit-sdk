@@ -74,10 +74,9 @@ class Worker:
         # rebalance storm on first reassignment) is operationally severe
         # and requires a restart to recover anyway.
         #
-        # MUST run before ``broker.connect()`` (Issue 7): if the
-        # assertion raises after connect, the broker is left connected
-        # and never closed, producing aiokafka "unclosed" warnings on
-        # process exit.
+        # MUST run before ``broker.connect()``: if the assertion raises
+        # after connect, the broker is left connected and never closed,
+        # producing aiokafka "unclosed" warnings on process exit.
         if has_agent_node and kafka_config is not None:
             kafka_config.assert_rehydration_timeout_ok()
 
@@ -88,9 +87,14 @@ class Worker:
         for node in self._nodes:
             if isinstance(node, BaseAgentNodeDef):
                 main_topic = node.subscribe_topics[0]
-                # kafka_config is not None here: the guard above raised for
-                # any agent node when it was None.
-                assert kafka_config is not None
+                # The guard above raises for any agent node when
+                # kafka_config is None, so it is non-None here. Use an
+                # explicit raise (not ``assert``) because asserts are
+                # stripped under ``python -O`` / ``PYTHONOPTIMIZE=1``.
+                if kafka_config is None:
+                    raise RuntimeError(
+                        "kafka_config is required when an aggregator is wired; this should have been caught at the earlier validation guard"
+                    )
                 await node.aggregator.setup(
                     broker,
                     node_id=node.node_id,
