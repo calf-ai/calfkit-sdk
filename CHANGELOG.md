@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.1...v0.3.2) (2026-05-21)
+
+
+### Bug Fixes
+
+* route tool returns to private inbox to prevent co-tenant leak ([#142](https://github.com/calf-ai/calfkit-sdk/issues/142)) ([197463f](https://github.com/calf-ai/calfkit-sdk/commit/197463f2f7f338bae53bf144e3a86cf27373e350))
+
+
+### Documentation
+
+* integrate DX review into v1 design and add reviewer artifact ([#138](https://github.com/calf-ai/calfkit-sdk/issues/138)) ([29a7961](https://github.com/calf-ai/calfkit-sdk/commit/29a7961d5c2d4e46fcb7e2e4a81f43116c34feb3))
+
 ## [0.3.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.0...v0.3.1) (2026-05-19)
 
 
