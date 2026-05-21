@@ -11,6 +11,26 @@ class BaseNodeSchema:
     publish_topic: str | None
 
     def __post_init__(self) -> None:
+        # Reject empty / whitespace-only / dot-prefixed ``node_id``. ``node_id``
+        # is the prefix for several per-node Kafka topics
+        # (``{node_id}.private.return``, ``{node_id}.fanout-state``,
+        # ``{node_id}.fanout-returns``); an empty or dot-prefixed value would
+        # produce malformed/shared topic names (e.g., ``.private.return``)
+        # that every empty-id node would collide on — re-introducing the
+        # co-tenant leak shape that issue #141 / PR #142 closed for
+        # ``_return_topic``. Same ``__post_init__`` placement rationale as
+        # the ``subscribe_topics`` guard below: ``@dataclass`` subclasses
+        # like ``BaseToolNodeDef`` bypass ``BaseNodeDef.__init__``.
+        if not self.node_id or not self.node_id.strip() or self.node_id.startswith("."):
+            raise ValueError(
+                f"node_id must be a non-empty identifier without a leading dot; got {self.node_id!r}. "
+                f"node_id is the prefix for several per-node Kafka topics "
+                f"({{node_id}}.private.return, {{node_id}}.fanout-state, "
+                f"{{node_id}}.fanout-returns) — an empty or dot-prefixed value "
+                f"would produce malformed/shared topic names and re-introduce the "
+                f"co-tenant leak shape (issue #141)."
+            )
+
         if not isinstance(self.subscribe_topics, (list, tuple)):
             self.subscribe_topics = [self.subscribe_topics]
         # Reject empty subscribe_topics for every node kind (Agent, Consumer,

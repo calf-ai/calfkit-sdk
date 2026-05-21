@@ -154,9 +154,18 @@ class FanOutState(BaseModel):
     metrics)."""
 
     agent_topic: str
-    """The agent's main input topic. The aggregated ``AggregatedReturn`` is
-    published here on batch completion (so the agent re-enters with the
-    merged state)."""
+    """Per-instance return inbox (``{node_id}.private.return``) where the
+    aggregator publishes the merged completion to re-enter the agent.
+    Stored on the batch at dispatch time so a worker restart or rebalance
+    between dispatch and completion still publishes to the right topic.
+    The agent's main handler subscribes to this topic via
+    :meth:`Worker.register_handlers`.
+
+    Pre-merge this field carried ``subscribe_topics[0]`` (the public
+    inbox); post-merge it carries ``_return_topic`` so the merged
+    completion doesn't leak to co-tenants sharing the public inbox
+    (issue #141 / PR #142). The attribute name is retained for
+    log/snapshot compatibility on rehydrated state-topic records."""
 
     degraded: bool = False
     """True when this batch was marked degraded at dispatch time. Today set

@@ -122,15 +122,22 @@ class Worker:
                 # return inbox (``_return_topic``) to its MAIN public
                 # subscription only — where tool ``Call`` returns and
                 # ``TailCall`` self-retries are addressed exclusively to this
-                # node instance (issue #141 / PR #142). Auxiliary subscriptions
-                # (e.g., the aggregator's ``fanout-returns`` subscriber) own
-                # their own topics under a separate consumer group and must
-                # not also subscribe to ``_return_topic`` — that would split
-                # delivery across two consumer groups. Detection uses
-                # ``sub.handler == node.handler`` (bound-method ``==`` is
-                # semantic identity: same ``__self__`` and same ``__func__``).
-                # ``dict.fromkeys`` preserves declared order while removing
-                # duplicates, so a user who manually lists
+                # node instance (issue #141 / PR #142). Auxiliary
+                # subscriptions (e.g., the aggregator's ``fanout-returns``
+                # subscriber) own their own topic set under the SAME consumer
+                # group as the main subscription (neither sets an explicit
+                # ``group_id``; both inherit ``self._group_id or node.name``)
+                # but on disjoint topics — the safety here comes from topic
+                # disjointness, not group separation. They must NOT also
+                # subscribe to ``_return_topic``: adding ``_return_topic`` to
+                # both subscriptions in the same group would split delivery
+                # of return envelopes non-deterministically between the main
+                # handler and the aggregator handler (Kafka assigns each
+                # partition to exactly one consumer in the group).
+                # Detection uses ``sub.handler == node.handler`` (bound-method
+                # ``==`` is semantic identity: same ``__self__`` and same
+                # ``__func__``). ``dict.fromkeys`` preserves declared order
+                # while removing duplicates, so a user who manually lists
                 # ``f'{node_id}.private.return'`` in ``subscribe_topics``
                 # doesn't end up with a duplicate registration.
                 if sub.handler == node.handler:

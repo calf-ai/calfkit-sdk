@@ -15,15 +15,23 @@ scope: Canonical merged design for the durable fan-out aggregator — public API
 > The implementation diverges from this doc in the following ways; treat this
 > banner as authoritative when it contradicts the body below.
 >
-> 1. **Multi-partition by default.** All three topics (main, `{node_id}.fanout-state`,
->    `{node_id}.fanout-returns`) share the same partition count, auto-detected
->    from the agent's main topic at worker startup (default 6 when missing).
->    Co-partitioning is preserved by a custom
->    `FanOutAggregatorPartitioner` installed broker-wide at `Client.connect`
+> 1. **Multi-partition by default.** All four per-agent topics — the
+>    agent's main inbox, `{node_id}.private.return`,
+>    `{node_id}.fanout-state`, and `{node_id}.fanout-returns` — share
+>    the same partition count, auto-detected from the agent's main
+>    topic at worker startup (default 6 when missing). Co-partitioning
+>    is preserved by a custom `FanOutAggregatorPartitioner` installed
+>    broker-wide at `Client.connect`
 >    (`calfkit/client/base.py::BaseClient.connect`,
->    `calfkit/nodes/aggregator/_partitioner.py`). Earlier "single-partition
->    v1 / multi-partition v1.1" framing is obsolete; the body below has
->    been updated to match.
+>    `calfkit/nodes/aggregator/_partitioner.py`). The per-agent return
+>    inbox `{node_id}.private.return` is the destination for tool
+>    callbacks, `TailCall` self-retries, AND the aggregator's
+>    merged-completion re-entry (post-PR #140 + #142); it is
+>    auto-provisioned by `ensure_aggregator_topics` for
+>    aggregator-equipped agents alongside the two aggregator topics
+>    (`calfkit/nodes/aggregator/_topic_admin.py`). Earlier
+>    "single-partition v1 / multi-partition v1.1" framing is obsolete;
+>    the body below has been updated to match.
 > 2. **Per-partition linearisation** (§7.1) is achieved via consumer-group
 >    ownership of the returns topic plus `max_workers=1` on the aggregator's
 >    subscriber (`calfkit/nodes/agent.py::BaseAgentNodeDef.kafka_subscriptions`).
@@ -318,22 +326,39 @@ The full DX surface (testing API, comparison tables, naming rationale, etc.) is 
 
 ### 5.1 Per-agent topology
 
-Each `Agent` instance owns two new Kafka topics:
+Each `Agent` instance participates on four Kafka topics — its public
+inbox (existing), a framework-private return inbox (PR #142), and the
+two aggregator topics introduced by this design:
 
 ```
+subscribe_topics[0]         normal,    N partitions — agent's public inbox (may be co-tenanted)
+{node_id}.private.return    normal,    N partitions — per-instance return inbox (PR #142)
 {node_id}.fanout-state      compacted, N partitions — system of record for in-flight batches
 {node_id}.fanout-returns    normal,    N partitions — fan-in channel for tool returns
 ```
 
-Both share the same partition count `N` as the agent's main topic (auto-detected
-at startup; default 6 when the main topic doesn't exist yet —
-`calfkit/nodes/aggregator/_topic_admin.py::ensure_aggregator_topics`). The
-`FanOutAggregatorPartitioner` keeps composite-key (`{corr}|{fan_out_id}`)
-records co-partitioned with `correlation_id`-keyed records, so the same
-correlation lands on the same partition number across all three topics
+All four share the same partition count `N` as the agent's main topic
+(auto-detected at startup; default 6 when the main topic doesn't
+exist yet — `calfkit/nodes/aggregator/_topic_admin.py::ensure_aggregator_topics`).
+The `FanOutAggregatorPartitioner` keeps composite-key
+(`{corr}|{fan_out_id}`) records co-partitioned with
+`correlation_id`-keyed records, so the same correlation lands on the
+same partition number across all four topics
 (`calfkit/nodes/aggregator/_partitioner.py`).
 
-Per-agent ownership is the locked-in decision. Multiple agents do not share these topics.
+`{node_id}.private.return` is the per-node return inbox introduced in
+PR #142 (issue #141): it is the destination for sequential-path tool
+callbacks (`_publish_action`), `TailCall` self-retries, AND — post
+this PR — the aggregator's merged-completion re-entry. The aggregator
+re-uses the same topic rather than re-publishing to the public inbox
+because that route can be co-tenanted with sibling agents, and the
+re-entry must land back on the same instance that dispatched the
+fan-out. `ensure_aggregator_topics` provisions it side-by-side with
+the aggregator topics so co-partitioning with the main topic is
+guaranteed on first start.
+
+Per-agent ownership of the aggregator + return topics is the
+locked-in decision. Multiple agents do not share these topics.
 
 ### 5.2 Message flow
 
@@ -380,15 +405,18 @@ Per-agent ownership is the locked-in decision. Multiple agents do not share thes
                           +-----------------+-----------------------+
                                             |
                           on completion:    |
-                          (a) re-enter agent main topic with merged  |
-                              state (AggregatedReturn synthesised)   |
+                          (a) re-enter via {node_id}.private.return  |
+                              with merged state (AggregatedReturn    |
+                              synthesised)                            |
                           (b) tombstone fanout-state record          |
                           (publish-first, tombstone-second — see §8.4 |
                           for the rationale and the redelivery       |
                           contract that depends on this ordering)    |
                                             |
                                             v
-                                  agent's subscribe_topics
+                                  {node_id}.private.return
+                                  (agent re-subscribes here in addition
+                                  to its public inbox — PR #142)
 ```
 
 ### 5.3 Key design choices
@@ -400,10 +428,34 @@ The compacted topic is part of the same Kafka cluster the agent already depends 
 The agent's main `subscribe_topics` already handles `ReturnCall` envelopes from single-tool calls (via the existing call-stack `callback_topic`). For parallel fan-out, returns must hit the **aggregator** before they re-enter the agent's `run()`. Routing all returns to the main topic and disambiguating inside `run()` is what the current code does and is exactly what we are fixing. A dedicated `fanout-returns` topic separates the two consumer-group concerns cleanly.
 
 **Why per-agent topics, not a global aggregator service?**
-Per-agent topics co-partition cleanly with the agent's main subscribe topic — the same `correlation_id` lands on the same partition on both. This makes read-modify-write on the aggregator a linearisable single-consumer problem (no distributed lock). A shared global topic would require additional partition coordination across agents.
+Per-agent topics co-partition cleanly with the agent's main subscribe topic and `_return_topic` — the same `correlation_id` lands on the same partition across all four (main, `_return_topic`, fanout-state, fanout-returns). This makes read-modify-write on the aggregator a linearisable single-consumer problem (no distributed lock), and keeps the merged-completion re-entry on the same instance that dispatched the fan-out. A shared global topic would require additional partition coordination across agents.
 
-**Why retarget tool returns to the aggregator topic, not to the main topic?**
-We rewrite the `callback_topic` field of the tool's `CallFrame` to `{node_id}.fanout-returns` at dispatch time (only in the parallel case; the single-tool sequential path still uses the main topic, unchanged). When the tool calls `ReturnCall(state=...)`, the existing `_publish_action` logic in `base.py::BaseNodeDef._publish_action` (the `ReturnCall` branch) pops the frame and publishes to `frame.callback_topic` — which is now the aggregator topic. This is a one-line change inside the parallel branch of `_publish_action` and keeps the rest of the call-stack semantics intact.
+**Why retarget tool returns to the aggregator topic, not to `_return_topic`?**
+We rewrite the `callback_topic` field of the tool's `CallFrame` to `{node_id}.fanout-returns` at dispatch time (only in the parallel case; the single-tool sequential path still uses `_return_topic`, unchanged). When the tool calls `ReturnCall(state=...)`, the existing `_publish_action` logic in `base.py::BaseNodeDef._publish_action` (the `ReturnCall` branch) pops the frame and publishes to `frame.callback_topic` — which is now the aggregator topic. This is a one-line change inside the parallel branch of `_publish_action` and keeps the rest of the call-stack semantics intact.
+
+**The three distinct purposes `{node_id}.private.return` serves
+post-merge.** PR #142 introduced `_return_topic` as the per-node
+return inbox; this PR adds a third reader to it. Today the topic
+carries:
+
+1. **Sequential single-Call tool callbacks.** When a tool returns via
+   `ReturnCall(state=...)` on the non-parallel path, `_publish_action`
+   publishes the return to `frame.callback_topic`, which the
+   framework sets to the calling node's `_return_topic` at dispatch
+   time (`base.py::BaseNodeDef._publish_action`,
+   `base.py::BaseNodeDef.invoke_frame`).
+2. **`TailCall` self-retry target.** Agents that return
+   `TailCall[State](target_topic=self._return_topic, state=...)` use
+   the same per-instance inbox so the next iteration lands back on
+   the dispatching instance (`agent.py` `TailCall` branch).
+3. **Aggregator merged-completion re-entry.** This PR: the
+   aggregator's `_aggregator_handler` publishes the
+   `AggregatedReturn` envelope to `FanOutState.agent_topic`, which is
+   set to `self._return_topic` at dispatch time. Without this, a
+   merged re-entry published to `subscribe_topics[0]` could be
+   delivered to a different co-tenant instance (when the public
+   inbox is shared across an agent family) and the originating
+   instance would never see its own fan-out complete.
 
 ---
 
@@ -435,7 +487,8 @@ class FanOutState(BaseModel):
     base_state: State
     started_at_ms: int
     last_updated_ms: int
-    agent_topic: str         # where the aggregated return is published
+    agent_topic: str         # the agent's _return_topic — where the
+                             # aggregated re-entry envelope is published
 
     # Durable degraded-marker (see §7.5): set on dispatch when the
     # idempotent-dispatch path overwrote a drifted in-flight batch and
@@ -493,9 +546,14 @@ NewType was retired; the module-level docstring on
 **Why store `base_state` in the record:** completion requires merging into the state snapshot captured at dispatch time, not whatever state the latest return brings (returns carry stale fragments). On rehydration after restart, the aggregator needs `base_state` to perform the merge — we cannot reconstruct it from envelopes alone. Cost: each fan-out writes one State-sized record. State is bounded by message_history which is bounded by the agent loop, so this is reasonable.
 
 **Why store `agent_topic` in the record:** completion publishes the
-`AggregatedReturn` to the agent's main topic, and rehydration may run on
-a worker that wasn't the one that wrote the record. The agent's main
-topic name is the canonical recovery anchor.
+`AggregatedReturn` to the agent's per-instance return inbox
+(`{node_id}.private.return`, accessed via the node's `_return_topic`
+property — see §5.3 for why this and not the public inbox), and
+rehydration may run on a worker that wasn't the one that wrote the
+record. The topic name is the canonical recovery anchor. Despite the
+field name (`agent_topic`), the value is the agent's `_return_topic`,
+not its public `subscribe_topics[0]`; the field name is retained for
+wire-format stability.
 
 ### 6.2 The returns-topic message: standard `Envelope`
 
@@ -513,11 +571,15 @@ The aggregator's subscriber unpacks the standard `Envelope`:
 
 This is the **right call**: we do not invent a new envelope type for a transient transport pattern. The aggregator pulls what it needs from the existing shape.
 
-### 6.3 The post-completion message: re-entry to the main topic
+### 6.3 The post-completion message: re-entry via `_return_topic`
 
-When the batch completes, the aggregator publishes one envelope to the
-agent's main subscribe topic (``FanOutState.agent_topic``). The envelope
-shape is the standard ``Envelope``. The aggregator constructs it by:
+When the batch completes, the aggregator publishes one envelope to
+the agent's per-instance return inbox
+``{node_id}.private.return`` (stored on the durable record as
+``FanOutState.agent_topic``; despite the field name, the value is
+the node's ``_return_topic`` — see §5.3 and the §6.1 rationale).
+The envelope shape is the standard ``Envelope``. The aggregator
+constructs it by:
 
 1. Taking the persisted ``FanOutState.base_state`` and running it
    through ``aggregator.merge(batch)`` where ``batch.received`` holds
@@ -571,8 +633,11 @@ The re-entry envelope is then published with
 headers; ``HDR_FANOUT_ID`` is intentionally absent because the batch is
 done.
 
-From the agent's point of view, this is a normal inbound on its main
-subscribe topic, with merged state. The existing
+From the agent's point of view, this is a normal inbound delivered
+via the framework-managed `_return_topic` subscription that the
+worker layers on top of every node's public subscription
+(`worker.py` adds `_return_topic` to each node's subscriber set; see
+PR #142 / issue #141), with merged state. The existing
 ``_parallel_state_aggregation`` gate and the ``RuntimeError`` are
 removed; the agent simply runs the next LLM iteration.
 
@@ -589,7 +654,8 @@ Present on:
   - Every ReturnCall from a tool participating in a parallel batch (because the
     tool republishes inbound headers via Response, see
     base.py::BaseNodeDef.handler).
-  - Every aggregator-emitted re-entry to the agent's main topic.
+  - Every aggregator-emitted re-entry to the agent via its
+    ``_return_topic``.
 
 Absent on:
   - Single-tool sequential dispatches.
@@ -752,21 +818,47 @@ For any `(correlation_id, fan_out_id)`, all reads and writes to `fanout-state` m
 
 This is achieved via three composed properties:
 
-1. **Co-partitioning.** The `FanOutAggregatorPartitioner` extracts `correlation_id` from composite keys before hashing, so writes for the same `correlation_id` always land on the same partition number across main / fanout-state / fanout-returns (`calfkit/nodes/aggregator/_partitioner.py`).
+1. **Co-partitioning.** The `FanOutAggregatorPartitioner` extracts `correlation_id` from composite keys before hashing, so writes for the same `correlation_id` always land on the same partition number across all four per-agent topics — main / `{node_id}.private.return` / fanout-state / fanout-returns (`calfkit/nodes/aggregator/_partitioner.py`). `_return_topic` must co-partition because the aggregator's merged-completion re-entry publish (§6.3, §8.4) lands there with `key=correlation_id`; the consuming instance picks up the partition that owned the original inbound, preserving single-owner semantics for the agent loop.
 2. **Single owner per partition.** The aggregator's returns subscriber is a consumer-group member; Kafka guarantees one member owns a given partition at a time.
 3. **Serial dispatch within the owner.** The aggregator's subscription registers with `max_workers=1` (`calfkit/nodes/agent.py::BaseAgentNodeDef.kafka_subscriptions`), so a single asyncio task drives read-modify-write for all owned partitions on this worker — no in-process race for the same key.
 
 Together these make per-key writes linearisable across the cluster.
 
-### 7.2 Co-partitioning with the agent's main topic
+### 7.2 Co-partitioning across the four per-agent topics
 
-The agent's main `subscribe_topics` and `fanout-returns` are partitioned by `correlation_id` (the existing `_publish_action` already does `key=correlation_id.encode()` on every outbound call inside `base.py::BaseNodeDef._publish_action`). If the agent's main topic has 6 partitions, `fanout-returns` has 6 partitions; both use the `FanOutAggregatorPartitioner` installed at `Client.connect`; the same correlation_id lands on the same partition number on both topics.
+The agent's four per-agent topics — `subscribe_topics[0]`,
+`{node_id}.private.return`, `{node_id}.fanout-state`, and
+`{node_id}.fanout-returns` — are all keyed by `correlation_id` for
+agent-bound traffic (the existing `_publish_action` already does
+`key=correlation_id.encode()` on every outbound call inside
+`base.py::BaseNodeDef._publish_action`, and the aggregator's
+re-entry publish at `agent.py::_aggregator_handler` keys identically).
+If the agent's main topic has 6 partitions, the other three also have
+6 partitions; all four use the `FanOutAggregatorPartitioner` installed
+at `Client.connect`; the same `correlation_id` lands on the same
+partition number across all four.
 
-**Consequence:** the aggregator consumer-group member that owns partition 3 of `fanout-returns` is the one whose aggregator instance handles all returns for correlation IDs hashing to partition 3. The agent worker that owns partition 3 of the main topic resumes those correlations. Co-location of state and processing is automatic.
+The partition-count match is enforced by
+`ensure_aggregator_topics` (`calfkit/nodes/aggregator/_topic_admin.py`),
+which provisions all three per-agent extras — fanout-state,
+fanout-returns, AND `{node_id}.private.return` — with the partition
+count read from the agent's main topic, and validates on existing
+topics. For aggregator-equipped agents this means `_return_topic` is
+auto-provisioned with the right partition count and never relies on
+broker-default behaviour; for non-aggregator nodes, `_return_topic`
+falls back to broker auto-create (PR #142's documented requirement).
+
+**Consequence:** the aggregator consumer-group member that owns
+partition 3 of `fanout-returns` is the one whose aggregator instance
+handles all returns for correlation IDs hashing to partition 3. The
+agent worker that owns partition 3 of the main topic AND of
+`{node_id}.private.return` resumes those correlations. Co-location
+of state, returns processing, and re-entry handling is automatic
+across all four topics.
 
 ### 7.3 What happens during a Kafka rebalance mid-fan-out
 
-Scenario: agent worker A is mid-fan-out for `correlation_id=X` (`fan_out_id=F`). Two tools have returned, one is outstanding. Worker A has the partition 3 assignment for `fanout-state`, `fanout-returns`, and the main topic. Worker B joins the consumer group.
+Scenario: agent worker A is mid-fan-out for `correlation_id=X` (`fan_out_id=F`). Two tools have returned, one is outstanding. Worker A has the partition 3 assignment for `fanout-state`, `fanout-returns`, `{node_id}.private.return`, and the main topic (all four co-partitioned). Worker B joins the consumer group.
 
 1. Kafka triggers rebalance. Partition 3 is reassigned to worker B.
 2. Worker A loses its assignment. Any uncommitted offsets are not committed; the messages will be redelivered to worker B.
@@ -779,7 +871,7 @@ The user sees: a brief pause during rebalance, then the batch completes. No `Run
 
 ### 7.4 What happens during a partition rebalance after completion
 
-Scenario: batch `(X, F)` completed. Worker A wrote a tombstone to `fanout-state` and re-entered the agent's main topic. Then rebalance reassigns partition 3 to worker B.
+Scenario: batch `(X, F)` completed. Worker A wrote a tombstone to `fanout-state` and re-entered the agent via `{node_id}.private.return`. Then rebalance reassigns partition 3 to worker B.
 
 1. Worker B's rebalance listener fires `on_partitions_assigned` for partition 3 of `fanout-returns`. The state store rehydrates the same partition of `fanout-state` from beginning. It sees the dispatch record for `(X, F)`, then the tombstone — the tombstone drops the key from the cache and adds it to `_recently_completed` (TTL = 60s).
 2. Worker B begins consuming `fanout-returns` on partition 3. A redelivered return for `correlation_id=X`, `fan_out_id=F` arrives (possible if worker A's offset commit was lost).
@@ -792,20 +884,24 @@ This is the §10.3 "late return" path. The reason `delete.retention.ms=60000` is
 
 The composite key for dedup is `(correlation_id, fan_out_id, tool_call_id)`.
 
-**Inbound on the agent's main topic and `fanout-returns`** — both
-subscriptions are registered with
-``ack_policy=AckPolicy.NACK_ON_ERROR`` (see
-``calfkit/nodes/agent.py::BaseAgentNodeDef.kafka_subscriptions``). The
-agent's main subscription is force-set to ``NACK_ON_ERROR`` (overriding
-``BaseNodeDef``'s default ``ACK_FIRST``) because the dispatch path's
-durable state-store write and per-Call publish loop MUST rewind the
-inbound offset on raise — otherwise an inbound is committed-then-lost
-and the user-facing request hangs forever. The fanout-returns
-subscription uses the same ack policy so a handler raise (publish
-failure, transient state-store error, ``AggregatorMergeError`` under
-ABORT) rewinds the consumer offset and the message is redelivered
-within the same consumer session, rather than silently swallowed by
-``ACK_FIRST``'s before-handler commit.
+**Inbound on the agent (its public inbox + `_return_topic`) and
+`fanout-returns`** — all aggregator-touching subscriptions are
+registered with ``ack_policy=AckPolicy.NACK_ON_ERROR`` (see
+``calfkit/nodes/agent.py::BaseAgentNodeDef.kafka_subscriptions``).
+Note the worker layers `_return_topic` onto the agent's public
+subscription so both topics route into the same handler under one
+subscriber (PR #142, `worker.py`). That handler is force-set to
+``NACK_ON_ERROR`` (overriding ``BaseNodeDef``'s default
+``ACK_FIRST``) because the dispatch path's durable state-store write
+and per-Call publish loop MUST rewind the inbound offset on raise —
+otherwise an inbound (original request OR merged re-entry from the
+aggregator) is committed-then-lost and the user-facing request hangs
+forever. The fanout-returns subscription uses the same ack policy so
+a handler raise (publish failure, transient state-store error,
+``AggregatorMergeError`` under ABORT) rewinds the consumer offset
+and the message is redelivered within the same consumer session,
+rather than silently swallowed by ``ACK_FIRST``'s before-handler
+commit.
 
 **Inbound on `fanout-returns`** — handler at
 `calfkit/nodes/agent.py::BaseAgentNodeDef._aggregator_handler`:
@@ -846,8 +942,10 @@ the durable state at `(correlation_id, fan_out_id)`:
    survive worker restart and ``NACK_ON_ERROR`` redelivery — a
    rehydrating worker reads the flag back from the compacted topic.
 5. **First-time dispatch:** no record exists → build the initial
-   ``_InFlightBatch`` (with ``agent_topic=self.subscribe_topics[0]``
-   and ``degraded=False``) and ``await state_store.put(key,
+   ``_InFlightBatch`` (with ``agent_topic=self._return_topic`` —
+   `{node_id}.private.return`, the per-instance return inbox where
+   the merged re-entry envelope will eventually be published — and
+   ``degraded=False``) and ``await state_store.put(key,
    initial_batch)`` before publishing any tool Call.
 
 This is the "idempotent dispatch" pattern. It costs one cache lookup at
@@ -890,7 +988,11 @@ _publish_parallel_with_aggregator(calls, envelope, correlation_id, broker, parti
   |
   +--- (first-time / overwrite branch) build initial _InFlightBatch
   |      with base_state = calls[0].state deep-copy,
-  |      received = {}, agent_topic = self.subscribe_topics[0]
+  |      received = {}, agent_topic = self._return_topic  # the
+  |                       # per-instance return inbox where the merged
+  |                       # AggregatedReturn will eventually re-enter
+  |                       # the agent (NOT subscribe_topics[0], which
+  |                       # may be co-tenanted with sibling agents)
   |    await state_store.put(key, initial_batch, partition=partition)
   |    The publish completes before the cache write — durable log is the recovery anchor.
   |
@@ -1060,7 +1162,8 @@ fields to publish the re-entry envelope.
   |       internal_workflow_state=re_entry_state,
   |    )
   |
-  +--- # Publish to agent's main topic (FanOutState.agent_topic) FIRST,
+  +--- # Publish to the agent's _return_topic (FanOutState.agent_topic,
+  |    # which holds {node_id}.private.return — see §5.3, §6.1) FIRST,
   |    # then tombstone. Rationale below.
   |    headers = {
   |       HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: "agent",
@@ -1084,7 +1187,11 @@ fields to publish the re-entry envelope.
   +--- ack and return
 ```
 
-A subtle property: **the merged state goes to the agent's main topic, not to the original caller.** The agent then runs its next LLM iteration. The caller's reply only happens when the agent eventually returns a `ReturnCall` after all LLM iterations are done.
+A subtle property: **the merged state goes back to the same agent
+instance (via its `_return_topic`), not to the original caller.** The
+agent then runs its next LLM iteration. The caller's reply only
+happens when the agent eventually returns a `ReturnCall` after all
+LLM iterations are done.
 
 **Why publish-first, tombstone-second.** Earlier drafts of this design
 specified tombstone-first ordering on the theory that the durable log
@@ -1092,7 +1199,7 @@ should never contradict itself — a stale state record outliving a
 successful re-entry would, in principle, confuse subsequent
 rebalances. In practice, shipping the tombstone-first ordering exposed
 a worse failure mode: if `state_store.put` succeeded on a prior
-delivery but the downstream agent-topic publish then failed,
+delivery but the downstream `_return_topic` publish then failed,
 FastStream redelivered the inbound tool return to the aggregator
 handler. On redelivery, `new_ids` was empty (every tcid was already in
 `batch.received`) and the handler short-circuited on the
@@ -1110,13 +1217,15 @@ tombstone**. Genuine duplicates (where `should_complete`
 is still False) still take the drop path. The trade-off is described
 in the §9.1 failure-mode matrix and the dedup contract in §9.2.
 
-The downstream cost is that the agent's main-topic handler must be
-idempotent on `correlation_id` for the merged-state envelope, since a
-crash between publish and tombstone (or between two redelivered
-completion attempts) can result in the same merged envelope being
-delivered to the agent twice. The dedup mechanism is the existing
-idempotent-dispatch check at `agent.py::_publish_parallel_with_aggregator`'s
-redelivery branch: redelivery hits `state_store.was_recently_completed(key)`
+The downstream cost is that the agent's handler (which serves both
+the public inbox and `_return_topic` under one subscriber after the
+worker's PR #142 layering) must be idempotent on `correlation_id`
+for the merged-state envelope, since a crash between publish and
+tombstone (or between two redelivered completion attempts) can
+result in the same merged envelope being delivered to the agent
+twice. The dedup mechanism is the existing idempotent-dispatch check
+at `agent.py::_publish_parallel_with_aggregator`'s redelivery
+branch: redelivery hits `state_store.was_recently_completed(key)`
 or `existing.expected_tool_call_ids == expected_tool_call_ids` and
 short-circuits the second dispatch. The same check covers the
 publish-twice case: the agent re-enters with the merged state on the
@@ -1150,6 +1259,12 @@ Worker.run():
   |       #      -> reads main_topic's partition count via admin.describe_topics
   |       #      -> creates {node_id}.fanout-state with STATE_TOPIC_CONFIG
   |       #      -> creates {node_id}.fanout-returns with default config
+  |       #      -> creates {node_id}.private.return with default config
+  |       #         (the per-instance return inbox — re-entry destination
+  |         #         for the aggregator's merged completion publish;
+  |         #         provisioned here, with matching partition count,
+  |         #         so co-partitioning holds for the aggregator-equipped
+  |         #         agent on first start)
   |       #      -> validates partition count on existing topics
   |       #   2. construct _KafkaStateStore (with kafka_config kwargs forwarded)
   |       #   3. construct _StateStoreRebalanceListener
@@ -1251,7 +1366,7 @@ Restated and consolidated from §7 plus new failure scenarios:
 | Tool process crashes mid-execution | No return arrives | Batch remains pending until partition rebalance evicts it (v1 has no idle-timeout reaper — see §17.11). Operator-visible via stuck `inflight_batches`. | Batch stays in-flight; operator must redrive or rely on rebalance eviction |
 | Aggregator process crashes after receiving return, before write-through | Return's consumer offset never committed; redelivered to next owner | Next owner re-receives; dedup based on `tool_call_id` not in `batch.received` (post-rehydration); proceeds | None |
 | Aggregator process crashes after write-through, before completion check | Cache lost; rebalance rehydration finds updated state; should_complete re-runs | Completion fires (if applicable); re-entry happens | Slight delay; correct outcome |
-| Aggregator process crashes after re-entry publish, before tombstone | The durable record still says "in flight" (no tombstone); the merged envelope did reach the agent topic. Inbound redelivered to aggregator handler after rebalance. | Handler re-runs: `new_ids` is empty (all results already in `batch.received`) but `should_complete` is True → re-attempts merge → publish → tombstone (see `BaseAgentNodeDef._aggregator_handler`). | Merged-state envelope is delivered to the agent topic again; agent dedups by `correlation_id` (existing calfkit contract). |
+| Aggregator process crashes after re-entry publish, before tombstone | The durable record still says "in flight" (no tombstone); the merged envelope did reach the agent's `_return_topic`. Inbound redelivered to aggregator handler after rebalance. | Handler re-runs: `new_ids` is empty (all results already in `batch.received`) but `should_complete` is True → re-attempts merge → publish → tombstone (see `BaseAgentNodeDef._aggregator_handler`). | Merged-state envelope is delivered to the agent via `_return_topic` again; agent dedups by `correlation_id` (existing calfkit contract). |
 | Aggregator process crashes after merge / before re-entry publish | Same as above — the durable record still says "in flight", no envelope reached the agent. | Same redelivery path re-attempts merge → publish → tombstone idempotently. | None — the merged envelope is delivered exactly the same as a non-crash path. |
 
 The last two rows are why the shipped ordering is **publish-first,
@@ -1262,12 +1377,13 @@ tombstone-first ordering for log-self-consistency reasons; in practice
 that ordering produced a stuck-batch failure mode (durable record
 tombstoned, agent never re-entered) with no automated recovery path.
 The publish-first ordering trades that for at-least-once re-entry on
-the agent topic — the agent's main handler is responsible for dedup
-on the merged envelope, which is the same contract calfkit already
-relies on for redelivery of any inbound (see §9.2). Atomic
-write-and-publish across `fanout-state` and the agent's main topic
-would close the gap and remove the dedup requirement; that is a v2
-consideration (§17.2).
+the agent's `_return_topic` — the agent's handler (serving both its
+public inbox and `_return_topic` under one subscriber, per the
+worker's PR #142 layering) is responsible for dedup on the merged
+envelope, which is the same contract calfkit already relies on for
+redelivery of any inbound (see §9.2). Atomic write-and-publish
+across `fanout-state` and `_return_topic` would close the gap and
+remove the dedup requirement; that is a v2 consideration (§17.2).
 
 ### 9.2 The dedup contract restated
 
@@ -1275,7 +1391,7 @@ The aggregator MUST be idempotent under at-least-once delivery on the following 
 
 - **Same tool return arrives twice**: dedup via `tool_call_id in batch.received` check. Drop the second.
 - **Same dispatch happens twice**: dedup via idempotent-dispatch check at `_publish_parallel_with_aggregator` (see §7.5). Recently-completed → skip; in-flight matching → preserve and re-publish; in-flight drifted → log ERROR and overwrite.
-- **Same completion publish happens twice**: the agent's main topic handler must be idempotent on `correlation_id`. The agent's next LLM iteration sees a deduped inbound and produces a single resume. This is the existing calfkit contract for redelivery on any handler.
+- **Same completion publish happens twice**: the agent's handler (serving both the public inbox and `_return_topic`, where the duplicated completion publish lands) must be idempotent on `correlation_id`. The agent's next LLM iteration sees a deduped inbound and produces a single resume. This is the existing calfkit contract for redelivery on any handler.
 
 ### 9.3 Late-return policy
 
@@ -1917,9 +2033,9 @@ error policy should treat ``InMemoryAggregator`` and the real
 
 Three modes:
 
-- **Cluster allows topic auto-creation** (`auto.create.topics.enable=true`): the first publish to `fanout-state` would auto-create it — but with the *default* `cleanup.policy=delete`, which is WRONG. The shipped `_topic_admin.ensure_aggregator_topics` uses the Kafka Admin API to (a) check the topic exists, (b) create with `STATE_TOPIC_CONFIG` if missing, (c) validate partition count AND every key in `STATE_TOPIC_CONFIG` against the live topic configuration when the state topic already exists. A drifted value (e.g. an operator manually set `cleanup.policy=delete`) raises `AggregatorStateStoreError` with the offending key/value at startup — the "misconfigured pre-existing topic" gap is closed.
-- **Cluster forbids topic auto-creation**: `ensure_aggregator_topics` creates explicitly via Admin API. If the broker user lacks permission, `AggregatorStateStoreError` is raised and the worker fails to start (it's a configuration error). The admin-side code distinguishes `UnknownTopicOrPartitionError` from permission/auth failures (see §6.5), so auth issues surface loudly with a resolved error label rather than being misreported as missing-topic.
-- **Managed Kafka (e.g. Confluent Cloud, AWS MSK Serverless)**: the user must pre-create topics. No CLI ships in v1.
+- **Cluster allows topic auto-creation** (`auto.create.topics.enable=true`): the first publish to `fanout-state` would auto-create it — but with the *default* `cleanup.policy=delete`, which is WRONG. The shipped `_topic_admin.ensure_aggregator_topics` uses the Kafka Admin API to (a) check the topic exists, (b) create with `STATE_TOPIC_CONFIG` if missing, (c) validate partition count AND every key in `STATE_TOPIC_CONFIG` against the live topic configuration when the state topic already exists. A drifted value (e.g. an operator manually set `cleanup.policy=delete`) raises `AggregatorStateStoreError` with the offending key/value at startup — the "misconfigured pre-existing topic" gap is closed. The same call also provisions `{node_id}.private.return` (the per-instance return inbox the aggregator publishes merged completions to) with the same partition count, so co-partitioning is guaranteed without depending on broker-default behaviour.
+- **Cluster forbids topic auto-creation**: `ensure_aggregator_topics` creates all three per-agent topics explicitly via Admin API — `fanout-state`, `fanout-returns`, and `{node_id}.private.return`. If the broker user lacks permission, `AggregatorStateStoreError` is raised and the worker fails to start (it's a configuration error). The admin-side code distinguishes `UnknownTopicOrPartitionError` from permission/auth failures (see §6.5), so auth issues surface loudly with a resolved error label rather than being misreported as missing-topic.
+- **Managed Kafka (e.g. Confluent Cloud, AWS MSK Serverless)**: typical hosted defaults disable auto-create, so the operator must either grant the worker the Topic-Create ACL (so `ensure_aggregator_topics` provisions the three topics on first start) or pre-create all three with the same partition count as the agent's main topic. Without provisioning `{node_id}.private.return`, the aggregator's first merged-completion publish fails with `UnknownTopicOrPartitionError`. No CLI ships in v1.
 
 ### 14.3 CLI helper (not shipped)
 
@@ -1954,15 +2070,61 @@ Parallel fan-outs are now durable. The user-visible difference is **fewer myster
 
 ### 15.3 New Kafka topics
 
-Two new topics per agent. Operational impact:
+Two new aggregator-specific topics per agent — plus, post the PR #142
+merge, one additional per-node return inbox the aggregator depends on.
+Operational impact:
 
-- Managed Kafka users with strict topic auto-creation policies must pre-create them.
-- Topic count grows by `2 × num_agents`. For a deployment with 20 agents, that's 40 new topics. Manageable.
-- Disk usage: the state topic is bounded by `pending_batches × N_tool_calls × State_size`. For a 100-agent deployment with bursty workloads, peak ~10s of GB across all aggregator topics. Negligible compared to typical Kafka log volumes.
+- **Three per-node topics in total need to exist before the first
+  parallel fan-out completes:** `{node_id}.fanout-state`,
+  `{node_id}.fanout-returns`, and `{node_id}.private.return`. For
+  aggregator-equipped agents, `ensure_aggregator_topics` provisions
+  all three at worker startup via the Kafka Admin API
+  (`calfkit/nodes/aggregator/_topic_admin.py`) using the agent's
+  main-topic partition count, so the operator only needs to grant
+  the Topic-Create ACL or pre-create them. For non-aggregator nodes
+  (consumers, plain tool nodes), `_return_topic` falls back to
+  broker auto-create — PR #142's existing requirement.
+- **Why `_return_topic` is in this list now even though it predates
+  this PR:** under `auto.create.topics.enable=false` on managed
+  clusters (Confluent Cloud, MSK Serverless), the aggregator's
+  first merged-completion publish to `{node_id}.private.return`
+  would fail with `UnknownTopicOrPartitionError` if the topic were
+  not pre-created. Co-provisioning it here closes that gap for
+  aggregator-equipped agents.
+- Managed Kafka users with strict topic auto-creation policies must
+  ensure either (a) all three topics are pre-created with the same
+  partition count as the agent's main topic, or (b) the worker has
+  the Topic-Create ACL so `ensure_aggregator_topics` can create them
+  on first start. `ensure_aggregator_topics` validates partition
+  counts on existing topics and raises
+  `AggregatorStateStoreError` on mismatch.
+- Topic count grows by `3 × num_agents` (aggregator-equipped).
+  For a deployment with 20 such agents, that's 60 new topics.
+  Manageable.
+- Disk usage: the state topic is bounded by `pending_batches ×
+  N_tool_calls × State_size`. For a 100-agent deployment with
+  bursty workloads, peak ~10s of GB across all aggregator topics.
+  Negligible compared to typical Kafka log volumes.
 
 ### 15.4 Release note headline
 
-> **Parallel tool calls are now durable.** Agents that dispatch multiple tool calls in a single turn now use a Kafka-backed aggregator that survives worker restarts and consumer-group rebalances. No code changes are required to benefit. Two new Kafka topics are created per agent (`{agent}.fanout-state`, `{agent}.fanout-returns`); on managed Kafka with restricted auto-creation, pre-create them or grant the worker the Topic-Create ACL. See the [Aggregator documentation] for advanced customisation (short-circuit completion, custom merge, progress events).
+> **Parallel tool calls are now durable.** Agents that dispatch
+> multiple tool calls in a single turn now use a Kafka-backed
+> aggregator that survives worker restarts and consumer-group
+> rebalances. No code changes are required to benefit. Three
+> per-agent Kafka topics back the new path: `{agent}.fanout-state`
+> (compacted), `{agent}.fanout-returns`, and (post-PR-142)
+> `{agent}.private.return` — the per-instance return inbox the
+> aggregator publishes merged completions to. On managed Kafka with
+> restricted auto-creation, either pre-create all three or grant the
+> worker the Topic-Create ACL; for aggregator-equipped agents,
+> `ensure_aggregator_topics` provisions all three side-by-side at
+> startup with the main topic's partition count. For non-aggregator
+> nodes (consumers, plain tool nodes), `{node_id}.private.return`
+> remains PR #142's documented requirement (broker auto-create or
+> manual pre-creation). See the [Aggregator documentation] for
+> advanced customisation (short-circuit completion, custom merge,
+> progress events).
 
 ### 15.5 Deprecations
 
@@ -2168,12 +2330,13 @@ with `FanOutAggregatorPartitioner` keeping co-partitioning intact. See
 The shipped `FanOutAggregatorPartitioner` is installed broker-wide by
 `Client.connect` (`calfkit/client/base.py::BaseClient.connect`) and
 hashes plain keys with the same murmur2 as Kafka's default partitioner
-— so co-location holds as long as users do not pass their own
-`partitioner=` to the `Client.connect` kwargs (which the framework
-explicitly rejects with a `ValueError`). A partition-count mismatch
-between main and aggregator topics is caught by
-`ensure_aggregator_topics`, which raises `AggregatorStateStoreError`
-on validation failure.
+— so co-location holds across all four per-agent topics (main,
+`{node_id}.private.return`, `fanout-state`, `fanout-returns`) as long
+as users do not pass their own `partitioner=` to the `Client.connect`
+kwargs (which the framework explicitly rejects with a `ValueError`).
+A partition-count mismatch between the main topic and any of the
+three per-node extras is caught by `ensure_aggregator_topics`, which
+raises `AggregatorStateStoreError` on validation failure.
 
 ### 17.11 Idle-timeout reaping (Future work — deferred)
 
@@ -2292,7 +2455,9 @@ Client            Agent (run)        Aggregator(state)     Tool A         Tool B
   |                  |          dedup, write-through       
   |                  |          should_complete() == True
   |                  |          merge()
-  |                  |          publish re-entry to agent main topic
+  |                  |          publish re-entry to {node_id}.private.return
+  |                  |          (the agent's _return_topic — NOT its public
+  |                  |          inbox; see §5.3 for why)
   |                  |          tombstone fanout-state
   |                  |
   |                  | (agent.run reinvoked with merged state)

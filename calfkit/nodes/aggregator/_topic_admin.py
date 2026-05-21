@@ -2,11 +2,11 @@
 
 Uses FastStream-exposed ``broker.config.admin_client`` (an
 ``aiokafka.AIOKafkaAdminClient`` under the hood) to ensure
-``{node_id}.fanout-state`` (compacted) and ``{node_id}.fanout-returns``
-(regular) exist with the correct configuration before the worker starts
-processing. When topics already exist, validates the partition count
-matches the agent's main topic; raises :class:`AggregatorStateStoreError`
-on mismatch.
+``{node_id}.fanout-state`` (compacted), ``{node_id}.fanout-returns``
+(regular), and ``{node_id}.private.return`` (regular) exist with the
+correct configuration before the worker starts processing. When topics
+already exist, validates the partition count matches the agent's main
+topic; raises :class:`AggregatorStateStoreError` on mismatch.
 """
 
 from __future__ import annotations
@@ -70,8 +70,9 @@ async def ensure_aggregator_topics(
     default_partitions: int = 6,
     replication_factor: int = 3,
 ) -> tuple[str, str, int]:
-    """Provision the aggregator's state + returns topics, co-partitioned with
-    the agent's main topic.
+    """Provision the aggregator's state + returns topics (and the agent's
+    framework-private return inbox), all co-partitioned with the agent's
+    main topic.
 
     Algorithm:
 
@@ -80,14 +81,17 @@ async def ensure_aggregator_topics(
        fall back to ``default_partitions`` and emit a WARN — the user is
        presumably running an end-to-end demo and not managing topics
        externally.
-    2. For each of state and returns:
+    2. For each of state, returns, and the per-node ``_return_topic``:
 
        - If the topic doesn't exist, create it with the right partition
          count and (for state) ``cleanup.policy=compact``.
        - If it exists, validate that the partition count matches.
 
     3. Return ``(state_topic, returns_topic, partition_count)`` for the
-       state store and rebalance listener to use downstream.
+       state store and rebalance listener to use downstream. The
+       ``_return_topic`` is provisioned as a side-effect only; callers
+       derive its name from the node's ``_return_topic`` property and
+       don't need it in the return tuple.
 
     Raises:
         AggregatorStateStoreError: configuration mismatch (e.g., existing
@@ -95,6 +99,17 @@ async def ensure_aggregator_topics(
     """
     state_topic = f"{node_id}.fanout-state"
     returns_topic = f"{node_id}.fanout-returns"
+    # ``_return_topic`` (``{node_id}.private.return``) exists at the
+    # framework level (PR #142, issue #141) — not aggregator-specific —
+    # but the aggregator's merged-completion publish (``_aggregator_handler``
+    # in ``agent.py``) targets it to re-enter the agent. Provisioning it
+    # here alongside the aggregator topics guarantees: (a) under
+    # ``auto.create.topics.enable=false`` the re-entry publish does not
+    # fail with ``UnknownTopicOrPartitionError`` on the first fan-out
+    # completion, and (b) the topic is created with the SAME partition
+    # count as the main topic so that broker-default partitioning never
+    # silently breaks co-partitioning for the agent's keyed traffic.
+    return_topic = f"{node_id}.private.return"
 
     admin: Any = broker.config.admin_client
 
@@ -120,10 +135,22 @@ async def ensure_aggregator_topics(
         configs=None,
     )
 
+    # ``_return_topic`` is a regular (non-compacted) topic — it carries
+    # one-shot tool-return and aggregator completion envelopes, not
+    # last-write-wins state.
+    await _ensure_topic(
+        admin,
+        return_topic,
+        partitions=partition_count,
+        replication_factor=replication_factor,
+        configs=None,
+    )
+
     logger.info(
-        "aggregator topics ensured: state=%s returns=%s partitions=%d",
+        "aggregator topics ensured: state=%s returns=%s return=%s partitions=%d",
         state_topic,
         returns_topic,
+        return_topic,
         partition_count,
     )
 

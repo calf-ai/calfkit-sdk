@@ -89,7 +89,7 @@ def _broker_with_admin(admin: AsyncMock) -> MagicMock:
     return broker
 
 
-async def test_creates_both_topics_when_main_exists() -> None:
+async def test_creates_all_topics_when_main_exists() -> None:
     admin = _make_admin({"agent.in": 8})
     broker = _broker_with_admin(admin)
 
@@ -98,8 +98,17 @@ async def test_creates_both_topics_when_main_exists() -> None:
     assert state_topic == "agent.fanout-state"
     assert returns_topic == "agent.fanout-returns"
     assert partitions == 8
-    # Two create_topics calls — one per topic
-    assert admin.create_topics.await_count == 2
+    # Three create_topics calls — state, returns, and _return_topic
+    # (``{node_id}.private.return``). _return_topic is provisioned here
+    # so the aggregator's merged-completion re-entry publish has a target
+    # with the correct partition count under auto.create.topics.enable=false.
+    assert admin.create_topics.await_count == 3
+    created_names = {call.args[0][0].name for call in admin.create_topics.await_args_list}
+    assert created_names == {
+        "agent.fanout-state",
+        "agent.fanout-returns",
+        "agent.private.return",
+    }
 
 
 async def test_uses_default_partitions_when_main_missing() -> None:
@@ -114,7 +123,8 @@ async def test_uses_default_partitions_when_main_missing() -> None:
     )
 
     assert partitions == 4
-    assert admin.create_topics.await_count == 2
+    # state + returns + _return_topic
+    assert admin.create_topics.await_count == 3
 
 
 def test_state_topic_config_includes_segment_ms_and_dirty_ratio() -> None:
@@ -130,26 +140,29 @@ def test_state_topic_config_includes_segment_ms_and_dirty_ratio() -> None:
 
 
 async def test_state_topic_creation_uses_compact_config() -> None:
-    """The state topic must be created with cleanup.policy=compact."""
+    """The state topic must be created with cleanup.policy=compact;
+    the returns topic and the per-node _return_topic must NOT be
+    compacted (they're event streams, not last-write-wins state)."""
     admin = _make_admin({"agent.in": 6})
     broker = _broker_with_admin(admin)
 
     await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
 
-    # Inspect the create_topics calls — first is the state topic.
+    # Inspect the create_topics calls — index by topic name rather than
+    # order so this test does not break if provisioning order changes.
     calls = admin.create_topics.await_args_list
-    state_call_topics = calls[0].args[0]
-    assert len(state_call_topics) == 1
-    state_new_topic = state_call_topics[0]
-    assert state_new_topic.name == "agent.fanout-state"
+    new_topics_by_name = {call.args[0][0].name: call.args[0][0] for call in calls}
+
+    state_new_topic = new_topics_by_name["agent.fanout-state"]
     assert state_new_topic.topic_configs == STATE_TOPIC_CONFIG
 
-    returns_call_topics = calls[1].args[0]
-    returns_new_topic = returns_call_topics[0]
-    assert returns_new_topic.name == "agent.fanout-returns"
-    # The returns topic must NOT be compacted (it's an event stream).
+    returns_new_topic = new_topics_by_name["agent.fanout-returns"]
     # aiokafka normalizes None to {}, so check the meaningful property.
     assert "cleanup.policy" not in (returns_new_topic.topic_configs or {})
+
+    return_new_topic = new_topics_by_name["agent.private.return"]
+    # _return_topic is a regular (non-compacted) one-shot envelope stream.
+    assert "cleanup.policy" not in (return_new_topic.topic_configs or {})
 
 
 async def test_skips_existing_with_matching_partitions() -> None:
@@ -158,13 +171,14 @@ async def test_skips_existing_with_matching_partitions() -> None:
             "agent.in": 6,
             "agent.fanout-state": 6,
             "agent.fanout-returns": 6,
+            "agent.private.return": 6,
         }
     )
     broker = _broker_with_admin(admin)
 
     await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
 
-    # No create_topics calls — both already exist with matching partition count
+    # No create_topics calls — all three already exist with matching partition count
     assert admin.create_topics.await_count == 0
 
 
@@ -231,7 +245,8 @@ async def test_resolve_partition_count_falls_back_on_unknown_topic(
         )
 
     assert partitions == 4
-    assert admin.create_topics.await_count == 2
+    # state + returns + _return_topic
+    assert admin.create_topics.await_count == 3
     # Confirm the WARN about defaulting to the fallback partition count fired.
     assert any("agent.in" in record.message and "defaulting" in record.message for record in caplog.records if record.levelname == "WARNING")
 
@@ -242,18 +257,22 @@ async def test_create_topic_swallows_topic_already_exists() -> None:
     """
     admin = AsyncMock()
 
-    # describe_topics is called five times when both topics race-create:
+    # describe_topics is called seven times when all three topics race-create:
     #   1. resolve main topic partition count -> 8
     #   2. _ensure_topic(state) pre-create describe -> not found
     #   3. _ensure_topic(state) post-race re-describe -> found w/ 8 partitions
     #   4. _ensure_topic(returns) pre-create describe -> not found
     #   5. _ensure_topic(returns) post-race re-describe -> found w/ 8 partitions
+    #   6. _ensure_topic(_return_topic) pre-create describe -> not found
+    #   7. _ensure_topic(_return_topic) post-race re-describe -> found w/ 8 partitions
     describe_results: list[list[dict[str, Any]]] = [
         [_topic_metadata("agent.in", 8)],
         [],
         [_topic_metadata("agent.fanout-state", 8)],
         [],
         [_topic_metadata("agent.fanout-returns", 8)],
+        [],
+        [_topic_metadata("agent.private.return", 8)],
     ]
     describe_call_count = 0
 
@@ -264,7 +283,7 @@ async def test_create_topic_swallows_topic_already_exists() -> None:
         return result
 
     admin.describe_topics = AsyncMock(side_effect=describe_topics)
-    # Both create_topics calls raise — simulating the race on both topics.
+    # All three create_topics calls raise — simulating the race on every topic.
     admin.create_topics = AsyncMock(side_effect=TopicAlreadyExistsError())
 
     broker = _broker_with_admin(admin)
@@ -278,8 +297,8 @@ async def test_create_topic_swallows_topic_already_exists() -> None:
     assert state_topic == "agent.fanout-state"
     assert returns_topic == "agent.fanout-returns"
     assert partitions == 8
-    # Both create attempts ran (race on each topic) and both were swallowed.
-    assert admin.create_topics.await_count == 2
+    # All three create attempts ran (race on each topic) and all were swallowed.
+    assert admin.create_topics.await_count == 3
 
 
 async def test_resolve_partition_count_raises_on_authorization_failure() -> None:
@@ -344,8 +363,8 @@ async def test_resolve_partition_count_falls_back_only_on_unknown_topic() -> Non
     )
 
     assert partitions == 4
-    # Both aggregator topics are created at the default partition count.
-    assert admin.create_topics.await_count == 2
+    # All three aggregator-side topics are created at the default partition count.
+    assert admin.create_topics.await_count == 3
 
 
 async def test_resolve_partition_count_accepts_topic_with_error_code_zero() -> None:
@@ -434,9 +453,9 @@ async def test_try_describe_falls_back_only_on_unknown_topic() -> None:
 
     await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
 
-    # Both topics must be created when the existence-check describe reports
-    # UNKNOWN_TOPIC_OR_PARTITION.
-    assert admin.create_topics.await_count == 2
+    # All three aggregator-side topics must be created when the
+    # existence-check describe reports UNKNOWN_TOPIC_OR_PARTITION.
+    assert admin.create_topics.await_count == 3
 
 
 async def test_create_topic_race_validates_partition_count_matches() -> None:
@@ -449,11 +468,13 @@ async def test_create_topic_race_validates_partition_count_matches() -> None:
     # 2: state pre-create describe -> not found
     # 3: state post-race re-describe -> found w/ 6 partitions (matches)
     # 4: returns pre-create describe -> found w/ 6 partitions (no race)
+    # 5: _return_topic pre-create describe -> found w/ 6 partitions (no race)
     describe_results: list[list[dict[str, Any]]] = [
         [_topic_metadata("agent.in", 6)],
         [],
         [_topic_metadata("agent.fanout-state", 6)],
         [_topic_metadata("agent.fanout-returns", 6)],
+        [_topic_metadata("agent.private.return", 6)],
     ]
     describe_call_count = 0
 
@@ -464,7 +485,8 @@ async def test_create_topic_race_validates_partition_count_matches() -> None:
         return result
 
     admin.describe_topics = AsyncMock(side_effect=describe_topics)
-    # Only the state create races; returns is unaffected (already exists in step 4).
+    # Only the state create races; returns + _return_topic pre-exist so
+    # ``_ensure_topic`` short-circuits before calling create_topics for them.
     admin.create_topics = AsyncMock(side_effect=TopicAlreadyExistsError())
     broker = _broker_with_admin(admin)
 
@@ -475,7 +497,8 @@ async def test_create_topic_race_validates_partition_count_matches() -> None:
     )
 
     assert partitions == 6
-    # state attempted create + raced; returns was pre-existing so no create.
+    # Only state attempted create (and raced); returns and _return_topic
+    # were pre-existing so no create call fired for them.
     assert admin.create_topics.await_count == 1
 
 
@@ -561,6 +584,7 @@ async def test_existing_state_topic_with_correct_cleanup_policy_passes() -> None
             "agent.in": 6,
             "agent.fanout-state": 6,
             "agent.fanout-returns": 6,
+            "agent.private.return": 6,
         },
         topic_configs={
             "agent.fanout-state": dict(STATE_TOPIC_CONFIG),
@@ -584,6 +608,7 @@ async def test_existing_state_topic_with_wrong_cleanup_policy_raises() -> None:
             "agent.in": 6,
             "agent.fanout-state": 6,
             "agent.fanout-returns": 6,
+            "agent.private.return": 6,
         },
         topic_configs={
             "agent.fanout-state": {
@@ -599,28 +624,34 @@ async def test_existing_state_topic_with_wrong_cleanup_policy_raises() -> None:
 
 
 async def test_returns_topic_does_not_validate_configs() -> None:
-    """The returns topic is a regular event stream (no required configs);
-    only partition count matters. Even if its cleanup.policy is unusual,
-    ``_ensure_topic`` must skip the config-validation path entirely."""
+    """The returns topic and ``_return_topic`` are regular event streams
+    (no required configs); only partition count matters. Even if their
+    cleanup.policy is unusual, ``_ensure_topic`` must skip the
+    config-validation path entirely for both."""
     admin = _make_admin(
         {
             "agent.in": 6,
             "agent.fanout-state": 6,
             "agent.fanout-returns": 6,
+            "agent.private.return": 6,
         },
         topic_configs={
             "agent.fanout-state": dict(STATE_TOPIC_CONFIG),
-            # Intentionally surprising config on the returns topic; must be ignored.
+            # Intentionally surprising configs on the non-compacted topics;
+            # both must be ignored (no cleanup.policy contract for them).
             "agent.fanout-returns": {"cleanup.policy": "delete", "retention.ms": "1000"},
+            "agent.private.return": {"cleanup.policy": "delete", "retention.ms": "1000"},
         },
     )
     broker = _broker_with_admin(admin)
 
     await ensure_aggregator_topics(broker, node_id="agent", main_topic="agent.in")
 
-    # describe_configs may be called for the state topic, but never for returns.
+    # describe_configs may be called for the state topic, but never for the
+    # two non-compacted topics.
     described_topics = [resource.name for call in admin.describe_configs.await_args_list for resource in call.args[0]]
     assert "agent.fanout-returns" not in described_topics
+    assert "agent.private.return" not in described_topics
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +734,7 @@ async def test_describe_topic_configs_succeeds_on_zero_error_code() -> None:
             "agent.in": 6,
             "agent.fanout-state": 6,
             "agent.fanout-returns": 6,
+            "agent.private.return": 6,
         },
         topic_configs={
             "agent.fanout-state": dict(STATE_TOPIC_CONFIG),

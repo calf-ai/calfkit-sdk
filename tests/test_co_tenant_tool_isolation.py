@@ -162,6 +162,123 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
     assert len(bravo_finals) == 1, f"bravo emitted {len(bravo_finals)} finals (expected 1); peer-tool-return leak"
 
 
+async def test_parallel_fanout_does_not_leak_merged_completion_between_co_tenant_agents(container):
+    """Two agents share ``co_tenant_chan.in`` and each runs a parallel fan-out
+    over its own tool set. After one publish, each agent's aggregator merges
+    its own tool returns and re-enters that agent exactly once — yielding
+    exactly one final per agent.
+
+    Without ``agent.py:466`` setting ``agent_topic=self._return_topic``, the
+    aggregator's merged-completion publish would target the shared
+    ``subscribe_topics[0]`` and both co-tenant agents would receive (and
+    re-enter on) each other's completions. This regression test pins the
+    aggregator-path co-tenant isolation invariant.
+
+    Sibling to :func:`test_tool_return_does_not_leak_between_co_tenant_agents`
+    (which exercises the non-aggregator single-tool path via
+    ``BaseNodeDef._publish_action``); this test exercises the durable
+    aggregator path via ``BaseAgentNodeDef._publish_parallel_with_aggregator``
+    + ``_aggregator_handler``'s merged-completion publish.
+    """
+    from calfkit.nodes.aggregator.testing import setup_for_tests
+
+    # Each agent gets its own tool set — parallel fan-out targets must be
+    # distinct so the aggregator's per-agent batch keys (correlation_id,
+    # fan_out_id) don't entangle. The leak this test pins is the *merged
+    # completion* publish target (``agent_topic``), not the per-call dispatch.
+    @agent_tool
+    def alpha_fanout_a() -> str:
+        return "alpha-a"
+
+    @agent_tool
+    def alpha_fanout_b() -> str:
+        return "alpha-b"
+
+    @agent_tool
+    def bravo_fanout_a() -> str:
+        return "bravo-a"
+
+    @agent_tool
+    def bravo_fanout_b() -> str:
+        return "bravo-b"
+
+    worker = container.get(Worker)
+    alpha = Agent(
+        "alpha_fanout_agent",
+        system_prompt="x",
+        subscribe_topics=SHARED_INPUT,
+        publish_topic="alpha_fanout_agent.out",
+        model_client=_call_all_tools_then_finalize(["alpha_fanout_a", "alpha_fanout_b"]),
+        tools=[alpha_fanout_a, alpha_fanout_b],
+    )
+    bravo = Agent(
+        "bravo_fanout_agent",
+        system_prompt="x",
+        subscribe_topics=SHARED_INPUT,
+        publish_topic="bravo_fanout_agent.out",
+        model_client=_call_all_tools_then_finalize(["bravo_fanout_a", "bravo_fanout_b"]),
+        tools=[bravo_fanout_a, bravo_fanout_b],
+    )
+
+    alpha_finals: list[NodeResult] = []
+    bravo_finals: list[NodeResult] = []
+
+    @consumer(
+        subscribe_topics="alpha_fanout_agent.out",
+        gates=[lambda ctx: bool(ctx.state.final_output_parts)],
+        node_id="alpha_fanout_final_sink",
+    )
+    def alpha_sink(result: NodeResult) -> None:
+        alpha_finals.append(result)
+
+    @consumer(
+        subscribe_topics="bravo_fanout_agent.out",
+        gates=[lambda ctx: bool(ctx.state.final_output_parts)],
+        node_id="bravo_fanout_final_sink",
+    )
+    def bravo_sink(result: NodeResult) -> None:
+        bravo_finals.append(result)
+
+    worker.add_nodes(
+        alpha,
+        bravo,
+        alpha_fanout_a,
+        alpha_fanout_b,
+        bravo_fanout_a,
+        bravo_fanout_b,
+        alpha_sink,
+        bravo_sink,
+    )
+    prepare_worker(container)
+
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    async with TestKafkaBroker(broker):
+        # Both agents go through the durable aggregator for parallel fan-out;
+        # setup_for_tests wires the in-test broker into each aggregator so
+        # _publish_parallel_with_aggregator + _aggregator_handler can run.
+        await setup_for_tests(alpha, broker)
+        await setup_for_tests(bravo, broker)
+        await client.invoke_node("hi", SHARED_INPUT)
+        await wait_for_condition(
+            lambda: len(alpha_finals) >= 1 and len(bravo_finals) >= 1,
+            timeout=5.0,
+        )
+    # TestKafkaBroker dispatches publishes synchronously through its
+    # in-memory ``FakeProducer``, so any duplicate final the buggy code
+    # would have produced (peer's merged completion re-entering on the
+    # shared subscribe topic) has already landed by the time
+    # ``wait_for_condition`` resolves — no explicit drain needed.
+
+    assert len(alpha_finals) == 1, (
+        f"alpha emitted {len(alpha_finals)} finals (expected 1); aggregator merged-completion leak via shared subscribe_topics[0]"
+    )
+    assert len(bravo_finals) == 1, (
+        f"bravo emitted {len(bravo_finals)} finals (expected 1); aggregator merged-completion leak via shared subscribe_topics[0]"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Contract tests: each routing action writes the right callback / target
 # ---------------------------------------------------------------------------
@@ -429,6 +546,38 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
         f"expected deduped 2-tuple ('dedup_agent.private.return', 'dedup_chan.in'). "
         f"Without dict.fromkeys, the private return topic would appear twice in registration "
         f"logs / AsyncAPI / observability — silently tolerated by Kafka clients but noisy."
+    )
+
+    # The aggregator's fanout-returns subscription must own its own topic set
+    # WITHOUT _return_topic. Adding _return_topic here would split _return_topic
+    # delivery across two consumer groups (main handler and aggregator handler)
+    # — main handler would never receive the re-entry envelope reliably.
+    # The composite resolution in Worker.register_handlers gates this with
+    # ``sub.handler == node.handler``; a regression that flipped that gate
+    # would dual-subscribe the aggregator handler to _return_topic and break
+    # re-entry routing non-deterministically.
+    aggregator_sub_calls = [c for c in spy.call_args_list if c.kwargs.get("group_id") == "dedup_agent" and "dedup_agent.fanout-returns" in c.args]
+    assert len(aggregator_sub_calls) == 1, f"expected one aggregator subscriber registration; got {len(aggregator_sub_calls)}"
+    assert "dedup_agent.private.return" not in aggregator_sub_calls[0].args, (
+        f"aggregator's fanout-returns subscription must NOT subscribe to _return_topic; "
+        f"got args={aggregator_sub_calls[0].args}. Splitting _return_topic across two "
+        f"consumer groups in the same group_id would non-deterministically route "
+        f"re-entry envelopes to either handler."
+    )
+
+    # Agents register exactly two subscriptions under group_id="dedup_agent":
+    # (1) the main handler subscription (carries user subscribe_topics +
+    #     deduped _return_topic), and
+    # (2) the aggregator's fanout-returns subscription (carries only
+    #     {node_id}.fanout-returns).
+    # Anything else (e.g., an accidental third registration from a refactor)
+    # would change consumer-group rebalancing semantics and must be caught
+    # here.
+    all_dedup_agent_subs = [c for c in spy.call_args_list if c.kwargs.get("group_id") == "dedup_agent"]
+    assert len(all_dedup_agent_subs) == 2, (
+        f"expected exactly 2 subscriber registrations under group_id='dedup_agent' "
+        f"(main + aggregator fanout-returns); got {len(all_dedup_agent_subs)}: "
+        f"{[c.args for c in all_dedup_agent_subs]}"
     )
 
 

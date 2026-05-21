@@ -40,6 +40,13 @@ class _InFlightBatch:
     base_state: State
     started_at_ms: int
     last_updated_ms: int
+    # Per-instance return inbox (``{node_id}.private.return``) where the
+    # aggregator publishes the merged completion to re-enter the agent.
+    # Mirrors :attr:`FanOutState.agent_topic` — see that field's docstring
+    # for the full rationale (issue #141 / PR #142). Post-merge this carries
+    # ``_return_topic`` rather than the public ``subscribe_topics[0]`` so
+    # the merged completion doesn't leak to co-tenants sharing the public
+    # inbox; the attribute name is retained for log/snapshot compatibility.
     agent_topic: str
     degraded: bool = False
     received: Mapping[str, Any] = field(default_factory=dict)
