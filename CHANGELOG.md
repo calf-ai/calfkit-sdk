@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.2...v0.3.3) (2026-05-22)
+
+
+### Bug Fixes
+
+* (agent,tool) surface tool exceptions to the agent instead of hanging ([#146](https://github.com/calf-ai/calfkit-sdk/issues/146)) ([05162cc](https://github.com/calf-ai/calfkit-sdk/commit/05162cc2512285e7dfcb64a30c7c8bca2f9fe50d))
+
 ## [0.3.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.1...v0.3.2) (2026-05-21)
 
 
