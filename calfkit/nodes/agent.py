@@ -2,6 +2,8 @@ import logging
 from collections.abc import Callable
 from typing import Any, ClassVar, Generic, cast
 
+from pydantic import ValidationError
+
 from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
@@ -11,18 +13,17 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
+from calfkit.exceptions import ToolExecutionError
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.state import PendingToolBatch
+from calfkit.models.state import FailedToolCall, PendingToolBatch
 from calfkit.nodes.base import BaseNodeDef, GateFunction
-from calfkit.nodes.tool import ToolNodeDef
+from calfkit.nodes.tool import BaseToolNodeDef, ToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 logger = logging.getLogger(__name__)
-
-NoneType = type(None)
 
 
 class BaseAgentNodeDef(
@@ -85,11 +86,17 @@ class BaseAgentNodeDef(
         elif self.tools:
             tools_registry = {tool.tool_schema.name: tool for tool in self.tools}
 
+        # ``latest_tool_calls()`` walks ``message_history`` in reverse on each call;
+        # cache once for all pre-model uses. The post-model use after
+        # ``result.new_messages()`` is extended into history must re-call to see
+        # the model's new tool calls.
+        latest_tool_calls = ctx.state.latest_tool_calls()
+
         logger.debug(
             "[%s] agent run entered node=%s pending_tool_calls=%d history_len=%d",
             ctx.deps.correlation_id[:8],
             self.name,
-            len(ctx.state.latest_tool_calls()),
+            len(latest_tool_calls),
             len(ctx.state.message_history),
         )
 
@@ -99,7 +106,61 @@ class BaseAgentNodeDef(
             if batch and not batch.is_complete:
                 return Silent()
 
-        latest_tool_calls = ctx.state.latest_tool_calls()
+        # Collect all FailedToolCall results in this turn so operators see every
+        # failure in a parallel batch; raise on the first after logging all.
+        # Also defend against corrupt marker dicts: a payload with the calfkit
+        # marker tag that fails ``FailedToolCall`` validation (e.g. schema drift
+        # during rolling deploy, a required field added without default, a
+        # tampered wire payload) round-trips through the union's ``| Any`` arm
+        # as a plain ``dict``. Synthesize a typed marker so the silent-failure
+        # path closes — operators still see the raise and the corrupt-keys
+        # context.
+        failed_tool_calls: list[FailedToolCall] = []
+        for tc in latest_tool_calls:
+            result = ctx.state.tool_results.get(tc.tool_call_id)
+            if isinstance(result, FailedToolCall):
+                failed_tool_calls.append(result)
+            elif isinstance(result, dict) and result.get("marker_kind") == "calfkit-tool-error":
+                logger.error(
+                    "[%s] corrupt FailedToolCall marker detected node=%s tool_call_id=%s raw_keys=%s; "
+                    "likely schema drift or version skew across the Kafka boundary",
+                    ctx.deps.correlation_id[:8],
+                    self.name,
+                    tc.tool_call_id,
+                    sorted(result.keys()),
+                )
+                # Synthesize a typed marker with sentinel fields known to pass
+                # FailedToolCall's validators. tc.tool_call_id is the LLM-emitted
+                # correlation key; fall back to "<missing>" if it's empty so
+                # ``min_length=1`` doesn't itself raise.
+                raw_tool_name = result.get("tool_name")
+                failed_tool_calls.append(
+                    FailedToolCall(
+                        tool_name=raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "<unknown>",
+                        tool_call_id=tc.tool_call_id or "<missing>",
+                        exc_type="CorruptFailedToolCallMarker",
+                        exc_message=f"Marker dict failed validation as FailedToolCall (likely schema drift); raw_keys={sorted(result.keys())}",
+                    )
+                )
+        if failed_tool_calls:
+            for failure in failed_tool_calls:
+                logger.error(
+                    "[%s] tool execution error detected node=%s tool=%s tool_call_id=%s exc_type=%s exc_message=%s",
+                    ctx.deps.correlation_id[:8],
+                    self.name,
+                    failure.tool_name,
+                    failure.tool_call_id,
+                    failure.exc_type,
+                    failure.exc_message,
+                )
+            first = failed_tool_calls[0]
+            raise ToolExecutionError(
+                tool_name=first.tool_name,
+                tool_call_id=first.tool_call_id,
+                exc_type=first.exc_type,
+                exc_message=first.exc_message,
+            )
+
         tool_results = None
 
         if len(latest_tool_calls) > 0:
@@ -141,14 +202,13 @@ class BaseAgentNodeDef(
             model_settings=run_model_settings,
         )
         if isinstance(result.output, DeferredToolRequests):
-            # The LLM called one or more tools
             logger.debug(
                 "[%s] model returned DeferredToolRequests tool_count=%d node=%s",
                 ctx.deps.correlation_id[:8],
                 len(result.output.calls),
                 self.name,
             )
-            messages = result.new_messages()  # preserve conversation history
+            messages = result.new_messages()
             ctx.state.message_history.extend(messages)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
@@ -166,7 +226,9 @@ class BaseAgentNodeDef(
                             tool_call_id=tool_call.tool_call_id,
                         ),
                     )
-                elif tool_node.subscribe_topics is None:
+                    continue
+
+                if tool_node.subscribe_topics is None:
                     logger.error(
                         "tool=%s is unreachable. No subscribe topics were provided for the tool node.",
                         tool_call.tool_name,
@@ -179,8 +241,89 @@ class BaseAgentNodeDef(
                             tool_call_id=tool_call.tool_call_id,
                         ),
                     )
+                    continue
 
-            if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):  # All tool calls were invalid, we need to retry.
+                # Parse args from the LLM's emission. Applies to ALL dispatch
+                # paths so that malformed-JSON args from override (schema-only)
+                # tools are also surfaced as RetryPromptPart instead of escaping
+                # to the worker's hard FailedToolCall path.
+                #
+                # ``args_as_dict()`` can raise more than just ValueError /
+                # AssertionError: ``pydantic_core.from_json`` raises TypeError
+                # when ``args`` is a non-string/non-bytes value (e.g. an int or
+                # list emitted by an off-spec provider). Catch broadly so any
+                # parse failure surfaces as an LLM-retryable RetryPromptPart
+                # rather than escaping ``run()`` and hanging the caller.
+                try:
+                    args = tool_call.args_as_dict()
+                except Exception as e:
+                    content = f"Malformed tool arguments: {type(e).__name__}: {_safe_exc_message(e)}"
+                    logger.warning(
+                        "[%s] tool=%s args parse failed at dispatch: %s",
+                        ctx.deps.correlation_id[:8],
+                        tool_call.tool_name,
+                        content,
+                        exc_info=True,
+                    )
+                    ctx.state.add_tool_result(
+                        tool_call.tool_call_id,
+                        RetryPromptPart(
+                            content=content,
+                            tool_name=tool_call.tool_name,
+                            tool_call_id=tool_call.tool_call_id,
+                        ),
+                    )
+                    continue
+
+                # Validate against the schema if we have a runtime validator.
+                # Override-mode schemas (BaseToolNodeSchema-only) skip this step
+                # and dispatch unvalidated; this is the documented carve-out.
+                if isinstance(tool_node, BaseToolNodeDef):
+                    try:
+                        tool_node.validate_call_args(args)
+                    except ValidationError as e:
+                        validation_errors = e.errors(include_url=False, include_context=False)
+                        logger.warning(
+                            "[%s] tool=%s arg validation failed at dispatch: %s",
+                            ctx.deps.correlation_id[:8],
+                            tool_call.tool_name,
+                            validation_errors,
+                        )
+                        ctx.state.add_tool_result(
+                            tool_call.tool_call_id,
+                            RetryPromptPart(
+                                content=validation_errors,
+                                tool_name=tool_call.tool_name,
+                                tool_call_id=tool_call.tool_call_id,
+                            ),
+                        )
+                        continue
+                    except Exception as e:
+                        # A user-authored Pydantic ``field_validator`` raised
+                        # something other than ``ValidationError`` (e.g.
+                        # ``RuntimeError``, ``TypeError``, a custom exception).
+                        # Surface as ``RetryPromptPart`` so the LLM can retry
+                        # rather than letting the exception escape ``run()`` and
+                        # silently hang the caller.
+                        validator_content = f"Tool argument validator raised {type(e).__name__}: {_safe_exc_message(e)}"
+                        logger.warning(
+                            "[%s] tool=%s arg validator raised %s; surfacing as RetryPromptPart",
+                            ctx.deps.correlation_id[:8],
+                            tool_call.tool_name,
+                            type(e).__name__,
+                            exc_info=True,
+                        )
+                        ctx.state.add_tool_result(
+                            tool_call.tool_call_id,
+                            RetryPromptPart(
+                                content=validator_content,
+                                tool_name=tool_call.tool_name,
+                                tool_call_id=tool_call.tool_call_id,
+                            ),
+                        )
+                        continue
+
+            if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
                 # TODO: maybe consider a node retry return type that doesn't require round trip to itself.
                 # Tailcall to itself is a roundtrip.
                 logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
