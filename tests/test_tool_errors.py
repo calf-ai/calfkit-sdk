@@ -1373,3 +1373,120 @@ async def test_fallback_marker_preserves_real_tool_name_and_id_when_valid(monkey
     # exc_type marks this as a fallback marker.
     assert stored.exc_type == "FailedToolCallConstructionError"
     assert "Failed to construct primary marker" in stored.exc_message
+
+
+# ---------------------------------------------------------------------------
+# Unserializable tool return values must not silently hang the worker
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_unserializable_return_value_becomes_failed_tool_call():
+    # Regression: a tool returning a non-JSON-serializable value (a user class,
+    # an unmapped stdlib type, etc.) would pass through ``ToolReturn(__init__)``
+    # but raise ``PydanticSerializationError`` at FastStream's envelope publish
+    # boundary — killing the worker handler before any reply published, which
+    # is the silent-hang failure mode this module exists to prevent. The worker
+    # must eagerly verify wire-safety and surface a FailedToolCall instead.
+
+    class _NotJsonSerializable:
+        pass
+
+    def returns_unserializable(ctx: ToolContext) -> object:
+        return _NotJsonSerializable()
+
+    tool_node = ToolNodeDef.create_tool_node(
+        func=returns_unserializable,
+        subscribe_topics="tool.unserializable.input",
+        publish_topic="tool.unserializable.output",
+    )
+
+    state = State()
+    tool_call_id = "tc-unserializable-001"
+    _register_tool_call(state, tool_name="returns_unserializable", tool_call_id=tool_call_id)
+    ctx = _make_ctx(state)
+
+    result = await tool_node.run(ctx, tool_call_id)
+    assert isinstance(result, ReturnCall), f"expected ReturnCall (no hang), got {type(result).__name__}"
+
+    stored = ctx.state.tool_results.get(tool_call_id)
+    assert isinstance(stored, FailedToolCall), f"expected FailedToolCall, got {type(stored).__name__}"
+    assert stored.exc_type == "PydanticSerializationError"
+    assert "Unable to serialize" in stored.exc_message
+
+    # And critically: the state must now JSON-round-trip cleanly so the actual
+    # Kafka publish wouldn't itself raise.
+    state.model_dump_json()
+
+
+# ---------------------------------------------------------------------------
+# Corrupt FailedToolCall marker dict (schema drift / version skew) must raise
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_detects_corrupt_marker_dict_and_raises():
+    # Regression: an entry in ``tool_results`` that carries the calfkit marker
+    # tag but fails FailedToolCall validation (e.g. a required field added in
+    # a newer schema; a stale message replayed; a tampered payload) round-trips
+    # through ``CalfToolResult | Any`` as a plain dict. The agent's isinstance
+    # check would silently miss it without this defense.
+    agent = Agent(
+        "agent_corrupt_marker",
+        system_prompt="x",
+        subscribe_topics="agent_corrupt_marker.input",
+        publish_topic="agent_corrupt_marker.output",
+        model_client=TestModel(),
+    )
+
+    state = State()
+    tool_call_id = "tc-corrupt-001"
+    _register_tool_call(state, tool_name="buggy", tool_call_id=tool_call_id)
+    # Insert a raw dict carrying the marker tag but missing required fields;
+    # bypass model validation by writing directly to the dict.
+    state.tool_results[tool_call_id] = {
+        "marker_kind": "calfkit-tool-error",
+        "tool_name": "buggy",
+        "tool_call_id": tool_call_id,
+        # missing exc_type, exc_message
+    }
+    ctx = _make_ctx(state)
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await agent.run(ctx)
+
+    err = exc_info.value
+    assert err.exc_type == "CorruptFailedToolCallMarker"
+    assert err.tool_call_id == tool_call_id
+    # Real tool_name from the dict is preserved when valid.
+    assert err.tool_name == "buggy"
+    # Diagnostic message names the corruption shape.
+    assert "schema drift" in err.exc_message or "raw_keys" in err.exc_message
+
+
+async def test_agent_corrupt_marker_with_missing_tool_name_uses_sentinel():
+    # Defense-in-depth: a corrupt marker dict missing even ``tool_name`` must
+    # still produce a typed raise rather than crashing the agent. Sentinel
+    # value substituted.
+    agent = Agent(
+        "agent_corrupt_no_name",
+        system_prompt="x",
+        subscribe_topics="agent_corrupt_no_name.input",
+        publish_topic="agent_corrupt_no_name.output",
+        model_client=TestModel(),
+    )
+
+    state = State()
+    tool_call_id = "tc-corrupt-noname"
+    _register_tool_call(state, tool_name="some_tool", tool_call_id=tool_call_id)
+    state.tool_results[tool_call_id] = {
+        "marker_kind": "calfkit-tool-error",
+        # missing tool_name, exc_type, exc_message
+    }
+    ctx = _make_ctx(state)
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await agent.run(ctx)
+
+    err = exc_info.value
+    assert err.exc_type == "CorruptFailedToolCallMarker"
+    assert err.tool_name == "<unknown>"
+    assert err.tool_call_id == tool_call_id

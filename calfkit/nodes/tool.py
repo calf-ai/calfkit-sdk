@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+import pydantic_core
 from typing_extensions import Self
 
 from calfkit._protocol import NodeKind
@@ -109,6 +110,15 @@ class ToolNodeDef(BaseToolNodeDef):
         # but is not yet rate-limited on the deferred path.
         try:
             result = await self._tool.function_schema.call(tool_call_part.args_as_dict(), tool_call_ctx)
+            # Construct the ToolReturn and eagerly verify it is wire-safe BEFORE
+            # storing in state. FastStream's envelope serialization at publish
+            # time would raise PydanticSerializationError on a non-serializable
+            # return_value, killing the worker handler before the reply
+            # publishes — the silent-hang failure mode this module exists to
+            # prevent. By serializing inside the try block, any failure flows
+            # through ``except Exception`` below and surfaces as a FailedToolCall.
+            tool_return = ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id})
+            pydantic_core.to_json(tool_return)
         except ModelRetry as e:
             logger.warning(
                 "[%s] tool=%s raised ModelRetry: %s",
@@ -173,10 +183,9 @@ class ToolNodeDef(BaseToolNodeDef):
             ctx.state.add_tool_result(tool_call_part.tool_call_id, marker)
             return ReturnCall[State](state=ctx.state)
 
-        ctx.state.add_tool_result(
-            tool_call_part.tool_call_id,
-            ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id}),
-        )
+        # ``tool_return`` was constructed and serialization-verified inside the
+        # try block above; reuse it rather than constructing twice.
+        ctx.state.add_tool_result(tool_call_part.tool_call_id, tool_return)
 
         logger.debug("[%s] tool completed tool=%s", ctx.deps.correlation_id[:8], self.name)
         return ReturnCall[State](state=ctx.state)

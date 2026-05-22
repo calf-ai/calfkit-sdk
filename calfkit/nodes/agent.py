@@ -108,11 +108,40 @@ class BaseAgentNodeDef(
 
         # Collect all FailedToolCall results in this turn so operators see every
         # failure in a parallel batch; raise on the first after logging all.
+        # Also defend against corrupt marker dicts: a payload with the calfkit
+        # marker tag that fails ``FailedToolCall`` validation (e.g. schema drift
+        # during rolling deploy, a required field added without default, a
+        # tampered wire payload) round-trips through the union's ``| Any`` arm
+        # as a plain ``dict``. Synthesize a typed marker so the silent-failure
+        # path closes — operators still see the raise and the corrupt-keys
+        # context.
         failed_tool_calls: list[FailedToolCall] = []
         for tc in latest_tool_calls:
             result = ctx.state.tool_results.get(tc.tool_call_id)
             if isinstance(result, FailedToolCall):
                 failed_tool_calls.append(result)
+            elif isinstance(result, dict) and result.get("marker_kind") == "calfkit-tool-error":
+                logger.error(
+                    "[%s] corrupt FailedToolCall marker detected node=%s tool_call_id=%s raw_keys=%s; "
+                    "likely schema drift or version skew across the Kafka boundary",
+                    ctx.deps.correlation_id[:8],
+                    self.name,
+                    tc.tool_call_id,
+                    sorted(result.keys()),
+                )
+                # Synthesize a typed marker with sentinel fields known to pass
+                # FailedToolCall's validators. tc.tool_call_id is the LLM-emitted
+                # correlation key; fall back to "<missing>" if it's empty so
+                # ``min_length=1`` doesn't itself raise.
+                raw_tool_name = result.get("tool_name")
+                failed_tool_calls.append(
+                    FailedToolCall(
+                        tool_name=raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "<unknown>",
+                        tool_call_id=tc.tool_call_id or "<missing>",
+                        exc_type="CorruptFailedToolCallMarker",
+                        exc_message=f"Marker dict failed validation as FailedToolCall (likely schema drift); raw_keys={sorted(result.keys())}",
+                    )
+                )
         if failed_tool_calls:
             for failure in failed_tool_calls:
                 logger.error(
