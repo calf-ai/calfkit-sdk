@@ -1180,10 +1180,12 @@ async def test_tool_failed_marker_construction_falls_back_to_sentinel():
     # it via state.tool_results.get(tool_call_id).
     stored = ctx.state.tool_results.get("")
     assert isinstance(stored, FailedToolCall), f"expected FailedToolCall, got {type(stored).__name__}"
-    # Fallback uses sentinel field values so operators can distinguish from
-    # a normal marker.
+    # Fallback preserves real ``tool_name`` (operators need correlation), only
+    # substitutes ``<missing>`` for the empty ``tool_call_id`` that caused
+    # primary construction to fail. ``exc_type`` is the construction-failure
+    # sentinel.
     assert stored.tool_call_id == "<missing>"
-    assert stored.tool_name == "<unknown>"
+    assert stored.tool_name == "boom"
     assert stored.exc_type == "FailedToolCallConstructionError"
     assert "Failed to construct primary marker" in stored.exc_message
 
@@ -1276,3 +1278,98 @@ async def test_agent_validator_failure_branch_continues_loop():
     assert isinstance(bad_stored, RetryPromptPart)
     assert "tc-good-002" not in ctx.state.tool_results, "good call should still be pending dispatch"
     assert isinstance(result, Call), f"expected Call (good call dispatched), got {type(result).__name__}"
+
+
+# ---------------------------------------------------------------------------
+# args_as_dict() raises TypeError on non-string/non-dict args; must not escape
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_handles_typeerror_args_as_retry_prompt():
+    # Regression: when the LLM emits a ``ToolCallPart.args`` that is neither a
+    # JSON string nor a dict (e.g. an int / list from an off-spec provider),
+    # ``args_as_dict()`` raises ``TypeError`` from ``pydantic_core.from_json``.
+    # The dispatch catch must widen beyond (ValueError, AssertionError) so the
+    # exception does not escape ``run()`` and hang the caller. Surfaces as a
+    # ``RetryPromptPart`` for LLM-visible retry.
+    def typed_tool(ctx: ToolContext, x: int) -> str:
+        return f"got {x}"
+
+    tool_node = ToolNodeDef.create_tool_node(
+        func=typed_tool,
+        subscribe_topics="tool.typeerr.input",
+        publish_topic="tool.typeerr.output",
+    )
+
+    # args is an int, not a dict or JSON string — args_as_dict() raises TypeError.
+    bad_call = ToolCallPart(tool_name="typed_tool", args=123, tool_call_id="tc-typeerr")
+
+    agent = Agent(
+        "agent_typeerr",
+        system_prompt="x",
+        subscribe_topics="agent_typeerr.input",
+        publish_topic="agent_typeerr.output",
+        model_client=_model_emits_tool_calls([bad_call]),
+        tools=[tool_node],
+    )
+
+    ctx = _make_ctx(State())
+    result = await agent.run(ctx)
+
+    assert isinstance(result, TailCall), f"expected TailCall, got {type(result).__name__}"
+    stored = ctx.state.tool_results.get("tc-typeerr")
+    assert isinstance(stored, RetryPromptPart)
+    assert "TypeError" in str(stored.content)
+    assert "Malformed tool arguments" in str(stored.content)
+
+
+# ---------------------------------------------------------------------------
+# Sentinel fallback preserves real tool identity when valid
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_marker_preserves_real_tool_name_and_id_when_valid(monkeypatch):
+    # Regression: when primary FailedToolCall construction fails for any reason
+    # OTHER than empty tool_call_id/tool_name (the previously-documented trigger),
+    # the fallback must still preserve real ``tool_name`` / ``tool_call_id`` so
+    # operators don't lose the correlation key in the raised ToolExecutionError.
+    import calfkit.nodes.tool as tool_module
+
+    _original_marker_cls = tool_module.FailedToolCall
+    _call_count = {"n": 0}
+
+    def _make_failing_then_real(*args, **kwargs):
+        _call_count["n"] += 1
+        if _call_count["n"] == 1:
+            # Simulate ANY construction failure unrelated to the input fields
+            # (e.g., a future schema-evolution constraint).
+            raise RuntimeError("simulated primary construction failure")
+        return _original_marker_cls(*args, **kwargs)
+
+    monkeypatch.setattr(tool_module, "FailedToolCall", _make_failing_then_real)
+
+    def boom(ctx: ToolContext) -> str:
+        raise ValueError("original tool failure")
+
+    tool_node = ToolNodeDef.create_tool_node(
+        func=boom,
+        subscribe_topics="tool.preserve.input",
+        publish_topic="tool.preserve.output",
+    )
+
+    state = State()
+    tool_call_id = "real-correlation-id-abc123"
+    _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
+    ctx = _make_ctx(state)
+
+    result = await tool_node.run(ctx, tool_call_id)
+    assert isinstance(result, ReturnCall)
+
+    stored = ctx.state.tool_results.get(tool_call_id)
+    assert isinstance(stored, FailedToolCall)
+    # Real values preserved — operators can still grep the log for the call id.
+    assert stored.tool_call_id == tool_call_id, f"expected real id preserved, got {stored.tool_call_id!r}"
+    assert stored.tool_name == "boom", f"expected real tool_name preserved, got {stored.tool_name!r}"
+    # exc_type marks this as a fallback marker.
+    assert stored.exc_type == "FailedToolCallConstructionError"
+    assert "Failed to construct primary marker" in stored.exc_message

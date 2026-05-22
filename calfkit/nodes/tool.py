@@ -151,12 +151,22 @@ class ToolNodeDef(BaseToolNodeDef):
                     tool_call_part.tool_call_id,
                     type(construct_err).__name__,
                 )
-                # Hardcoded sentinel fallback: every field is a known-valid literal
-                # so construction itself cannot raise. The reply still publishes so
-                # the agent isn't left hanging on the original tool_call_id.
+                # Fallback: preserve real ``tool_name`` / ``tool_call_id`` from
+                # ``tool_call_part`` when they are valid strings (so operators
+                # don't lose the correlation key in the raised ToolExecutionError);
+                # only substitute sentinels for fields that are themselves
+                # problematic. ``isinstance(..., str)`` and truthy guards keep
+                # construction total even if the originals are the cause of the
+                # primary failure (e.g. empty ``tool_call_id``).
+                fallback_tool_name = (
+                    tool_call_part.tool_name if isinstance(tool_call_part.tool_name, str) and tool_call_part.tool_name else "<unknown>"
+                )
+                fallback_tool_call_id = (
+                    tool_call_part.tool_call_id if isinstance(tool_call_part.tool_call_id, str) and tool_call_part.tool_call_id else "<missing>"
+                )
                 marker = FailedToolCall(
-                    tool_name="<unknown>",
-                    tool_call_id="<missing>",
+                    tool_name=fallback_tool_name,
+                    tool_call_id=fallback_tool_call_id,
                     exc_type="FailedToolCallConstructionError",
                     exc_message=f"Failed to construct primary marker: {_safe_exc_message(construct_err)}",
                 )

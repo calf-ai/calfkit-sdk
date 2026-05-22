@@ -218,15 +218,23 @@ class BaseAgentNodeDef(
                 # paths so that malformed-JSON args from override (schema-only)
                 # tools are also surfaced as RetryPromptPart instead of escaping
                 # to the worker's hard FailedToolCall path.
+                #
+                # ``args_as_dict()`` can raise more than just ValueError /
+                # AssertionError: ``pydantic_core.from_json`` raises TypeError
+                # when ``args`` is a non-string/non-bytes value (e.g. an int or
+                # list emitted by an off-spec provider). Catch broadly so any
+                # parse failure surfaces as an LLM-retryable RetryPromptPart
+                # rather than escaping ``run()`` and hanging the caller.
                 try:
                     args = tool_call.args_as_dict()
-                except (ValueError, AssertionError) as e:
-                    content = f"Malformed tool arguments: {type(e).__name__}: {e}"
+                except Exception as e:
+                    content = f"Malformed tool arguments: {type(e).__name__}: {_safe_exc_message(e)}"
                     logger.warning(
                         "[%s] tool=%s args parse failed at dispatch: %s",
                         ctx.deps.correlation_id[:8],
                         tool_call.tool_name,
                         content,
+                        exc_info=True,
                     )
                     ctx.state.add_tool_result(
                         tool_call.tool_call_id,
