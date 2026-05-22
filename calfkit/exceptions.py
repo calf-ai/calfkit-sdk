@@ -1,3 +1,6 @@
+from typing import Any
+
+
 class DeserializationError(Exception):
     """Raised when client-side output deserialization fails."""
 
@@ -15,7 +18,7 @@ class ToolExecutionError(Exception):
         self.exc_message = exc_message
         super().__init__(f"Tool {tool_name!r} (call_id={tool_call_id}) raised {exc_type}: {exc_message}")
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[Any, ...]:
         # Bypass keyword-only ``__init__`` during reconstruction by routing
         # through a module-level helper that uses ``__new__``. A naive
         # ``(self.__class__, (), state)`` reduction would call ``__init__()``
@@ -31,7 +34,12 @@ class ToolExecutionError(Exception):
             },
         )
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: dict[str, Any] | None) -> None:
+        # ``__reduce__`` above always provides a dict, but the supertype
+        # signature allows ``None`` (Liskov); treat ``None`` as a no-op so
+        # subclasses constructed without state don't crash.
+        if state is None:
+            return
         self.tool_name = state["tool_name"]
         self.tool_call_id = state["tool_call_id"]
         self.exc_type = state["exc_type"]

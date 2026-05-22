@@ -112,9 +112,8 @@ def _calf_tool_result_discriminator(x: Any) -> str | None:
     union falls through to the ``Any`` arm rather than silently misrouting.
     Keep this in sync with the upstream helper if a new pydantic-ai tag is added.
     """
-    getter = x.get if isinstance(x, dict) else lambda k: getattr(x, k, None)
     for key in ("marker_kind", "kind", "part_kind"):
-        v = getter(key)
+        v = x.get(key) if isinstance(x, dict) else getattr(x, key, None)
         if isinstance(v, str):
             return v
     return None

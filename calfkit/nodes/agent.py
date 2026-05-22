@@ -282,17 +282,17 @@ class BaseAgentNodeDef(
                     try:
                         tool_node.validate_call_args(args)
                     except ValidationError as e:
-                        content = e.errors(include_url=False, include_context=False)
+                        validation_errors = e.errors(include_url=False, include_context=False)
                         logger.warning(
                             "[%s] tool=%s arg validation failed at dispatch: %s",
                             ctx.deps.correlation_id[:8],
                             tool_call.tool_name,
-                            content,
+                            validation_errors,
                         )
                         ctx.state.add_tool_result(
                             tool_call.tool_call_id,
                             RetryPromptPart(
-                                content=content,
+                                content=validation_errors,
                                 tool_name=tool_call.tool_name,
                                 tool_call_id=tool_call.tool_call_id,
                             ),
