@@ -46,11 +46,22 @@ from calfkit.nodes import Agent, ToolNodeDef
 # ---------------------------------------------------------------------------
 
 
-def _make_ctx(state: State, correlation_id: str = "cid-tool-errors-00000000") -> SessionRunContext:
-    return SessionRunContext(
+def _make_ctx(
+    state: State,
+    correlation_id: str = "cid-tool-errors-00000000",
+    frame_id: str | None = None,
+) -> SessionRunContext:
+    ctx = SessionRunContext(
         state=state,
         deps=Deps(correlation_id=correlation_id, provided_deps={}),
     )
+    # ``_frame_id`` is a ``PrivateAttr`` populated by ``BaseNodeDef.prepare_context``
+    # in the live path; tests that drive ``agent.run`` directly must set it
+    # here when they exercise parallel-mode aggregation (which keys
+    # ``_pending_batches`` on ``frame_id``).
+    if frame_id is not None:
+        ctx._frame_id = frame_id
+    return ctx
 
 
 def _register_tool_call(state: State, *, tool_name: str, tool_call_id: str, args: dict | None = None) -> ToolCallPart:
@@ -394,6 +405,7 @@ async def test_agent_parallel_mode_marker_in_batch_triggers_error_after_aggregat
     )
 
     correlation_id = "cid-parallel-mixed"
+    frame_id = "frame-parallel-mixed"
     success_id = "tc-parallel-ok"
     fail_id = "tc-parallel-fail"
 
@@ -401,7 +413,7 @@ async def test_agent_parallel_mode_marker_in_batch_triggers_error_after_aggregat
     _register_tool_call(base_state, tool_name="happy_tool", tool_call_id=success_id)
     _register_tool_call(base_state, tool_name="buggy_tool", tool_call_id=fail_id)
 
-    agent._pending_batches[correlation_id] = PendingToolBatch(
+    agent._pending_batches[frame_id] = PendingToolBatch(
         expected_tool_call_ids=frozenset({success_id, fail_id}),
         base_state=base_state,
     )
@@ -423,7 +435,7 @@ async def test_agent_parallel_mode_marker_in_batch_triggers_error_after_aggregat
         ),
     )
 
-    ctx = _make_ctx(inflight_state, correlation_id=correlation_id)
+    ctx = _make_ctx(inflight_state, correlation_id=correlation_id, frame_id=frame_id)
 
     with pytest.raises(ToolExecutionError) as exc_info:
         await agent.run(ctx)
@@ -448,6 +460,7 @@ async def test_agent_parallel_mode_waits_for_incomplete_batch():
     )
 
     correlation_id = "cid-parallel-partial"
+    frame_id = "frame-parallel-partial"
     pending_id = "tc-parallel-pending"
     fail_id = "tc-parallel-partial-fail"
 
@@ -455,7 +468,7 @@ async def test_agent_parallel_mode_waits_for_incomplete_batch():
     _register_tool_call(base_state, tool_name="slow_tool", tool_call_id=pending_id)
     _register_tool_call(base_state, tool_name="buggy_tool", tool_call_id=fail_id)
 
-    agent._pending_batches[correlation_id] = PendingToolBatch(
+    agent._pending_batches[frame_id] = PendingToolBatch(
         expected_tool_call_ids=frozenset({pending_id, fail_id}),
         base_state=base_state,
     )
@@ -472,7 +485,7 @@ async def test_agent_parallel_mode_waits_for_incomplete_batch():
         ),
     )
 
-    ctx = _make_ctx(inflight_state, correlation_id=correlation_id)
+    ctx = _make_ctx(inflight_state, correlation_id=correlation_id, frame_id=frame_id)
 
     result = await agent.run(ctx)
     assert isinstance(result, Silent), f"expected Silent while batch incomplete, got {type(result).__name__}"
@@ -996,6 +1009,7 @@ async def test_agent_parallel_mode_logs_all_failures_before_raising(caplog):
     )
 
     correlation_id = "cid-multi-fail"
+    frame_id = "frame-multi-fail"
     first_id = "tc-first-fail"
     second_id = "tc-second-fail"
 
@@ -1003,7 +1017,7 @@ async def test_agent_parallel_mode_logs_all_failures_before_raising(caplog):
     _register_tool_call(base_state, tool_name="buggy_a", tool_call_id=first_id)
     _register_tool_call(base_state, tool_name="buggy_b", tool_call_id=second_id)
 
-    agent._pending_batches[correlation_id] = PendingToolBatch(
+    agent._pending_batches[frame_id] = PendingToolBatch(
         expected_tool_call_ids=frozenset({first_id, second_id}),
         base_state=base_state,
     )
@@ -1030,7 +1044,7 @@ async def test_agent_parallel_mode_logs_all_failures_before_raising(caplog):
         ),
     )
 
-    ctx = _make_ctx(inflight_state, correlation_id=correlation_id)
+    ctx = _make_ctx(inflight_state, correlation_id=correlation_id, frame_id=frame_id)
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.agent"):
         with pytest.raises(ToolExecutionError):
@@ -1490,3 +1504,185 @@ async def test_agent_corrupt_marker_with_missing_tool_name_uses_sentinel():
     assert err.exc_type == "CorruptFailedToolCallMarker"
     assert err.tool_name == "<unknown>"
     assert err.tool_call_id == tool_call_id
+
+
+# ---------------------------------------------------------------------------
+# Parallel-same-agent invocations: ``_pending_batches`` is keyed by ``frame_id``,
+# not ``correlation_id``. A supervisor that fans out two ``Call``s to the same
+# agent shares one correlation_id across both invocations — keying on
+# correlation_id used to silently collide the batches and wedge one of them.
+# ---------------------------------------------------------------------------
+
+
+async def test_pending_batches_keyed_by_frame_id_not_correlation_id():
+    # Direct unit-level regression for the collision bug. Two parallel
+    # invocations of the same agent (same correlation_id, different frame_ids)
+    # must each track their own PendingToolBatch independently, and a reply
+    # for invocation A's tool_call_ids must aggregate into A's batch only.
+    agent = Agent(
+        "agent_parallel_same",
+        system_prompt="x",
+        subscribe_topics="agent_parallel_same.input",
+        publish_topic="agent_parallel_same.output",
+        model_client=TestModel(),
+    )
+
+    correlation_id = "cid-shared-by-both"
+
+    # Invocation A
+    frame_a = "frame-A"
+    a_tool_id = "tc-A-1"
+    base_state_a = State()
+    _register_tool_call(base_state_a, tool_name="tool_a", tool_call_id=a_tool_id)
+    agent._pending_batches[frame_a] = PendingToolBatch(
+        expected_tool_call_ids=frozenset({a_tool_id}),
+        base_state=base_state_a,
+    )
+
+    # Invocation B (same correlation_id, different frame_id, disjoint tool_call_ids)
+    frame_b = "frame-B"
+    b_tool_id = "tc-B-1"
+    base_state_b = State()
+    _register_tool_call(base_state_b, tool_name="tool_b", tool_call_id=b_tool_id)
+    agent._pending_batches[frame_b] = PendingToolBatch(
+        expected_tool_call_ids=frozenset({b_tool_id}),
+        base_state=base_state_b,
+    )
+
+    # Both batches coexist — keying on correlation_id would have overwritten one.
+    assert set(agent._pending_batches.keys()) == {frame_a, frame_b}, (
+        f"both per-invocation batches must coexist; got keys={list(agent._pending_batches.keys())}"
+    )
+    assert agent._pending_batches[frame_a].expected_tool_call_ids == frozenset({a_tool_id})
+    assert agent._pending_batches[frame_b].expected_tool_call_ids == frozenset({b_tool_id})
+
+    # Reply for invocation A arrives. ctx carries A's frame_id.
+    a_reply_state = State()
+    _register_tool_call(a_reply_state, tool_name="tool_a", tool_call_id=a_tool_id)
+    a_reply_state.add_tool_result(
+        a_tool_id,
+        ToolReturn(return_value="a-done", metadata={"tool_call_id": a_tool_id}),
+    )
+    ctx_a = _make_ctx(a_reply_state, correlation_id=correlation_id, frame_id=frame_a)
+
+    agent._parallel_state_aggregation(ctx_a)
+
+    # A's batch completed and was popped; B's must be untouched.
+    assert frame_a not in agent._pending_batches, "A's batch must be popped after completion"
+    assert frame_b in agent._pending_batches, "B's batch must NOT be affected by A's reply"
+    assert agent._pending_batches[frame_b].collected_results == {}, "B's batch must not have collected any of A's results"
+
+    # Now B's reply arrives.
+    b_reply_state = State()
+    _register_tool_call(b_reply_state, tool_name="tool_b", tool_call_id=b_tool_id)
+    b_reply_state.add_tool_result(
+        b_tool_id,
+        ToolReturn(return_value="b-done", metadata={"tool_call_id": b_tool_id}),
+    )
+    ctx_b = _make_ctx(b_reply_state, correlation_id=correlation_id, frame_id=frame_b)
+
+    agent._parallel_state_aggregation(ctx_b)
+
+    assert frame_b not in agent._pending_batches, "B's batch must be popped after completion"
+
+
+async def test_parallel_replies_with_wrong_frame_id_do_not_aggregate():
+    # Defense-in-depth: if a tool reply arrives carrying an unrelated frame_id
+    # (e.g. a stale message, a routing error, a reply destined for some other
+    # agent invocation), the aggregator must not absorb its tool_results into
+    # the wrong batch. The batch under the correct frame_id must remain
+    # untouched.
+    agent = Agent(
+        "agent_wrong_frame",
+        system_prompt="x",
+        subscribe_topics="agent_wrong_frame.input",
+        publish_topic="agent_wrong_frame.output",
+        model_client=TestModel(),
+    )
+
+    real_frame = "frame-real"
+    real_tool_id = "tc-real-1"
+    base_state = State()
+    _register_tool_call(base_state, tool_name="tool_real", tool_call_id=real_tool_id)
+    agent._pending_batches[real_frame] = PendingToolBatch(
+        expected_tool_call_ids=frozenset({real_tool_id}),
+        base_state=base_state,
+    )
+
+    # A reply arrives carrying tool_results for ``real_tool_id`` but a
+    # different frame_id — must NOT aggregate into the real batch.
+    wrong_frame = "frame-unrelated"
+    inflight_state = State()
+    _register_tool_call(inflight_state, tool_name="tool_real", tool_call_id=real_tool_id)
+    inflight_state.add_tool_result(
+        real_tool_id,
+        ToolReturn(return_value="leaked", metadata={"tool_call_id": real_tool_id}),
+    )
+    ctx = _make_ctx(inflight_state, frame_id=wrong_frame)
+
+    agent._parallel_state_aggregation(ctx)
+
+    # Real batch is untouched.
+    assert real_frame in agent._pending_batches
+    assert agent._pending_batches[real_frame].collected_results == {}
+
+
+def test_prepare_context_populates_frame_id_from_envelope():
+    # Plumbing regression: ``prepare_context`` must read
+    # ``current_frame.frame_id`` into ``ctx._frame_id`` so that
+    # ``_pending_batches`` lookups in ``agent.run`` see the right key. Without
+    # this, ``ctx.frame_id`` returns ``None`` and every parallel batch lives
+    # under a single ``None`` key, re-introducing the collision bug at runtime.
+    import asyncio
+
+    from calfkit.models.envelope import Envelope
+    from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
+
+    agent = Agent(
+        "agent_prep_ctx",
+        system_prompt="x",
+        subscribe_topics="agent_prep_ctx.input",
+        publish_topic="agent_prep_ctx.output",
+        model_client=TestModel(),
+    )
+
+    frame = CallFrame(
+        target_topic="agent_prep_ctx.input",
+        callback_topic="caller.return",
+    )
+    wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[frame]))
+    envelope = Envelope(
+        context=SessionRunContext(
+            state=State(),
+            deps=Deps(correlation_id="cid-prep", provided_deps={}),
+        ),
+        internal_workflow_state=wf,
+    )
+
+    ctx = asyncio.run(agent.prepare_context(envelope))
+    assert ctx.frame_id == frame.frame_id, f"prepare_context must mirror current_frame.frame_id onto ctx; got {ctx.frame_id!r} vs {frame.frame_id!r}"
+
+
+def test_frame_id_survives_envelope_json_round_trip():
+    # The CallFrame's frame_id must survive Envelope JSON serialization
+    # verbatim — otherwise per-invocation aggregation keys would diverge across
+    # the Kafka boundary and the collision-bug fix would be ineffective in
+    # production (only in-process tests would see correct behavior).
+    from calfkit.models.envelope import Envelope
+    from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
+
+    frame = CallFrame(
+        target_topic="some.topic",
+        callback_topic="caller.return",
+    )
+    wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[frame]))
+    envelope = Envelope(
+        context=SessionRunContext(
+            state=State(),
+            deps=Deps(correlation_id="cid-rt", provided_deps={}),
+        ),
+        internal_workflow_state=wf,
+    )
+
+    restored = Envelope.model_validate_json(envelope.model_dump_json())
+    assert restored.internal_workflow_state.current_frame.frame_id == frame.frame_id
