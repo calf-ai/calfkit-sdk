@@ -104,14 +104,23 @@ class BaseAgentNodeDef(
         # its own fresh ``CallFrame`` (UUID7 ``frame_id``), so the per-invocation
         # frame is the only key that keeps concurrent batches from clobbering each
         # other in this dict.
-        #
-        # ``ctx.frame_id`` may be ``None`` when ``run()`` is driven outside the
-        # framework's prepare-context path (unit tests of non-parallel branches).
-        # In that case the dict lookup misses cleanly — no aggregation needed
-        # because no batch could have been written under ``None`` (the
-        # write-side guard rejects ``None``).
         frame_id = ctx.frame_id
         if frame_id is None:
+            # ``BaseNodeDef.prepare_context`` unconditionally mirrors
+            # ``current_frame.frame_id`` (which has a ``default_factory``) onto
+            # ``ctx._frame_id``, so a None here means ``run()`` was driven outside
+            # the framework handler — either a unit test or a subclass that
+            # bypasses ``prepare_context``. Warn loudly so a future regression in
+            # the handler path surfaces immediately instead of silently skipping
+            # aggregation and potentially advancing past a real batch.
+            logger.warning(
+                "[%s] _parallel_state_aggregation: ctx.frame_id is None on node=%s; "
+                "skipping aggregation. prepare_context is the only legitimate "
+                "population path for _frame_id — a None value here indicates run() "
+                "was driven outside the framework handler.",
+                ctx.deps.correlation_id[:8],
+                self.name,
+            )
             return
         batch = self._pending_batches.get(frame_id)
         if batch is not None:
@@ -124,6 +133,31 @@ class BaseAgentNodeDef(
                     batch.base_state.add_tool_result(tool_call_id, tool_call_result)
                 ctx.state = batch.base_state
                 del self._pending_batches[frame_id]
+        else:
+            # Stray-reply / lost-batch detection: more than one tool_result for the
+            # current ``latest_tool_calls`` is present, but no batch is registered
+            # for this frame_id. The agent would have written a batch on dispatch
+            # (single-tool dispatch in parallel mode is the one legitimate
+            # no-batch path, hence the ``> 1`` floor to suppress that false
+            # positive). Likely causes: lost batch from partition rebalance or
+            # process restart, stray/duplicate delivery, or a routing error.
+            # Replies will not be aggregated; if any tool_call_ids remain
+            # incomplete the existing guard at the bottom of ``run()`` raises
+            # ``RuntimeError`` — this warning fires in the all-arrived-together
+            # race that would otherwise silently advance.
+            completed_latest = [tc for tc in ctx.state.latest_tool_calls() if tc.tool_call_id in ctx.state.tool_results]
+            if len(completed_latest) > 1:
+                logger.warning(
+                    "[%s] no PendingToolBatch for frame_id=%s on node=%s but %d completed "
+                    "tool replies present (tool_call_ids=%s); replies will NOT be "
+                    "aggregated. Likely a lost batch (partition rebalance or process "
+                    "restart), stray/duplicate delivery, or a routing error.",
+                    ctx.deps.correlation_id[:8],
+                    frame_id,
+                    self.name,
+                    len(completed_latest),
+                    [tc.tool_call_id for tc in completed_latest],
+                )
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         tools_registry = dict[str, BaseToolNodeSchema]()
@@ -148,10 +182,21 @@ class BaseAgentNodeDef(
 
         if not self.sequential_only_mode:
             self._parallel_state_aggregation(ctx)
-            # ``ctx.frame_id`` may be ``None`` in tests driving ``run()`` outside
-            # the framework's prepare-context path; treat that as "no batch".
-            # See ``_require_frame_id_for_write`` for why write-side rejects None.
-            batch = self._pending_batches.get(ctx.frame_id) if ctx.frame_id is not None else None
+            # Defense-in-depth: ``_parallel_state_aggregation`` already warns
+            # and returns early on a None ``frame_id``, but a future refactor
+            # that calls this branch independently must not silently mask the
+            # missing key. See ``_require_frame_id_for_write`` for why write-side
+            # rejects None.
+            if ctx.frame_id is None:
+                logger.warning(
+                    "[%s] run(): ctx.frame_id is None on node=%s; cannot look up "
+                    "parallel batch — treating as no batch.",
+                    ctx.deps.correlation_id[:8],
+                    self.name,
+                )
+                batch = None
+            else:
+                batch = self._pending_batches.get(ctx.frame_id)
             if batch and not batch.is_complete:
                 return Silent()
 
