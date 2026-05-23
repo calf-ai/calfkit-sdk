@@ -189,8 +189,7 @@ class BaseAgentNodeDef(
             # rejects None.
             if ctx.frame_id is None:
                 logger.warning(
-                    "[%s] run(): ctx.frame_id is None on node=%s; cannot look up "
-                    "parallel batch — treating as no batch.",
+                    "[%s] run(): ctx.frame_id is None on node=%s; cannot look up parallel batch — treating as no batch.",
                     ctx.deps.correlation_id[:8],
                     self.name,
                 )
