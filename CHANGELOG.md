@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.4...v0.3.5) (2026-05-23)
+
+
+### Bug Fixes
+
+* key _pending_batches by frame_id to fix parallel tool calling collisions ([#155](https://github.com/calf-ai/calfkit-sdk/issues/155)) ([12ad569](https://github.com/calf-ai/calfkit-sdk/commit/12ad569d4c58ff7f66d26018c7b46533ae8702dc))
+
 ## [0.3.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.3...v0.3.4) (2026-05-23)
 
 
