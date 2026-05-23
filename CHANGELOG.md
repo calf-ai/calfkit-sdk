@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.3...v0.3.4) (2026-05-23)
+
+
+### Documentation
+
+* add Ask DeepWiki badge to README ([#152](https://github.com/calf-ai/calfkit-sdk/issues/152)) ([2fb90f7](https://github.com/calf-ai/calfkit-sdk/commit/2fb90f70ddf9e5363759936c385af04c58651e33))
+
 ## [0.3.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.2...v0.3.3) (2026-05-22)
 
 
