@@ -162,10 +162,12 @@ class BaseNodeDef(BaseNodeSchema):
         emitter_node_kind: str | None = None,
     ) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
-        if envelope.internal_workflow_state.current_frame.overrides:
-            ctx.state.overrides = envelope.internal_workflow_state.current_frame.overrides
+        current_frame = envelope.internal_workflow_state.current_frame
+        if current_frame.overrides:
+            ctx.state.overrides = current_frame.overrides
         ctx._emitter_node_id = emitter_node_id
         ctx._emitter_node_kind = emitter_node_kind
+        ctx._frame_id = current_frame.frame_id
         return ctx
 
     def _emitter_headers(self) -> dict[str, str]:

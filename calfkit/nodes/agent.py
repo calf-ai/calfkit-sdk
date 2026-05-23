@@ -66,8 +66,54 @@ class BaseAgentNodeDef(
             model_settings=cast(ModelSettings | None, model_settings),
         )
 
+    @staticmethod
+    def _require_frame_id_for_write(ctx: SessionRunContext) -> str:
+        """Resolve the per-invocation frame_id when WRITING a new parallel batch.
+
+        ``ctx.frame_id`` is populated by ``BaseNodeDef.prepare_context`` from
+        ``envelope.internal_workflow_state.current_frame.frame_id``. It is the
+        only correct key for ``_pending_batches`` because parallel invocations
+        of the same agent share a single ``correlation_id`` — see
+        :meth:`_parallel_state_aggregation` for the collision scenario this
+        defends against. A ``None`` value at write time means the agent was
+        invoked outside the framework's prepare-context path (e.g. a test
+        driving ``run()`` directly without seeding ``_frame_id``); raising is
+        the right call because silently bucketing every batch under ``None``
+        would re-introduce the exact bug this keying is designed to prevent.
+
+        Read-side lookups tolerate ``None`` (treated as "no batch present")
+        because the only way a read can find a ``None``-keyed entry is if a
+        write was previously allowed to use ``None`` — which this guard
+        prevents at the source.
+        """
+        frame_id = ctx.frame_id
+        if frame_id is None:
+            raise RuntimeError(
+                "ctx.frame_id is None — parallel tool-batch dispatch requires a "
+                "frame_id, normally populated by BaseNodeDef.prepare_context from "
+                "the inbound envelope's current_frame. If you are driving run() "
+                "directly in a test that fans out a parallel batch, set "
+                "ctx._frame_id before invoking."
+            )
+        return frame_id
+
     def _parallel_state_aggregation(self, ctx: SessionRunContext) -> None:
-        batch = self._pending_batches.get(ctx.deps.correlation_id)
+        # Keyed on ``ctx.frame_id`` (per-invocation), NOT ``ctx.deps.correlation_id``:
+        # a supervisor that fans out two ``Call``s to the same agent topic shares one
+        # ``correlation_id`` across both invocations. Each invocation publishes onto
+        # its own fresh ``CallFrame`` (UUID7 ``frame_id``), so the per-invocation
+        # frame is the only key that keeps concurrent batches from clobbering each
+        # other in this dict.
+        #
+        # ``ctx.frame_id`` may be ``None`` when ``run()`` is driven outside the
+        # framework's prepare-context path (unit tests of non-parallel branches).
+        # In that case the dict lookup misses cleanly — no aggregation needed
+        # because no batch could have been written under ``None`` (the
+        # write-side guard rejects ``None``).
+        frame_id = ctx.frame_id
+        if frame_id is None:
+            return
+        batch = self._pending_batches.get(frame_id)
         if batch is not None:
             for tool_call_id in batch.expected_tool_call_ids:
                 if tool_call_id not in batch.collected_results and tool_call_id in ctx.state.tool_results:
@@ -77,7 +123,7 @@ class BaseAgentNodeDef(
                 for tool_call_id, tool_call_result in batch.collected_results.items():
                     batch.base_state.add_tool_result(tool_call_id, tool_call_result)
                 ctx.state = batch.base_state
-                del self._pending_batches[ctx.deps.correlation_id]
+                del self._pending_batches[frame_id]
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         tools_registry = dict[str, BaseToolNodeSchema]()
@@ -102,7 +148,10 @@ class BaseAgentNodeDef(
 
         if not self.sequential_only_mode:
             self._parallel_state_aggregation(ctx)
-            batch = self._pending_batches.get(ctx.deps.correlation_id)
+            # ``ctx.frame_id`` may be ``None`` in tests driving ``run()`` outside
+            # the framework's prepare-context path; treat that as "no batch".
+            # See ``_require_frame_id_for_write`` for why write-side rejects None.
+            batch = self._pending_batches.get(ctx.frame_id) if ctx.frame_id is not None else None
             if batch and not batch.is_complete:
                 return Silent()
 
@@ -183,7 +232,7 @@ class BaseAgentNodeDef(
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
                     raise RuntimeError(
                         f"[{ctx.deps.correlation_id[:8]}] Parallel mode reached incomplete tool calls outside aggregation gate. "
-                        f"node={self.name} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
+                        f"node={self.name} frame_id={ctx.frame_id} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
                         f"This indicates lost PendingToolBatch state (e.g. partition rebalance or process restart)."
                     )
 
@@ -356,7 +405,7 @@ class BaseAgentNodeDef(
                     for tc in pending_tool_calls
                 ]
 
-                self._pending_batches[ctx.deps.correlation_id] = PendingToolBatch(
+                self._pending_batches[self._require_frame_id_for_write(ctx)] = PendingToolBatch(
                     expected_tool_call_ids=frozenset(launch_tool_call_ids),
                     base_state=ctx.state.model_copy(deep=True),
                 )
