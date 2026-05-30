@@ -25,7 +25,11 @@ dependencies = [
     "uuid-utils>=0.14.0",
     # Vendored pydantic-ai dependencies (from pydantic-ai-slim v1.47.0)
     "httpx>=0.27",
-    "griffe>=1.14.0",
+    # griffe pin bumped to >=2.0 during MCP v1 Phase 0: griffe 1.15.0 ships a
+    # broken wheel with no top-level __init__.py, causing `from griffe import
+    # Docstring` in calfkit/_vendor/pydantic_ai/_griffe.py to fail. griffe 2.x
+    # restores the symbol and is API-compatible with the vendored code.
+    "griffe>=2.0,<3",
     "typing-inspection>=0.4.0",
     "opentelemetry-api>=1.28.0",
     "genai-prices>=0.0.48",
@@ -36,6 +40,10 @@ dependencies = [
     "anthropic>=0.80.0",
     "typing-extensions>=4.15.0",
     "dishka>=1.9.1",
+    # MCP (Model Context Protocol) — used by calfkit/mcp/* adaptor.
+    # Pin <2 to gate out major bumps; rename of streamablehttp_client in 1.20
+    # is the reason for the lower bound.
+    "mcp>=1.20.0,<2",
 ]
 
 [project.urls]
@@ -45,6 +53,9 @@ Issues = "https://github.com/calf-ai/calf-sdk/issues"
 
 [project.optional-dependencies]
 dev = []
+# Installed via `pip install calfkit[mcp-codegen]`. Off the critical install
+# path because the CLI is only invoked at schema-generation time, not runtime.
+mcp-codegen = ["typer>=0.12"]
 
 [build-system]
 requires = ["hatchling"]
