@@ -370,6 +370,101 @@ async def save_final(result: NodeResult) -> None:
 
 <br>
 
+### MCP Adaptor (Optional)
+
+Use any [Model Context Protocol](https://modelcontextprotocol.io/) server as native calfkit tools — Gmail, GitHub, Postgres, filesystems, browsers, and hundreds of others — without writing per-tool glue code.
+
+**Step 1 — Generate schemas** (one-time per MCP server, committed to your repo):
+
+```shell
+pip install calfkit[mcp-codegen]   # adds the codegen CLI
+calfkit mcp codegen gmail \
+    --command "npx -y @modelcontextprotocol/server-gmail" \
+    --output gmail_schemas.py
+```
+
+The CLI spawns the MCP server briefly, runs `tools/list`, and writes a deterministic Python module with `McpToolDef` constants the agent will consume.
+
+**Step 2 — Declare the server in a shared module**:
+
+```python
+# shared.py — imported by both agent and tool workers
+from calfkit import mcp
+from gmail_schemas import Gmail
+
+gmail = mcp("npx -y @modelcontextprotocol/server-gmail", tools=Gmail.ALL)
+```
+
+**Step 3 — Use it** — same shape as any native tool:
+
+```python
+# agent_worker.py
+from calfkit import Agent, Client, Worker
+from shared import gmail
+
+agent = Agent(
+    "scribe",
+    subscribe_topics="scribe.input",
+    model_client=...,
+    tools=[gmail],   # all gmail tools registered with the LLM
+)
+asyncio.run(Worker(Client.connect("localhost:9092"), nodes=[agent]).run())
+```
+
+```python
+# tools_worker.py — hosts the MCP subprocess + dispatches tool calls
+from calfkit import Client, Worker
+from shared import gmail
+
+asyncio.run(Worker(Client.connect("localhost:9092"), nodes=[gmail]).run())
+```
+
+That's it. Run the two workers; the agent's LLM can call any Gmail tool over Kafka.
+
+**Filter, rename, observe**:
+
+```python
+# Subset of tools
+gmail.where(read_only_hint=True)        # only read-only tools
+gmail.only("search", "send")             # explicit allowlist
+gmail.prefix("inbox")                    # gmail.search → inbox.search for the LLM
+
+# Tap any tool's outputs — same as native tools (the bridge publishes to mcp.<server>.<tool>.output)
+@consumer(subscribe_topics="mcp.gmail.send.output")
+async def audit_sent_email(result):
+    ...
+```
+
+**`mcp.json` interop** — copy your Claude Desktop / Cursor / Cline config verbatim:
+
+```python
+from calfkit.mcp import McpServers
+from gmail_schemas import Gmail
+from github_schemas import Github
+
+servers = McpServers.from_file("./mcp.json", schemas={
+    "gmail": Gmail.ALL,
+    "github": Github.ALL,
+})
+agent  = Agent("scribe", tools=[*servers.values()], ...)
+worker = Worker(client, nodes=[*servers.values(), agent])
+```
+
+**Per-tenant identity** (Pattern 1 multi-tenancy — MCP server holds the credentials, calfkit passes user identity):
+
+```python
+gmail = mcp(
+    "https://gmail-mcp.acme.com/mcp",
+    token="$CALFKIT_SERVICE_TOKEN",                     # session-static auth
+    meta=lambda ctx: {"user_id": ctx.deps["user_id"]},  # per-call user identity
+    tools=Gmail.ALL,
+)
+```
+
+Full guide with multi-server deployments, drift detection in CI, and observability patterns: [`docs/mcp-guide.md`](docs/mcp-guide.md).
+
+<br>
+
 ## Documentation
 
 Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.
