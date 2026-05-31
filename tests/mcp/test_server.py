@@ -525,3 +525,39 @@ def test_stdio_no_expansion_when_no_var() -> None:
     assert s.transport.command == "npx"
     assert s.transport.args == ("-y", "@m/server")
     assert s.transport.env == {"K": "literal"}
+
+
+def test_http_braced_var_form_expanded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``${VAR}`` form works through ``McpServer.http``, not just ``mcp.json``."""
+    monkeypatch.setenv("MCP_HOST", "api.example.com")
+    s = McpServer.http("https://${MCP_HOST}/mcp", tools=[_td("t")])
+    assert s.transport.url == "https://api.example.com/mcp"
+
+
+def test_http_explicit_authorization_beats_expanded_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit ``headers={'Authorization': ...}`` wins over ``token="$VAR"``.
+
+    Precedence is checked AFTER expansion — both legs need to be honoured.
+    """
+    monkeypatch.setenv("SECRET", "should-be-ignored")
+    s = McpServer.http(
+        "https://x.com/mcp",
+        tools=[_td("t")],
+        token="$SECRET",
+        headers={"Authorization": "Basic preset"},
+    )
+    assert s.transport.build_session_headers()["Authorization"] == "Basic preset"
+
+
+def test_http_expanded_url_must_have_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scheme-less expansion result fails loudly at construction."""
+    monkeypatch.setenv("BAD_BASE", "no-scheme-here")
+    with pytest.raises(McpConfigError, match="does not start with"):
+        McpServer.http("$BAD_BASE", tools=[_td("t")])
+
+
+def test_expand_env_failure_includes_arg_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset-var errors include the field name so multi-field configs are debuggable."""
+    monkeypatch.delenv("CALFKIT_TEST_MISSING_ENV", raising=False)
+    with pytest.raises(McpConfigError, match=r"McpServer\.stdio\(env=\).*CALFKIT_TEST_MISSING_ENV"):
+        McpServer.stdio("x", tools=[_td("t")], env={"K": "$CALFKIT_TEST_MISSING_ENV"})

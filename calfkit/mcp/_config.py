@@ -81,11 +81,14 @@ ParsedMcpServerSpec = ParsedStdioSpec | ParsedHttpSpec
 # ---------------------------------------------------------------------------
 
 
-def expand_env(value: Any) -> Any:
+def expand_env(value: Any, *, where: str | None = None) -> Any:
     """Recursively substitute ``$VAR`` / ``${VAR}`` in strings.
 
     Applied to ``str``, ``dict``, ``list``, and ``tuple`` values; all other
     types pass through unchanged. Unset env vars raise ``McpConfigError``.
+
+    ``where`` is a free-form context string (e.g. ``"McpServer.http(token=)"``)
+    prefixed to the error message so multi-field configs are easy to debug.
 
     >>> expand_env("$HOME")               # doctest: +SKIP
     '/Users/ryan'
@@ -95,17 +98,17 @@ def expand_env(value: Any) -> Any:
     'price: $5'
     """
     if isinstance(value, str):
-        return _expand_str(value)
+        return _expand_str(value, where=where)
     if isinstance(value, dict):
-        return {k: expand_env(v) for k, v in value.items()}
+        return {k: expand_env(v, where=where) for k, v in value.items()}
     if isinstance(value, list):
-        return [expand_env(x) for x in value]
+        return [expand_env(x, where=where) for x in value]
     if isinstance(value, tuple):
-        return tuple(expand_env(x) for x in value)
+        return tuple(expand_env(x, where=where) for x in value)
     return value
 
 
-def _expand_str(s: str) -> str:
+def _expand_str(s: str, *, where: str | None = None) -> str:
     """Expand ``$VAR`` and ``${VAR}`` references in a single string."""
 
     def _sub(match: re.Match[str]) -> str:
@@ -118,7 +121,8 @@ def _expand_str(s: str) -> str:
             # Shouldn't happen given the regex, but defensive.
             return match.group(0)
         if var_name not in os.environ:
-            raise McpConfigError(f"environment variable {var_name!r} is unset (referenced as ${var_name})")
+            prefix = f"{where}: " if where else ""
+            raise McpConfigError(f"{prefix}environment variable {var_name!r} is unset (referenced as ${var_name})")
         return os.environ[var_name]
 
     return _ENV_PATTERN.sub(_sub, s)

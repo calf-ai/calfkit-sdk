@@ -266,3 +266,86 @@ def test_readme_minimal_example_works() -> None:
     assert isinstance(gmail.transport, StdioTransport)
     assert gmail.raw_name == "server-gmail"
     assert len(list(gmail)) == 2  # iterates to yield BaseToolNodeSchema
+
+
+# ---------------------------------------------------------------------------
+# mcp() expand-before-routing — $VAR URLs / commands must auto-detect correctly
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_call_expands_var_url_and_routes_to_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``mcp("$MCP_URL", ...)`` with ``$MCP_URL=https://...`` must route to HTTP.
+
+    Regression: prior to the fix, the ``startswith("http")`` check ran on
+    the literal ``"$MCP_URL"`` string and mis-routed to stdio.
+    """
+    monkeypatch.setenv("MCP_URL", "https://api.example.com/mcp")
+    server = mcp_factory("$MCP_URL", tools=[_td()])
+    assert isinstance(server.transport, HttpTransport)
+    assert server.transport.url == "https://api.example.com/mcp"
+
+
+def test_mcp_call_expands_var_command_and_routes_to_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``mcp("$MCP_CMD", ...)`` with ``$MCP_CMD="npx -y @x"`` must shlex-split
+    the expanded value so multi-word commands work via env-var indirection.
+    """
+    monkeypatch.setenv("MCP_CMD", "npx -y @mcp/server-x")
+    server = mcp_factory("$MCP_CMD", tools=[_td()])
+    assert isinstance(server.transport, StdioTransport)
+    assert server.transport.command == "npx"
+    assert server.transport.args == ("-y", "@mcp/server-x")
+
+
+def test_mcp_call_unset_var_raises_with_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CALFKIT_NONEXISTENT_FACTORY_VAR", raising=False)
+    with pytest.raises(McpConfigError, match="CALFKIT_NONEXISTENT_FACTORY_VAR"):
+        mcp_factory("$CALFKIT_NONEXISTENT_FACTORY_VAR", tools=[_td()])
+
+
+# ---------------------------------------------------------------------------
+# Factory __getattr__ delegation (re-binding submodule shadow)
+# ---------------------------------------------------------------------------
+
+
+def test_factory_getattr_resolves_mcpserver_after_top_level_import() -> None:
+    """``from calfkit import mcp; calfkit.mcp.McpServer`` works despite the
+    factory rebinding the ``calfkit.mcp`` attribute on the parent package.
+    """
+    import calfkit  # noqa: F401  triggers the rebound attribute path
+    from calfkit.mcp import McpServer as direct_McpServer
+
+    assert top_level_mcp.McpServer is direct_McpServer
+
+
+def test_factory_getattr_resolves_other_public_names() -> None:
+    from calfkit.mcp import McpServers as direct_McpServers
+    from calfkit.mcp import McpToolAnnotations as direct_McpToolAnnotations
+    from calfkit.mcp import McpToolDef as direct_McpToolDef
+
+    assert top_level_mcp.McpServers is direct_McpServers
+    assert top_level_mcp.McpToolDef is direct_McpToolDef
+    assert top_level_mcp.McpToolAnnotations is direct_McpToolAnnotations
+
+
+def test_factory_getattr_private_attribute_raises() -> None:
+    with pytest.raises(AttributeError):
+        _ = top_level_mcp._not_a_real_attribute
+
+
+def test_factory_getattr_unknown_public_attribute_message() -> None:
+    """Unknown public attribute gets the standard Python module message,
+    matching what users see for any other module typo.
+    """
+    with pytest.raises(AttributeError, match="has no attribute 'NoSuchThing'"):
+        _ = top_level_mcp.NoSuchThing
+
+
+def test_factory_explicit_methods_still_resolve_without_getattr() -> None:
+    """``mcp.stdio`` / ``mcp.http`` resolve via the class, NOT __getattr__."""
+    # These are class methods on _McpFactory itself — verify they don't
+    # accidentally route through __getattr__ and break the factory contract.
+    assert callable(top_level_mcp.stdio)
+    assert callable(top_level_mcp.http)
+    # And the canonical happy path still works
+    s = top_level_mcp.stdio("x", tools=[_td()], name="explicit")
+    assert isinstance(s.transport, StdioTransport)

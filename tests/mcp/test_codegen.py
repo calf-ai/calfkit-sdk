@@ -91,7 +91,15 @@ def test_class_name_mixed_specials() -> None:
 
 
 def test_class_name_leading_digit_gets_prefix() -> None:
-    assert _to_class_name("12srv").startswith("_")
+    # The function only PascalCases when there's a separator to split on;
+    # ``12srv`` has none, so we get ``_12srv`` (digit-prefix added, casing
+    # preserved). Pin the exact value so the docstring + behaviour stay
+    # aligned.
+    assert _to_class_name("12srv") == "_12srv"
+
+
+def test_class_name_leading_digit_with_separator_pascal_cases_parts() -> None:
+    assert _to_class_name("12-srv") == "_12Srv"
 
 
 def test_class_name_empty_falls_back() -> None:
@@ -158,6 +166,9 @@ _FIXED_TIME = datetime.datetime(2026, 5, 30, 12, 0, 0, tzinfo=datetime.timezone.
 
 def test_render_module_minimal() -> None:
     out = render_module(server_name="x", tools=[], generated_at=_FIXED_TIME)
+    # Output starts with the file-level ruff exemption so generated files
+    # don't trip line-length lint on long tool descriptions / JSON schemas.
+    assert out.startswith("# ruff: noqa: E501")
     # Has the banner and class even with zero tools
     assert "DO NOT EDIT BY HAND" in out
     assert "class X:" in out

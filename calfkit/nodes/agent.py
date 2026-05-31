@@ -24,31 +24,26 @@ from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import BaseToolNodeDef, ToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
-# Public alias for the heterogeneous tool entries that ``Agent(tools=...)``
-# accepts. Native tool nodes pass through; ``McpServer`` instances are
-# flattened via their ``__iter__`` at construction time. Type-checkers see
-# the widened union; runtime sees the expanded list.
+# Public alias for ``Agent(tools=[...])`` entries. ``McpServer`` is
+# flattened by ``_flatten_tools`` at construction.
 ToolLike = ToolNodeDef | McpServer
 
 
 def _flatten_tools(entries: Iterable[ToolLike] | None) -> list[BaseToolNodeSchema]:
-    """Expand ``McpServer`` entries into their underlying tool schemas.
+    """Expand ``McpServer`` entries into ``BaseToolNodeSchema`` via ``__iter__``.
 
-    Native ``ToolNodeDef`` / ``BaseToolNodeSchema`` entries are appended
-    as-is. ``McpServer`` instances yield one ``BaseToolNodeSchema`` per
-    filtered tool via ``__iter__``. This is what makes
-    ``Agent(tools=[mcp_server])`` work end-to-end — without flattening,
-    the registry build at :meth:`BaseAgentNodeDef.run` would attempt
-    ``mcp_server.tool_schema.name`` and raise ``AttributeError``.
+    Validates entry types up front so nested-list / typo'd inputs fail at
+    construction with a clear ``TypeError`` instead of crashing at the
+    first model turn with a less actionable ``AttributeError``.
     """
-    if not entries:
-        return []
     flattened: list[BaseToolNodeSchema] = []
-    for entry in entries:
+    for entry in entries or ():
         if isinstance(entry, McpServer):
             flattened.extend(entry)
-        else:
+        elif isinstance(entry, BaseToolNodeSchema):
             flattened.append(entry)
+        else:
+            raise TypeError(f"Agent(tools=...) entry must be a ToolNodeDef, BaseToolNodeSchema, or McpServer; got {type(entry).__name__}: {entry!r}")
     return flattened
 
 

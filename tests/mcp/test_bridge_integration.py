@@ -20,16 +20,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from mcp.types import CallToolResult, TextContent
 
 from calfkit._vendor.pydantic_ai.messages import (
-    ModelMessage,
     ModelResponse,
     ToolCallPart,
     ToolReturn,
 )
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
-from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
+from calfkit._vendor.pydantic_ai.models.function import FunctionModel
 from calfkit.mcp._testing import FakeMcpServer
 from calfkit.mcp._tool_def import McpToolDef
 from calfkit.models import SessionRunContext, State
@@ -61,21 +61,49 @@ def _make_ctx(state: State, *, frame_id: str = "frame-test") -> SessionRunContex
     return ctx
 
 
+def _noop_model() -> FunctionModel:
+    """LLM stub that always returns a final-text response. For tests that
+    only exercise construction, not dispatch."""
+    return FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")]))
+
+
 def _model_that_calls(tool_name: str, args: dict[str, Any], tool_call_id: str) -> FunctionModel:
-    """Deterministic LLM that emits exactly one tool call on the first turn,
-    then returns a final text response on the second turn.
+    """LLM that emits one tool call on turn 1, then a final text on turn 2+.
 
-    Used to drive ``Agent.run()`` through the dispatch path without an LLM.
+    Implemented as an iterator with a ``done`` default so the >2 turn case
+    no longer raises StopIteration — safer for unforeseen retry paths.
     """
-    call_count = {"n": 0}
+    turns = iter(
+        [
+            ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args, tool_call_id=tool_call_id)]),
+        ]
+    )
+    fallback = ModelResponse(parts=[ModelTextPart("done")])
+    return FunctionModel(lambda m, i: next(turns, fallback))
 
-    def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args, tool_call_id=tool_call_id)])
-        return ModelResponse(parts=[ModelTextPart("done")])
 
-    return FunctionModel(_fn)
+def _make_agent(
+    *,
+    tools: list[Any] | None,
+    model_client: FunctionModel | None = None,
+    sequential_only_mode: bool = False,
+    node_id: str = "scribe",
+) -> Agent:
+    """Construct an Agent with the canonical test wiring.
+
+    Test sites differ only on ``tools=`` and (occasionally) ``model_client=``;
+    extracting this helper drops ~40 lines of repetition without obscuring
+    the per-test intent.
+    """
+    return Agent(
+        node_id,
+        system_prompt="x",
+        subscribe_topics=f"{node_id}.input",
+        publish_topic=f"{node_id}.output",
+        model_client=model_client or _noop_model(),
+        tools=tools,
+        sequential_only_mode=sequential_only_mode,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +125,7 @@ def test_agent_flattens_mcp_server_into_tools() -> None:
         invoker=lambda n, a, m: _ok_result("ok"),
     )
 
-    agent = Agent(
-        "scribe",
-        system_prompt="x",
-        subscribe_topics="scribe.input",
-        publish_topic="scribe.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=[fake],
-    )
+    agent = _make_agent(tools=[fake])
 
     # Two tools, both BaseToolNodeSchema, neither still wrapped in an McpServer
     assert len(agent.tools) == 2
@@ -125,42 +146,21 @@ def test_agent_mixed_mcp_and_native_tools() -> None:
 
     fake = FakeMcpServer(name="gmail", tools=[_td("search")], invoker=lambda n, a, m: _ok_result("ok"))
 
-    agent = Agent(
-        "mixed",
-        system_prompt="x",
-        subscribe_topics="mixed.input",
-        publish_topic="mixed.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=[my_native_tool, fake],
-    )
+    agent = _make_agent(tools=[my_native_tool, fake], node_id="mixed")
 
-    # Three tools: the native one, plus one for each fake tool
+    # Two tools: one native, one MCP
     assert len(agent.tools) == 2
     names = {t.tool_schema.name for t in agent.tools}
     assert names == {"my_native_tool", "search"}
 
 
 def test_agent_empty_tools_list_is_safe() -> None:
-    agent = Agent(
-        "no-tools",
-        system_prompt="x",
-        subscribe_topics="x.input",
-        publish_topic="x.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=[],
-    )
+    agent = _make_agent(tools=[], node_id="no-tools")
     assert agent.tools == []
 
 
 def test_agent_none_tools_is_safe() -> None:
-    agent = Agent(
-        "no-tools",
-        system_prompt="x",
-        subscribe_topics="x.input",
-        publish_topic="x.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=None,
-    )
+    agent = _make_agent(tools=None, node_id="no-tools")
     assert agent.tools == []
 
 
@@ -168,18 +168,25 @@ def test_add_tools_flattens_mcp_server() -> None:
     """``add_tools(McpServer)`` flattens the same way constructor does."""
     fake = FakeMcpServer(name="gmail", tools=[_td("search"), _td("send")], invoker=lambda n, a, m: _ok_result("ok"))
 
-    agent = Agent(
-        "scribe",
-        system_prompt="x",
-        subscribe_topics="scribe.input",
-        publish_topic="scribe.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=[],
-    )
+    agent = _make_agent(tools=[])
     agent.add_tools(fake)
 
     assert len(agent.tools) == 2
     assert {t.tool_schema.name for t in agent.tools} == {"search", "send"}
+
+
+def test_agent_rejects_unknown_tool_entry_type() -> None:
+    """Nested list or random non-tool object raises TypeError at construction
+    instead of crashing deep in registry build at first model turn.
+
+    Regression: same bug class as the original P0 #1 — silent acceptance of
+    invalid entries shifts the failure point from construction to first call.
+    """
+    with pytest.raises(TypeError, match="must be a ToolNodeDef"):
+        _make_agent(tools=[[_td("search")]])  # nested list typo
+
+    with pytest.raises(TypeError, match="must be a ToolNodeDef"):
+        _make_agent(tools=["not a tool"])  # type: ignore[list-item]
 
 
 # ---------------------------------------------------------------------------
@@ -201,13 +208,9 @@ async def test_agent_dispatches_mcp_tool_call_to_bridge_topic() -> None:
         invoker=lambda n, a, m: _ok_result("results"),
     )
 
-    agent = Agent(
-        "scribe",
-        system_prompt="x",
-        subscribe_topics="scribe.input",
-        publish_topic="scribe.output",
-        model_client=_model_that_calls("search", {"q": "calf"}, "tc-1"),
+    agent = _make_agent(
         tools=[fake],
+        model_client=_model_that_calls("search", {"q": "calf"}, "tc-1"),
         sequential_only_mode=True,
     )
 
@@ -233,13 +236,9 @@ async def test_agent_returns_after_mcp_tool_result_arrives() -> None:
         invoker=lambda n, a, m: _ok_result("results"),
     )
 
-    agent = Agent(
-        "scribe",
-        system_prompt="x",
-        subscribe_topics="scribe.input",
-        publish_topic="scribe.output",
-        model_client=_model_that_calls("search", {"q": "calf"}, "tc-2"),
+    agent = _make_agent(
         tools=[fake],
+        model_client=_model_that_calls("search", {"q": "calf"}, "tc-2"),
         sequential_only_mode=True,
     )
 
@@ -275,14 +274,7 @@ def test_renamed_mcp_server_yields_renamed_tool_schemas() -> None:
     )
     renamed = fake.rename({"search": "find_email"})
 
-    agent = Agent(
-        "scribe",
-        system_prompt="x",
-        subscribe_topics="scribe.input",
-        publish_topic="scribe.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=[renamed],
-    )
+    agent = _make_agent(tools=[renamed])
 
     assert len(agent.tools) == 1
     schema = agent.tools[0]
@@ -300,14 +292,7 @@ def test_filtered_mcp_server_only_yields_allowed_tools() -> None:
         invoker=lambda n, a, m: _ok_result("ok"),
     )
 
-    agent = Agent(
-        "scribe",
-        system_prompt="x",
-        subscribe_topics="scribe.input",
-        publish_topic="scribe.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=[fake.only("search", "send")],
-    )
+    agent = _make_agent(tools=[fake.only("search", "send")])
 
     assert {t.tool_schema.name for t in agent.tools} == {"search", "send"}
 
@@ -323,14 +308,7 @@ def test_flattened_schema_carries_mcp_routing_metadata() -> None:
     """
     fake = FakeMcpServer(name="gmail", tools=[_td("search")], invoker=lambda n, a, m: _ok_result("ok"))
 
-    agent = Agent(
-        "scribe",
-        system_prompt="x",
-        subscribe_topics="scribe.input",
-        publish_topic="scribe.output",
-        model_client=FunctionModel(lambda m, i: ModelResponse(parts=[ModelTextPart("done")])),
-        tools=[fake],
-    )
+    agent = _make_agent(tools=[fake])
 
     schema = agent.tools[0]
     md = schema.tool_schema.metadata

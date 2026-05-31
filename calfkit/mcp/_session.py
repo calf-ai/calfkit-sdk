@@ -39,11 +39,10 @@ import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.types import Implementation
 
 from calfkit.mcp._tool_def import McpToolDef
-from calfkit.mcp.exceptions import McpConfigError
+from calfkit.mcp.exceptions import McpConfigError, McpTransportError
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +131,11 @@ class HttpTransport(McpTransport):
 
         Precedence: explicit ``headers`` dict; then ``token`` populates
         ``Authorization`` if absent (does NOT overwrite an explicit
-        ``Authorization`` header in ``headers``).
+        ``Authorization`` header in ``headers``). The collision check is
+        case-insensitive so ``headers={"authorization": ...}`` also wins.
         """
         out: dict[str, str] = dict(self.headers)
-        if self.token is not None and "Authorization" not in {k for k in out}:
+        if self.token is not None and not any(k.lower() == "authorization" for k in out):
             tok = self.token.strip()
             if tok.lower().startswith("bearer "):
                 out["Authorization"] = tok
@@ -147,11 +147,11 @@ class HttpTransport(McpTransport):
 def _make_httpx_factory(extra_kwargs: dict[str, Any]) -> Any:
     """Build an ``McpHttpClientFactory`` that merges user kwargs over MCP defaults.
 
-    The MCP SDK's default factory wires up ``follow_redirects=True``,
-    request-level timeout, headers, and auth. We preserve those defaults
-    and stack the user-supplied ``httpx_client_kwargs`` on top so users
-    can plug in proxies, custom SSL contexts, transports, limits, etc.
-    User kwargs take precedence on conflict.
+    The MCP SDK calls the factory with session-static ``headers`` (including
+    ``Authorization`` for HTTP transports). User-supplied ``headers`` in
+    ``httpx_client_kwargs`` merge *per-key* with those rather than wholesale
+    replacing them — otherwise the SDK's Authorization header would silently
+    disappear when a user passed even one custom header.
     """
 
     def _factory(
@@ -159,26 +159,25 @@ def _make_httpx_factory(extra_kwargs: dict[str, Any]) -> Any:
         timeout: httpx.Timeout | None = None,
         auth: httpx.Auth | None = None,
     ) -> httpx.AsyncClient:
-        # Start from a default client to inherit the MCP-tuned settings,
-        # then close it immediately and rebuild with the same kwargs plus
-        # the user overrides. (The defaults dict isn't directly exposed by
-        # the SDK, so we mirror it: follow_redirects=True + the supplied
-        # timeout / headers / auth.)
         kwargs: dict[str, Any] = {"follow_redirects": True}
         if timeout is not None:
             kwargs["timeout"] = timeout
         if headers is not None:
-            kwargs["headers"] = headers
+            kwargs["headers"] = dict(headers)
         if auth is not None:
             kwargs["auth"] = auth
-        # User wins on conflict.
-        kwargs.update(extra_kwargs)
+
+        # Merge headers per-key so user-supplied headers add to / override
+        # individual SDK headers without nuking the rest (esp. Authorization).
+        extra = dict(extra_kwargs)
+        extra_headers = extra.pop("headers", None)
+        if extra_headers:
+            merged = dict(kwargs.get("headers", {}))
+            merged.update(extra_headers)
+            kwargs["headers"] = merged
+        kwargs.update(extra)
         return httpx.AsyncClient(**kwargs)
 
-    # Reference create_mcp_http_client so static analyzers know the
-    # signature contract we're matching — and so a future SDK signature
-    # change surfaces here at import time rather than silently breaking.
-    _ = create_mcp_http_client
     return _factory
 
 
@@ -354,28 +353,33 @@ class McpSession:
         )
 
     async def aclose(self) -> None:
-        """Tear down the session + transport. Safe to call multiple times.
+        """Tear down the session + transport.
 
         For stdio transports, the close is bounded by
-        ``StdioTransport.shutdown_grace_seconds`` (default 5s) — a hung MCP
-        subprocess will be hard-cancelled rather than blocking shutdown
-        indefinitely. The subprocess may leak in pathological cases (SDK
-        cleanup itself blocks past the grace window); operators see the
-        timeout warning and can take action.
+        ``StdioTransport.shutdown_grace_seconds`` (default 5s; ``0`` means
+        immediate hard-cancel, no grace). On timeout we raise
+        :class:`McpTransportError` so the worker logs an ERROR-level
+        traceback rather than absorbing the leak silently — the MCP SDK's
+        ``_terminate_process_tree`` may not have run, so the subprocess
+        likely orphans.
+
+        ``self._session`` is reset in a ``finally`` block so a subsequent
+        ``aclose()`` is a no-op even after a timeout.
         """
-        grace = None
-        if isinstance(self._transport, StdioTransport):
-            grace = self._transport.shutdown_grace_seconds
+        grace = self._transport.shutdown_grace_seconds if isinstance(self._transport, StdioTransport) else None
         try:
-            if grace is not None and grace > 0:
+            if grace is not None:
                 await asyncio.wait_for(self._stack.aclose(), timeout=grace)
             else:
                 await self._stack.aclose()
         except asyncio.TimeoutError:
-            logger.warning(
-                "McpSession.aclose exceeded shutdown_grace_seconds=%.1fs; transport may leak. Inspect the MCP server for a stuck shutdown handler.",
+            logger.error(
+                "McpSession.aclose exceeded shutdown_grace_seconds=%.1fs for transport %r; "
+                "MCP subprocess likely orphaned (SDK cleanup did not complete). Investigate with `ps`.",
                 grace,
+                self._transport,
             )
+            raise McpTransportError(f"MCP session aclose timed out after {grace}s; subprocess likely orphaned") from None
         finally:
             self._session = None
 

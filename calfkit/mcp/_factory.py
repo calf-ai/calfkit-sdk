@@ -23,6 +23,7 @@ from calfkit.mcp._config import (
     ParsedHttpSpec,
     ParsedMcpServerSpec,
     ParsedStdioSpec,
+    expand_env,
     parse_mcp_config,
 )
 from calfkit.mcp._server import McpServer
@@ -68,12 +69,18 @@ class _McpFactory:
         name: str | None = None,
         **kwargs: Any,
     ) -> McpServer:
-        if cmd_or_url.startswith("http://") or cmd_or_url.startswith("https://"):
-            return self.http(cmd_or_url, tools=tools, name=name, **kwargs)
+        # Expand $VAR before routing so ``mcp("$MCP_URL", ...)`` is routed by
+        # the URL it resolves to, not by the literal "$..." prefix. (Without
+        # this, $VAR URLs are misrouted to stdio.) ``McpServer.stdio/.http``
+        # will re-call ``expand_env`` on individual fields — a no-op for the
+        # already-resolved values we pass downstream.
+        expanded = expand_env(cmd_or_url, where=f"mcp({cmd_or_url!r})")
+        if expanded.startswith("http://") or expanded.startswith("https://"):
+            return self.http(expanded, tools=tools, name=name, **kwargs)
         # Treat as stdio command line; shlex split for shell-style quoting
         import shlex
 
-        parts = shlex.split(cmd_or_url)
+        parts = shlex.split(expanded)
         if not parts:
             raise McpConfigError(f"mcp({cmd_or_url!r}): command is empty after shell-splitting")
         return self.stdio(parts[0], *parts[1:], tools=tools, name=name, **kwargs)
@@ -122,17 +129,12 @@ class _McpFactory:
         import sys
 
         mod = sys.modules.get("calfkit.mcp")
-        # ``mod`` is either the real submodule (the canonical case) or
-        # ``None`` during partial-init imports. The defensive ``is self``
-        # check covers a pathological case where ``calfkit.mcp`` ends up
-        # bound to this factory instance in sys.modules — unreachable in
-        # practice but cheap insurance against an infinite-recursion bug.
-        if mod is None or mod is self:  # type: ignore[comparison-overlap]
+        if mod is None:
             raise AttributeError(name)
-        try:
-            return getattr(mod, name)
-        except AttributeError:
-            raise AttributeError(f"module 'calfkit.mcp' has no attribute {name!r}") from None
+        # ``getattr`` raises ``AttributeError`` with the canonical
+        # "module 'calfkit.mcp' has no attribute 'X'" message — exactly
+        # what users debugging a typo expect.
+        return getattr(mod, name)
 
 
 mcp = _McpFactory()

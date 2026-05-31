@@ -204,10 +204,10 @@ class McpServer:
         Unset variables raise :class:`McpConfigError`.
         """
         transport = StdioTransport(
-            command=expand_env(command),
-            args=tuple(expand_env(a) for a in args),
-            env=expand_env(env) if env is not None else None,
-            cwd=expand_env(cwd) if cwd is not None else None,
+            command=expand_env(command, where="McpServer.stdio(command=)"),
+            args=tuple(expand_env(a, where="McpServer.stdio(args=)") for a in args),
+            env=expand_env(env, where="McpServer.stdio(env=)") if env is not None else None,
+            cwd=expand_env(cwd, where="McpServer.stdio(cwd=)") if cwd is not None else None,
             shutdown_grace_seconds=shutdown_grace_seconds,
             safe_env_only=safe_env_only,
         )
@@ -248,12 +248,21 @@ class McpServer:
         ``$VAR`` / ``${VAR}`` substitution is applied to ``url``, ``token``,
         and every header value at construction time so the same idiom works
         for inline construction and ``mcp.json`` loading. Unset variables
-        raise :class:`McpConfigError`.
+        raise :class:`McpConfigError`. The expanded URL must start with
+        ``http://`` or ``https://`` — a misconfigured template like
+        ``$MCP_BASE`` resolving to a scheme-less value fails loudly here
+        rather than later inside httpx.
         """
+        expanded_url = expand_env(url, where="McpServer.http(url=)")
+        if not (expanded_url.startswith("http://") or expanded_url.startswith("https://")):
+            raise McpConfigError(
+                f"McpServer.http(url=): expanded URL {expanded_url!r} does not start with "
+                f"'http://' or 'https://'. Check that any $VAR in {url!r} resolves to a full URL."
+            )
         transport = HttpTransport(
-            url=expand_env(url),
-            token=expand_env(token) if token is not None else None,
-            headers=expand_env(dict(headers)) if headers is not None else {},
+            url=expanded_url,
+            token=expand_env(token, where="McpServer.http(token=)") if token is not None else None,
+            headers=expand_env(dict(headers), where="McpServer.http(headers=)") if headers is not None else {},
             httpx_client_kwargs=dict(httpx_client_kwargs) if httpx_client_kwargs is not None else {},
             timeout_seconds=timeout_seconds,
             sse_read_timeout_seconds=sse_read_timeout_seconds,
