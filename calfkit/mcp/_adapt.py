@@ -8,12 +8,12 @@ Two responsibilities:
 
    - ``isError=True`` → ``RetryPromptPart`` (LLM-visible, retryable).
    - ``isError=False`` → ``ToolReturn`` with ``structuredContent`` if present,
-     else concatenated text. See ``docs/mcp-adaptor-design.md`` §9.
+     else concatenated text.
 
 2. **Error classification** — translate raised MCP / transport exceptions
    into ``FailedToolCall`` markers (operator-visible, NOT LLM-retryable),
    consistent with the existing native-tool failure path at
-   ``calfkit/nodes/tool.py:138-184``. See design doc §8.
+   ``calfkit/nodes/tool.py:138-184``.
 
 The distinction is load-bearing:
 

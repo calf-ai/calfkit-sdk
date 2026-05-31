@@ -15,12 +15,9 @@ Transport descriptors are kept separate from the session so the Phase 6
 ``McpServers`` config flow can build a transport from parsed mcp.json and
 hand it to the session at startup.
 
-Pattern 1 multi-tenancy (design doc §10): credentials are **session-static**
-and baked into the transport at construction. Per-call ``meta=`` is the
-only per-call hook — it travels in the JSON-RPC message body, race-free.
-
-See ``docs/mcp-v1-plan.md`` §6.3 and ``docs/mcp-adaptor-implementation-plan.md``
-§5.3 for design context.
+Pattern 1 multi-tenancy: credentials are **session-static** and baked
+into the transport at construction. Per-call ``meta=`` is the only
+per-call hook — it travels in the JSON-RPC message body, race-free.
 """
 
 from __future__ import annotations

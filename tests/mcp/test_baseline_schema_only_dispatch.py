@@ -1,9 +1,8 @@
-"""Phase 0 sanity test: the load-bearing claim of the MCP v1 plan.
+"""Baseline test for the MCP adaptor's load-bearing claim.
 
-The v1 plan (``docs/mcp-v1-plan.md`` D7, §6.1) asserts that the agent loop
-already supports schema-only tools registered as ``BaseToolNodeSchema``
-instances via the ``Agent(tools=[...])`` path, with two specific properties
-the MCP adaptor depends on:
+The MCP adaptor relies on the agent loop already supporting schema-only
+tools registered as ``BaseToolNodeSchema`` instances via the
+``Agent(tools=[...])`` path, with two specific properties:
 
   1. The agent dispatches the tool call without attempting client-side
      argument validation. The ``isinstance(tool_node, BaseToolNodeDef)``

@@ -3,7 +3,7 @@
 **Status:** Roadmap (post-v1)
 **Document version:** 1.0
 **Last updated:** 2026-05-30
-**Related to:** [`docs/mcp-adaptor-design.md`](./mcp-adaptor-design.md) (v1, codegen-based)
+**Related to:** [`docs/mcp-overview.md`](./mcp-overview.md) (v1, codegen-based)
 
 ---
 
@@ -24,7 +24,7 @@ from gmail_schemas import Gmail
 gmail = mcp("npx -y @mcp/server-gmail", tools=Gmail.ALL)
 ```
 
-This is the right v1 choice (see [archived catalog sub-plan](./mcp-catalog-discovery-plan.md) for the alternatives considered), but it imposes a build step and asks users to manage generated artifacts. For dev/experimentation, this is friction. For users who prefer the dynamic-discovery model that pydantic-ai / OpenAI Agents / Google ADK offer, codegen is a step backward.
+This is the right v1 choice, but it imposes a build step and asks users to manage generated artifacts. For dev/experimentation, this is friction. For users who prefer the dynamic-discovery model that pydantic-ai / OpenAI Agents / Google ADK offer, codegen is a step backward.
 
 A future revision adds a runtime-discovery alternative behind the same `mcp(...)` API.
 

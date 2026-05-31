@@ -17,15 +17,12 @@ Design notes:
   fields over time (e.g. ``returnDirect`` proposed for a future revision);
   carrying ``McpToolAnnotations`` as its own type keeps schema evolution
   isolated. Convenience boolean properties (``read_only``, ``destructive``,
-  etc.) apply the MCP spec's default semantics — see
-  ``docs/mcp-adaptor-design.md`` §4.3.
+  etc.) apply the MCP spec's default semantics.
 
 - **Frozen dataclasses**. v1 treats schemas as immutable artifacts from
-  codegen; mutation is not part of the user contract. Future filter /
-  rename machinery (Phase 2) produces new instances via ``dataclasses.replace``.
-
-See ``docs/mcp-v1-plan.md`` §6.1 for the codegen workflow and
-``docs/mcp-adaptor-implementation-plan.md`` §5 for class-design context.
+  codegen; mutation is not part of the user contract. Filter / rename
+  machinery on ``McpServer`` produces new instances via
+  ``dataclasses.replace``.
 """
 
 from __future__ import annotations

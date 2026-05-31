@@ -18,11 +18,8 @@ Polymorphism: ``__iter__`` yields one :class:`BaseToolNodeSchema` per
 filtered tool. The agent's existing ``tools_registry`` machinery
 (``calfkit/nodes/agent.py:163-167``) consumes these directly via the
 schema-only path — empirically validated by Phase 0's baseline test.
-The Worker (Phase 4) detects ``McpServer`` instances in ``nodes=`` and
-constructs one ``McpBridge`` per tool from the same iteration.
-
-See ``docs/mcp-v1-plan.md`` §6.1 and ``docs/mcp-adaptor-implementation-plan.md``
-§5.1 for design context.
+The Worker detects ``McpServer`` instances in ``nodes=`` and constructs
+one ``McpBridge`` per tool from the same iteration.
 """
 
 from __future__ import annotations

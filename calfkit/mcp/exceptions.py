@@ -15,13 +15,13 @@ The taxonomy distinguishes:
   (``MCPError`` from ``call_tool``, ``InitializeResult`` capability mismatch).
   Also maps to ``FailedToolCall``.
 
-- ``McpToolDriftError`` — reserved for the v1.1 strict-mode opt-in where the
-  bridge hard-fails on declared-vs-server tool drift. v1 logs a warning
-  rather than raising (see ``docs/mcp-v1-plan.md`` §11 Q7).
+- ``McpToolDriftError`` — reserved for a future strict-mode opt-in where
+  the bridge hard-fails on declared-vs-server tool drift. v1 logs a
+  warning rather than raising.
 
 Tool-semantic errors (``CallToolResult.is_error=True``) do NOT raise here —
 they are returned as ``RetryPromptPart`` content by ``_adapt.py`` so the LLM
-can retry. See ``docs/mcp-adaptor-design.md`` §8 and §9.
+can retry.
 
 The base class is named :class:`CalfkitMcpError` (not ``McpError``) so it
 does not collide with the MCP SDK's ``mcp.shared.exceptions.McpError``

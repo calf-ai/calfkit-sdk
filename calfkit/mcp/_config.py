@@ -26,9 +26,6 @@ Env substitution rules (``$VAR`` and ``${VAR}``):
 - An unset env var raises :class:`McpConfigError` at parse time (do not
   silently produce empty strings).
 - Literal ``$$`` escapes to a single ``$`` (uncommon but supported).
-
-See ``docs/mcp-v1-plan.md`` §2.2 for the user-facing API and
-``docs/mcp-adaptor-implementation-plan.md`` §9 for the design rationale.
 """
 
 from __future__ import annotations

@@ -475,10 +475,6 @@ its own README.
 ## Further reading
 
 - **Runnable example**: [`examples/quickstart_mcp/`](../examples/quickstart_mcp/)
-- **Design rationale**: [`mcp-adaptor-design.md`](./mcp-adaptor-design.md) —
-  peer-SDK comparison, multi-tenancy patterns, content fidelity
-- **v1 plan**: [`mcp-v1-plan.md`](./mcp-v1-plan.md) — signed-off
-  decisions with sourced rationale per design question
 - **v1.x roadmap**: [`mcp-discovery-rpc-design.md`](./mcp-discovery-rpc-design.md) —
   runtime tool discovery (alternative to codegen)
 - **MCP protocol spec**: [`modelcontextprotocol.io`](https://modelcontextprotocol.io/specification/2025-11-25/)

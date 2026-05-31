@@ -125,9 +125,8 @@ class Worker:
     async def _on_startup(self) -> None:
         """FastStream startup hook — runs before broker.start().
 
-        Per the audit in ``docs/mcp-adaptor-implementation-plan.md`` §5.1,
-        ``on_startup`` fires before any Kafka subscriber begins consuming.
-        We use this window to:
+        FastStream's ``on_startup`` fires before any Kafka subscriber
+        begins consuming, so we use this window to:
 
         1. Open each McpServer's MCP session (subprocess spawn or HTTP
            connect + ``initialize`` + drift-detection sanity check).

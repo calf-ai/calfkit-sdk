@@ -1,4 +1,4 @@
-"""calfkit MCP adaptor — see ``docs/mcp-v1-plan.md``.
+"""calfkit MCP adaptor — see ``docs/mcp-overview.md`` for user-facing usage.
 
 Public exports:
 
