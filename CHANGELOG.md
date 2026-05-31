@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.6](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.5...v0.3.6) (2026-05-31)
+
+
+### Features
+
+* MCP adaptor v1, expose any MCP server as calfkit tools ([#162](https://github.com/calf-ai/calfkit-sdk/issues/162)) ([dde6c32](https://github.com/calf-ai/calfkit-sdk/commit/dde6c3286763ea6904a9ca64564e0ac65b09fcb4))
+
 ## [0.3.5](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.4...v0.3.5) (2026-05-23)
 
 
