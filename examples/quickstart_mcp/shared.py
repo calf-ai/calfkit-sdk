@@ -10,7 +10,8 @@ The same ``McpServer`` object plays two roles depending on the worker:
 No subprocess is spawned at import time — that happens at Worker.run().
 """
 
-from calfkit import mcp
 from everything_schemas import Everything
+
+from calfkit import mcp
 
 everything = mcp("npx -y @modelcontextprotocol/server-everything", tools=Everything.ALL)
