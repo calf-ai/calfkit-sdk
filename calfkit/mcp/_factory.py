@@ -136,8 +136,16 @@ class _McpFactory:
         etc. attribute access. Resolving via ``sys.modules`` recovers the
         real submodule (the import system keeps that binding intact) so both
         idioms keep working.
+
+        Dunder names (``__reduce__``, ``__deepcopy__``, etc.) are
+        intentionally NOT delegated — Python's serialization and copy
+        machinery probes them and must see ``AttributeError`` to fall back
+        to default behaviour. Single-underscore names ARE delegated
+        because they include real submodule names (e.g. ``_session``)
+        that ``unittest.mock.patch`` walks through when resolving dotted
+        paths like ``calfkit.mcp._session.stdio_client``.
         """
-        if name.startswith("_"):
+        if name.startswith("__"):
             raise AttributeError(name)
         import sys
 

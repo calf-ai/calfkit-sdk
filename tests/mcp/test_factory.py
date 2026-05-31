@@ -367,8 +367,33 @@ def test_factory_getattr_resolves_other_public_names() -> None:
 
 
 def test_factory_getattr_private_attribute_raises() -> None:
+    """Unknown ``_`` names raise — but via delegation to the submodule,
+    which doesn't have them either. The error message is the standard
+    Python module one, not a factory-specific one.
+    """
     with pytest.raises(AttributeError):
         _ = top_level_mcp._not_a_real_attribute
+
+
+def test_factory_getattr_resolves_real_submodule_names() -> None:
+    """Single-underscore submodule names (e.g. ``_session``, ``_server``)
+    delegate through to ``sys.modules['calfkit.mcp']`` so that
+    ``unittest.mock.patch('calfkit.mcp._session.stdio_client')`` and
+    similar dotted-path lookups work without tripping the factory's
+    ``__getattr__`` guard.
+    """
+    import calfkit.mcp._session  # noqa: F401  ensures submodule is registered
+    from calfkit.mcp import _session as direct_session
+
+    assert top_level_mcp._session is direct_session
+
+
+def test_factory_getattr_dunders_still_raise() -> None:
+    """Dunders must NOT delegate — Python's copy/serialization machinery
+    probes them and needs ``AttributeError`` to use default behaviour.
+    """
+    with pytest.raises(AttributeError):
+        _ = top_level_mcp.__not_a_dunder__
 
 
 def test_factory_getattr_unknown_public_attribute_message() -> None:

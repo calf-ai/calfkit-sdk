@@ -7,6 +7,7 @@ server live in the Phase 8 lane.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -18,6 +19,14 @@ from calfkit.cli.mcp import app
 from calfkit.mcp._tool_def import McpToolDef
 
 runner = CliRunner()
+
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(s: str) -> str:
+    """Strip ANSI SGR escape codes so substring assertions are robust
+    against typer/rich's bold/dim/color styling in CI environments."""
+    return _ANSI_SGR.sub("", s)
 
 
 def _td(name: str = "t") -> McpToolDef:
@@ -219,19 +228,20 @@ def test_cli_handles_initialize_failure(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 
 def test_cli_help_lists_codegen() -> None:
-    # NO_COLOR=1: disable typer/rich's ANSI styling so substring checks see
-    # raw text, not ``\x1b[…m-\x1b[…m-command`` sequences split mid-flag.
-    result = runner.invoke(app, ["--help"], env={"NO_COLOR": "1"})
+    result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "codegen" in result.stdout
+    assert "codegen" in _plain(result.stdout)
 
 
 def test_cli_codegen_help_shows_flags() -> None:
-    result = runner.invoke(app, ["codegen", "--help"], env={"NO_COLOR": "1"})
+    result = runner.invoke(app, ["codegen", "--help"])
     assert result.exit_code == 0
-    # Critical flags are documented
-    assert "--command" in result.stdout
-    assert "--url" in result.stdout
-    assert "--token" in result.stdout
-    assert "--output" in result.stdout
-    assert "--check" in result.stdout
+    # Critical flags are documented. Strip ANSI codes first — typer/rich
+    # styling in CI splits "--command" with bold/dim escapes between
+    # the two dashes, defeating naive substring checks.
+    stdout = _plain(result.stdout)
+    assert "--command" in stdout
+    assert "--url" in stdout
+    assert "--token" in stdout
+    assert "--output" in stdout
+    assert "--check" in stdout
