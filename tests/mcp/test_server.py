@@ -455,3 +455,73 @@ def test_session_property_initially_none() -> None:
 def test_transport_property() -> None:
     s = McpServer.stdio("x", tools=[_td("t")], name="srv")
     assert isinstance(s.transport, StdioTransport)
+
+
+# ---------------------------------------------------------------------------
+# $VAR expansion at construction time (P0 #5 — token/headers/env)
+# ---------------------------------------------------------------------------
+
+
+def test_http_token_var_is_expanded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``$VAR`` substitution applied to ``token=`` at construction.
+
+    Regression: prior to this fix, only the ``mcp.json`` path expanded
+    env vars — users following the README's ``token="$CALFKIT_SERVICE_TOKEN"``
+    snippet sent the literal string as their Bearer.
+    """
+    monkeypatch.setenv("CALFKIT_SERVICE_TOKEN", "sk-real-token")
+    s = McpServer.http("https://api.example.com/mcp", tools=[_td("t")], token="$CALFKIT_SERVICE_TOKEN")
+    assert isinstance(s.transport, HttpTransport)
+    assert s.transport.token == "sk-real-token"
+    # The assembled header reflects the expanded value
+    assert s.transport.build_session_headers() == {"Authorization": "Bearer sk-real-token"}
+
+
+def test_http_headers_values_are_expanded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_VERSION", "2024-11-25")
+    s = McpServer.http(
+        "https://api.example.com/mcp",
+        tools=[_td("t")],
+        headers={"X-Api-Version": "$API_VERSION", "X-Static": "yes"},
+    )
+    assert isinstance(s.transport, HttpTransport)
+    assert s.transport.headers == {"X-Api-Version": "2024-11-25", "X-Static": "yes"}
+
+
+def test_http_url_is_expanded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCP_HOST", "api.example.com")
+    s = McpServer.http("https://$MCP_HOST/mcp", tools=[_td("t")])
+    assert isinstance(s.transport, HttpTransport)
+    assert s.transport.url == "https://api.example.com/mcp"
+
+
+def test_stdio_env_values_are_expanded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GMAIL_API_KEY", "k-from-host")
+    s = McpServer.stdio(
+        "npx",
+        "-y",
+        "@m/server-gmail",
+        tools=[_td("t")],
+        env={"GMAIL_API_KEY": "$GMAIL_API_KEY", "STATIC": "yes"},
+    )
+    assert s.transport.env == {"GMAIL_API_KEY": "k-from-host", "STATIC": "yes"}
+
+
+def test_stdio_args_are_expanded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PKG_VERSION", "1.2.3")
+    s = McpServer.stdio("npx", "-y", "@m/server-gmail@$PKG_VERSION", tools=[_td("t")])
+    assert s.transport.args == ("-y", "@m/server-gmail@1.2.3")
+
+
+def test_http_unset_token_var_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CALFKIT_NONEXISTENT_TOKEN_VAR", raising=False)
+    with pytest.raises(McpConfigError, match="CALFKIT_NONEXISTENT_TOKEN_VAR"):
+        McpServer.http("https://api.example.com/mcp", tools=[_td("t")], token="$CALFKIT_NONEXISTENT_TOKEN_VAR")
+
+
+def test_stdio_no_expansion_when_no_var() -> None:
+    """Plain strings without `$VAR` should pass through unchanged."""
+    s = McpServer.stdio("npx", "-y", "@m/server", tools=[_td("t")], env={"K": "literal"})
+    assert s.transport.command == "npx"
+    assert s.transport.args == ("-y", "@m/server")
+    assert s.transport.env == {"K": "literal"}

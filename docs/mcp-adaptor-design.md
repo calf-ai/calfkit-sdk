@@ -295,7 +295,7 @@ The filtered/renamed object is itself an `McpServer` — operations chain.
 gmail = McpServer.http(
     "https://gmail-mcp.acme.com/mcp",
     token="$CALFKIT_SERVICE_TOKEN",                     # session-static auth to MCP server
-    meta=lambda ctx: {"user_id": ctx.deps["user_id"]},  # per-call user identity
+    meta=lambda ctx: {"user_id": ctx.deps.provided_deps["user_id"]},  # per-call user identity
 )
 ```
 
@@ -447,7 +447,7 @@ The calfkit bridge passes user identity in `_meta`. The MCP server holds its own
 gmail = McpServer.http(
     "https://gmail-mcp.acme.com/mcp",
     token="$CALFKIT_SERVICE_TOKEN",                     # auths calfkit ↔ MCP server
-    meta=lambda ctx: {"user_id": ctx.deps["user_id"]},  # per-call user identity
+    meta=lambda ctx: {"user_id": ctx.deps.provided_deps["user_id"]},  # per-call user identity
 )
 ```
 
@@ -465,7 +465,7 @@ v1 does not implement this. v2 will add a session-pool option to `McpServer`:
 # v2 sketch — not in v1
 gmail = McpServer.http(
     "https://gmail-mcp.acme.com/mcp",
-    session_key=lambda ctx: ctx.deps["tenant"],
+    session_key=lambda ctx: ctx.deps.provided_deps["tenant"],
     session_token=lambda tenant: vault.get_oauth_token(tenant),
 )
 ```

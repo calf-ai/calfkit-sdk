@@ -198,6 +198,11 @@ def render_module(
     src_line = f"Source: {source}" if source else "Source: (not recorded)"
 
     lines: list[str] = []
+    # File-level lint exemption. Tool descriptions and JSON-schema strings
+    # frequently exceed line-length limits; the generated content is not
+    # human-edited so wrapping would only hurt the deterministic-output
+    # contract that powers ``--check`` drift detection.
+    lines.append("# ruff: noqa: E501")
     # Module docstring
     lines.append('"""Generated MCP tool schemas for the `' + server_name + "` server.")
     lines.append("")
@@ -209,9 +214,15 @@ def render_module(
     lines.append(f"Tool count: {len(sorted_tools)}")
     lines.append('"""')
     lines.append("")
+    # Import McpToolAnnotations only when at least one tool needs it —
+    # otherwise the unused import trips lint and signals dead code to readers.
+    needs_annotations = any(_render_annotations(td) is not None for td in sorted_tools)
     lines.append("from __future__ import annotations")
     lines.append("")
-    lines.append("from calfkit.mcp import McpToolAnnotations, McpToolDef")
+    if needs_annotations:
+        lines.append("from calfkit.mcp import McpToolAnnotations, McpToolDef")
+    else:
+        lines.append("from calfkit.mcp import McpToolDef")
     lines.append("")
     lines.append("")
 
@@ -236,8 +247,12 @@ def render_module(
         for const_name, _td in constants_in_order:
             lines.append(f"    {const_name} = {const_name}")
         lines.append("")
-        all_items = ", ".join(c for c, _ in constants_in_order)
-        lines.append(f"    ALL: list[McpToolDef] = [{all_items}]")
+        # ALL list rendered one-per-line so even servers with many tools
+        # produce diff-friendly output (no 300+ char single-line list).
+        lines.append("    ALL: list[McpToolDef] = [")
+        for const_name, _td in constants_in_order:
+            lines.append(f"        {const_name},")
+        lines.append("    ]")
     lines.append("")
 
     return "\n".join(lines)

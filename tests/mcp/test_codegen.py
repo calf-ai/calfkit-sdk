@@ -172,13 +172,16 @@ def test_render_module_single_tool() -> None:
         tools=[_td("search", description="Search emails")],
         generated_at=_FIXED_TIME,
     )
-    assert "from calfkit.mcp import McpToolAnnotations, McpToolDef" in out
+    # Tool has no annotations → import is narrowed to McpToolDef only
+    assert "from calfkit.mcp import McpToolDef" in out
+    assert "McpToolAnnotations" not in out
     assert "SEARCH = McpToolDef(" in out
     assert "name='search'" in out
     assert "description='Search emails'" in out
     assert "class Gmail:" in out
     assert "SEARCH = SEARCH" in out
-    assert "ALL: list[McpToolDef] = [SEARCH]" in out
+    # ALL list is rendered one-per-line for diff friendliness
+    assert "ALL: list[McpToolDef] = [\n        SEARCH,\n    ]" in out
 
 
 def test_render_module_multiple_tools_sorted() -> None:
@@ -193,8 +196,8 @@ def test_render_module_multiple_tools_sorted() -> None:
     pos_search = out.find("SEARCH = McpToolDef(")
     pos_send = out.find("SEND = McpToolDef(")
     assert pos_archive < pos_search < pos_send
-    # ALL list also reflects sorted order
-    assert "ALL: list[McpToolDef] = [ARCHIVE, SEARCH, SEND]" in out
+    # ALL list (one per line) also reflects sorted order
+    assert "ALL: list[McpToolDef] = [\n        ARCHIVE,\n        SEARCH,\n        SEND,\n    ]" in out
 
 
 def test_render_module_deterministic_across_invocations() -> None:

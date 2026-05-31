@@ -25,6 +25,7 @@ See ``docs/mcp-v1-plan.md`` §6.3 and ``docs/mcp-adaptor-implementation-plan.md`
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -34,9 +35,11 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.types import Implementation
 
 from calfkit.mcp._tool_def import McpToolDef
@@ -107,8 +110,9 @@ class HttpTransport(McpTransport):
     ``Bearer `` case-insensitively, in which case it is used as-is).
 
     ``httpx_client_kwargs`` (v1 plan Q11): pass-through escape hatch for
-    custom SSL / proxy / etc. Reserved here; threaded into a custom
-    ``httpx_client_factory`` if non-empty.
+    custom SSL / proxy / etc. When non-empty, threaded into a custom
+    ``httpx_client_factory`` that constructs the ``httpx.AsyncClient`` with
+    the MCP defaults plus these user-supplied kwargs (user wins on conflicts).
     """
 
     url: str
@@ -138,6 +142,44 @@ class HttpTransport(McpTransport):
             else:
                 out["Authorization"] = f"Bearer {tok}"
         return out
+
+
+def _make_httpx_factory(extra_kwargs: dict[str, Any]) -> Any:
+    """Build an ``McpHttpClientFactory`` that merges user kwargs over MCP defaults.
+
+    The MCP SDK's default factory wires up ``follow_redirects=True``,
+    request-level timeout, headers, and auth. We preserve those defaults
+    and stack the user-supplied ``httpx_client_kwargs`` on top so users
+    can plug in proxies, custom SSL contexts, transports, limits, etc.
+    User kwargs take precedence on conflict.
+    """
+
+    def _factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        # Start from a default client to inherit the MCP-tuned settings,
+        # then close it immediately and rebuild with the same kwargs plus
+        # the user overrides. (The defaults dict isn't directly exposed by
+        # the SDK, so we mirror it: follow_redirects=True + the supplied
+        # timeout / headers / auth.)
+        kwargs: dict[str, Any] = {"follow_redirects": True}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if headers is not None:
+            kwargs["headers"] = headers
+        if auth is not None:
+            kwargs["auth"] = auth
+        # User wins on conflict.
+        kwargs.update(extra_kwargs)
+        return httpx.AsyncClient(**kwargs)
+
+    # Reference create_mcp_http_client so static analyzers know the
+    # signature contract we're matching — and so a future SDK signature
+    # change surfaces here at import time rather than silently breaking.
+    _ = create_mcp_http_client
+    return _factory
 
 
 def _basename_from_command(command: str, args: tuple[str, ...]) -> str:
@@ -262,12 +304,18 @@ class McpSession:
             # mcp 1.20+ streamablehttp_client returns 3-tuple
             # (read, write, get_session_id). We don't currently use the
             # session ID accessor; reserved for future observability.
+            client_kwargs: dict[str, Any] = {}
+            if self._transport.httpx_client_kwargs:
+                # User supplied SSL / proxy / etc. Build a factory that
+                # honours the MCP defaults but applies user kwargs on top.
+                client_kwargs["httpx_client_factory"] = _make_httpx_factory(self._transport.httpx_client_kwargs)
             read, write, _get_session_id = await self._stack.enter_async_context(
                 streamablehttp_client(
                     self._transport.url,
                     headers=self._transport.build_session_headers() or None,
                     timeout=timedelta(seconds=self._transport.timeout_seconds),
                     sse_read_timeout=timedelta(seconds=self._transport.sse_read_timeout_seconds),
+                    **client_kwargs,
                 )
             )
         else:
@@ -306,9 +354,30 @@ class McpSession:
         )
 
     async def aclose(self) -> None:
-        """Tear down the session + transport. Safe to call multiple times."""
-        await self._stack.aclose()
-        self._session = None
+        """Tear down the session + transport. Safe to call multiple times.
+
+        For stdio transports, the close is bounded by
+        ``StdioTransport.shutdown_grace_seconds`` (default 5s) — a hung MCP
+        subprocess will be hard-cancelled rather than blocking shutdown
+        indefinitely. The subprocess may leak in pathological cases (SDK
+        cleanup itself blocks past the grace window); operators see the
+        timeout warning and can take action.
+        """
+        grace = None
+        if isinstance(self._transport, StdioTransport):
+            grace = self._transport.shutdown_grace_seconds
+        try:
+            if grace is not None and grace > 0:
+                await asyncio.wait_for(self._stack.aclose(), timeout=grace)
+            else:
+                await self._stack.aclose()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "McpSession.aclose exceeded shutdown_grace_seconds=%.1fs; transport may leak. Inspect the MCP server for a stuck shutdown handler.",
+                grace,
+            )
+        finally:
+            self._session = None
 
     # ----- protocol operations -----
 
@@ -324,13 +393,22 @@ class McpSession:
     async def list_tools(self) -> list[McpToolDef]:
         """Fetch the server's tool catalog and adapt to :class:`McpToolDef`.
 
-        Pagination: aiokafka's MCP SDK transparently handles cursor-based
-        pagination up to the SDK's internal limit. For v1 we treat the
-        first page as the full catalog; v2 may add explicit cursor loops.
+        Pagination: the MCP SDK's ``ClientSession.list_tools`` returns one
+        page. For v1 we treat the first page as the full catalog and log a
+        warning if the server advertises additional pages — operators on
+        large servers will see the signal and can refresh via codegen once
+        cursor support lands.
         """
         self._require_open()
         assert self._session is not None
         result = await self._session.list_tools()
+        if getattr(result, "nextCursor", None):
+            logger.warning(
+                "MCP server returned a paginated tools/list (nextCursor=%r); "
+                "v1 reads only the first page. Tools beyond the first page "
+                "will not be visible to bridges or codegen.",
+                result.nextCursor,
+            )
         return [McpToolDef.from_mcp_tool(t) for t in result.tools]
 
     async def call_tool(

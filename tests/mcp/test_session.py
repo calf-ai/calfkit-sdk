@@ -421,3 +421,145 @@ def test_transport_property_exposed() -> None:
     t = StdioTransport(command="x")
     session = McpSession(t)
     assert session.transport is t
+
+
+# ---------------------------------------------------------------------------
+# httpx_client_kwargs threading (P0 #2 — Q11)
+# ---------------------------------------------------------------------------
+
+
+def test_make_httpx_factory_returns_client_with_user_kwargs() -> None:
+    """``_make_httpx_factory`` merges user kwargs over MCP defaults.
+
+    Regression: prior to this fix, ``httpx_client_kwargs`` was stored on
+    ``HttpTransport`` but never threaded into ``streamablehttp_client``.
+    """
+    import httpx
+
+    from calfkit.mcp._session import _make_httpx_factory
+
+    factory = _make_httpx_factory({"verify": False, "follow_redirects": False})
+    client = factory(headers={"X-K": "v"}, timeout=httpx.Timeout(10.0))
+    try:
+        assert isinstance(client, httpx.AsyncClient)
+        # User-supplied kwarg wins on conflict.
+        assert client.follow_redirects is False
+    finally:
+        # AsyncClient must be cleaned up; close via underlying sync close.
+        import asyncio
+
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(client.aclose())
+
+
+async def test_connect_threads_factory_when_kwargs_set() -> None:
+    """When ``httpx_client_kwargs`` is non-empty, ``_connect`` passes a
+    custom ``httpx_client_factory`` to ``streamablehttp_client``.
+    """
+    transport = HttpTransport(url="https://example.com/mcp", httpx_client_kwargs={"verify": False})
+    session = McpSession(transport)
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock(), MagicMock()))
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+    with patch("calfkit.mcp._session.streamablehttp_client", return_value=mock_cm) as mock_streamable:
+        with patch("calfkit.mcp._session.ClientSession") as mock_cs:
+            mock_cs.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            mock_cs.return_value.__aexit__ = AsyncMock(return_value=None)
+            await session._connect()
+    _, call_kwargs = mock_streamable.call_args
+    assert "httpx_client_factory" in call_kwargs
+    assert callable(call_kwargs["httpx_client_factory"])
+
+
+async def test_connect_omits_factory_when_no_kwargs() -> None:
+    """No ``httpx_client_kwargs`` → ``httpx_client_factory`` not set; SDK uses default."""
+    transport = HttpTransport(url="https://example.com/mcp")
+    session = McpSession(transport)
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock(), MagicMock()))
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+    with patch("calfkit.mcp._session.streamablehttp_client", return_value=mock_cm) as mock_streamable:
+        with patch("calfkit.mcp._session.ClientSession") as mock_cs:
+            mock_cs.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            mock_cs.return_value.__aexit__ = AsyncMock(return_value=None)
+            await session._connect()
+    _, call_kwargs = mock_streamable.call_args
+    assert "httpx_client_factory" not in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# shutdown_grace_seconds bounds the close (P0 #3 — Q14)
+# ---------------------------------------------------------------------------
+
+
+async def test_aclose_respects_shutdown_grace_seconds(caplog: pytest.LogCaptureFixture) -> None:
+    """A hung stdio aclose is hard-cancelled after ``shutdown_grace_seconds``.
+
+    Regression: the kwarg was stored on ``StdioTransport`` but never read by
+    ``McpSession.aclose``. Now we wrap with ``asyncio.wait_for`` and warn
+    on timeout. Use a tiny grace value so the test is fast.
+    """
+    import asyncio
+
+    transport = StdioTransport(command="x", shutdown_grace_seconds=0.05)
+    session = McpSession(transport)
+    # Pretend a session is open so aclose() runs the close path.
+    session._session = MagicMock()
+
+    async def _slow_aclose() -> None:
+        await asyncio.sleep(5)  # WAY longer than the grace window
+
+    with patch.object(session._stack, "aclose", side_effect=_slow_aclose):
+        with caplog.at_level("WARNING", logger="calfkit.mcp._session"):
+            await session.aclose()
+
+    # Warning fired; session field reset.
+    assert any("shutdown_grace_seconds" in r.message for r in caplog.records)
+    assert session._session is None
+
+
+async def test_aclose_no_grace_for_http_transport() -> None:
+    """HttpTransport has no grace kwarg; aclose runs unbounded.
+
+    A hung HTTP close is not currently bounded by calfkit — operator
+    responsibility. This test pins the behaviour so a future change is
+    visible.
+    """
+    transport = HttpTransport(url="https://example.com/mcp")
+    session = McpSession(transport)
+    session._session = MagicMock()
+
+    completed = False
+
+    async def _quick_aclose() -> None:
+        nonlocal completed
+        completed = True
+
+    with patch.object(session._stack, "aclose", side_effect=_quick_aclose):
+        await session.aclose()
+
+    assert completed
+    assert session._session is None
+
+
+# ---------------------------------------------------------------------------
+# list_tools pagination warning (P1 #15)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_tools_warns_on_paginated_response(caplog: pytest.LogCaptureFixture) -> None:
+    """Server with >1 page of tools triggers a WARNING — v1 reads page 1 only."""
+    transport = StdioTransport(command="x")
+    session = McpSession(transport)
+    mock_session = MagicMock()
+    paginated = MagicMock()
+    paginated.tools = []
+    paginated.nextCursor = "cursor-page-2"
+    mock_session.list_tools = AsyncMock(return_value=paginated)
+    session._session = mock_session
+
+    with caplog.at_level("WARNING", logger="calfkit.mcp._session"):
+        await session.list_tools()
+
+    assert any("nextCursor" in r.message for r in caplog.records)

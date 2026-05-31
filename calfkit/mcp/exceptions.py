@@ -22,28 +22,39 @@ The taxonomy distinguishes:
 Tool-semantic errors (``CallToolResult.is_error=True``) do NOT raise here —
 they are returned as ``RetryPromptPart`` content by ``_adapt.py`` so the LLM
 can retry. See ``docs/mcp-adaptor-design.md`` §8 and §9.
+
+The base class is named :class:`CalfkitMcpError` (not ``McpError``) so it
+does not collide with the MCP SDK's ``mcp.shared.exceptions.McpError``
+that is raised by ``ClientSession.call_tool`` on JSON-RPC failures. A user
+catching the calfkit base will not accidentally swallow SDK protocol errors.
 """
 
 from __future__ import annotations
 
 
-class McpError(Exception):
-    """Base class for all MCP adaptor exceptions."""
+class CalfkitMcpError(Exception):
+    """Base class for all calfkit MCP adaptor exceptions.
+
+    Distinct from ``mcp.shared.exceptions.McpError`` (the SDK's JSON-RPC
+    error type) — catching this base does NOT catch SDK errors raised by
+    ``call_tool``. Operator code that wants to handle the SDK's protocol
+    errors should ``except mcp.shared.exceptions.McpError`` directly.
+    """
 
 
-class McpConfigError(McpError):
+class McpConfigError(CalfkitMcpError):
     """User-visible misconfiguration. Raised at parse / construction time."""
 
 
-class McpTransportError(McpError):
+class McpTransportError(CalfkitMcpError):
     """Transport-layer failure (subprocess crash, HTTP connect refused, timeout)."""
 
 
-class McpProtocolError(McpError):
+class McpProtocolError(CalfkitMcpError):
     """MCP protocol-layer failure (server-side MCPError, capability mismatch)."""
 
 
-class McpToolDriftError(McpError):
+class McpToolDriftError(CalfkitMcpError):
     """Reserved for v1.1 strict-mode opt-in.
 
     The bridge worker would raise this if a tool declared in ``tools=`` is not

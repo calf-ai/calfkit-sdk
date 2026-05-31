@@ -107,6 +107,33 @@ class _McpFactory:
         """
         return McpServer.http(url, tools=tools, name=name, **kwargs)
 
+    def __getattr__(self, name: str) -> Any:
+        """Delegate unknown attribute lookups to the ``calfkit.mcp`` submodule.
+
+        ``from calfkit import mcp`` rebinds the ``calfkit.mcp`` attribute on
+        the parent package from the submodule object to this factory instance,
+        which otherwise breaks ``calfkit.mcp.McpServer`` / ``McpServers`` /
+        etc. attribute access. Resolving via ``sys.modules`` recovers the
+        real submodule (the import system keeps that binding intact) so both
+        idioms keep working.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        import sys
+
+        mod = sys.modules.get("calfkit.mcp")
+        # ``mod`` is either the real submodule (the canonical case) or
+        # ``None`` during partial-init imports. The defensive ``is self``
+        # check covers a pathological case where ``calfkit.mcp`` ends up
+        # bound to this factory instance in sys.modules — unreachable in
+        # practice but cheap insurance against an infinite-recursion bug.
+        if mod is None or mod is self:  # type: ignore[comparison-overlap]
+            raise AttributeError(name)
+        try:
+            return getattr(mod, name)
+        except AttributeError:
+            raise AttributeError(f"module 'calfkit.mcp' has no attribute {name!r}") from None
+
 
 mcp = _McpFactory()
 """The README-leading factory. ``mcp("npx ...", tools=...)`` is the

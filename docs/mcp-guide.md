@@ -172,7 +172,7 @@ gmail = mcp(
     # Calfkit ↔ MCP server: one service-level credential
     token="$CALFKIT_SERVICE_TOKEN",
     # Per-call: user identity passed in MCP _meta field
-    meta=lambda ctx: {"user_id": ctx.deps["user_id"]},
+    meta=lambda ctx: {"user_id": ctx.deps.provided_deps["user_id"]},
     tools=Gmail.ALL,
 )
 ```

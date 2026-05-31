@@ -103,7 +103,7 @@ Standard `mcp.json` shape (Claude Desktop / Cursor / Cline-compatible):
 gmail = McpServer.http(
     "https://gmail-mcp.acme.com/mcp",
     token="$CALFKIT_SERVICE_TOKEN",                     # session-static auth
-    meta=lambda ctx: {"user_id": ctx.deps["user_id"]},  # per-call identity
+    meta=lambda ctx: {"user_id": ctx.deps.provided_deps["user_id"]},  # per-call identity
     tools=Gmail.ALL,
 )
 ```
@@ -346,7 +346,7 @@ Sequential phases 1–4; phases 5–7 parallelizable; phase 8 is release.
 ### 10.1 Calfkit versioning
 
 - v1 ships as **`calfkit 0.4.0`** — minor bump because of additive feature, no breaking changes.
-- The MCP adaptor is opt-in (users who don't use it pay nothing — no new required deps, no behavior changes to existing nodes).
+- The MCP adaptor is opt-in at the API level (no behavior changes to existing nodes), but the underlying `mcp` SDK is now a **required** dependency. The factory shortcut (`from calfkit import mcp`) is re-exported at the top level so the SDK is imported eagerly when calfkit is imported; the install footprint grows by `mcp>=1.20.0` plus its transitive deps (httpx, anyio — both of which are already pulled in by existing LLM provider deps). Pure-Kafka users without MCP needs pay the disk/import cost but nothing else.
 - `calfkit[mcp-codegen]` extra installs the CLI dependency (`typer`).
 
 ### 10.2 Release-please configuration

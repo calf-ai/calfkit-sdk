@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, ClassVar, Generic, cast
 
 from pydantic import ValidationError
@@ -14,6 +14,7 @@ from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.exceptions import ToolExecutionError
+from calfkit.mcp._server import McpServer
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
 from calfkit.models.node_schema import BaseToolNodeSchema
@@ -22,6 +23,34 @@ from calfkit.models.state import FailedToolCall, PendingToolBatch
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import BaseToolNodeDef, ToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
+
+# Public alias for the heterogeneous tool entries that ``Agent(tools=...)``
+# accepts. Native tool nodes pass through; ``McpServer`` instances are
+# flattened via their ``__iter__`` at construction time. Type-checkers see
+# the widened union; runtime sees the expanded list.
+ToolLike = ToolNodeDef | McpServer
+
+
+def _flatten_tools(entries: Iterable[ToolLike] | None) -> list[BaseToolNodeSchema]:
+    """Expand ``McpServer`` entries into their underlying tool schemas.
+
+    Native ``ToolNodeDef`` / ``BaseToolNodeSchema`` entries are appended
+    as-is. ``McpServer`` instances yield one ``BaseToolNodeSchema`` per
+    filtered tool via ``__iter__``. This is what makes
+    ``Agent(tools=[mcp_server])`` work end-to-end — without flattening,
+    the registry build at :meth:`BaseAgentNodeDef.run` would attempt
+    ``mcp_server.tool_schema.name`` and raise ``AttributeError``.
+    """
+    if not entries:
+        return []
+    flattened: list[BaseToolNodeSchema] = []
+    for entry in entries:
+        if isinstance(entry, McpServer):
+            flattened.extend(entry)
+        else:
+            flattened.append(entry)
+    return flattened
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +69,7 @@ class BaseAgentNodeDef(
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
         gates: list[GateFunction] | None = None,
-        tools: list[ToolNodeDef] | None = None,
+        tools: list[ToolLike] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
@@ -48,7 +77,7 @@ class BaseAgentNodeDef(
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
-        self.tools = tools or list()
+        self.tools: list[BaseToolNodeSchema] = _flatten_tools(tools)
         self.sequential_only_mode = sequential_only_mode
         self._pending_batches: dict[str, PendingToolBatch] = dict()
 
@@ -465,8 +494,8 @@ class BaseAgentNodeDef(
                 ctx.state.final_output_parts = [DataPart(data=result.output)]
             return ReturnCall[State](state=ctx.state)
 
-    def add_tools(self, *tools: ToolNodeDef) -> None:
-        self.tools.extend(tools)
+    def add_tools(self, *tools: ToolLike) -> None:
+        self.tools.extend(_flatten_tools(tools))
 
     def instructions(self, func: Callable[..., str | None]) -> Callable[..., str | None]:
         """Decorator to define dynamic instruction functions that can build instructions at runtime."""

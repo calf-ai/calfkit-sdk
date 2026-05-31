@@ -33,6 +33,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+from calfkit.mcp._config import expand_env
 from calfkit.mcp._session import HttpTransport, McpSession, McpTransport, StdioTransport
 from calfkit.mcp._tool_def import McpToolDef
 from calfkit.mcp.exceptions import McpConfigError
@@ -196,12 +197,17 @@ class McpServer:
         to the subprocess (full passthrough, matching Docker / subprocess
         conventions). Pass ``safe_env_only=True`` to defer to the MCP SDK's
         allowlist instead.
+
+        ``$VAR`` / ``${VAR}`` substitution is applied to every string value
+        (command, args, env values, cwd) at construction time so the same
+        idiom works for inline construction and ``mcp.json`` loading.
+        Unset variables raise :class:`McpConfigError`.
         """
         transport = StdioTransport(
-            command=command,
-            args=tuple(args),
-            env=env,
-            cwd=cwd,
+            command=expand_env(command),
+            args=tuple(expand_env(a) for a in args),
+            env=expand_env(env) if env is not None else None,
+            cwd=expand_env(cwd) if cwd is not None else None,
             shutdown_grace_seconds=shutdown_grace_seconds,
             safe_env_only=safe_env_only,
         )
@@ -238,11 +244,16 @@ class McpServer:
 
         Per Pattern 1 (design doc §10), credentials are session-static.
         For per-call user identity, use ``meta=lambda ctx: {...}``.
+
+        ``$VAR`` / ``${VAR}`` substitution is applied to ``url``, ``token``,
+        and every header value at construction time so the same idiom works
+        for inline construction and ``mcp.json`` loading. Unset variables
+        raise :class:`McpConfigError`.
         """
         transport = HttpTransport(
-            url=url,
-            token=token,
-            headers=dict(headers) if headers is not None else {},
+            url=expand_env(url),
+            token=expand_env(token) if token is not None else None,
+            headers=expand_env(dict(headers)) if headers is not None else {},
             httpx_client_kwargs=dict(httpx_client_kwargs) if httpx_client_kwargs is not None else {},
             timeout_seconds=timeout_seconds,
             sse_read_timeout_seconds=sse_read_timeout_seconds,

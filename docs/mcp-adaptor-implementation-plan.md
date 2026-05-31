@@ -284,7 +284,7 @@ from gmail_schemas import Gmail
 gmail = McpServer.http(
     "https://gmail-mcp.acme.com/mcp",
     token="$CALFKIT_SERVICE_TOKEN",                     # session-static auth to MCP server
-    meta=lambda ctx: {"user_id": ctx.deps["user_id"]},  # per-call user identity
+    meta=lambda ctx: {"user_id": ctx.deps.provided_deps["user_id"]},  # per-call user identity
     tools=Gmail.ALL,
 )
 ```
