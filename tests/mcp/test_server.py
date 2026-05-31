@@ -458,16 +458,16 @@ def test_transport_property() -> None:
 
 
 # ---------------------------------------------------------------------------
-# $VAR expansion at construction time (P0 #5 — token/headers/env)
+# $VAR expansion at construction time (token / headers / env / url)
 # ---------------------------------------------------------------------------
 
 
 def test_http_token_var_is_expanded(monkeypatch: pytest.MonkeyPatch) -> None:
     """``$VAR`` substitution applied to ``token=`` at construction.
 
-    Regression: prior to this fix, only the ``mcp.json`` path expanded
-    env vars — users following the README's ``token="$CALFKIT_SERVICE_TOKEN"``
-    snippet sent the literal string as their Bearer.
+    Regression: env-var expansion must happen in the McpServer constructors,
+    not only in the mcp.json path — otherwise users following the README's
+    ``token="$CALFKIT_SERVICE_TOKEN"`` snippet send the literal string.
     """
     monkeypatch.setenv("CALFKIT_SERVICE_TOKEN", "sk-real-token")
     s = McpServer.http("https://api.example.com/mcp", tools=[_td("t")], token="$CALFKIT_SERVICE_TOKEN")
@@ -556,8 +556,26 @@ def test_http_expanded_url_must_have_scheme(monkeypatch: pytest.MonkeyPatch) -> 
         McpServer.http("$BAD_BASE", tools=[_td("t")])
 
 
-def test_expand_env_failure_includes_arg_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unset-var errors include the field name so multi-field configs are debuggable."""
-    monkeypatch.delenv("CALFKIT_TEST_MISSING_ENV", raising=False)
-    with pytest.raises(McpConfigError, match=r"McpServer\.stdio\(env=\).*CALFKIT_TEST_MISSING_ENV"):
-        McpServer.stdio("x", tools=[_td("t")], env={"K": "$CALFKIT_TEST_MISSING_ENV"})
+@pytest.mark.parametrize(
+    "context_label, builder",
+    [
+        ("McpServer.http(url=)", lambda: McpServer.http("$_X", tools=[_td("t")])),
+        ("McpServer.http(token=)", lambda: McpServer.http("https://x/mcp", tools=[_td("t")], token="$_X")),
+        ("McpServer.http(headers=)", lambda: McpServer.http("https://x/mcp", tools=[_td("t")], headers={"K": "$_X"})),
+        ("McpServer.stdio(command=)", lambda: McpServer.stdio("$_X", tools=[_td("t")])),
+        ("McpServer.stdio(args=)", lambda: McpServer.stdio("x", "$_X", tools=[_td("t")])),
+        ("McpServer.stdio(env=)", lambda: McpServer.stdio("x", tools=[_td("t")], env={"K": "$_X"})),
+        ("McpServer.stdio(cwd=)", lambda: McpServer.stdio("x", tools=[_td("t")], cwd="$_X")),
+    ],
+)
+def test_expand_env_where_context_is_threaded_to_every_field(context_label: str, builder: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every where= call site surfaces its field name in error messages.
+
+    Catches refactor-time typos that would degrade debuggability (e.g. a
+    copy-paste leaving the wrong field name on a where= argument).
+    """
+    import re
+
+    monkeypatch.delenv("_X", raising=False)
+    with pytest.raises(McpConfigError, match=re.escape(context_label)):
+        builder()  # type: ignore[operator]

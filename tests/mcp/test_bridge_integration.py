@@ -178,9 +178,6 @@ def test_add_tools_flattens_mcp_server() -> None:
 def test_agent_rejects_unknown_tool_entry_type() -> None:
     """Nested list or random non-tool object raises TypeError at construction
     instead of crashing deep in registry build at first model turn.
-
-    Regression: same bug class as the original P0 #1 — silent acceptance of
-    invalid entries shifts the failure point from construction to first call.
     """
     with pytest.raises(TypeError, match="must be a ToolNodeDef"):
         _make_agent(tools=[[_td("search")]])  # nested list typo

@@ -21,12 +21,14 @@ from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, PendingToolBatch
 from calfkit.nodes.base import BaseNodeDef, GateFunction
-from calfkit.nodes.tool import BaseToolNodeDef, ToolNodeDef, _safe_exc_message
+from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
-# Public alias for ``Agent(tools=[...])`` entries. ``McpServer`` is
-# flattened by ``_flatten_tools`` at construction.
-ToolLike = ToolNodeDef | McpServer
+# Public alias for ``Agent(tools=[...])`` entries. Includes
+# ``BaseToolNodeSchema`` (covers ``ToolNodeDef`` via inheritance and any
+# user-defined schema-only subclass) and ``McpServer`` (flattened by
+# ``_flatten_tools`` at construction).
+ToolLike = BaseToolNodeSchema | McpServer
 
 
 def _flatten_tools(entries: Iterable[ToolLike] | None) -> list[BaseToolNodeSchema]:

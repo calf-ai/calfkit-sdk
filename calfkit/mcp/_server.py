@@ -467,8 +467,14 @@ class McpServer:
         except Exception:
             # Don't let a list_tools failure prevent the bridge from
             # starting — call_tool failures will surface naturally if
-            # the agent calls an unknown tool. Log loudly so operators see it.
-            logger.warning("McpServer %r: tools/list sanity-check failed; skipping drift detection", self._raw_name, exc_info=True)
+            # the agent calls an unknown tool. Log at ERROR so operators
+            # alert on the missed drift check.
+            logger.error(
+                "McpServer %r: tools/list sanity-check failed; skipping drift detection. "
+                "Tool dispatch may fail at runtime if declared tools don't exist on the server.",
+                self._raw_name,
+                exc_info=True,
+            )
             return
 
         server_names = {t.name for t in server_tools}

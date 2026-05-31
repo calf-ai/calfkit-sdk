@@ -15,6 +15,7 @@ glue layered on top of ``McpServer`` and the ``_config.py`` parser.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,6 +32,10 @@ from calfkit.mcp.exceptions import McpConfigError
 
 if TYPE_CHECKING:
     from calfkit.mcp._tool_def import McpToolDef
+
+# URI scheme grammar per RFC 3986 § 3.1, anchored so a URL embedded inside
+# a command line arg doesn't false-positive as URL intent.
+_SCHEME_PREFIX = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*)://")
 
 
 class _McpFactory:
@@ -69,20 +74,28 @@ class _McpFactory:
         name: str | None = None,
         **kwargs: Any,
     ) -> McpServer:
-        # Expand $VAR before routing so ``mcp("$MCP_URL", ...)`` is routed by
-        # the URL it resolves to, not by the literal "$..." prefix. (Without
-        # this, $VAR URLs are misrouted to stdio.) ``McpServer.stdio/.http``
-        # will re-call ``expand_env`` on individual fields — a no-op for the
-        # already-resolved values we pass downstream.
+        if not isinstance(cmd_or_url, str) or not cmd_or_url:
+            raise McpConfigError(f"mcp(): first argument must be a non-empty string; got {type(cmd_or_url).__name__}: {cmd_or_url!r}")
+        # Expand before routing — startswith("http") on a literal "$VAR"
+        # would mis-route to stdio.
         expanded = expand_env(cmd_or_url, where=f"mcp({cmd_or_url!r})")
-        if expanded.startswith("http://") or expanded.startswith("https://"):
-            return self.http(expanded, tools=tools, name=name, **kwargs)
+        # Anchored scheme check: a leading "scheme://" means URL intent.
+        # Anchoring avoids false positives on command lines that legitimately
+        # contain a URL inside an arg (e.g. ``python -c "url='http://...'"``).
+        scheme_match = _SCHEME_PREFIX.match(expanded)
+        if scheme_match:
+            scheme = scheme_match.group(1).lower()
+            if scheme in ("http", "https"):
+                return self.http(expanded, tools=tools, name=name, **kwargs)
+            raise McpConfigError(
+                f"mcp({cmd_or_url!r} → {expanded!r}): scheme {scheme!r} is not http(s)://. Use mcp.http(url) explicitly for non-HTTP transports."
+            )
         # Treat as stdio command line; shlex split for shell-style quoting
         import shlex
 
         parts = shlex.split(expanded)
         if not parts:
-            raise McpConfigError(f"mcp({cmd_or_url!r}): command is empty after shell-splitting")
+            raise McpConfigError(f"mcp({cmd_or_url!r} → {expanded!r}): command is empty after shell-splitting")
         return self.stdio(parts[0], *parts[1:], tools=tools, name=name, **kwargs)
 
     def stdio(

@@ -147,11 +147,12 @@ class HttpTransport(McpTransport):
 def _make_httpx_factory(extra_kwargs: dict[str, Any]) -> Any:
     """Build an ``McpHttpClientFactory`` that merges user kwargs over MCP defaults.
 
-    The MCP SDK calls the factory with session-static ``headers`` (including
-    ``Authorization`` for HTTP transports). User-supplied ``headers`` in
-    ``httpx_client_kwargs`` merge *per-key* with those rather than wholesale
-    replacing them — otherwise the SDK's Authorization header would silently
-    disappear when a user passed even one custom header.
+    SDK-supplied headers (including ``Authorization`` for HTTP transports)
+    are merged with user-supplied ``httpx_client_kwargs["headers"]`` via
+    ``httpx.Headers`` — the case-insensitive header type. Without this,
+    a user header keyed ``"authorization"`` (lowercase) would not collide
+    with the SDK's ``"Authorization"`` and httpx would concatenate both
+    values into one header on the wire.
     """
 
     def _factory(
@@ -162,18 +163,16 @@ def _make_httpx_factory(extra_kwargs: dict[str, Any]) -> Any:
         kwargs: dict[str, Any] = {"follow_redirects": True}
         if timeout is not None:
             kwargs["timeout"] = timeout
-        if headers is not None:
-            kwargs["headers"] = dict(headers)
         if auth is not None:
             kwargs["auth"] = auth
 
-        # Merge headers per-key so user-supplied headers add to / override
-        # individual SDK headers without nuking the rest (esp. Authorization).
+        # Build the headers using httpx.Headers so case-insensitive
+        # de-duplication happens before AsyncClient sees the dict.
+        merged = httpx.Headers(headers or {})
         extra = dict(extra_kwargs)
-        extra_headers = extra.pop("headers", None)
-        if extra_headers:
-            merged = dict(kwargs.get("headers", {}))
-            merged.update(extra_headers)
+        for k, v in (extra.pop("headers", None) or {}).items():
+            merged[k] = v  # user wins on case-insensitive collision
+        if merged:
             kwargs["headers"] = merged
         kwargs.update(extra)
         return httpx.AsyncClient(**kwargs)
@@ -355,31 +354,35 @@ class McpSession:
     async def aclose(self) -> None:
         """Tear down the session + transport.
 
-        For stdio transports, the close is bounded by
-        ``StdioTransport.shutdown_grace_seconds`` (default 5s; ``0`` means
-        immediate hard-cancel, no grace). On timeout we raise
+        For stdio transports with ``shutdown_grace_seconds > 0`` the close
+        is bounded by that grace window; on timeout we raise
         :class:`McpTransportError` so the worker logs an ERROR-level
         traceback rather than absorbing the leak silently — the MCP SDK's
         ``_terminate_process_tree`` may not have run, so the subprocess
-        likely orphans.
+        likely orphans. ``grace_seconds == 0`` means "no bound" (matches
+        HTTP behaviour and lets operators opt out of the wait_for wrap).
 
         ``self._session`` is reset in a ``finally`` block so a subsequent
         ``aclose()`` is a no-op even after a timeout.
         """
-        grace = self._transport.shutdown_grace_seconds if isinstance(self._transport, StdioTransport) else None
+        # 0 sentinel matches the HTTP transport's None: both mean unbounded.
+        # `wait_for(coro, timeout=0)` raises immediately without giving the
+        # coroutine a chance to run, so it must be excluded from the bounded
+        # branch.
+        grace = self._transport.shutdown_grace_seconds if isinstance(self._transport, StdioTransport) else 0
         try:
-            if grace is not None:
+            if grace > 0:
                 await asyncio.wait_for(self._stack.aclose(), timeout=grace)
             else:
                 await self._stack.aclose()
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logger.error(
                 "McpSession.aclose exceeded shutdown_grace_seconds=%.1fs for transport %r; "
                 "MCP subprocess likely orphaned (SDK cleanup did not complete). Investigate with `ps`.",
                 grace,
                 self._transport,
             )
-            raise McpTransportError(f"MCP session aclose timed out after {grace}s; subprocess likely orphaned") from None
+            raise McpTransportError(f"MCP session aclose timed out after {grace}s; subprocess likely orphaned") from e
         finally:
             self._session = None
 

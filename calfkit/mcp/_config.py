@@ -165,17 +165,15 @@ def parse_mcp_config(config: dict[str, Any] | str | Path) -> dict[str, ParsedMcp
     if not isinstance(servers_dict, dict):
         raise McpConfigError(f"mcp.json: top-level value must be an object mapping server names to specs; got {type(servers_dict).__name__}")
 
-    expanded = expand_env(servers_dict)
-    if not isinstance(expanded, dict):  # type-narrowing for mypy
-        raise McpConfigError("mcp.json: expanded config is not a dict")
-
+    # Expand per-server so unset-var errors name the offending server.
     out: dict[str, ParsedMcpServerSpec] = {}
-    for name, raw_spec in expanded.items():
+    for name, raw_spec in servers_dict.items():
         if not isinstance(name, str) or not name:
             raise McpConfigError(f"mcp.json: server name must be a non-empty string; got {name!r}")
         if not isinstance(raw_spec, dict):
             raise McpConfigError(f"mcp.json: spec for server {name!r} must be an object; got {type(raw_spec).__name__}")
-        out[name] = _parse_server_spec(name, raw_spec)
+        expanded_spec = expand_env(raw_spec, where=f"mcp.json[{name!r}]")
+        out[name] = _parse_server_spec(name, expanded_spec)
     return out
 
 

@@ -224,6 +224,11 @@ class McpBridge(BaseNodeDef):
                 args,
                 meta=meta,
             )
+        except (MemoryError, RecursionError, SystemError):
+            # Process-level health issues must propagate as the operator's
+            # signal that the worker is sick; converting to FailedToolCall
+            # would mask them as a tool-level fault.
+            raise
         except Exception as e:
             logger.exception(
                 "[%s] mcp_bridge dispatch failed tool=%s tool_call_id=%s raised %s",

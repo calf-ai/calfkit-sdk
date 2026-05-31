@@ -424,12 +424,14 @@ def test_transport_property_exposed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# httpx_client_kwargs threading (P0 #2 — Q11)
+# httpx_client_kwargs threading (HttpTransport escape hatch)
 # ---------------------------------------------------------------------------
 
 
 async def test_make_httpx_factory_returns_client_with_user_kwargs() -> None:
-    """``_make_httpx_factory`` merges user kwargs over MCP defaults."""
+    """User kwargs (e.g. ``verify=False`` for custom SSL) flow into the
+    constructed httpx.AsyncClient and override built-in defaults.
+    """
     import httpx
 
     from calfkit.mcp._session import _make_httpx_factory
@@ -465,13 +467,54 @@ async def test_make_httpx_factory_merges_headers_instead_of_replacing() -> None:
 
 async def test_make_httpx_factory_user_header_overrides_sdk_header_for_same_key() -> None:
     """A user header for the *same* key as the SDK's wins (explicit override)."""
-
     from calfkit.mcp._session import _make_httpx_factory
 
     factory = _make_httpx_factory({"headers": {"Accept": "text/plain"}})
     client = factory(headers={"Accept": "application/json"})
     try:
         assert client.headers["accept"] == "text/plain"
+    finally:
+        await client.aclose()
+
+
+async def test_make_httpx_factory_user_header_collides_case_insensitively() -> None:
+    """User ``authorization`` (lowercase) must override SDK ``Authorization``.
+
+    httpx would otherwise concatenate both values into a single header
+    on the wire (``'Bearer sdk-token, Custom-Auth'``), breaking auth.
+    """
+    from calfkit.mcp._session import _make_httpx_factory
+
+    factory = _make_httpx_factory({"headers": {"authorization": "Custom-Auth"}})
+    client = factory(headers={"Authorization": "Bearer sdk-token"})
+    try:
+        # Single canonical header, user value wins
+        assert client.headers["authorization"] == "Custom-Auth"
+        assert "sdk-token" not in client.headers["authorization"]
+    finally:
+        await client.aclose()
+
+
+async def test_make_httpx_factory_empty_user_headers_preserves_sdk_headers() -> None:
+    """Empty user headers dict must NOT clobber SDK headers (no-op merge)."""
+    from calfkit.mcp._session import _make_httpx_factory
+
+    factory = _make_httpx_factory({"headers": {}})
+    client = factory(headers={"Authorization": "Bearer sdk-token"})
+    try:
+        assert client.headers["authorization"] == "Bearer sdk-token"
+    finally:
+        await client.aclose()
+
+
+async def test_make_httpx_factory_sdk_passes_no_headers() -> None:
+    """SDK calling factory(headers=None) — user headers still apply."""
+    from calfkit.mcp._session import _make_httpx_factory
+
+    factory = _make_httpx_factory({"headers": {"X-User": "yes"}})
+    client = factory(headers=None)
+    try:
+        assert client.headers["x-user"] == "yes"
     finally:
         await client.aclose()
 
@@ -542,7 +585,7 @@ async def test_connect_omits_factory_when_no_kwargs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# shutdown_grace_seconds bounds the close (P0 #3 — Q14)
+# shutdown_grace_seconds bounds the close
 # ---------------------------------------------------------------------------
 
 
@@ -572,27 +615,49 @@ async def test_aclose_respects_shutdown_grace_seconds(caplog: pytest.LogCaptureF
     assert session._session is None
 
 
-async def test_aclose_zero_grace_raises_immediately() -> None:
-    """``shutdown_grace_seconds=0`` means fast-fail (no grace), not unbounded.
+async def test_aclose_zero_grace_means_unbounded() -> None:
+    """``shutdown_grace_seconds=0`` means "no bound" — opt out of wait_for.
 
-    Previously fell through to ``self._stack.aclose()`` unbounded because
-    ``grace > 0`` was false; now ``wait_for(timeout=0)`` raises immediately.
+    Setting 0 must NOT cause a clean close to raise TimeoutError. The
+    `wait_for(coro, timeout=0)` semantic raises immediately even for
+    instant coroutines; sentinel ``0`` skips that wrap entirely.
     """
-    import asyncio
+    transport = StdioTransport(command="x", shutdown_grace_seconds=0.0)
+    session = McpSession(transport)
+    session._session = MagicMock()
 
-    from calfkit.mcp.exceptions import McpTransportError
+    closed = False
+
+    async def _quick_aclose() -> None:
+        nonlocal closed
+        closed = True
+
+    with patch.object(session._stack, "aclose", side_effect=_quick_aclose):
+        # Must NOT raise; clean close completes naturally.
+        await session.aclose()
+
+    assert closed
+    assert session._session is None
+
+
+async def test_aclose_zero_grace_unbounded_for_slow_close() -> None:
+    """grace=0 truly is unbounded — even a slow aclose runs to completion."""
+    import asyncio
 
     transport = StdioTransport(command="x", shutdown_grace_seconds=0.0)
     session = McpSession(transport)
     session._session = MagicMock()
 
-    async def _slow_aclose() -> None:
-        await asyncio.sleep(5)
+    completed = False
 
-    with patch.object(session._stack, "aclose", side_effect=_slow_aclose):
-        with pytest.raises(McpTransportError):
-            await session.aclose()
-    assert session._session is None
+    async def _slow_but_finite() -> None:
+        nonlocal completed
+        await asyncio.sleep(0.02)
+        completed = True
+
+    with patch.object(session._stack, "aclose", side_effect=_slow_but_finite):
+        await session.aclose()
+    assert completed
 
 
 async def test_aclose_non_timeout_exception_propagates_and_resets_state() -> None:
@@ -614,24 +679,49 @@ async def test_aclose_non_timeout_exception_propagates_and_resets_state() -> Non
 async def test_aclose_no_grace_for_http_transport() -> None:
     """HttpTransport has no grace kwarg; aclose runs unbounded.
 
-    A hung HTTP close is not currently bounded by calfkit — operator
-    responsibility. This test pins the behaviour so a future change is
-    visible.
+    Asserts ``asyncio.wait_for`` is NOT called for HTTP transports so a
+    future change that bounded HTTP closes (potentially a leak risk for
+    legitimate slow servers) would trip this test.
     """
     transport = HttpTransport(url="https://example.com/mcp")
     session = McpSession(transport)
     session._session = MagicMock()
 
-    completed = False
-
     async def _quick_aclose() -> None:
-        nonlocal completed
-        completed = True
+        return None
 
-    with patch.object(session._stack, "aclose", side_effect=_quick_aclose):
+    with (
+        patch.object(session._stack, "aclose", side_effect=_quick_aclose),
+        patch("calfkit.mcp._session.asyncio.wait_for") as mock_wait_for,
+    ):
         await session.aclose()
+        mock_wait_for.assert_not_called()
+    assert session._session is None
 
-    assert completed
+
+async def test_aclose_is_no_op_after_timeout() -> None:
+    """The aclose docstring promises 'subsequent aclose() is a no-op even
+    after a timeout' — pin that contract so a refactor that moves the
+    ``_session = None`` reset out of ``finally`` breaks this test.
+    """
+    import asyncio
+
+    from calfkit.mcp.exceptions import McpTransportError
+
+    transport = StdioTransport(command="x", shutdown_grace_seconds=0.05)
+    session = McpSession(transport)
+    session._session = MagicMock()
+
+    async def _slow_aclose() -> None:
+        await asyncio.sleep(5)
+
+    with patch.object(session._stack, "aclose", side_effect=_slow_aclose) as mock_close:
+        with pytest.raises(McpTransportError):
+            await session.aclose()
+        # Second call must be a no-op (no raise) because _session was reset
+        mock_close.side_effect = None
+        mock_close.return_value = None
+        await session.aclose()  # must not raise
     assert session._session is None
 
 

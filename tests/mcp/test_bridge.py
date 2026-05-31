@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, ErrorData, TextContent
 
@@ -301,6 +302,29 @@ async def test_generic_exception_stores_failed_tool_call() -> None:
     stored = state.tool_results.get("tc-fail")
     assert isinstance(stored, FailedToolCall)
     assert stored.exc_type == "RuntimeError"
+
+
+@pytest.mark.parametrize("exc_type", [MemoryError, RecursionError, SystemError])
+async def test_process_level_errors_propagate_not_converted_to_failed_tool_call(
+    exc_type: type[BaseException],
+) -> None:
+    """Process-health failures must propagate out so operators see them
+    as worker-level events, not as a tool's RetryPromptPart / FailedToolCall.
+    """
+
+    def boom(name: str, args: dict[str, Any], meta: dict[str, Any] | None) -> CallToolResult:
+        raise exc_type("process-level issue")
+
+    fake = FakeMcpServer(name="gmail", tools=[_td()], invoker=boom)
+    await _open_fake(fake)
+    bridge = McpBridge(server=fake, tool_def=_td())
+
+    state = State()
+    _add_pending_tool_call(state, tool_name="t", tool_call_id="tc-leak", args={})
+    with pytest.raises(exc_type):
+        await bridge.run(_make_ctx(state), "tc-leak")
+    # And the state has NO tool_result entry — nothing was converted
+    assert "tc-leak" not in state.tool_results
 
 
 # ---------------------------------------------------------------------------

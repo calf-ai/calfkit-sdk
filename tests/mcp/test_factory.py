@@ -274,10 +274,10 @@ def test_readme_minimal_example_works() -> None:
 
 
 def test_mcp_call_expands_var_url_and_routes_to_http(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``mcp("$MCP_URL", ...)`` with ``$MCP_URL=https://...`` must route to HTTP.
+    """``mcp("$MCP_URL", ...)`` with ``$MCP_URL=https://...`` routes to HTTP.
 
-    Regression: prior to the fix, the ``startswith("http")`` check ran on
-    the literal ``"$MCP_URL"`` string and mis-routed to stdio.
+    Regression: the routing check must run on the expanded value, not on
+    the literal ``"$VAR"`` prefix, or env-templated URLs misroute to stdio.
     """
     monkeypatch.setenv("MCP_URL", "https://api.example.com/mcp")
     server = mcp_factory("$MCP_URL", tools=[_td()])
@@ -297,9 +297,48 @@ def test_mcp_call_expands_var_command_and_routes_to_stdio(monkeypatch: pytest.Mo
 
 
 def test_mcp_call_unset_var_raises_with_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Error message includes the literal ``mcp('$X')`` call form so operators
+    can grep the source for the broken call site, not just the var name.
+    """
     monkeypatch.delenv("CALFKIT_NONEXISTENT_FACTORY_VAR", raising=False)
-    with pytest.raises(McpConfigError, match="CALFKIT_NONEXISTENT_FACTORY_VAR"):
+    with pytest.raises(McpConfigError, match=r"mcp\('\$CALFKIT_NONEXISTENT_FACTORY_VAR'\)"):
         mcp_factory("$CALFKIT_NONEXISTENT_FACTORY_VAR", tools=[_td()])
+
+
+def test_mcp_call_non_string_raises_clear_error() -> None:
+    """``mcp(None, ...)`` / ``mcp(123, ...)`` must raise a clear McpConfigError
+    instead of a confusing ``AttributeError`` deep in expand_env.
+    """
+    with pytest.raises(McpConfigError, match="non-empty string"):
+        mcp_factory(None, tools=[_td()])  # type: ignore[arg-type]
+    with pytest.raises(McpConfigError, match="non-empty string"):
+        mcp_factory(123, tools=[_td()])  # type: ignore[arg-type]
+
+
+def test_mcp_call_non_http_scheme_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo like ``ftp://...`` is more likely a wrong-scheme bug than an
+    intent to spawn the URL as a binary — fail loudly with guidance.
+    """
+    with pytest.raises(McpConfigError, match="is not http"):
+        mcp_factory("ftp://server/path", tools=[_td()])
+
+
+def test_mcp_call_non_http_scheme_via_var_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same check applies after $VAR expansion."""
+    monkeypatch.setenv("BAD_SCHEME_URL", "ftp://server/path")
+    with pytest.raises(McpConfigError, match="is not http"):
+        mcp_factory("$BAD_SCHEME_URL", tools=[_td()])
+
+
+def test_mcp_call_command_with_embedded_url_arg_routes_to_stdio() -> None:
+    """A stdio command-line that contains a URL inside an arg must route to
+    stdio, not raise a scheme-mismatch — the anchored scheme check guards
+    against this false positive.
+    """
+    server = mcp_factory("python -m mymcp --endpoint http://api.example.com", tools=[_td()])
+    assert isinstance(server.transport, StdioTransport)
+    assert server.transport.command == "python"
+    assert server.transport.args == ("-m", "mymcp", "--endpoint", "http://api.example.com")
 
 
 # ---------------------------------------------------------------------------
