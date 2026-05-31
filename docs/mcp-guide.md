@@ -271,7 +271,7 @@ Kafka delivers at-least-once. If a bridge worker crashes between executing an MC
 
 **v1 ships a worker-local LRU+TTL cache** keyed on `(tool_call_id, args_hash)`. Successful results are served from cache on redelivery without re-dispatching. Defaults: 1hr TTL, 10k entries max, in-memory only. Tools annotated `idempotentHint=True` bypass the cache (safe to re-run).
 
-This is a hot fix; a generalized BaseNodeDef-level idempotency mechanism is tracked in [#161](https://github.com/calf-ai/issue/161).
+This is a hot fix; a generalized BaseNodeDef-level idempotency mechanism is tracked in [#161](https://github.com/calf-ai/calfkit-sdk/issues/161).
 
 You can supply a custom cache (e.g. with different TTL) via `Worker(..., idempotency_cache=IdempotencyCache(ttl_seconds=1800))`.
 
@@ -312,7 +312,7 @@ Documented limits so they don't surprise:
 - **Long-running tool calls** — MCP's experimental `tasks` extension is not implemented. A long call pins the bridge worker handler for its duration.
 - **Per-call HTTP credentials** — not protocol-supported; use Pattern 1 (identity in `_meta`) or one bridge per credential set.
 - **Hot reload via `notifications/tools/list_changed`** — bridges don't react to this notification in v1; users restart workers to pick up new tools.
-- **Cross-process idempotency** — the dedup cache is per-process. Multi-replica bridges don't share state. Tracked in [#161](https://github.com/calf-ai/issue/161).
+- **Cross-process idempotency** — the dedup cache is per-process. Multi-replica bridges don't share state. Tracked in [#161](https://github.com/calf-ai/calfkit-sdk/issues/161).
 
 ---
 
