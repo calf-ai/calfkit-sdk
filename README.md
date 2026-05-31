@@ -370,6 +370,14 @@ async def save_final(result: NodeResult) -> None:
 
 <br>
 
+### MCP Adaptor (Optional)
+
+Expose any [Model Context Protocol](https://modelcontextprotocol.io/) server's tools (Gmail, GitHub, Postgres, filesystems, browsers, and hundreds of others) as native calfkit tools that any `Agent` can call over standard Kafka envelopes — no per-tool glue code.
+
+See [`docs/mcp-overview.md`](docs/mcp-overview.md) for the quickstart, deployment topologies, `mcp.json` interop, multi-tenancy, observability, and CI drift detection.
+
+<br>
+
 ## Documentation
 
 Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.

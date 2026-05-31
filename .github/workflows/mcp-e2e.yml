@@ -1,0 +1,61 @@
+name: MCP E2E Tests
+
+# Separate lane for MCP adaptor end-to-end tests against a real MCP server.
+# Phase 8 of MCP adaptor v1 (#158).
+#
+# Uses no untrusted-input context vars; only safe meta vars (workflow, ref)
+# for concurrency grouping.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "calfkit/mcp/**"
+      - "calfkit/cli/**"
+      - "tests/mcp/**"
+      - "pyproject.toml"
+      - ".github/workflows/mcp-e2e.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: MCP E2E
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js (for npx-installable MCP servers)
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Verify npx availability
+        run: npx --version
+
+      - name: Pre-fetch @modelcontextprotocol/server-everything
+        run: npx -y @modelcontextprotocol/server-everything --help || true
+
+      - name: Run MCP E2E tests
+        run: uv run pytest tests/mcp/e2e -v --tb=short --timeout=120

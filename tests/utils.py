@@ -22,6 +22,25 @@ skip_if_no_openai_key = pytest.mark.skipif(
 )
 
 
+def _have_npx() -> bool:
+    """Return True if the ``npx`` command is on PATH.
+
+    Used to gate Phase 8 E2E tests that spawn npx-installable MCP servers
+    (e.g. ``@modelcontextprotocol/server-everything``). Without npx the
+    tests can't run; in CI lanes without Node, the tests skip cleanly.
+    """
+    import shutil
+
+    return shutil.which("npx") is not None
+
+
+# Skip MCP E2E tests if npx is not installed
+skip_if_no_npx = pytest.mark.skipif(
+    not _have_npx(),
+    reason="Skipping MCP E2E test: npx not on PATH (install Node.js to enable)",
+)
+
+
 async def wait_for_condition(
     predicate: Callable[[], bool],
     timeout: float = 20.0,
