@@ -461,7 +461,7 @@ gmail = mcp(
 )
 ```
 
-Full guide with multi-server deployments, drift detection in CI, and observability patterns: [`docs/mcp-guide.md`](docs/mcp-guide.md).
+Full overview with multi-server deployments, drift detection in CI, and observability patterns: [`docs/mcp-overview.md`](docs/mcp-overview.md).
 
 <br>
 

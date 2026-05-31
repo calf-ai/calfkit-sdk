@@ -199,7 +199,7 @@ Each decision is settled. Companion docs carry the full reasoning.
 | **D13** | **`Agent(tools=)` type widened via `ToolLike` Union alias** | Single line; future-proof for additional shapes | Impl plan §15.3 |
 | **D14** | **`meta=` accepts both sync and async callables** | Trivial to support; mirrors existing calfkit gates | Impl plan §15.4 |
 | **D15** | **Codegen output is versioned JSON-equivalent Python module** | Human-readable, diff-friendly, IDE-completable | Impl plan §15.5 |
-| **D16** | **README minimal example + separate `docs/mcp-guide.md` for advanced patterns** | Easy onboarding + thorough reference | Impl plan §15.6 |
+| **D16** | **README minimal example + separate `docs/mcp-overview.md` for advanced patterns** | Easy onboarding + thorough reference | Impl plan §15.6 |
 
 ---
 
@@ -288,7 +288,7 @@ Sequential phases 1–4; phases 5–7 parallelizable; phase 8 is release.
 | **4 — Worker integration** | 1 | Patch `worker.py`: McpServer segregation, `_on_startup`/`_on_shutdown`, FastStream hook wiring, BaseException cleanup. Single-process + split-process lifecycle tests. |
 | **5 — Codegen CLI** | 2 | `_codegen.py` renderer; `cli/mcp.py` typer command (`codegen`, `codegen --check`); tests using FakeMcpServer + tempdirs |
 | **6 — Public API polish** | 1 | Module-level `mcp` factory + `.stdio` / `.http` namespacers; auto-detect logic; `McpServers.from_file` / `from_config`; end-to-end fixture |
-| **7 — Documentation + examples** | 2 | README MCP section; `docs/mcp-guide.md` (multi-server, Pattern 1, observability tap); `examples/quickstart_mcp/` (4 files + 1 generated schema file) |
+| **7 — Documentation + examples** | 2 | README MCP section; `docs/mcp-overview.md` (multi-server, Pattern 1, observability tap); `examples/quickstart_mcp/` (4 files + 1 generated schema file) |
 | **8 — E2E + release** | 2 | Integration tests against `@modelcontextprotocol/server-everything` + an HTTP MCP fixture (separate CI lane); release-please config; smoke test against a real OAuth server |
 
 **Total: 17 working days** for a single engineer, plus integration buffer. Parallelization can compress this to ~12 calendar days if phases 5–7 run alongside phase 8 prep.
@@ -361,8 +361,8 @@ Sequential phases 1–4; phases 5–7 parallelizable; phase 8 is release.
 
 ### 10.4 Documentation deliverables
 
-- README: top-level MCP section (10–15 lines), copy-pasteable quickstart, link to `docs/mcp-guide.md`.
-- `docs/mcp-guide.md` (new): comprehensive user guide — multi-server, Pattern 1 OAuth, filtering, observability, CI drift detection.
+- README: top-level MCP section (10–15 lines), copy-pasteable quickstart, link to `docs/mcp-overview.md`.
+- `docs/mcp-overview.md` (new): comprehensive user guide — multi-server, Pattern 1 OAuth, filtering, observability, CI drift detection.
 - `docs/mcp-adaptor-design.md` & `docs/mcp-adaptor-implementation-plan.md` stay as deeper reference for contributors.
 
 ---
@@ -414,7 +414,7 @@ v1 is considered shipped when:
 2. **E2E test against `@modelcontextprotocol/server-everything`** passes in the separate CI lane.
 3. **`examples/quickstart_mcp/`** is runnable end-to-end via the README instructions.
 4. **README MCP section** is reviewed and merged.
-5. **`docs/mcp-guide.md`** is reviewed and merged.
+5. **`docs/mcp-overview.md`** is reviewed and merged.
 6. **Manual smoke test** against a real OAuth-protected MCP server (Gmail or GitHub) succeeds.
 7. **`calfkit mcp codegen --check`** is wired into calfkit's own CI as a self-test against the example.
 8. **Release notes** clearly describe the new feature and `calfkit[mcp-codegen]` extra.
@@ -502,7 +502,7 @@ A cross-document consistency audit was performed (62 findings across all plannin
 | 4 — Worker integration | 1 | `worker.py` patch + lifecycle tests | Phase 3 |
 | 5 — Codegen CLI | 2 | `_codegen.py` + `cli/mcp.py` | Phase 1 (can run parallel to 2–4) |
 | 6 — Public API polish | 1 | `mcp` factory + `McpServers.from_file` | Phase 4 |
-| 7 — Docs + examples | 2 | README, `mcp-guide.md`, `examples/quickstart_mcp/` | Phase 6 |
+| 7 — Docs + examples | 2 | README, `mcp-overview.md`, `examples/quickstart_mcp/` | Phase 6 |
 | 8 — E2E + release | 2 | Real-Kafka lane, real MCP servers, release-please | Phase 7 |
 
 Phases 5, 6, 7 can compress to ~3 calendar days if parallelised. Total: **17 working days serial / ~12 calendar days with parallelism**.
