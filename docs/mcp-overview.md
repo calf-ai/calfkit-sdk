@@ -114,6 +114,19 @@ from gmail_schemas import Gmail
 gmail = mcp("npx -y @modelcontextprotocol/server-gmail", tools=Gmail.ALL)
 ```
 
+By default the bridge passes the worker's full `os.environ` to the MCP
+subprocess. For multi-tenant or untrusted MCP servers, opt into the MCP
+SDK's safe allowlist instead:
+
+```python
+gmail = mcp.stdio(
+    "npx", "-y", "@modelcontextprotocol/server-gmail",
+    tools=Gmail.ALL,
+    safe_env_only=True,           # only HOME, PATH, USER, LANG, ... + your explicit env=
+    env={"GMAIL_OAUTH": "$OAUTH"},
+)
+```
+
 ### 4. Wire into a worker
 
 This is the **single-process dev topology** — agent and bridge in one
@@ -236,6 +249,13 @@ worker = Worker(client, nodes=[*servers.values(), agent])
 `$VAR` substitution is applied at load time; unset variables raise
 `McpConfigError` immediately. A server in the JSON without a matching
 entry in `schemas=` also raises — misconfig fails loudly at startup.
+
+When the config comes from env vars / Vault / a K8s ConfigMap rather
+than a file on disk, pass the parsed dict directly:
+
+```python
+servers = McpServers.from_config(my_config_dict, schemas={...})
+```
 
 ---
 
