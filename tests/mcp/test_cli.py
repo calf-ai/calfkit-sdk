@@ -219,13 +219,15 @@ def test_cli_handles_initialize_failure(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 
 def test_cli_help_lists_codegen() -> None:
-    result = runner.invoke(app, ["--help"])
+    # NO_COLOR=1: disable typer/rich's ANSI styling so substring checks see
+    # raw text, not ``\x1b[…m-\x1b[…m-command`` sequences split mid-flag.
+    result = runner.invoke(app, ["--help"], env={"NO_COLOR": "1"})
     assert result.exit_code == 0
     assert "codegen" in result.stdout
 
 
 def test_cli_codegen_help_shows_flags() -> None:
-    result = runner.invoke(app, ["codegen", "--help"])
+    result = runner.invoke(app, ["codegen", "--help"], env={"NO_COLOR": "1"})
     assert result.exit_code == 0
     # Critical flags are documented
     assert "--command" in result.stdout
