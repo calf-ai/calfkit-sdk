@@ -138,7 +138,7 @@ async def _generate_and_write(
         rendered,
         output,
         check=check,
-        differ=lambda expected, actual: diff_modules(expected=expected, actual=actual),
+        differ=diff_modules,
         label=f"{len(tools)} tool(s)",
         refresh_cmd=f"calfkit mcp codegen {server_name} ...",
     )

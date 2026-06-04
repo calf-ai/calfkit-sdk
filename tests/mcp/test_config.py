@@ -14,13 +14,16 @@ Coverage focus:
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
 from calfkit.mcp._config import (
+    HttpServerConfig,
     ParsedHttpSpec,
     ParsedStdioSpec,
+    StdioServerConfig,
     expand_env,
     parse_mcp_config,
 )
@@ -361,3 +364,78 @@ def test_parse_empty_object_spec_rejected() -> None:
     """A server spec with neither 'command' nor 'url' is an unknown transport."""
     with pytest.raises(McpConfigError, match="unknown transport"):
         parse_mcp_config({"s": {}})
+
+
+def test_parsed_stdio_covers_every_input_model_field() -> None:
+    """Reflective congruence: every non-``type`` input field has a ``Parsed*`` home.
+
+    Guards the silent-drop class of bug — adding a field to the input model
+    without wiring ``_to_parsed`` + the dataclass would otherwise validate and
+    then vanish, caught only if someone hand-extends the congruence test.
+    """
+    stdio_in = set(StdioServerConfig.model_fields) - {"type"}
+    stdio_out = {f.name for f in fields(ParsedStdioSpec)} - {"kind"}
+    assert stdio_in == stdio_out
+    http_in = set(HttpServerConfig.model_fields) - {"type"}
+    http_out = {f.name for f in fields(ParsedHttpSpec)} - {"kind"}
+    assert http_in == http_out
+
+
+# ---------------------------------------------------------------------------
+# parse_mcp_config — transport precedence edge cases (ambiguous / contradictory)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_url_wins_when_both_command_and_url_present() -> None:
+    """Ambiguous spec carrying both keys resolves to HTTP (url-first)."""
+    parsed = parse_mcp_config({"s": {"command": "npx", "url": "https://x/mcp"}})
+    spec = parsed["s"]
+    assert isinstance(spec, ParsedHttpSpec)
+    assert spec.url == "https://x/mcp"
+
+
+def test_parse_explicit_type_overrides_inference() -> None:
+    """An explicit ``type`` selects the transport even against a contradictory key."""
+    # type=stdio with only a url present → routed to stdio, then fails on command.
+    with pytest.raises(McpConfigError, match="'command'"):
+        parse_mcp_config({"s": {"type": "stdio", "url": "https://x/mcp"}})
+
+
+def test_parse_unrecognized_type_with_command_is_unknown_transport() -> None:
+    """A non-empty but invalid ``type`` disables inference (matches legacy behavior)."""
+    with pytest.raises(McpConfigError, match="unknown transport"):
+        parse_mcp_config({"s": {"type": "bogus", "command": "npx"}})
+
+
+# ---------------------------------------------------------------------------
+# parse_mcp_config — error messages: no secret leakage, all problems surfaced
+# ---------------------------------------------------------------------------
+
+
+def test_parse_error_does_not_leak_expanded_secret_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing-field error must not dump the expanded env (which holds secrets)."""
+    monkeypatch.setenv("MY_SECRET", "supersecret-token-abc123")
+    with pytest.raises(McpConfigError) as exc_info:
+        parse_mcp_config({"s": {"type": "stdio", "env": {"OAUTH": "$MY_SECRET"}}})
+    msg = str(exc_info.value)
+    assert "'command'" in msg  # still names the offending field
+    assert "supersecret-token-abc123" not in msg  # but never leaks the secret
+
+
+def test_parse_error_does_not_leak_expanded_secret_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing-url error must not dump the expanded Authorization header."""
+    monkeypatch.setenv("MY_SECRET", "supersecret-token-abc123")
+    with pytest.raises(McpConfigError) as exc_info:
+        parse_mcp_config({"s": {"type": "http", "headers": {"Authorization": "Bearer $MY_SECRET"}}})
+    msg = str(exc_info.value)
+    assert "'url'" in msg
+    assert "supersecret-token-abc123" not in msg
+
+
+def test_parse_error_surfaces_all_invalid_fields() -> None:
+    """A spec with multiple problems reports every offending field, not just the first."""
+    with pytest.raises(McpConfigError) as exc_info:
+        parse_mcp_config({"s": {"command": "", "cwd": 5}})
+    msg = str(exc_info.value)
+    assert "'command'" in msg
+    assert "'cwd'" in msg

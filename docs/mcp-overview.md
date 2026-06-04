@@ -261,8 +261,8 @@ servers = McpServers.from_config(my_config_dict, schemas={...})
 #### Editor autocomplete via `$schema`
 
 calfkit ships a reference JSON Schema for `mcp.json`. Add a `"$schema"` key
-to get field autocompletion, inline docs, and validation of the
-calfkit-accepted surface in your editor:
+to get field autocompletion and inline docs for the calfkit-accepted surface
+in your editor (the schema is permissive — it does not reject unknown keys):
 
 ```json
 {
@@ -294,7 +294,7 @@ not the schema. Accepted fields:
 | stdio | `cwd` | string | working directory |
 | http | `url` | string *(required)* | endpoint; `$VAR` expanded |
 | http | `headers` | {string: string} | `$VAR` expanded |
-| either | `type` | `"stdio"` / `"http"` / `"sse"` | optional; inferred from `command`/`url` |
+| either | `type` | `"stdio"` / `"http"` / `"sse"` | optional; inferred from `command`/`url`. `stdio` only on a stdio spec; `http`/`sse` only on an http spec |
 
 Get the schema as a dict programmatically with
 `from calfkit.mcp import mcp_json_schema`. The committed file is regenerated

@@ -89,9 +89,10 @@ class StdioServerConfig(BaseModel):
     """Input model for a stdio MCP server spec (validation + schema source)."""
 
     model_config = ConfigDict(extra="ignore")  # drop-in leniency; also suppresses additionalProperties
-    # ``type`` is decorative for validation: transport is resolved before we
-    # validate (see ``_validate_server``), so this field never drives the
-    # stdio-vs-http choice. It exists ONLY to document/autocomplete the key.
+    # ``type``, when present, selects the transport — and thus which model and
+    # required fields apply (see ``_validate_server``); when omitted it is
+    # inferred from ``command``/``url``. The ``Literal`` also documents and
+    # autocompletes the accepted values in the emitted schema.
     type: Literal["stdio"] | None = Field(default=None, description="Optional; inferred from `command` when omitted.")
     command: str = Field(min_length=1, description="Executable to spawn. Supports $VAR/${VAR} expansion.")
     args: list[str] = Field(default_factory=list, description="CLI args; each supports $VAR.")
@@ -103,14 +104,19 @@ class HttpServerConfig(BaseModel):
     """Input model for an HTTP MCP server spec (validation + schema source)."""
 
     model_config = ConfigDict(extra="ignore")  # drop-in leniency; also suppresses additionalProperties
-    # ``type`` is decorative for validation: transport is resolved before we
-    # validate (see ``_validate_server``), so this field never drives the
-    # stdio-vs-http choice. It exists ONLY to document/autocomplete the key.
+    # ``type``, when present, selects the transport — and thus which model and
+    # required fields apply (see ``_validate_server``); when omitted it is
+    # inferred from ``command``/``url``. The ``Literal`` also documents and
+    # autocompletes the accepted values in the emitted schema.
     type: Literal["http", "sse"] | None = Field(default=None, description="`http` (or legacy `sse`); inferred from `url`.")
     url: str = Field(min_length=1, description="Streamable-HTTP endpoint. Supports $VAR.")
     headers: dict[str, str] | None = Field(default=None, description="Request headers; values support $VAR.")
 
 
+# Schema-generation source ONLY — never validate live data through this.
+# Its ``anyOf`` union resolves stdio-first (and ``extra="ignore"`` lets a stdio
+# spec swallow a stray ``url``), which DISAGREES with the url-first precedence in
+# ``_validate_server``. Per-server validation must go through ``_validate_server``.
 _SERVERS = TypeAdapter(dict[str, StdioServerConfig | HttpServerConfig])
 
 
@@ -263,7 +269,8 @@ def _validate_server(name: str, raw: dict[str, Any]) -> StdioServerConfig | Http
     - Else if ``type == "stdio"`` or ``command`` is present → stdio transport.
     - Otherwise → ``unknown transport`` error.
 
-    ``url`` takes precedence over ``command`` on ambiguous specs (url-first).
+    When ``type`` is omitted, ``url`` takes precedence over ``command`` on
+    ambiguous specs (url-first); an explicit ``type`` always wins.
     Resolving transport *before* validating keeps the friendly
     ``unknown transport`` message out of Pydantic and preserves the
     ``loc[0]`` substring contract relied on by ``test_config.py``.
@@ -287,13 +294,26 @@ def _validate_server(name: str, raw: dict[str, Any]) -> StdioServerConfig | Http
 def _raise_from_validation(name: str, exc: ValidationError) -> NoReturn:
     """Translate a Pydantic ``ValidationError`` into an ``McpConfigError``.
 
-    Keys on ``loc[0]`` (the offending field name) so the rendered ``{field!r}``
-    reproduces the ``'command'`` / ``'args'`` / ``'env'`` / ``'cwd'`` / ``'url'``
-    / ``'headers'`` substrings matched by the regression tests.
+    Renders every offending field (keyed on ``loc[0]``) so the ``{field!r}``
+    rendering reproduces the ``'command'`` / ``'args'`` / ``'env'`` / ``'cwd'``
+    / ``'url'`` / ``'headers'`` substrings matched by the regression tests, and
+    so a multi-problem spec is reported in one pass rather than one-per-rerun.
+
+    The offending *value* (``err['input']``) is deliberately NOT rendered: for a
+    missing-field error Pydantic sets it to the whole expanded spec dict, which
+    can contain ``$VAR``-resolved secrets (env values, Authorization headers).
+    Echoing it would leak credentials into error text, logs, and exception
+    reporters.
     """
-    err = exc.errors()[0]
-    field = err["loc"][0] if err.get("loc") else "<unknown>"
-    raise McpConfigError(f"mcp.json: server {name!r}: invalid {field!r} — {err['msg']} (got {err['input']!r})") from exc
+    errors = exc.errors()
+    if not errors:  # defensive: model_validate never raises an empty error set
+        raise McpConfigError(f"mcp.json: server {name!r}: invalid spec") from exc
+    parts = []
+    for err in errors:
+        loc = err["loc"]
+        field = loc[0] if loc else "<unknown>"
+        parts.append(f"invalid {field!r} — {err['msg']}")
+    raise McpConfigError(f"mcp.json: server {name!r}: {'; '.join(parts)}") from exc
 
 
 def _to_parsed(cfg: StdioServerConfig | HttpServerConfig) -> ParsedMcpServerSpec:

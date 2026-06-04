@@ -13,6 +13,7 @@ Coverage focus:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from calfkit.mcp import mcp_json_schema
 
@@ -57,3 +58,15 @@ def test_schema_render_is_deterministic() -> None:
     first = json.dumps(mcp_json_schema(), indent=2)
     second = json.dumps(mcp_json_schema(), indent=2)
     assert first == second
+
+
+def test_committed_schema_file_matches_generator() -> None:
+    """The committed ``mcp.schema.json`` must equal the generator's exact output.
+
+    Pins the serialization form (``indent=2`` + trailing newline) that the CLI
+    writes and CI's ``calfkit mcp schema --check`` depends on, so drift is
+    caught locally rather than only in CI.
+    """
+    committed = Path(__file__).resolve().parents[2] / "calfkit" / "mcp" / "mcp.schema.json"
+    expected = json.dumps(mcp_json_schema(), indent=2) + "\n"
+    assert committed.read_text(encoding="utf-8") == expected

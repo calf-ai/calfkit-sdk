@@ -1,8 +1,8 @@
 # Design: Reference JSON Schema for `mcp.json`
 
-**Status:** Plan (pre-implementation, post-review) · **Component:** `calfkit/mcp` · **Decision:** Option A3 (parser delegates to Pydantic input models). Schema is **wrapped-only**, has **no `$id`**; the `$schema` URL users reference is a docs concern (raw-git, pinned to `main`).
+**Status:** Implemented (PR #172) · **Component:** `calfkit/mcp` · **Decision:** Option A3 (parser delegates to Pydantic input models). Schema is **wrapped-only**, has **no `$id`**; the `$schema` URL users reference is a docs concern (raw-git, pinned to `main`).
 
-> Revised after four review passes (DX, type-design, adversarial correctness, simplification). Every load-bearing claim below was verified against the pinned toolchain (pydantic 2.12.5, hatchling, ruff `N`, mypy strict). Change log at the end.
+> This is the design record (kept for the rationale and rejected alternatives). It was written pre-implementation and verified across four review passes; the feature is now merged. Where the text below says it "replicates `_parse_server_spec`" or carries "verify during impl" notes, those refer to the design phase — the `_parse_*_spec` helpers have since been **removed**, and that transport-detection behavior now lives in `_validate_server` (`calfkit/mcp/_config.py`). A post-merge PR review also hardened error rendering to avoid leaking `$VAR`-expanded secrets and to surface all validation errors.
 
 ---
 
