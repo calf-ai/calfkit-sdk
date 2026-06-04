@@ -28,10 +28,14 @@ class _ReplyDispatcher:
             correlation_id: Annotated[str, Context()],
             headers: Annotated[dict[str, Any], Context("message.headers")],
         ) -> None:
-            # Stash the inbound emitter so deserialize_to_node_result can surface it
-            # via NodeResult.emitter_node_id / emitter_node_kind.
-            envelope.context._emitter_node_id = decode_header_str(headers.get(HDR_EMITTER))
-            envelope.context._emitter_node_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
+            # Stash the inbound correlation id + emitter so the context surfaces
+            # them (ctx.correlation_id, NodeResult.emitter_node_id / kind). All are
+            # transport-sourced, never read from the envelope body.
+            envelope.context._stamp_transport(
+                correlation_id=correlation_id,
+                emitter_node_id=decode_header_str(headers.get(HDR_EMITTER)),
+                emitter_node_kind=decode_header_str(headers.get(HDR_EMITTER_KIND)),
+            )
 
             future = self._pending.pop(correlation_id, None)
             if future is None:

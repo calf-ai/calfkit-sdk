@@ -70,26 +70,38 @@ class WorkflowState(BaseModel):
         return self.call_stack.push(frame)
 
 
-class Deps(BaseModel):
-    """immutable dependencies for agent executions"""
-
-    model_config = ConfigDict(extra="ignore", frozen=True)
-    correlation_id: str
-    provided_deps: dict[str, Any] = Field(description="user-provided agent dependencies")
-
-
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
-    """Base generic context for a session — state, deps, and per-hop emitter."""
+    """Base generic context for a session — state, deps, and per-hop identity."""
 
     state: StateT
     """The app state. Mutable."""
 
     deps: DepsT
-    """Dependencies for the execution. Immutable."""
+    """User-provided dependencies for the execution. A JSON-serializable mapping
+    (it crosses the Kafka boundary). The same ``dict`` the producer passed to
+    ``Client.invoke_node(deps=...)``; tools read it as ``ctx.deps["key"]``."""
 
+    _correlation_id: str | None = PrivateAttr(default=None)
     _emitter_node_id: str | None = PrivateAttr(default=None)
     _emitter_node_kind: str | None = PrivateAttr(default=None)
     _frame_id: str | None = PrivateAttr(default=None)
+
+    @property
+    def correlation_id(self) -> str:
+        """The correlation id that ties this hop to its invocation.
+
+        Sourced from the inbound Kafka message ``correlation_id`` (stamped by
+        ``BaseNodeDef.prepare_context`` server-side, the consumer handler, or the
+        client's reply dispatcher) — never from the envelope body. Backed by a
+        ``PrivateAttr`` so it cannot be spoofed via the model constructor, mirroring
+        :attr:`emitter_node_id`. Unlike the emitter id it is always present once a
+        handler has prepared the context (the transport guarantees a value), so the
+        accessor is typed ``str`` and asserts the invariant.
+        """
+        assert self._correlation_id is not None, (
+            "correlation_id is unset; the context was read outside a handler that stamps it (prepare_context / consumer handler / reply dispatcher)."
+        )
+        return self._correlation_id
 
     @property
     def emitter_node_id(self) -> str | None:
@@ -127,5 +139,19 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         """
         return self._frame_id
 
+    def _stamp_transport(self, *, correlation_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None) -> None:
+        """Stamp transport-sourced identity onto this context.
 
-SessionRunContext = BaseSessionRunContext[State, Deps]
+        ``correlation_id`` and the emitter ids come from the inbound Kafka message
+        (header / FastStream ``Context()``), never the envelope body. Called by
+        ``BaseNodeDef.prepare_context`` (on a freshly-copied context), the consumer
+        handler, and the client's reply dispatcher, so the three sites cannot drift.
+        ``frame_id`` is workflow-state-sourced, not transport-sourced, so it is
+        stamped separately by ``prepare_context``.
+        """
+        self._correlation_id = correlation_id
+        self._emitter_node_id = emitter_node_id
+        self._emitter_node_kind = emitter_node_kind
+
+
+SessionRunContext = BaseSessionRunContext[State, dict[str, Any]]

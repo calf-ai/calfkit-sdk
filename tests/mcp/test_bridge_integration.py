@@ -35,7 +35,6 @@ from calfkit.mcp._tool_def import McpToolDef
 from calfkit.models import SessionRunContext, State
 from calfkit.models.actions import Call, ReturnCall
 from calfkit.models.node_schema import BaseToolNodeSchema
-from calfkit.models.session_context import Deps
 from calfkit.nodes import Agent, agent_tool
 
 # ---------------------------------------------------------------------------
@@ -56,7 +55,8 @@ def _ok_result(text: str) -> CallToolResult:
 
 
 def _make_ctx(state: State, *, frame_id: str = "frame-test") -> SessionRunContext:
-    ctx = SessionRunContext(state=state, deps=Deps(correlation_id="cid-int", provided_deps={}))
+    ctx = SessionRunContext(state=state, deps={})
+    ctx._correlation_id = "cid-int"
     ctx._frame_id = frame_id
     return ctx
 

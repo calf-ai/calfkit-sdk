@@ -261,7 +261,7 @@ result = await client.execute_node(
 result = await client.execute_node(
     "What's my phone number?",
     "agent.input",
-    deps={"user_id": "usr_123"},  # Available to tools via ctx.deps.provided_deps
+    deps={"user_id": "usr_123"},  # Available to tools via ctx.deps["user_id"]
 )
 ```
 
@@ -287,7 +287,7 @@ Gates are predicates: `Callable[[SessionRunContext], bool | Awaitable[bool]]`. T
 
 ```python
 def is_scheduler_target(ctx) -> bool:
-    discord = ctx.deps.provided_deps.get("discord", {})
+    discord = ctx.deps.get("discord", {})
     return discord.get("slash_target") == "scheduler"
 
 scheduler = Agent(
@@ -305,7 +305,7 @@ scheduler = Agent("scheduler", subscribe_topics="discord.thread.123", model_clie
 
 @scheduler.gate
 def is_scheduler_target(ctx) -> bool:
-    discord = ctx.deps.provided_deps.get("discord", {})
+    discord = ctx.deps.get("discord", {})
     return discord.get("slash_target") == "scheduler"
 ```
 
@@ -321,7 +321,7 @@ For tool-node gating, pass `gates=[...]` to `ToolNodeDef.create_tool_node(...)` 
 
 ### Consumer Nodes (Optional)
 
-A **consumer node** is a terminal sink — it subscribes to one or more topics and runs arbitrary Python logic against every event flowing through. Consumers receive the same `NodeResult` that `Client.execute_node()` returns, including the full session state (`tool_calls`, `tool_results`, `message_history`, `metadata`).
+A **consumer node** is a terminal sink — it subscribes to one or more topics and runs arbitrary Python logic against every event flowing through. Consumers receive the same `NodeResult` that `Client.execute_node()` returns, including the full session state (`tool_calls`, `tool_results`, `message_history`, `metadata`) and the inbound producer `deps` via `result.deps["key"]` — the same data tools read as `ctx.deps["key"]`.
 
 Deploy a consumer as its own service. Wire it to an agent's `publish_topic` (or any topic carrying calfkit envelopes) to observe outputs from agents, tools, and intermediate hops:
 

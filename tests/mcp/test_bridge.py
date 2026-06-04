@@ -32,7 +32,6 @@ from calfkit.mcp._testing import FakeMcpServer
 from calfkit.mcp._tool_def import McpToolAnnotations, McpToolDef
 from calfkit.models import SessionRunContext, State
 from calfkit.models.actions import ReturnCall, Silent
-from calfkit.models.session_context import Deps
 from calfkit.models.state import FailedToolCall
 
 # ---------------------------------------------------------------------------
@@ -50,7 +49,9 @@ def _td(name: str = "t", *, idempotent: bool | None = None) -> McpToolDef:
 
 
 def _make_ctx(state: State, correlation_id: str = "cid-bridge-test") -> SessionRunContext:
-    return SessionRunContext(state=state, deps=Deps(correlation_id=correlation_id, provided_deps={}))
+    ctx = SessionRunContext(state=state, deps={})
+    ctx._correlation_id = correlation_id
+    return ctx
 
 
 def _add_pending_tool_call(state: State, *, tool_name: str, tool_call_id: str, args: dict[str, Any] | None = None) -> ToolCallPart:
@@ -187,7 +188,7 @@ async def test_dispatch_with_sync_meta_callable() -> None:
         return _ok_result()
 
     fake = FakeMcpServer(name="gmail", tools=[_td("send")], invoker=invoker)
-    fake._meta = lambda ctx: {"user_id": ctx.deps.correlation_id}
+    fake._meta = lambda ctx: {"user_id": ctx.correlation_id}
     await _open_fake(fake)
     bridge = McpBridge(server=fake, tool_def=_td("send"))
 

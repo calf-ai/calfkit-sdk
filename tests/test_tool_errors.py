@@ -31,7 +31,6 @@ from calfkit.exceptions import ToolExecutionError
 from calfkit.models import SessionRunContext, ToolContext
 from calfkit.models.actions import Call, ReturnCall, Silent, TailCall
 from calfkit.models.node_schema import BaseToolNodeSchema
-from calfkit.models.session_context import Deps
 from calfkit.models.state import (
     FailedToolCall,
     OverridesState,
@@ -51,14 +50,12 @@ def _make_ctx(
     correlation_id: str = "cid-tool-errors-00000000",
     frame_id: str | None = None,
 ) -> SessionRunContext:
-    ctx = SessionRunContext(
-        state=state,
-        deps=Deps(correlation_id=correlation_id, provided_deps={}),
-    )
-    # ``_frame_id`` is a ``PrivateAttr`` populated by ``BaseNodeDef.prepare_context``
-    # in the live path; tests that drive ``agent.run`` directly must set it
-    # here when they exercise parallel-mode aggregation (which keys
-    # ``_pending_batches`` on ``frame_id``).
+    ctx = SessionRunContext(state=state, deps={})
+    # ``_correlation_id`` / ``_frame_id`` are ``PrivateAttr``s populated by
+    # ``BaseNodeDef.prepare_context`` in the live path; tests that drive
+    # ``agent.run`` directly must set them here. ``_frame_id`` matters for
+    # parallel-mode aggregation (which keys ``_pending_batches`` on it).
+    ctx._correlation_id = correlation_id
     if frame_id is not None:
         ctx._frame_id = frame_id
     return ctx
@@ -1652,10 +1649,7 @@ def test_prepare_context_populates_frame_id_from_envelope():
     )
     wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[frame]))
     envelope = Envelope(
-        context=SessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="cid-prep", provided_deps={}),
-        ),
+        context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=wf,
     )
 
@@ -1677,10 +1671,7 @@ def test_frame_id_survives_envelope_json_round_trip():
     )
     wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[frame]))
     envelope = Envelope(
-        context=SessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="cid-rt", provided_deps={}),
-        ),
+        context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=wf,
     )
 

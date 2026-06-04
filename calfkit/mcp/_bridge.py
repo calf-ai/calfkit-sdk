@@ -136,7 +136,7 @@ class McpBridge(BaseNodeDef):
         """
         logger.debug(
             "[%s] mcp_bridge run entered server=%s tool=%s tool_call_id=%s",
-            ctx.deps.correlation_id[:8],
+            ctx.correlation_id[:8],
             self._server.raw_name,
             self._tool_def.name,
             tool_call_id,
@@ -169,7 +169,7 @@ class McpBridge(BaseNodeDef):
             if cached is not None:
                 logger.info(
                     "[%s] mcp_bridge dedup HIT tool=%s tool_call_id=%s — serving cached result",
-                    ctx.deps.correlation_id[:8],
+                    ctx.correlation_id[:8],
                     self._tool_def.name,
                     tool_call_id,
                 )
@@ -184,14 +184,14 @@ class McpBridge(BaseNodeDef):
             tool_call_id=tool_call_part.tool_call_id,
             tool_name=tool_call_part.tool_name,
             messages=ctx.state.message_history,
-            run_id=ctx.deps.correlation_id,
+            run_id=ctx.correlation_id,
         )
         try:
             meta = await _resolve_meta(self._server, tool_call_ctx)
         except Exception as e:
             logger.exception(
                 "[%s] mcp_bridge meta hook raised for tool=%s tool_call_id=%s",
-                ctx.deps.correlation_id[:8],
+                ctx.correlation_id[:8],
                 self._tool_def.name,
                 tool_call_id,
             )
@@ -204,7 +204,7 @@ class McpBridge(BaseNodeDef):
         if self._server.session is None:
             logger.error(
                 "[%s] mcp_bridge tool=%s reached run() before McpServer._open_bridge_session ran",
-                ctx.deps.correlation_id[:8],
+                ctx.correlation_id[:8],
                 self._tool_def.name,
             )
             failure = classify_mcp_error(
@@ -232,7 +232,7 @@ class McpBridge(BaseNodeDef):
         except Exception as e:
             logger.exception(
                 "[%s] mcp_bridge dispatch failed tool=%s tool_call_id=%s raised %s",
-                ctx.deps.correlation_id[:8],
+                ctx.correlation_id[:8],
                 self._tool_def.name,
                 tool_call_id,
                 type(e).__name__,
@@ -262,7 +262,7 @@ class McpBridge(BaseNodeDef):
         ctx.state.add_tool_result(tool_call_part.tool_call_id, tool_return)
         logger.debug(
             "[%s] mcp_bridge completed tool=%s tool_call_id=%s",
-            ctx.deps.correlation_id[:8],
+            ctx.correlation_id[:8],
             self._tool_def.name,
             tool_call_id,
         )

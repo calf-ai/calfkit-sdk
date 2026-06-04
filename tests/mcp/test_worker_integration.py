@@ -394,7 +394,6 @@ async def test_e2e_worker_dispatches_via_constructed_bridge() -> None:
     """
     from calfkit._vendor.pydantic_ai.messages import ToolCallPart, ToolReturn
     from calfkit.models import SessionRunContext, State
-    from calfkit.models.session_context import Deps
 
     captured: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
 
@@ -413,7 +412,8 @@ async def test_e2e_worker_dispatches_via_constructed_bridge() -> None:
 
     state = State()
     state.add_tool_call(ToolCallPart(tool_name="search", args={"q": "hi"}, tool_call_id="tc-e2e"))
-    ctx = SessionRunContext(state=state, deps=Deps(correlation_id="cid-e2e", provided_deps={}))
+    ctx = SessionRunContext(state=state, deps={})
+    ctx._correlation_id = "cid-e2e"
 
     await bridge.run(ctx, "tc-e2e")
 

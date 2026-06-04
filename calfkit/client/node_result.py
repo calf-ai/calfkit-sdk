@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic
 
 from calfkit._types import OutputT
@@ -25,8 +25,9 @@ class NodeResult(Generic[OutputT]):
     state fields. ``message_history``, ``output_parts``, and ``metadata`` are
     convenience properties that read through ``state``.
 
-    Treat ``NodeResult`` and its ``state`` as read-only. The dataclass is
-    frozen, but ``state`` is a mutable Pydantic model:
+    Treat ``NodeResult``, its ``state``, and its ``deps`` as read-only. The
+    dataclass is frozen, but ``state`` is a mutable Pydantic model and ``deps``
+    is a mutable dict (both shared with the envelope, not copied):
 
     * **Consumer path**: the consumer never republishes (no ``publish_topic``),
       so mutations have no observable downstream effect. They can still
@@ -80,6 +81,15 @@ class NodeResult(Generic[OutputT]):
     """Coarse classification of the emitter (one of ``NodeKind``), sourced
     from the ``x-calf-emitter-kind`` Kafka header. May be ``None`` if not
     stamped."""
+
+    deps: dict[str, Any] = field(default_factory=dict)
+    """Inbound user-provided dependencies — the same ``dict`` the producer passed
+    to ``Client.invoke_node(deps=...)``, carried forward on every publish. Read
+    it as ``result.deps["key"]``, mirroring how tools read ``ctx.deps["key"]``.
+    Empty ``{}`` when the invocation set no deps.
+
+    Like ``state``, this is the same dict instance carried on the envelope (no
+    defensive copy) — treat it as read-only (see the read-only note above)."""
 
     # NodeResult holds a mutable Pydantic model (state); the dataclass-
     # synthesized __hash__ would recursively try to hash unhashable fields and

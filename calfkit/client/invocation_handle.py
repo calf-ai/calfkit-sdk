@@ -44,4 +44,4 @@ class InvocationHandle(Generic[OutputT]):
             envelope = await asyncio.wait_for(self._future, timeout=timeout)
         else:
             envelope = await self._future
-        return deserialize_to_node_result(envelope, self._output_type)
+        return deserialize_to_node_result(envelope, self._output_type, correlation_id=self.correlation_id)

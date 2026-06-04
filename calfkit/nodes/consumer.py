@@ -32,8 +32,10 @@ ConsumerFn = Callable[[NodeResult[OutputT]], None | Awaitable[None]]
 ``result.output`` is ``None`` on intermediate hops (e.g. tool completions, or
 agent state transitions that haven't yet produced a final output). User code
 must tolerate ``None`` or filter via gates. ``result.message_history``,
-``result.emitter_node_id``, and ``result.emitter_node_kind`` are always
-populated."""
+``result.correlation_id``, ``result.emitter_node_id``, and
+``result.emitter_node_kind`` are always populated. ``result.deps`` carries the
+inbound producer ``deps`` (``{}`` if none were set) — read it as
+``result.deps["key"]``, the same data tools see via ``ctx.deps["key"]``."""
 
 
 def _validate_consume_fn(consume_fn: Any) -> None:
@@ -195,11 +197,10 @@ class ConsumerNodeDef(Generic[OutputT], BaseNodeDef):
         )
         # Consumer is outside the call/return flow, so the inbound call_stack
         # may be empty (e.g. when tapping publish_topic post-ReturnCall) — we
-        # bypass BaseNodeDef.prepare_context which peeks the stack. Emitter
+        # bypass BaseNodeDef.prepare_context which peeks the stack. The stamped
         # ids are PrivateAttr (calfkit.models.session_context), so they never
         # ride on the wire; stamping the inbound context directly is safe.
-        envelope.context._emitter_node_id = emitter
-        envelope.context._emitter_node_kind = emitter_kind
+        envelope.context._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter, emitter_node_kind=emitter_kind)
         ctx = envelope.context
 
         if not await self._evaluate_gates(ctx, correlation_id):
@@ -209,6 +210,7 @@ class ConsumerNodeDef(Generic[OutputT], BaseNodeDef):
             result: NodeResult[OutputT] = deserialize_to_node_result(
                 envelope,
                 self._output_type,
+                correlation_id=correlation_id,
                 strict=False,
                 type_adapter=self._type_adapter,
             )

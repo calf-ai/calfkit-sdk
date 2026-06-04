@@ -16,6 +16,7 @@ def deserialize_to_node_result(
     envelope: Envelope,
     output_type: type[Any] = _UNSET,
     *,
+    correlation_id: str,
     strict: bool = True,
     type_adapter: TypeAdapter[Any] | None = None,
 ) -> NodeResult[Any]:
@@ -23,6 +24,10 @@ def deserialize_to_node_result(
 
     Args:
         envelope: The raw wire-format envelope returned by the agent node.
+        correlation_id: The transport ``correlation_id`` of the inbound message
+            (the key the reply future resolved on, or the consumer handler's
+            ``Context()`` value). Surfaced as ``NodeResult.correlation_id`` —
+            sourced from the transport, never from the envelope body.
         output_type: The expected Python type for the deserialized output.
 
             * **not provided** (``_UNSET``): auto-detect — prefer ``DataPart.data``
@@ -57,7 +62,6 @@ def deserialize_to_node_result(
             and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
     """
     state = envelope.context.state
-    correlation_id = envelope.context.deps.correlation_id
 
     if not state.final_output_parts and not strict:
         output: Any = None
@@ -70,6 +74,7 @@ def deserialize_to_node_result(
         correlation_id=correlation_id,
         emitter_node_id=envelope.context.emitter_node_id,
         emitter_node_kind=envelope.context.emitter_node_kind,
+        deps=envelope.context.deps,
     )
 
 

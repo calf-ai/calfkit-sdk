@@ -124,7 +124,7 @@ class BaseAgentNodeDef(
         return frame_id
 
     def _parallel_state_aggregation(self, ctx: SessionRunContext) -> None:
-        # Keyed on ``ctx.frame_id`` (per-invocation), NOT ``ctx.deps.correlation_id``:
+        # Keyed on ``ctx.frame_id`` (per-invocation), NOT ``ctx.correlation_id``:
         # a supervisor that fans out two ``Call``s to the same agent topic shares one
         # ``correlation_id`` across both invocations. Each invocation publishes onto
         # its own fresh ``CallFrame`` (UUID7 ``frame_id``), so the per-invocation
@@ -144,7 +144,7 @@ class BaseAgentNodeDef(
                 "skipping aggregation. prepare_context is the only legitimate "
                 "population path for _frame_id — a None value here indicates run() "
                 "was driven outside the framework handler.",
-                ctx.deps.correlation_id[:8],
+                ctx.correlation_id[:8],
                 self.name,
             )
             return
@@ -178,7 +178,7 @@ class BaseAgentNodeDef(
                     "tool replies present (tool_call_ids=%s); replies will NOT be "
                     "aggregated. Likely a lost batch (partition rebalance or process "
                     "restart), stray/duplicate delivery, or a routing error.",
-                    ctx.deps.correlation_id[:8],
+                    ctx.correlation_id[:8],
                     frame_id,
                     self.name,
                     len(completed_latest),
@@ -200,7 +200,7 @@ class BaseAgentNodeDef(
 
         logger.debug(
             "[%s] agent run entered node=%s pending_tool_calls=%d history_len=%d",
-            ctx.deps.correlation_id[:8],
+            ctx.correlation_id[:8],
             self.name,
             len(latest_tool_calls),
             len(ctx.state.message_history),
@@ -216,7 +216,7 @@ class BaseAgentNodeDef(
             if ctx.frame_id is None:
                 logger.warning(
                     "[%s] run(): ctx.frame_id is None on node=%s; cannot look up parallel batch — treating as no batch.",
-                    ctx.deps.correlation_id[:8],
+                    ctx.correlation_id[:8],
                     self.name,
                 )
                 batch = None
@@ -243,7 +243,7 @@ class BaseAgentNodeDef(
                 logger.error(
                     "[%s] corrupt FailedToolCall marker detected node=%s tool_call_id=%s raw_keys=%s; "
                     "likely schema drift or version skew across the Kafka boundary",
-                    ctx.deps.correlation_id[:8],
+                    ctx.correlation_id[:8],
                     self.name,
                     tc.tool_call_id,
                     sorted(result.keys()),
@@ -265,7 +265,7 @@ class BaseAgentNodeDef(
             for failure in failed_tool_calls:
                 logger.error(
                     "[%s] tool execution error detected node=%s tool=%s tool_call_id=%s exc_type=%s exc_message=%s",
-                    ctx.deps.correlation_id[:8],
+                    ctx.correlation_id[:8],
                     self.name,
                     failure.tool_name,
                     failure.tool_call_id,
@@ -288,7 +288,7 @@ class BaseAgentNodeDef(
                     target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
                     logger.debug(
                         "[%s] routing pending tool call=%s tool=%s node=%s",
-                        ctx.deps.correlation_id[:8],
+                        ctx.correlation_id[:8],
                         target_tool_call.tool_call_id,
                         target_tool_call.tool_name,
                         self.name,
@@ -301,7 +301,7 @@ class BaseAgentNodeDef(
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
                     raise RuntimeError(
-                        f"[{ctx.deps.correlation_id[:8]}] Parallel mode reached incomplete tool calls outside aggregation gate. "
+                        f"[{ctx.correlation_id[:8]}] Parallel mode reached incomplete tool calls outside aggregation gate. "
                         f"node={self.name} frame_id={ctx.frame_id} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
                         f"This indicates lost PendingToolBatch state (e.g. partition rebalance or process restart)."
                     )
@@ -316,14 +316,14 @@ class BaseAgentNodeDef(
             message_history=ctx.state.message_history,
             instructions=ctx.state.temp_instructions,
             toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
-            deps=ctx.deps.provided_deps,  # None valid when AgentDepsT=NoneType
+            deps=ctx.deps,
             deferred_tool_results=tool_results,
             model_settings=run_model_settings,
         )
         if isinstance(result.output, DeferredToolRequests):
             logger.debug(
                 "[%s] model returned DeferredToolRequests tool_count=%d node=%s",
-                ctx.deps.correlation_id[:8],
+                ctx.correlation_id[:8],
                 len(result.output.calls),
                 self.name,
             )
@@ -379,7 +379,7 @@ class BaseAgentNodeDef(
                     content = f"Malformed tool arguments: {type(e).__name__}: {_safe_exc_message(e)}"
                     logger.warning(
                         "[%s] tool=%s args parse failed at dispatch: %s",
-                        ctx.deps.correlation_id[:8],
+                        ctx.correlation_id[:8],
                         tool_call.tool_name,
                         content,
                         exc_info=True,
@@ -404,7 +404,7 @@ class BaseAgentNodeDef(
                         validation_errors = e.errors(include_url=False, include_context=False)
                         logger.warning(
                             "[%s] tool=%s arg validation failed at dispatch: %s",
-                            ctx.deps.correlation_id[:8],
+                            ctx.correlation_id[:8],
                             tool_call.tool_name,
                             validation_errors,
                         )
@@ -427,7 +427,7 @@ class BaseAgentNodeDef(
                         validator_content = f"Tool argument validator raised {type(e).__name__}: {_safe_exc_message(e)}"
                         logger.warning(
                             "[%s] tool=%s arg validator raised %s; surfacing as RetryPromptPart",
-                            ctx.deps.correlation_id[:8],
+                            ctx.correlation_id[:8],
                             tool_call.tool_name,
                             type(e).__name__,
                             exc_info=True,
@@ -445,7 +445,7 @@ class BaseAgentNodeDef(
             if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
                 # TODO: maybe consider a node retry return type that doesn't require round trip to itself.
                 # Tailcall to itself is a roundtrip.
-                logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.deps.correlation_id[:8], self.name)
+                logger.debug("[%s] all tool calls invalid, TailCall retry node=%s", ctx.correlation_id[:8], self.name)
                 return TailCall[State](target_topic=self._return_topic, state=ctx.state)
 
             pending_tool_calls = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
@@ -454,7 +454,7 @@ class BaseAgentNodeDef(
                 target_tool_call = pending_tool_calls[0]
                 logger.debug(
                     "[%s] routing new tool call=%s tool=%s node=%s",
-                    ctx.deps.correlation_id[:8],
+                    ctx.correlation_id[:8],
                     target_tool_call.tool_call_id,
                     target_tool_call.tool_name,
                     self.name,
@@ -483,7 +483,7 @@ class BaseAgentNodeDef(
                 return parallel_tool_calls
 
         else:
-            logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.deps.correlation_id[:8], self.name)
+            logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
             ctx.state.message_history.extend(result.new_messages())
             if isinstance(result.output, str):
                 ctx.state.final_output_parts = [TextPart(text=result.output)]
