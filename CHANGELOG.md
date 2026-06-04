@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.0...v0.4.1) (2026-06-04)
+
+
+### Features
+
+* reference JSON Schema for mcp.json ([#172](https://github.com/calf-ai/calfkit-sdk/issues/172)) ([1262f51](https://github.com/calf-ai/calfkit-sdk/commit/1262f51a5d1923598ace30e882bd67c9b2586599))
+
 ## [0.4.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.6...v0.4.0) (2026-06-04)
 
 
