@@ -7,6 +7,7 @@ server live in the Phase 8 lane.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -243,5 +244,72 @@ def test_cli_codegen_help_shows_flags() -> None:
     assert "--command" in stdout
     assert "--url" in stdout
     assert "--token" in stdout
+    assert "--output" in stdout
+    assert "--check" in stdout
+
+
+# ---------------------------------------------------------------------------
+# schema command (no MCP session needed — pure Pydantic render)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_schema_writes_file(tmp_path: Path) -> None:
+    """``schema --output`` writes a valid 2020-12 JSON Schema and reports it."""
+    output = tmp_path / "mcp.schema.json"
+    result = runner.invoke(app, ["schema", "--output", str(output)])
+    assert result.exit_code == 0, result.stderr
+    assert output.exists()
+    parsed = json.loads(output.read_text(encoding="utf-8"))
+    assert parsed["$schema"].endswith("2020-12/schema")
+    assert "Wrote" in result.stdout
+
+
+def test_cli_schema_check_passes_when_matching(tmp_path: Path) -> None:
+    """Write once, then --check on identical content → exit 0."""
+    output = tmp_path / "mcp.schema.json"
+    runner.invoke(app, ["schema", "--output", str(output)])
+    result = runner.invoke(app, ["schema", "--output", str(output), "--check"])
+    assert result.exit_code == 0
+    assert "up to date" in result.stdout
+
+
+def test_cli_schema_check_fails_when_missing(tmp_path: Path) -> None:
+    """--check against a non-existent file → exit 1 with drift message."""
+    output = tmp_path / "missing.schema.json"
+    result = runner.invoke(app, ["schema", "--output", str(output), "--check"])
+    assert result.exit_code == 1
+    assert "does not exist" in result.stderr
+
+
+def test_cli_schema_check_fails_on_drift(tmp_path: Path) -> None:
+    """--check against drifted content → exit 1 with diff + remediation hint."""
+    output = tmp_path / "mcp.schema.json"
+    output.write_text("{}\n", encoding="utf-8")
+    result = runner.invoke(app, ["schema", "--output", str(output), "--check"])
+    assert result.exit_code == 1
+    assert "Drift detected" in result.stderr
+    assert "+" in result.stderr or "-" in result.stderr
+    assert "calfkit mcp schema" in result.stderr
+
+
+def test_cli_schema_check_does_not_write(tmp_path: Path) -> None:
+    """--check must NOT overwrite the file even when drift is detected."""
+    output = tmp_path / "mcp.schema.json"
+    stale = "# stale\n"
+    output.write_text(stale, encoding="utf-8")
+    runner.invoke(app, ["schema", "--output", str(output), "--check"])
+    assert output.read_text(encoding="utf-8") == stale  # unchanged
+
+
+def test_cli_help_lists_schema() -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "schema" in _plain(result.stdout)
+
+
+def test_cli_schema_help_shows_flags() -> None:
+    result = runner.invoke(app, ["schema", "--help"])
+    assert result.exit_code == 0
+    stdout = _plain(result.stdout)
     assert "--output" in stdout
     assert "--check" in stdout

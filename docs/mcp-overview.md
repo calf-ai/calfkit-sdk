@@ -49,6 +49,7 @@ MCP adaptor adds value when crossing the calfkit ↔ MCP boundary.
 | stdio + Streamable HTTP transports | ✅ v1 | [Quickstart](#quickstart) |
 | Codegen-generated schemas (`calfkit mcp codegen`) | ✅ v1 | [Step 2](#2-generate-schemas-one-time-committed) |
 | `mcp.json` drop-in (Claude Desktop / Cursor / Cline format) | ✅ v1 | [mcp.json](#many-mcp-servers-via-mcpjson) |
+| Reference JSON Schema for `mcp.json` (`$schema` editor IntelliSense) | ✅ v1 | [mcp.json](#editor-autocomplete-via-schema) |
 | Filters: `.only()` / `.exclude()` / `.where(...)` | ✅ v1 | [Filtering](#filtering-renaming-and-selecting-tools) |
 | Renames: `.prefix()` / `.rename({...})` | ✅ v1 | [Filtering](#filtering-renaming-and-selecting-tools) |
 | Pattern 1 multi-tenancy (`meta=lambda ctx: {...}`) | ✅ v1 | [Per-tenant](#per-tenant-identity) |
@@ -256,6 +257,48 @@ than a file on disk, pass the parsed dict directly:
 ```python
 servers = McpServers.from_config(my_config_dict, schemas={...})
 ```
+
+#### Editor autocomplete via `$schema`
+
+calfkit ships a reference JSON Schema for `mcp.json`. Add a `"$schema"` key
+to get field autocompletion and inline docs for the calfkit-accepted surface
+in your editor (the schema is permissive — it does not reject unknown keys):
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/calf-ai/calfkit-sdk/main/calfkit/mcp/mcp.schema.json",
+  "mcpServers": {
+    "gmail": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-gmail"]}
+  }
+}
+```
+
+Offline or on a private fork, point at the copy shipped inside the installed
+package instead of the URL:
+
+```bash
+python -c "import importlib.resources as r; print(r.files('calfkit.mcp') / 'mcp.schema.json')"
+```
+
+The schema is **permissive** — unknown keys (e.g. another client's `disabled`
+/ `autoApprove`) are ignored, not rejected, so an existing `mcp.json` from
+another tool still validates. It documents the wrapped (`mcpServers`) form and
+is an editor aid only; the runtime validator is `McpServers.from_file(...)`,
+not the schema. Accepted fields:
+
+| Transport | Field | Type | Notes |
+|---|---|---|---|
+| stdio | `command` | string *(required)* | executable; `$VAR` expanded |
+| stdio | `args` | string[] | `$VAR` expanded |
+| stdio | `env` | {string: string} | `$VAR` expanded |
+| stdio | `cwd` | string | working directory |
+| http | `url` | string *(required)* | endpoint; `$VAR` expanded |
+| http | `headers` | {string: string} | `$VAR` expanded |
+| either | `type` | `"stdio"` / `"http"` / `"sse"` | optional; inferred from `command`/`url`. `stdio` only on a stdio spec; `http`/`sse` only on an http spec |
+
+Get the schema as a dict programmatically with
+`from calfkit.mcp import mcp_json_schema`. The committed file is regenerated
+with `calfkit mcp schema`; CI runs `calfkit mcp schema --check` to catch drift.
 
 ---
 

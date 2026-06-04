@@ -35,7 +35,9 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from calfkit.mcp.exceptions import McpConfigError
 
@@ -71,6 +73,72 @@ class ParsedHttpSpec:
 
 
 ParsedMcpServerSpec = ParsedStdioSpec | ParsedHttpSpec
+
+
+# ---------------------------------------------------------------------------
+# Input models (validation + schema source of truth)
+# ---------------------------------------------------------------------------
+#
+# These mirror the *input* shape of an mcp.json server spec (as opposed to
+# the normalised ``Parsed*`` output above). They drive both per-server
+# validation in ``parse_mcp_config`` and the reference schema emitted by
+# ``mcp_json_schema``, so the schema can never drift from the parser.
+
+
+class StdioServerConfig(BaseModel):
+    """Input model for a stdio MCP server spec (validation + schema source)."""
+
+    model_config = ConfigDict(extra="ignore")  # drop-in leniency; also suppresses additionalProperties
+    # ``type``, when present, selects the transport — and thus which model and
+    # required fields apply (see ``_validate_server``); when omitted it is
+    # inferred from ``command``/``url``. The ``Literal`` also documents and
+    # autocompletes the accepted values in the emitted schema.
+    type: Literal["stdio"] | None = Field(default=None, description="Optional; inferred from `command` when omitted.")
+    command: str = Field(min_length=1, description="Executable to spawn. Supports $VAR/${VAR} expansion.")
+    args: list[str] = Field(default_factory=list, description="CLI args; each supports $VAR.")
+    env: dict[str, str] | None = Field(default=None, description="Subprocess env overlay; values support $VAR.")
+    cwd: str | None = Field(default=None, description="Subprocess working directory.")
+
+
+class HttpServerConfig(BaseModel):
+    """Input model for an HTTP MCP server spec (validation + schema source)."""
+
+    model_config = ConfigDict(extra="ignore")  # drop-in leniency; also suppresses additionalProperties
+    # ``type``, when present, selects the transport — and thus which model and
+    # required fields apply (see ``_validate_server``); when omitted it is
+    # inferred from ``command``/``url``. The ``Literal`` also documents and
+    # autocompletes the accepted values in the emitted schema.
+    type: Literal["http", "sse"] | None = Field(default=None, description="`http` (or legacy `sse`); inferred from `url`.")
+    url: str = Field(min_length=1, description="Streamable-HTTP endpoint. Supports $VAR.")
+    headers: dict[str, str] | None = Field(default=None, description="Request headers; values support $VAR.")
+
+
+# Schema-generation source ONLY — never validate live data through this.
+# Its ``anyOf`` union resolves stdio-first (and ``extra="ignore"`` lets a stdio
+# spec swallow a stray ``url``), which DISAGREES with the url-first precedence in
+# ``_validate_server``. Per-server validation must go through ``_validate_server``.
+_SERVERS = TypeAdapter(dict[str, StdioServerConfig | HttpServerConfig])
+
+
+def mcp_json_schema() -> dict[str, Any]:
+    """Reference JSON Schema (draft 2020-12) for a calfkit ``mcp.json``.
+
+    Permissive: unknown keys are allowed (drop-in leniency), so the schema
+    carries no ``additionalProperties: false``. It is a documentation/editor
+    aid only and is NOT used to validate at runtime — the parser remains the
+    sole runtime validator.
+    """
+    servers_map = _SERVERS.json_schema(ref_template="#/$defs/{model}")
+    defs = servers_map.pop("$defs")
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "calfkit mcp.json",
+        "description": "Reference schema for calfkit McpServers.from_file(...). Unknown keys are ignored.",
+        "type": "object",
+        "required": ["mcpServers"],
+        "properties": {"mcpServers": servers_map},
+        "$defs": defs,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +238,7 @@ def parse_mcp_config(config: dict[str, Any] | str | Path) -> dict[str, ParsedMcp
         if not isinstance(raw_spec, dict):
             raise McpConfigError(f"mcp.json: spec for server {name!r} must be an object; got {type(raw_spec).__name__}")
         expanded_spec = expand_env(raw_spec, where=f"mcp.json[{name!r}]")
-        out[name] = _parse_server_spec(name, expanded_spec)
+        out[name] = _to_parsed(_validate_server(name, expanded_spec))
     return out
 
 
@@ -192,65 +260,69 @@ def _load_config_file(path: str | Path) -> dict[str, Any]:
     return parsed
 
 
-def _parse_server_spec(name: str, raw: dict[str, Any]) -> ParsedMcpServerSpec:
-    """Parse one server's spec into a ``ParsedMcpServerSpec``.
+def _validate_server(name: str, raw: dict[str, Any]) -> StdioServerConfig | HttpServerConfig:
+    """Resolve transport, then validate the spec via the matching input model.
 
     Transport detection rule (matches Claude Desktop / Cursor convention):
-    - If ``type == "http"`` (or ``type == "sse"``) → HTTP transport.
+    - If ``type == "http"`` (or legacy ``type == "sse"``) → HTTP transport.
     - Else if ``url`` is present → HTTP transport (inferred).
-    - Else if ``command`` is present → stdio transport.
-    - Otherwise → error.
+    - Else if ``type == "stdio"`` or ``command`` is present → stdio transport.
+    - Otherwise → ``unknown transport`` error.
+
+    When ``type`` is omitted, ``url`` takes precedence over ``command`` on
+    ambiguous specs (url-first); an explicit ``type`` always wins.
+    Resolving transport *before* validating keeps the friendly
+    ``unknown transport`` message out of Pydantic and preserves the
+    ``loc[0]`` substring contract relied on by ``test_config.py``.
     """
-    transport_type = raw.get("type")
-    has_url = "url" in raw
-    has_command = "command" in raw
-
-    if transport_type == "http" or transport_type == "sse" or (transport_type is None and has_url):
-        # SSE is the legacy MCP transport; we treat it as HTTP for the parser
-        # here. The runtime will use streamablehttp_client either way.
-        return _parse_http_spec(name, raw)
-    if transport_type == "stdio" or (transport_type is None and has_command):
-        return _parse_stdio_spec(name, raw)
-
-    raise McpConfigError(
-        f"mcp.json: server {name!r} has unknown transport. Provide either 'command' (stdio) or 'url' (http); got keys={sorted(raw.keys())}"
-    )
-
-
-def _parse_stdio_spec(name: str, raw: dict[str, Any]) -> ParsedStdioSpec:
-    command = raw.get("command")
-    if not isinstance(command, str) or not command:
-        raise McpConfigError(f"mcp.json: stdio server {name!r} requires a non-empty 'command' string; got {command!r}")
-
-    raw_args = raw.get("args", [])
-    if not isinstance(raw_args, list) or not all(isinstance(a, str) for a in raw_args):
-        raise McpConfigError(f"mcp.json: stdio server {name!r} 'args' must be a list of strings; got {raw_args!r}")
-    args = tuple(raw_args)
-
-    raw_env = raw.get("env")
-    env: dict[str, str] | None = None
-    if raw_env is not None:
-        if not isinstance(raw_env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw_env.items()):
-            raise McpConfigError(f"mcp.json: stdio server {name!r} 'env' must be a {{string: string}} object")
-        env = dict(raw_env)
-
-    cwd = raw.get("cwd")
-    if cwd is not None and not isinstance(cwd, str):
-        raise McpConfigError(f"mcp.json: stdio server {name!r} 'cwd' must be a string; got {type(cwd).__name__}")
-
-    return ParsedStdioSpec(command=command, args=args, env=env, cwd=cwd)
+    t, has_url, has_command = raw.get("type"), "url" in raw, "command" in raw
+    model: type[StdioServerConfig] | type[HttpServerConfig]
+    if t in ("http", "sse") or (t is None and has_url):
+        model = HttpServerConfig
+    elif t == "stdio" or (t is None and has_command):
+        model = StdioServerConfig
+    else:
+        raise McpConfigError(
+            f"mcp.json: server {name!r} has unknown transport. Provide either 'command' (stdio) or 'url' (http); got keys={sorted(raw.keys())}"
+        )
+    try:
+        return model.model_validate(raw)
+    except ValidationError as exc:
+        _raise_from_validation(name, exc)
 
 
-def _parse_http_spec(name: str, raw: dict[str, Any]) -> ParsedHttpSpec:
-    url = raw.get("url")
-    if not isinstance(url, str) or not url:
-        raise McpConfigError(f"mcp.json: http server {name!r} requires a non-empty 'url' string; got {url!r}")
+def _raise_from_validation(name: str, exc: ValidationError) -> NoReturn:
+    """Translate a Pydantic ``ValidationError`` into an ``McpConfigError``.
 
-    raw_headers = raw.get("headers")
-    headers: dict[str, str] | None = None
-    if raw_headers is not None:
-        if not isinstance(raw_headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw_headers.items()):
-            raise McpConfigError(f"mcp.json: http server {name!r} 'headers' must be a {{string: string}} object")
-        headers = dict(raw_headers)
+    Renders every offending field (keyed on ``loc[0]``) so the ``{field!r}``
+    rendering reproduces the ``'command'`` / ``'args'`` / ``'env'`` / ``'cwd'``
+    / ``'url'`` / ``'headers'`` substrings matched by the regression tests, and
+    so a multi-problem spec is reported in one pass rather than one-per-rerun.
 
-    return ParsedHttpSpec(url=url, headers=headers)
+    The offending *value* (``err['input']``) is deliberately NOT rendered: for a
+    missing-field error Pydantic sets it to the whole expanded spec dict, which
+    can contain ``$VAR``-resolved secrets (env values, Authorization headers).
+    Echoing it would leak credentials into error text, logs, and exception
+    reporters.
+    """
+    errors = exc.errors()
+    if not errors:  # defensive: model_validate never raises an empty error set
+        raise McpConfigError(f"mcp.json: server {name!r}: invalid spec") from exc
+    parts = []
+    for err in errors:
+        loc = err["loc"]
+        field = loc[0] if loc else "<unknown>"
+        parts.append(f"invalid {field!r} — {err['msg']}")
+    raise McpConfigError(f"mcp.json: server {name!r}: {'; '.join(parts)}") from exc
+
+
+def _to_parsed(cfg: StdioServerConfig | HttpServerConfig) -> ParsedMcpServerSpec:
+    """Normalise a validated input model into the existing ``Parsed*`` output.
+
+    Hand-maintained field copy (the type system does not enforce input↔output
+    congruence — the congruence tests in ``test_config.py`` are the only
+    guard). Keep this adjacent to both model definitions.
+    """
+    if isinstance(cfg, StdioServerConfig):
+        return ParsedStdioSpec(command=cfg.command, args=tuple(cfg.args), env=cfg.env, cwd=cfg.cwd)
+    return ParsedHttpSpec(url=cfg.url, headers=cfg.headers)

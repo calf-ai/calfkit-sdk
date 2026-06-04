@@ -47,9 +47,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/calf-ai/calf-sdk"
-Repository = "https://github.com/calf-ai/calf-sdk"
-Issues = "https://github.com/calf-ai/calf-sdk/issues"
+Homepage = "https://github.com/calf-ai/calfkit-sdk"
+Repository = "https://github.com/calf-ai/calfkit-sdk"
+Issues = "https://github.com/calf-ai/calfkit-sdk/issues"
 
 [project.scripts]
 # Top-level calfkit CLI. Currently mounts only the `mcp` subcommand (codegen).
