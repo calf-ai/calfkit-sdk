@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Generic
 
@@ -27,7 +28,10 @@ class NodeResult(Generic[OutputT]):
 
     Treat ``NodeResult``, its ``state``, and its ``deps`` as read-only. The
     dataclass is frozen, but ``state`` is a mutable Pydantic model and ``deps``
-    is a mutable dict (both shared with the envelope, not copied):
+    is the envelope's dict typed as a read-only ``Mapping`` (both shared with the
+    envelope, not copied — the ``Mapping`` annotation makes accidental
+    ``result.deps[...] = ...`` a type error; the runtime object is still that
+    shared dict):
 
     * **Consumer path**: the consumer never republishes (no ``publish_topic``),
       so mutations have no observable downstream effect. They can still
@@ -82,14 +86,16 @@ class NodeResult(Generic[OutputT]):
     from the ``x-calf-emitter-kind`` Kafka header. May be ``None`` if not
     stamped."""
 
-    deps: dict[str, Any] = field(default_factory=dict)
-    """Inbound user-provided dependencies — the same ``dict`` the producer passed
+    deps: Mapping[str, Any] = field(default_factory=dict)
+    """Inbound user-provided dependencies — the same mapping the producer passed
     to ``Client.invoke_node(deps=...)``, carried forward on every publish. Read
     it as ``result.deps["key"]``, mirroring how tools read ``ctx.deps["key"]``.
     Empty ``{}`` when the invocation set no deps.
 
-    Like ``state``, this is the same dict instance carried on the envelope (no
-    defensive copy) — treat it as read-only (see the read-only note above)."""
+    Typed as a read-only ``Mapping`` so accidental ``result.deps[...] = ...`` is a
+    type error. Like ``state``, the underlying object is the same dict carried on
+    the envelope (no defensive copy), so treat it as read-only at runtime too
+    (see the read-only note above)."""
 
     # NodeResult holds a mutable Pydantic model (state); the dataclass-
     # synthesized __hash__ would recursively try to hash unhashable fields and
