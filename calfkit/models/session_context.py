@@ -96,11 +96,15 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         ``PrivateAttr`` so it cannot be spoofed via the model constructor, mirroring
         :attr:`emitter_node_id`. Unlike the emitter id it is always present once a
         handler has prepared the context (the transport guarantees a value), so the
-        accessor is typed ``str`` and asserts the invariant.
+        accessor is typed ``str`` and raises if read before stamping (rather than
+        ``assert``, which ``python -O`` would strip — letting ``None`` leak into
+        ``correlation_id[:8]`` log/key sites as a confusing ``TypeError``).
         """
-        assert self._correlation_id is not None, (
-            "correlation_id is unset; the context was read outside a handler that stamps it (prepare_context / consumer handler / reply dispatcher)."
-        )
+        if self._correlation_id is None:
+            raise RuntimeError(
+                "correlation_id is unset; the context was read outside a handler that stamps it "
+                "(prepare_context / consumer handler / reply dispatcher)."
+            )
         return self._correlation_id
 
     @property

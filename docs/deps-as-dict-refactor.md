@@ -56,8 +56,8 @@ result.correlation_id               # consumers / client     (already existed)
 ## Why `correlation_id` is transport-sourced, not a wire field
 
 `correlation_id` is **already** the Kafka message's native attribute: every publish sets
-`broker.publish(..., correlation_id=..., key=correlation_id.encode())`, the server reads
-it via FastStream's `Context()`, and FastStream auto-propagates it across hops. So it is
+`broker.publish(..., correlation_id=...)` (server hops also key the message on it), the
+server reads it via FastStream's `Context()`, and FastStream auto-propagates it across hops. So it is
 modeled exactly like `emitter_node_id`/`emitter_node_kind`/`frame_id`: a `PrivateAttr`
 on `BaseSessionRunContext`, stamped from the transport in `BaseNodeDef.prepare_context`
 (server), the consumer handler, and the client's reply dispatcher — never read from the
@@ -84,9 +84,11 @@ under calfkit's own vocabulary (matching `NodeResult.correlation_id`, `Client.ex
   Kafka), so a richer typed-deps object is not viable the way pydantic-ai does it in-process.
 - **`deps` is surfaced without a defensive copy** — `result.deps` / `ctx.deps` is the same
   dict instance carried on the envelope, mirroring the existing no-copy decision for
-  `state`. The old `Deps` was frozen; the bare dict is mutable. `prepare_context` deep-copies
-  the inbound context per hop, so tool mutations cannot leak downstream, but callers should
-  treat `result.deps` / `ctx.deps` as read-only (documented on `NodeResult`).
+  `state`. The old `Deps` was frozen; the bare dict is mutable. On the server path
+  `prepare_context` deep-copies the inbound context per hop, so tool mutations cannot leak
+  downstream; the consumer path does not copy but never republishes (it is a terminal sink),
+  so a consumer mutating `result.deps` has no downstream effect. Callers should still treat
+  `result.deps` / `ctx.deps` as read-only (documented on `NodeResult`).
 
 ## Migration
 

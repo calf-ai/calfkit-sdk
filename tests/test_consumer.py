@@ -926,6 +926,21 @@ async def test_deps_round_trip_through_agent_to_client_and_consumer(container):
     assert all(r.deps == {"discord": {"channel_id": 7}} for r in received)
 
 
+def test_correlation_id_raises_when_unstamped():
+    """Reading ``correlation_id`` on a context no handler has stamped raises a
+    clear ``RuntimeError`` — not an assert (which ``python -O`` would strip,
+    leaking ``None`` into ``correlation_id[:8]`` as an opaque ``TypeError``)."""
+    from calfkit.models import ToolContext
+
+    ctx = SessionRunContext(state=State(), deps={})
+    with pytest.raises(RuntimeError, match="correlation_id is unset"):
+        _ = ctx.correlation_id
+
+    tool_ctx = ToolContext(deps={})  # run_id defaults to None
+    with pytest.raises(RuntimeError, match="without a run_id"):
+        _ = tool_ctx.correlation_id
+
+
 # ---------------------------------------------------------------------------
 # Pre-built TypeAdapter — schema-generation errors surface at construction
 # time, not per-envelope (Critical #3 from iteration 2 review).

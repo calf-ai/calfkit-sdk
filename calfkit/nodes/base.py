@@ -143,7 +143,8 @@ class BaseNodeDef(BaseNodeSchema):
         and will pass ``current_frame.input_args`` automatically if the parameter is declared.
 
         Args:
-            ctx: Session context containing mutable state and immutable dependencies.
+            ctx: Session context containing mutable state and the user-provided
+                dependencies dict (treat ``ctx.deps`` as read-only).
 
         Raises:
             NotImplementedError: If node subclass does not implement the run() method.

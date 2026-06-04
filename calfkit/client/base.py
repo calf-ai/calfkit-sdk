@@ -163,7 +163,7 @@ class BaseClient:
 
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
-            context=SessionRunContext(state=state, deps=deps or dict()),
+            context=SessionRunContext(state=state, deps={} if deps is None else deps),
         )
         await self._connection.publish(
             envelope,

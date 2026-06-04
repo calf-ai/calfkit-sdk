@@ -29,5 +29,6 @@ class ToolContext(RunContext[dict[str, Any]]):
         under calfkit's own vocabulary so tool authors use the same name as the
         rest of the SDK (``NodeResult.correlation_id``, ``Client.execute_node``).
         """
-        assert self.run_id is not None, "ToolContext was constructed without a run_id (correlation id)."
+        if self.run_id is None:
+            raise RuntimeError("ToolContext was constructed without a run_id (correlation id).")
         return self.run_id

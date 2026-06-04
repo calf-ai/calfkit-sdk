@@ -1657,6 +1657,29 @@ def test_prepare_context_populates_frame_id_from_envelope():
     assert ctx.frame_id == frame.frame_id, f"prepare_context must mirror current_frame.frame_id onto ctx; got {ctx.frame_id!r} vs {frame.frame_id!r}"
 
 
+def test_prepare_context_stamps_correlation_id_from_transport():
+    # ``correlation_id`` is transport-sourced: ``prepare_context`` must stamp the
+    # value the handler received via FastStream ``Context()`` onto ``ctx`` so
+    # ``ctx.correlation_id`` is readable (it is NOT carried on the envelope body).
+    import asyncio
+
+    from calfkit.models.envelope import Envelope
+    from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
+
+    agent = Agent(
+        "agent_prep_cid",
+        system_prompt="x",
+        subscribe_topics="agent_prep_cid.input",
+        publish_topic="agent_prep_cid.output",
+        model_client=TestModel(),
+    )
+    wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[CallFrame(target_topic="agent_prep_cid.input", callback_topic="caller.return")]))
+    envelope = Envelope(context=SessionRunContext(state=State(), deps={}), internal_workflow_state=wf)
+
+    ctx = asyncio.run(agent.prepare_context(envelope, correlation_id="cid-stamp-42"))
+    assert ctx.correlation_id == "cid-stamp-42"
+
+
 def test_frame_id_survives_envelope_json_round_trip():
     # The CallFrame's frame_id must survive Envelope JSON serialization
     # verbatim — otherwise per-invocation aggregation keys would diverge across
