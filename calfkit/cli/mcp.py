@@ -33,7 +33,10 @@ Exit codes (v1 plan §11 Q17):
 from __future__ import annotations
 
 import asyncio
+import difflib
+import json
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 
 try:
@@ -57,6 +60,51 @@ def _mcp_callback() -> None:
     pattern even when codegen is currently the only subcommand. Future
     subcommands (e.g. 'mcp inspect') will land alongside it.
     """
+
+
+def _emit_text(
+    rendered: str,
+    output: Path,
+    *,
+    check: bool,
+    differ: Callable[[str, str], str],
+    label: str,
+    refresh_cmd: str,
+) -> int:
+    """Write ``rendered`` to ``output`` (or, in ``check`` mode, compare without writing).
+
+    Shared write/``--check`` tail for ``codegen`` and ``schema``. The diff is
+    caller-supplied — ``codegen`` passes its AST-aware ``diff_modules`` while
+    ``schema`` passes a plain ``difflib`` text diff. ``differ(rendered, existing)``
+    must return an empty string when the two are equivalent.
+
+    Returns the exit code (0 ok · 1 drift/missing · 2 io-error).
+    """
+    if check:
+        if not output.exists():
+            typer.echo(f"Drift: {output} does not exist (would create with {label})", err=True)
+            return 1
+        try:
+            existing = output.read_text(encoding="utf-8")
+        except OSError as e:
+            typer.echo(f"Error: cannot read {output}: {e}", err=True)
+            return 2
+        diff = differ(rendered, existing)
+        if diff:
+            typer.echo(f"Drift detected in {output}:", err=True)
+            typer.echo(diff, err=True)
+            typer.echo(f"Re-run without --check to refresh: {refresh_cmd}", err=True)
+            return 1
+        typer.echo(f"OK: {output} is up to date ({label}).")
+        return 0
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8")
+    except OSError as e:
+        typer.echo(f"Error: cannot write {output}: {e}", err=True)
+        return 2
+    typer.echo(f"Wrote {output} ({label}).")
+    return 0
 
 
 # Public for tests — let test code call codegen logic directly without
@@ -86,39 +134,14 @@ async def _generate_and_write(
 
     rendered = render_module(server_name=server_name, tools=tools, source=source_str)
 
-    if check:
-        if not output.exists():
-            typer.echo(
-                f"Drift: {output} does not exist (would create with {len(tools)} tool(s))",
-                err=True,
-            )
-            return 1
-        try:
-            existing = output.read_text(encoding="utf-8")
-        except OSError as e:
-            typer.echo(f"Error: cannot read {output}: {e}", err=True)
-            return 2
-        diff = diff_modules(expected=rendered, actual=existing)
-        if diff:
-            typer.echo(f"Drift detected in {output}:", err=True)
-            typer.echo(diff, err=True)
-            typer.echo(
-                f"Re-run without --check to refresh: calfkit mcp codegen {server_name} ...",
-                err=True,
-            )
-            return 1
-        typer.echo(f"OK: {output} is up to date ({len(tools)} tool(s)).")
-        return 0
-
-    try:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered, encoding="utf-8")
-    except OSError as e:
-        typer.echo(f"Error: cannot write {output}: {e}", err=True)
-        return 2
-
-    typer.echo(f"Wrote {output} ({len(tools)} tool(s)).")
-    return 0
+    return _emit_text(
+        rendered,
+        output,
+        check=check,
+        differ=lambda expected, actual: diff_modules(expected=expected, actual=actual),
+        label=f"{len(tools)} tool(s)",
+        refresh_cmd=f"calfkit mcp codegen {server_name} ...",
+    )
 
 
 @app.command()
@@ -185,6 +208,47 @@ def codegen(
     )
     if exit_code != 0:
         raise typer.Exit(exit_code)
+
+
+@app.command()
+def schema(
+    output: Path = typer.Option(
+        Path("calfkit/mcp/mcp.schema.json"),
+        "--output",
+        "-o",
+        help="Path to write the reference schema. Default targets the repo checkout (not an installed package).",
+    ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Exit non-zero if the file would differ from the existing one. Does not write.",
+    ),
+) -> None:
+    """Emit the reference JSON Schema for mcp.json (no MCP server needed)."""
+    from calfkit.mcp import mcp_json_schema
+
+    rendered = json.dumps(mcp_json_schema(), indent=2) + "\n"
+
+    def _text_diff(expected: str, actual: str) -> str:
+        return "".join(
+            difflib.unified_diff(
+                actual.splitlines(keepends=True),
+                expected.splitlines(keepends=True),
+                fromfile="existing",
+                tofile="generated",
+            )
+        )
+
+    code = _emit_text(
+        rendered,
+        output,
+        check=check,
+        differ=_text_diff,
+        label="reference schema",
+        refresh_cmd="calfkit mcp schema",
+    )
+    if code != 0:
+        raise typer.Exit(code)
 
 
 def main() -> None:

@@ -322,3 +322,42 @@ def test_parsed_specs_are_immutable() -> None:
     stdio = parsed["s"]
     with pytest.raises(Exception):  # FrozenInstanceError
         stdio.command = "y"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# parse_mcp_config — input↔output field congruence (post-rewrite contract)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_stdio_field_congruence() -> None:
+    """Every field of a fully-populated stdio spec maps onto ``ParsedStdioSpec``."""
+    parsed = parse_mcp_config({"s": {"command": "npx", "args": ["-y", "x"], "env": {"K": "V"}, "cwd": "/tmp"}})
+    spec = parsed["s"]
+    assert isinstance(spec, ParsedStdioSpec)
+    assert spec.command == "npx"
+    assert spec.args == ("-y", "x")
+    assert isinstance(spec.args, tuple)
+    assert spec.env == {"K": "V"}
+    assert spec.cwd == "/tmp"
+
+
+def test_parse_http_field_congruence() -> None:
+    """Every field of a fully-populated http spec maps onto ``ParsedHttpSpec``."""
+    parsed = parse_mcp_config({"s": {"type": "http", "url": "https://x/mcp", "headers": {"Authorization": "Bearer x"}}})
+    spec = parsed["s"]
+    assert isinstance(spec, ParsedHttpSpec)
+    assert spec.url == "https://x/mcp"
+    assert spec.headers == {"Authorization": "Bearer x"}
+
+
+def test_parse_stdio_command_empty_after_expansion_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``$VAR`` that expands to '' fails the non-empty command rule."""
+    monkeypatch.setenv("EMPTY", "")
+    with pytest.raises(McpConfigError, match="'command'"):
+        parse_mcp_config({"s": {"command": "$EMPTY"}})
+
+
+def test_parse_empty_object_spec_rejected() -> None:
+    """A server spec with neither 'command' nor 'url' is an unknown transport."""
+    with pytest.raises(McpConfigError, match="unknown transport"):
+        parse_mcp_config({"s": {}})

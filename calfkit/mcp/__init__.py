@@ -15,6 +15,7 @@ The factory is also re-exported at the calfkit top level as
 ``from calfkit import mcp`` for ergonomic compact-form imports.
 """
 
+from calfkit.mcp._config import mcp_json_schema
 from calfkit.mcp._factory import McpServers, mcp
 from calfkit.mcp._server import McpServer
 from calfkit.mcp._tool_def import McpToolAnnotations, McpToolDef
@@ -25,4 +26,5 @@ __all__ = [
     "McpToolAnnotations",
     "McpToolDef",
     "mcp",
+    "mcp_json_schema",
 ]

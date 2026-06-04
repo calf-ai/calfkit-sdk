@@ -36,3 +36,6 @@ jobs:
 
       - name: Run MyPy
         run: uv run mypy calfkit/
+
+      - name: Check mcp.json reference schema is up to date
+        run: uv run calfkit mcp schema --check
