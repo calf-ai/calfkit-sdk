@@ -2,6 +2,10 @@
 
 An index of potential features and changes under consideration for Calf SDK. Each entry links to a detailed design document in `docs/`. Inclusion here does not imply commitment — items may be reshaped, deferred, or dropped after review.
 
+## Accepted
+
+- [Deps-as-dict refactor](docs/deps-as-dict-refactor.md) — `ctx.deps`/`result.deps` are plain dicts and `correlation_id` is a top-level context attribute (closes #144; breaking)
+
 ## Proposed
 
 - [Calfkit 1.0](docs/calfkit-v1-design.md) — 1.0 rewrite proposal covering node, agent, and result shape changes

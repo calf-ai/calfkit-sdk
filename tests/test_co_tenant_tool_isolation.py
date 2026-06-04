@@ -41,7 +41,6 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
     CallFrame,
     CallFrameStack,
-    Deps,
     SessionRunContext,
     WorkflowState,
 )
@@ -315,7 +314,8 @@ async def test_tailcall_self_retry_targets_private_return_topic():
 
     state = State()
     state.stage_message(ModelRequest.user_text_prompt("hi"))
-    ctx = SessionRunContext(state=state, deps=Deps(correlation_id="cid", provided_deps={}))
+    ctx = SessionRunContext(state=state, deps={})
+    ctx._correlation_id = "cid"
 
     result = await agent.run(ctx)
 
@@ -337,7 +337,7 @@ async def test_tailcall_self_retry_targets_private_return_topic():
     stack = CallFrameStack()
     stack.push(CallFrame(target_topic="tailcall_target.input", callback_topic="client.reply"))
     envelope = Envelope(
-        context=SessionRunContext(state=result.state, deps=Deps(correlation_id="cid", provided_deps={})),
+        context=SessionRunContext(state=result.state, deps={}),
         internal_workflow_state=WorkflowState(call_stack=stack),
     )
     broker = MagicMock()

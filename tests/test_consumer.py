@@ -32,7 +32,7 @@ from calfkit.client import Client, NodeResult
 from calfkit.models import SessionRunContext
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import DataPart, TextPart
-from calfkit.models.session_context import CallFrameStack, Deps, WorkflowState
+from calfkit.models.session_context import CallFrameStack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes import Agent, ConsumerNodeDef, consumer
 from calfkit.worker import Worker
@@ -67,28 +67,35 @@ def _wire_agent_with_consumer(container, consumer_node: ConsumerNodeDef) -> Agen
     return agent
 
 
-def _envelope_with_text(text: str, correlation_id: str = "test-cid-00000000") -> Envelope:
+def _make_ctx(state: State, correlation_id: str, deps: dict | None = None) -> SessionRunContext:
+    """Build a context with deps and a pre-stamped correlation_id (as a handler would)."""
+    ctx = SessionRunContext(state=state, deps=deps or {})
+    ctx._correlation_id = correlation_id
+    return ctx
+
+
+def _envelope_with_text(text: str, correlation_id: str = "test-cid-00000000", deps: dict | None = None) -> Envelope:
     state = State()
     state.final_output_parts = [TextPart(text=text)]
     return Envelope(
-        context=SessionRunContext(state=state, deps=Deps(correlation_id=correlation_id, provided_deps={})),
+        context=_make_ctx(state, correlation_id, deps),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
     )
 
 
-def _envelope_without_final_parts(correlation_id: str = "test-cid-00000000") -> Envelope:
+def _envelope_without_final_parts(correlation_id: str = "test-cid-00000000", deps: dict | None = None) -> Envelope:
     """Intermediate-hop shape: state populated but no final_output_parts."""
     return Envelope(
-        context=SessionRunContext(state=State(), deps=Deps(correlation_id=correlation_id, provided_deps={})),
+        context=_make_ctx(State(), correlation_id, deps),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
     )
 
 
-def _envelope_with_data(data: dict, correlation_id: str = "test-cid-00000000") -> Envelope:
+def _envelope_with_data(data: dict, correlation_id: str = "test-cid-00000000", deps: dict | None = None) -> Envelope:
     state = State()
     state.final_output_parts = [DataPart(data=data)]
     return Envelope(
-        context=SessionRunContext(state=state, deps=Deps(correlation_id=correlation_id, provided_deps={})),
+        context=_make_ctx(state, correlation_id, deps),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
     )
 
@@ -170,7 +177,7 @@ async def test_run_raises_assertion_error_if_called():
     """Defensive guard: handler() is overridden and run() should never be
     reached. If a future refactor calls it, fail loud."""
     node = ConsumerNodeDef(node_id="x", subscribe_topics="t", consume_fn=lambda r: None)
-    ctx = SessionRunContext(state=State(), deps=Deps(correlation_id="c", provided_deps={}))
+    ctx = SessionRunContext(state=State(), deps={})
 
     with pytest.raises(AssertionError, match="never be invoked"):
         await node.run(ctx)
@@ -658,7 +665,7 @@ async def test_node_result_convenience_properties_read_through_state():
     state.message_history = [ModelRequest.user_text_prompt("hi")]
     state.metadata = {"app": "demo"}
     envelope = Envelope(
-        context=SessionRunContext(state=state, deps=Deps(correlation_id="cid-prop", provided_deps={})),
+        context=SessionRunContext(state=state, deps={}),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
     )
 
@@ -717,7 +724,7 @@ async def test_consumer_sees_tool_results_via_state(container):
     state.add_tool_call(tool_call)
     state.add_tool_result(tool_call.tool_call_id, "sunny in Tokyo")
     envelope = Envelope(
-        context=SessionRunContext(state=state, deps=Deps(correlation_id="cid-tool", provided_deps={})),
+        context=SessionRunContext(state=state, deps={}),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
     )
 
@@ -811,7 +818,7 @@ def test_strict_mode_raises_on_empty_final_output_parts():
 
     envelope = _envelope_without_final_parts("cid-strict-empty")
     with pytest.raises(DeserializationError, match="No DataPart or TextPart"):
-        deserialize_to_node_result(envelope)  # strict=True default
+        deserialize_to_node_result(envelope, correlation_id="cid-strict-empty")  # strict=True default
 
 
 def test_lenient_mode_returns_none_on_empty_final_output_parts():
@@ -819,9 +826,119 @@ def test_lenient_mode_returns_none_on_empty_final_output_parts():
     from calfkit.client.deserialize import deserialize_to_node_result
 
     envelope = _envelope_without_final_parts("cid-lenient-empty")
-    result = deserialize_to_node_result(envelope, strict=False)
+    result = deserialize_to_node_result(envelope, correlation_id="cid-lenient-empty", strict=False)
     assert result.output is None
     assert result.state is envelope.context.state
+
+
+# ---------------------------------------------------------------------------
+# deps on NodeResult (issue #144) — inbound producer deps are surfaced to
+# consumers/clients as ``result.deps``, symmetric with ``ctx.deps`` in tools.
+# ---------------------------------------------------------------------------
+
+
+async def test_consumer_reads_inbound_deps():
+    """A @consumer reads the deps the producer set via ``result.deps["key"]`` —
+    the same data tools see via ``ctx.deps["key"]``."""
+    captured: list[NodeResult] = []
+
+    def sink(result: NodeResult) -> None:
+        captured.append(result)
+
+    node = ConsumerNodeDef(node_id="deps_sink", subscribe_topics="t", consume_fn=sink)
+    envelope = _envelope_with_text("hi", correlation_id="cid-deps", deps={"discord": {"channel_id": 42}})
+
+    await node.handler(
+        envelope,
+        correlation_id="cid-deps",
+        headers={HDR_EMITTER: b"upstream", HDR_EMITTER_KIND: b"agent"},
+        broker=MagicMock(),
+    )
+
+    assert len(captured) == 1
+    assert captured[0].deps == {"discord": {"channel_id": 42}}
+    assert captured[0].correlation_id == "cid-deps"
+
+
+async def test_node_result_deps_is_envelope_deps_no_copy():
+    """``result.deps`` is the same dict instance carried on the envelope (no
+    defensive copy), mirroring the documented no-copy decision for ``state``."""
+    captured: list[NodeResult] = []
+
+    def sink(result: NodeResult) -> None:
+        captured.append(result)
+
+    node = ConsumerNodeDef(node_id="deps_nocopy", subscribe_topics="t", consume_fn=sink)
+    envelope = _envelope_with_text("hi", correlation_id="cid-deps-id", deps={"k": "v"})
+
+    await node.handler(
+        envelope,
+        correlation_id="cid-deps-id",
+        headers={HDR_EMITTER: b"upstream", HDR_EMITTER_KIND: b"agent"},
+        broker=MagicMock(),
+    )
+
+    assert captured[0].deps is envelope.context.deps
+
+
+async def test_node_result_deps_defaults_to_empty_dict():
+    """When no deps were provided, ``result.deps`` is an empty dict (never None)."""
+    captured: list[NodeResult] = []
+
+    def sink(result: NodeResult) -> None:
+        captured.append(result)
+
+    node = ConsumerNodeDef(node_id="deps_empty", subscribe_topics="t", consume_fn=sink)
+    envelope = _envelope_with_text("hi", correlation_id="cid-deps-empty")  # no deps set
+
+    await node.handler(
+        envelope,
+        correlation_id="cid-deps-empty",
+        headers={HDR_EMITTER: b"upstream", HDR_EMITTER_KIND: b"agent"},
+        broker=MagicMock(),
+    )
+
+    assert captured[0].deps == {}
+
+
+async def test_deps_round_trip_through_agent_to_client_and_consumer(container):
+    """E2E: deps passed to ``execute_node`` flow through the agent and surface on
+    BOTH the client-returned ``NodeResult`` and the consumer's ``NodeResult`` —
+    proving the producer-side propagation (``_publish_action``) reaches the
+    consumer API boundary, which is the gap issue #144 closes."""
+    received: list[NodeResult] = []
+
+    @consumer(subscribe_topics="consumer_test_agent.output")
+    def sink(result: NodeResult) -> None:
+        received.append(result)
+
+    agent = _wire_agent_with_consumer(container, sink)
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    async with TestKafkaBroker(broker):
+        result = await client.execute_node("hi", agent.subscribe_topics[0], deps={"discord": {"channel_id": 7}}, timeout=5)
+
+    # Client side carries deps.
+    assert result.deps == {"discord": {"channel_id": 7}}
+    # Consumer side carries the same deps on every observed hop.
+    assert received, "consumer saw no envelopes"
+    assert all(r.deps == {"discord": {"channel_id": 7}} for r in received)
+
+
+def test_correlation_id_raises_when_unstamped():
+    """Reading ``correlation_id`` on a context no handler has stamped raises a
+    clear ``RuntimeError`` — not an assert (which ``python -O`` would strip,
+    leaking ``None`` into ``correlation_id[:8]`` as an opaque ``TypeError``)."""
+    from calfkit.models import ToolContext
+
+    ctx = SessionRunContext(state=State(), deps={})
+    with pytest.raises(RuntimeError, match="correlation_id is unset"):
+        _ = ctx.correlation_id
+
+    tool_ctx = ToolContext(deps={})  # run_id defaults to None
+    with pytest.raises(RuntimeError, match="without a run_id"):
+        _ = tool_ctx.correlation_id
 
 
 # ---------------------------------------------------------------------------

@@ -83,7 +83,7 @@ class ToolNodeDef(BaseToolNodeDef):
     async def run(self, ctx: SessionRunContext, tool_call_id: str) -> NodeResult[State]:
         logger.debug(
             "[%s] tool run entered tool=%s tool_call_id=%s emitter=%s",
-            ctx.deps.correlation_id[:8],
+            ctx.correlation_id[:8],
             self.name,
             tool_call_id,
             ctx.emitter_node_id,
@@ -102,7 +102,7 @@ class ToolNodeDef(BaseToolNodeDef):
             tool_call_id=tool_call_part.tool_call_id,
             tool_name=tool_call_part.tool_name,
             messages=ctx.state.message_history,
-            run_id=ctx.deps.correlation_id,
+            run_id=ctx.correlation_id,
         )
 
         # TODO(#143): bounded retries / backoff for non-ModelRetry exceptions.
@@ -122,7 +122,7 @@ class ToolNodeDef(BaseToolNodeDef):
         except ModelRetry as e:
             logger.warning(
                 "[%s] tool=%s raised ModelRetry: %s",
-                ctx.deps.correlation_id[:8],
+                ctx.correlation_id[:8],
                 self.name,
                 e.message,
             )
@@ -138,7 +138,7 @@ class ToolNodeDef(BaseToolNodeDef):
         except Exception as e:
             logger.exception(
                 "[%s] tool=%s tool_call_id=%s raised %s; surfacing FailedToolCall to agent",
-                ctx.deps.correlation_id[:8],
+                ctx.correlation_id[:8],
                 self.name,
                 tool_call_part.tool_call_id,
                 type(e).__name__,
@@ -156,7 +156,7 @@ class ToolNodeDef(BaseToolNodeDef):
             except Exception as construct_err:
                 logger.exception(
                     "[%s] tool=%s tool_call_id=%s failed to construct FailedToolCall (%s); using fallback sentinel marker",
-                    ctx.deps.correlation_id[:8],
+                    ctx.correlation_id[:8],
                     self.name,
                     tool_call_part.tool_call_id,
                     type(construct_err).__name__,
@@ -187,7 +187,7 @@ class ToolNodeDef(BaseToolNodeDef):
         # try block above; reuse it rather than constructing twice.
         ctx.state.add_tool_result(tool_call_part.tool_call_id, tool_return)
 
-        logger.debug("[%s] tool completed tool=%s", ctx.deps.correlation_id[:8], self.name)
+        logger.debug("[%s] tool completed tool=%s", ctx.correlation_id[:8], self.name)
         return ReturnCall[State](state=ctx.state)
 
 

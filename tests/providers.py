@@ -58,7 +58,7 @@ caller_id_lookup = {"id1": "9496310387", "id2": "9287792710", "id3": "2136179907
 
 def get_caller_id(ctx: ToolContext):
     """Use this tool to identify the phone number the user is messaging from."""
-    ephemeral_id = ctx.deps.provided_deps.get("ephemeral_id")
+    ephemeral_id = ctx.deps.get("ephemeral_id")
     if ephemeral_id is None:
         return "invalid id"
     return caller_id_lookup.get(ephemeral_id, "no number found")
@@ -66,7 +66,7 @@ def get_caller_id(ctx: ToolContext):
 
 def get_random_number(ctx: ToolContext) -> int | str:
     """Use this tool to get a random number."""
-    random_number: int = ctx.deps.provided_deps.get("random_number")  # pyright: ignore[reportAssignmentType]
+    random_number: int = ctx.deps.get("random_number")  # pyright: ignore[reportAssignmentType]
     if random_number is None:
         return "unable to get a random number"
     return random_number
@@ -74,7 +74,7 @@ def get_random_number(ctx: ToolContext) -> int | str:
 
 def get_random_string(ctx: ToolContext) -> str:
     """Use this tool to get a random string."""
-    random_string: str = ctx.deps.provided_deps.get("random_string")  # pyright: ignore[reportAssignmentType]
+    random_string: str = ctx.deps.get("random_string")  # pyright: ignore[reportAssignmentType]
     if random_string is None:
         return "unable to get a random string"
     return random_string
@@ -82,7 +82,7 @@ def get_random_string(ctx: ToolContext) -> str:
 
 def get_random_city(ctx: ToolContext) -> str:
     """Use this tool to get a random city."""
-    random_city: str = ctx.deps.provided_deps.get("random_city")  # pyright: ignore[reportAssignmentType]
+    random_city: str = ctx.deps.get("random_city")  # pyright: ignore[reportAssignmentType]
     if random_city is None:
         return "unable to get a random city"
     return random_city

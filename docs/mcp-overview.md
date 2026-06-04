@@ -301,7 +301,7 @@ holds no per-user secrets.
 gmail = mcp(
     "https://gmail-mcp.acme.com/mcp",
     token="$CALFKIT_SERVICE_TOKEN",            # session-static
-    meta=lambda ctx: {"user_id": ctx.deps.provided_deps["user_id"]},
+    meta=lambda ctx: {"user_id": ctx.deps["user_id"]},
     tools=Gmail.ALL,
 )
 # user_id arrives via Client.execute_node(deps={"user_id": ...})

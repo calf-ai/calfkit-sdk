@@ -143,7 +143,8 @@ class BaseNodeDef(BaseNodeSchema):
         and will pass ``current_frame.input_args`` automatically if the parameter is declared.
 
         Args:
-            ctx: Session context containing mutable state and immutable dependencies.
+            ctx: Session context containing mutable state and the user-provided
+                dependencies dict (treat ``ctx.deps`` as read-only).
 
         Raises:
             NotImplementedError: If node subclass does not implement the run() method.
@@ -160,13 +161,13 @@ class BaseNodeDef(BaseNodeSchema):
         envelope: Envelope,
         emitter_node_id: str | None = None,
         emitter_node_kind: str | None = None,
+        correlation_id: str | None = None,
     ) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
         current_frame = envelope.internal_workflow_state.current_frame
         if current_frame.overrides:
             ctx.state.overrides = current_frame.overrides
-        ctx._emitter_node_id = emitter_node_id
-        ctx._emitter_node_kind = emitter_node_kind
+        ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
         ctx._frame_id = current_frame.frame_id
         return ctx
 
@@ -275,7 +276,7 @@ class BaseNodeDef(BaseNodeSchema):
             )
         emitter_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
         logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, emitter_kind)
-        ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind)
+        ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
 
         if not await self._evaluate_gates(ctx, correlation_id):
             body: Envelope = envelope

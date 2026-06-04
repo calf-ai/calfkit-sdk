@@ -29,3 +29,27 @@ def assert_json_roundtrip(instance):
 
 def test_envelope_serialization_roundtrip(make_envelope):
     assert_json_roundtrip(make_envelope)
+
+
+def test_nested_deps_survive_json_roundtrip_and_correlation_id_stays_off_the_wire():
+    """The deps dict (incl. nested/list values) must survive a real JSON hop
+    verbatim, while ``correlation_id`` (a transport-sourced PrivateAttr) must NOT
+    appear in the serialized envelope body and is unset after a body-only
+    round-trip."""
+    from calfkit.models.envelope import Envelope
+    from calfkit.models.session_context import CallFrameStack, SessionRunContext, WorkflowState
+    from calfkit.models.state import State
+
+    deps = {"discord": {"channel_id": 7, "author": "ana"}, "tags": ["a", "b"]}
+    ctx = SessionRunContext(state=State(), deps=deps)
+    ctx._correlation_id = "cid-wire"  # stamped as a handler would
+    envelope = Envelope(context=ctx, internal_workflow_state=WorkflowState(call_stack=CallFrameStack()))
+
+    body = envelope.model_dump_json()
+    assert "correlation_id" not in body, "correlation_id must not ride on the envelope body"
+    assert "provided_deps" not in body, "the old Deps wrapper must not appear on the wire"
+
+    restored = Envelope.model_validate_json(body)
+    assert restored.context.deps == deps  # nested + list values preserved
+    # PrivateAttr is not serialized, so it does not survive a body-only round-trip.
+    assert restored.context._correlation_id is None

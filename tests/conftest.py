@@ -16,7 +16,7 @@ from calfkit._vendor.pydantic_ai.models.function import FunctionModel
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
 from calfkit.models.envelope import Envelope
 from calfkit.models.node_schema import BaseToolNodeSchema
-from calfkit.models.session_context import CallFrame, CallFrameStack, Deps, SessionRunContext, WorkflowState
+from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
 from calfkit.models.state import OverridesState, State
 from calfkit.nodes import Agent, ToolNodeDef
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient, OpenAIResponsesModelClient
@@ -417,8 +417,8 @@ def make_envelope_state(
 
 
 @pytest.fixture
-def make_envelope_deps() -> Deps:
-    return Deps(correlation_id=uuid_utils.uuid4().hex, provided_deps=fake.pydict(allowed_types=[str, int, float, bool]))
+def make_envelope_deps() -> dict[str, Any]:
+    return fake.pydict(allowed_types=[str, int, float, bool])
 
 
 @pytest.fixture

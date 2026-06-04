@@ -31,7 +31,6 @@ from calfkit.exceptions import ToolExecutionError
 from calfkit.models import SessionRunContext, ToolContext
 from calfkit.models.actions import Call, ReturnCall, Silent, TailCall
 from calfkit.models.node_schema import BaseToolNodeSchema
-from calfkit.models.session_context import Deps
 from calfkit.models.state import (
     FailedToolCall,
     OverridesState,
@@ -51,14 +50,12 @@ def _make_ctx(
     correlation_id: str = "cid-tool-errors-00000000",
     frame_id: str | None = None,
 ) -> SessionRunContext:
-    ctx = SessionRunContext(
-        state=state,
-        deps=Deps(correlation_id=correlation_id, provided_deps={}),
-    )
-    # ``_frame_id`` is a ``PrivateAttr`` populated by ``BaseNodeDef.prepare_context``
-    # in the live path; tests that drive ``agent.run`` directly must set it
-    # here when they exercise parallel-mode aggregation (which keys
-    # ``_pending_batches`` on ``frame_id``).
+    ctx = SessionRunContext(state=state, deps={})
+    # ``_correlation_id`` / ``_frame_id`` are ``PrivateAttr``s populated by
+    # ``BaseNodeDef.prepare_context`` in the live path; tests that drive
+    # ``agent.run`` directly must set them here. ``_frame_id`` matters for
+    # parallel-mode aggregation (which keys ``_pending_batches`` on it).
+    ctx._correlation_id = correlation_id
     if frame_id is not None:
         ctx._frame_id = frame_id
     return ctx
@@ -1652,15 +1649,35 @@ def test_prepare_context_populates_frame_id_from_envelope():
     )
     wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[frame]))
     envelope = Envelope(
-        context=SessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="cid-prep", provided_deps={}),
-        ),
+        context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=wf,
     )
 
     ctx = asyncio.run(agent.prepare_context(envelope))
     assert ctx.frame_id == frame.frame_id, f"prepare_context must mirror current_frame.frame_id onto ctx; got {ctx.frame_id!r} vs {frame.frame_id!r}"
+
+
+def test_prepare_context_stamps_correlation_id_from_transport():
+    # ``correlation_id`` is transport-sourced: ``prepare_context`` must stamp the
+    # value the handler received via FastStream ``Context()`` onto ``ctx`` so
+    # ``ctx.correlation_id`` is readable (it is NOT carried on the envelope body).
+    import asyncio
+
+    from calfkit.models.envelope import Envelope
+    from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
+
+    agent = Agent(
+        "agent_prep_cid",
+        system_prompt="x",
+        subscribe_topics="agent_prep_cid.input",
+        publish_topic="agent_prep_cid.output",
+        model_client=TestModel(),
+    )
+    wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[CallFrame(target_topic="agent_prep_cid.input", callback_topic="caller.return")]))
+    envelope = Envelope(context=SessionRunContext(state=State(), deps={}), internal_workflow_state=wf)
+
+    ctx = asyncio.run(agent.prepare_context(envelope, correlation_id="cid-stamp-42"))
+    assert ctx.correlation_id == "cid-stamp-42"
 
 
 def test_frame_id_survives_envelope_json_round_trip():
@@ -1677,10 +1694,7 @@ def test_frame_id_survives_envelope_json_round_trip():
     )
     wf = WorkflowState(call_stack=CallFrameStack(_internal_list=[frame]))
     envelope = Envelope(
-        context=SessionRunContext(
-            state=State(),
-            deps=Deps(correlation_id="cid-rt", provided_deps={}),
-        ),
+        context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=wf,
     )
 
