@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.6...v0.4.0) (2026-06-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* deps as dict, lift correlation_id to context ([#144](https://github.com/calf-ai/calfkit-sdk/issues/144)) (#170)
+
+### Features
+
+* deps as dict, lift correlation_id to context ([#144](https://github.com/calf-ai/calfkit-sdk/issues/144)) ([#170](https://github.com/calf-ai/calfkit-sdk/issues/170)) ([89f678e](https://github.com/calf-ai/calfkit-sdk/commit/89f678ee52e8099c5e331dc26d03fe558ac09c8d))
+
 ## [0.3.6](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.5...v0.3.6) (2026-05-31)
 
 
