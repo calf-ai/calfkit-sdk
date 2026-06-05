@@ -121,6 +121,7 @@ class BaseClient:
         cls,
         server_urls: str | Iterable[str] | None = None,
         reply_topic: str | None = None,
+        reply_ttl: float | None = None,
         *,
         provisioning: ProvisioningConfig | None = None,
         **broker_kwargs: Any,
@@ -135,6 +136,13 @@ class BaseClient:
                 ``CALF_HOST_URL`` environment variable, then ``"localhost"``.
             reply_topic: Explicit reply topic name. When ``None`` (default), a
                 unique topic is generated using a uuid7 client ID.
+            reply_ttl: Optional seconds after which an un-answered reply future
+                (from :meth:`invoke_node` / :meth:`execute_node`) is evicted with
+                a :class:`~calfkit.exceptions.ReplyExpiredError`. ``None``
+                (default) disables eviction entirely — a deliberate
+                caller-responsibility choice, not a default safety ceiling.
+                Callers who need a bounded pending map under lost replies or
+                abandoned handles must opt in by setting a TTL.
             provisioning: **Experimental** (may change or be removed in a minor
                 release; calfkit is pre-1.0). Opt-in Kafka topic auto-creation
                 config. When enabled, the client provisions its reply topic on
@@ -178,7 +186,7 @@ class BaseClient:
             **broker_forwarded,
         )
 
-        dispatcher = _ReplyDispatcher()
+        dispatcher = _ReplyDispatcher(reply_ttl=reply_ttl)
         dispatcher.register(broker_connection, reply_topic, group_id)
 
         return cls(
@@ -246,9 +254,44 @@ class BaseClient:
             An invocation handle with an associated future for the reply.
         """
         future = self._dispatcher.expect(correlation_id)
-
         logger.debug("[%s] invoke topic=%s reply=%s", correlation_id[:8], topic, reply_topic)
+        await self._publish_call(
+            topic=topic,
+            correlation_id=correlation_id,
+            callback_topic=reply_topic,
+            state=state,
+            overrides=overrides,
+            run_args=run_args,
+            deps=deps,
+        )
+        return InvocationHandle(
+            correlation_id=correlation_id,
+            topic=topic,
+            reply_topic=reply_topic,
+            _future=future,
+            _output_type=output_type,
+        )
 
+    async def _publish_call(
+        self,
+        *,
+        topic: str,
+        correlation_id: str,
+        callback_topic: str | None,
+        state: State,
+        overrides: OverridesState | None,
+        run_args: Sequence[Any] | None,
+        deps: dict[str, Any] | None,
+    ) -> None:
+        """Build and publish one client-originated call envelope.
+
+        Single-sources the wire shape shared by :meth:`_invoke` (*callback_topic*
+        is the reply topic) and :meth:`_emit` (*callback_topic* is ``None``, so the
+        worker suppresses the terminal point-to-point reply): the lazy
+        connect-guard, the ``CallFrame`` push, the ``Envelope`` build, and the
+        emitter headers. Callers own dispatcher registration — ``_invoke`` calls
+        ``expect()`` *before* this so a reply can never race an unregistered future.
+        """
         if not self._connection._connection:
             # Best-effort, opt-in reply-topic provisioning. This is a dev-safe
             # convenience (rf=1, no ACLs) — review before relying on it in
@@ -264,12 +307,11 @@ class BaseClient:
         call_stack.push(
             CallFrame(
                 target_topic=topic,
-                callback_topic=reply_topic,
+                callback_topic=callback_topic,
                 input_args=run_args,
                 overrides=overrides,
             )
         )
-
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),
@@ -281,13 +323,46 @@ class BaseClient:
             headers={HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND},
         )
 
-        return InvocationHandle(
-            correlation_id=correlation_id,
+    async def _emit(
+        self,
+        topic: str,
+        correlation_id: str,
+        state: State,
+        overrides: OverridesState | None = None,
+        run_args: Sequence[Any] | None = None,
+        deps: dict[str, Any] | None = None,
+    ) -> str:
+        """Emit a true one-way (fire-and-forget) invocation to a node.
+
+        Mirrors :meth:`_invoke` but allocates **zero** per-call client state and
+        triggers **zero** reply traffic: it does not register a reply future with
+        the dispatcher, does not build an :class:`InvocationHandle`, and pushes a
+        :class:`CallFrame` with ``callback_topic=None`` so the worker suppresses
+        the point-to-point reply on the terminal hop. The result still rides the
+        target node's ``publish_topic`` broadcast channel for traceability.
+
+        Args:
+            topic: Topic to send args to.
+            correlation_id: Correlation ID for this request, returned for tracing.
+            state: The session state.
+            overrides: Runtime overrides (agent tools, model settings).
+            run_args: The args to send to the node's run() method.
+            deps: Provided dependencies.
+
+        Returns:
+            The ``correlation_id`` of the emitted invocation, for tracing.
+        """
+        logger.debug("[%s] emit topic=%s", correlation_id[:8], topic)
+        await self._publish_call(
             topic=topic,
-            reply_topic=reply_topic,
-            _future=future,
-            _output_type=output_type,
+            correlation_id=correlation_id,
+            callback_topic=None,
+            state=state,
+            overrides=overrides,
+            run_args=run_args,
+            deps=deps,
         )
+        return correlation_id
 
     async def _provision_reply_topic(self) -> None:
         """Best-effort creation of this client's reply topic via the admin client.
