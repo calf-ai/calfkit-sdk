@@ -82,8 +82,7 @@ def _resolve_nodes(specs: list[str]) -> list[Any]:
         except Exception as e:  # noqa: BLE001 -- side-effect code at import time failed
             # The module exists but its top-level code raised when executed.
             typer.echo(
-                f"Error: module {module_path!r} raised during import "
-                f"(side-effect code failed): {e}",
+                f"Error: module {module_path!r} raised during import (side-effect code failed): {e}",
                 err=True,
             )
             raise typer.Exit(2) from e
@@ -229,8 +228,7 @@ def provision(
     server_urls = [s.strip() for s in bootstrap_servers.split(",") if s.strip()]
     if not server_urls:
         typer.echo(
-            "Error: --bootstrap-servers is empty after parsing; provide at "
-            "least one Kafka broker URL.",
+            "Error: --bootstrap-servers is empty after parsing; provide at least one Kafka broker URL.",
             err=True,
         )
         raise typer.Exit(2)

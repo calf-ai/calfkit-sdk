@@ -276,7 +276,16 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
         received.append(result.output)
 
     client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
-    worker = Worker(client, nodes=[sink])
+    # The round-trip publishes BEFORE the sink consumer has positioned itself on
+    # the freshly-created partition. Read from the earliest offset so the message
+    # is delivered regardless of consumer-join timing — the aiokafka default
+    # ``auto_offset_reset="latest"`` would race the publish and silently drop it
+    # (this is a test-determinism concern, not a provisioning behavior).
+    worker = Worker(
+        client,
+        nodes=[sink],
+        extra_subscribe_kwargs={"auto_offset_reset": "earliest"},
+    )
 
     async with _running_worker(worker), _admin() as admin:
         # (b.1) topics exist in metadata. The consumer's inbox plus its

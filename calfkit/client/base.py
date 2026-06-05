@@ -311,8 +311,7 @@ class BaseClient:
         )
         if report.unauthorized:
             logger.warning(
-                "topic provisioning: %d unauthorized topic(s) NOT created "
-                "(producers/consumers will stall): %s",
+                "topic provisioning: %d unauthorized topic(s) NOT created (producers/consumers will stall): %s",
                 len(report.unauthorized),
                 ", ".join(report.unauthorized),
             )

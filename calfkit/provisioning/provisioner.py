@@ -287,8 +287,7 @@ class TopicProvisioner:
                 unaccounted = [t for t in pending if t not in accounted]
                 if unaccounted:
                     raise TopicProvisioningError(
-                        "Topic provisioning response omitted requested "
-                        f"topic(s): {', '.join(unaccounted)}.",
+                        f"Topic provisioning response omitted requested topic(s): {', '.join(unaccounted)}.",
                         topic=unaccounted[0],
                         code=None,
                     )
