@@ -16,7 +16,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import pytest
 from faststream.kafka import KafkaBroker
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND
@@ -88,15 +87,22 @@ async def test_prepare_context_stamps_node_resources_onto_ctx() -> None:
     assert ctx.resources["db"] is sentinel
 
 
-async def test_prepared_ctx_resources_is_read_only() -> None:
+async def test_prepared_ctx_resources_is_a_shallow_copy_of_node_bag() -> None:
     node = _ProbeNode(node_id="probe", subscribe_topics=["probe.in"])
-    node.resources["db"] = object()
+    sentinel = object()
+    node.resources["db"] = sentinel
 
     ctx = await node.prepare_context(_envelope_with_frame(), correlation_id="cid")
 
+    # Read-side is typed as a Mapping; values come from the node's bag.
     assert isinstance(ctx.resources, Mapping)
-    with pytest.raises(TypeError):
-        ctx.resources["other"] = object()  # type: ignore[index]
+    assert ctx.resources["db"] is sentinel
+
+    # The handler gets a *shallow copy*: a distinct dict from the node's bag, so
+    # mutating the handler's copy can't corrupt the shared bag.
+    assert ctx.resources is not node.resources
+    ctx.resources["other"] = object()  # type: ignore[index]
+    assert "other" not in node.resources
 
 
 # ---------------------------------------------------------------------------
@@ -174,3 +180,49 @@ async def test_consumer_handler_injects_node_resources_into_result() -> None:
     )
 
     assert seen["db"] is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Shallow-copy isolation: each surface gets a distinct dict from the node bag
+# ---------------------------------------------------------------------------
+
+
+async def test_consumer_result_resources_is_shallow_copy_of_node_bag() -> None:
+    """The consumer's ``result.resources`` is a distinct dict from the node's
+    bag, so a consumer mutating it cannot corrupt the shared resources."""
+    from calfkit.client import NodeResult
+    from calfkit.models import TextPart
+    from calfkit.nodes import ConsumerNodeDef
+
+    seen: dict[str, Any] = {}
+
+    def sink(result: NodeResult[str]) -> None:
+        seen["resources"] = result.resources
+        # Mutating the handler's copy must not reach the node's bag.
+        result.resources["mutated"] = object()  # type: ignore[index]
+
+    node: ConsumerNodeDef[str] = ConsumerNodeDef(
+        node_id="sink_iso",
+        subscribe_topics="sink_iso.in",
+        consume_fn=sink,
+        output_type=str,
+    )
+    node.resources["db"] = object()
+
+    state = State(final_output_parts=[TextPart(text="hi")])
+    envelope = Envelope(
+        context=SessionRunContext(state=state, deps={}),
+        internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+    )
+
+    await node.handler(
+        envelope,
+        correlation_id="cid",
+        headers={HDR_EMITTER: b"agent", HDR_EMITTER_KIND: b"agent"},
+        broker=KafkaBroker(),
+    )
+
+    # The result's resources is a distinct object from the node's shared bag.
+    assert seen["resources"] is not node.resources
+    # The in-handler mutation never reached the node's bag.
+    assert "mutated" not in node.resources

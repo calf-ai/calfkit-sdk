@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from types import MappingProxyType
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -50,10 +49,10 @@ def deserialize_to_node_result(
             ``None`` (default), a new adapter is constructed per call.
             Consumers pre-build at wiring time so schema-generation errors
             surface once at construction rather than per envelope.
-        resources: Read-only view of the consuming node's lifecycle-managed
-            resources, surfaced as ``NodeResult.resources``. Stamped by the
-            consumer handler from the node's resource bag (a
-            :class:`types.MappingProxyType`). Defaults to an empty mapping.
+        resources: The consuming node's lifecycle-managed resources, surfaced as
+            ``NodeResult.resources`` (read-only by type). Stamped by the consumer
+            handler with a shallow copy of the node's resource bag. Defaults to
+            an empty mapping.
 
     Returns:
         A ``NodeResult`` whose ``.output`` is typed according to *output_type*
@@ -82,7 +81,7 @@ def deserialize_to_node_result(
         emitter_node_id=envelope.context.emitter_node_id,
         emitter_node_kind=envelope.context.emitter_node_kind,
         deps=envelope.context.deps,
-        resources=resources if resources is not None else MappingProxyType({}),
+        resources=resources if resources is not None else {},
     )
 
 

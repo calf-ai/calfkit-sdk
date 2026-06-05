@@ -13,67 +13,60 @@ from typing import Any
 import pytest
 
 # ---------------------------------------------------------------------------
-# B1 — direct ``bag[k] = v`` writes must funnel through claim() so the
-# "one owner per key" invariant holds for ALL writers, not just the views.
+# Resources are a per-owner plain ``dict`` (no provenance / claim machinery).
 # ---------------------------------------------------------------------------
 
 
-def test_direct_bag_write_records_provenance_and_collides() -> None:
-    from calfkit.exceptions import LifecycleConfigError
-    from calfkit.worker.lifecycle import _ResourceBag
+def test_owner_resources_default_is_a_plain_dict() -> None:
+    from calfkit.worker.lifecycle import LifecycleHookMixin
 
-    bag = _ResourceBag()
-    bag["db"] = "pool"  # direct write (the path tests/seeds use)
-
-    # A different claimant writing the same key must collide — the direct write
-    # established provenance instead of silently leaving the key unclaimed.
-    with pytest.raises(LifecycleConfigError):
-        bag.claim("db", "other", "@resource('db')")
-
-
-def test_resource_bag_release_pops_value_and_provenance() -> None:
-    from calfkit.worker.lifecycle import _ResourceBag
-
-    bag = _ResourceBag()
-    bag.claim("db", "pool", "@resource('db')")
-    bag.release("db")
-
-    assert "db" not in bag
-    # Provenance was cleared too, so a different owner may now claim the key.
-    bag.claim("db", "other", "a callback")
-    assert bag["db"] == "other"
-
-
-def test_resource_bags_are_per_owner_independent() -> None:
-    from calfkit.worker.lifecycle import _ResourceBag
-
-    a = _ResourceBag()
-    b = _ResourceBag()
-    a.claim("db", "a-pool", "@resource('db')")
-    # Same key on a *different* owner's bag must not collide.
-    b.claim("db", "b-pool", "@resource('db')")
-    assert a["db"] == "a-pool"
-    assert b["db"] == "b-pool"
-
-
-# ---------------------------------------------------------------------------
-# B2 — _resource_cm must close the just-opened resource if claim() collides,
-# instead of leaking it (claim was outside the try).
-# ---------------------------------------------------------------------------
-
-
-async def test_resource_cm_closes_resource_when_claim_collides() -> None:
-    from calfkit.exceptions import LifecycleConfigError
-    from calfkit.worker.lifecycle import _resource_cm, _ResourceBag
-
-    class _Owner:
-        def __init__(self) -> None:
-            self.resources = _ResourceBag()
+    class _Owner(LifecycleHookMixin):
+        pass
 
     owner = _Owner()
-    # Pre-claim the key under a different owner so the @resource claim collides.
-    owner.resources.claim("db", "callback-pool", "a callback")
+    assert isinstance(owner.resources, dict)
+    assert owner.resources == {}
 
+
+def test_resource_dicts_are_per_owner_independent() -> None:
+    from calfkit.worker.lifecycle import LifecycleHookMixin
+
+    class _Owner(LifecycleHookMixin):
+        pass
+
+    a = _Owner()
+    b = _Owner()
+    a.resources["db"] = "a-pool"
+    # Same key on a *different* owner's bag is independent.
+    b.resources["db"] = "b-pool"
+    assert a.resources["db"] == "a-pool"
+    assert b.resources["db"] == "b-pool"
+
+
+# ---------------------------------------------------------------------------
+# B2 — _resource_cm closes the just-opened resource if setup of a later step
+# fails, instead of leaking it.
+# ---------------------------------------------------------------------------
+
+
+async def test_resource_cm_pops_key_and_closes_on_exit() -> None:
+    from collections.abc import Callable
+
+    from calfkit.worker.lifecycle import _resource_cm
+
+    class _Owner:
+        """Minimal owner double satisfying ``SupportsLifecycleHooks``."""
+
+        def __init__(self) -> None:
+            self.resources: dict[str, Any] = {}
+
+        def _hooks_for(self, phase: str) -> list[Callable[..., Any]]:
+            return []
+
+        def _resource_cms(self) -> list[tuple[str, Callable[..., Any]]]:
+            return []
+
+    owner = _Owner()
     closed = []
 
     async def genfn(_ctx: Any) -> Any:
@@ -82,12 +75,11 @@ async def test_resource_cm_closes_resource_when_claim_collides() -> None:
         finally:
             closed.append("closed")
 
-    cm = _resource_cm(owner, "db", genfn, setup_ctx=None)
-    with pytest.raises(LifecycleConfigError):
-        await cm.__aenter__()
+    async with _resource_cm(owner, "db", genfn, setup_ctx=None):
+        assert owner.resources["db"] == "resource-pool"
 
-    # The generator was entered (resource opened); on the collision its finally
-    # must have run so the resource is not leaked.
+    # On exit the key is popped and the user generator's finally ran.
+    assert "db" not in owner.resources
     assert closed == ["closed"]
 
 
@@ -114,43 +106,51 @@ async def test_safe_teardown_propagates_cancelled_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B4 — the read-only resources guarantee must hold on the no-resources
-# (default) path for every injected surface, not only SessionRunContext.
+# B4 — the resources read-side is a Mapping on the no-resources (default) path
+# for every injected surface. Read-only is now TYPE-LEVEL only (mypy), not a
+# runtime guarantee.
 # ---------------------------------------------------------------------------
 
 
-def test_tool_context_default_resources_is_read_only() -> None:
+def test_tool_context_default_resources_is_a_mapping() -> None:
+    from collections.abc import Mapping
+
     from calfkit.models.tool_context import ToolContext
 
     ctx = ToolContext(deps={}, run_id="cid")
-    with pytest.raises(TypeError):
-        ctx.resources["db"] = object()  # type: ignore[index]
+    assert isinstance(ctx.resources, Mapping)
+    assert dict(ctx.resources) == {}
 
 
-def test_node_result_default_resources_is_read_only() -> None:
+def test_node_result_default_resources_is_a_mapping() -> None:
+    from collections.abc import Mapping
+
     from calfkit.client.node_result import NodeResult
     from calfkit.models.state import State
 
     result = NodeResult(output=None, state=State(), correlation_id="cid")
-    with pytest.raises(TypeError):
-        result.resources["db"] = object()  # type: ignore[index]
+    assert isinstance(result.resources, Mapping)
+    assert dict(result.resources) == {}
 
 
 # ---------------------------------------------------------------------------
-# B6 — SessionRunContext.resources is read-only via the property (not only
-# when stamped with a proxy), and the private attr stays deep-copy-safe.
+# B6 — SessionRunContext.resources reads through the stamped private attr, and
+# the private attr stays deep-copy-safe (a plain dict, not a proxy).
 # ---------------------------------------------------------------------------
 
 
-def test_session_context_resources_property_is_read_only_when_set() -> None:
+def test_session_context_resources_property_reads_stamped_value() -> None:
+    from collections.abc import Mapping
+
     from calfkit.models.session_context import SessionRunContext
     from calfkit.models.state import State
 
     ctx = SessionRunContext(state=State(), deps={})
-    # Stamp with a plain dict (what the fixed prepare_context stores).
-    ctx._resources = {"db": object()}
-    with pytest.raises(TypeError):
-        ctx.resources["db"] = object()  # type: ignore[index]
+    sentinel = object()
+    # Stamp with a plain dict (what prepare_context stores: dict(self.resources)).
+    ctx._resources = {"db": sentinel}
+    assert isinstance(ctx.resources, Mapping)
+    assert ctx.resources["db"] is sentinel
 
 
 def test_stamped_session_context_is_deep_copyable() -> None:

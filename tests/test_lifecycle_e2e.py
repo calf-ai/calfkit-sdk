@@ -7,13 +7,15 @@ resources down on stop. They verify the convergence properties the plan §5
 calls out:
 
 * a ``@resource`` (and a callback-shape resource) opened at boot reaches a live
-  handler as ``ctx.resources[...]`` and is closed (key + provenance popped) on
+  handler as ``ctx.resources[...]`` and is closed (key popped from the bag) on
   stop;
 * ``resources`` reach all four read surfaces (Agent ``run`` / custom
   ``BaseNodeDef`` ``ctx.resources``, ``agent_tool`` ``ctx.resources``, and the
   consumer ``result.resources``);
-* same-key collisions in both directions raise ``LifecycleConfigError`` at boot
-  while different keys coexist;
+* when an owner mixes ``@resource`` and resource-phase callbacks on the same
+  key, the ``@resource`` brackets win (callbacks ignored, warning logged), and a
+  duplicate ``@resource`` name on one owner raises ``LifecycleConfigError`` at
+  registration, while different keys coexist;
 * the presence idiom publishes "up"/"down" keyed on ``worker.id``;
 * an ``after_startup`` failure stops the broker, and a double ``start()`` raises.
 
@@ -104,7 +106,7 @@ class _ProbeNode(BaseNodeDef):
 
 
 # ---------------------------------------------------------------------------
-# @resource opens -> reaches a handler -> closed on stop (key + _claims gone)
+# @resource opens -> reaches a handler -> closed on stop (key popped from bag)
 # ---------------------------------------------------------------------------
 
 
@@ -134,10 +136,9 @@ async def test_resource_opens_reaches_handler_then_closes_on_stop() -> None:
 
     # The handler saw the resource via ctx.resources["db"].
     assert captured["resources"] == {"db": "POOL"}
-    # Closed on stop, and both the key and its provenance entry are gone.
+    # Closed on stop, and the key is gone from the node's bag.
     assert closed == ["db"]
     assert "db" not in node.resources
-    assert "db" not in node.resources._claims
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +172,11 @@ async def test_callback_resource_reaches_handler_then_closes_on_stop() -> None:
 
     # Same handler-reaching shape as @resource.
     assert captured["resources"] == {"db": "CB-POOL"}
-    # after_shutdown saw the resource before teardown; the key persists across
-    # the callback (a callback-shape resource owns its own cleanup) but the
-    # provenance claim was made by the callback.
+    # after_shutdown saw the resource before teardown; a callback-shape resource
+    # owns its own cleanup, so the key persists in the node's bag (the callback
+    # span never pops it).
     assert closed == ["CB-POOL"]
-    assert node.resources._claims.get("db") == "an on_startup/after_shutdown callback"
+    assert node.resources["db"] == "CB-POOL"
 
 
 # ---------------------------------------------------------------------------
@@ -288,13 +289,23 @@ async def test_resources_reach_agent_run_and_agent_tool() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Same-key collision BOTH directions raises; different keys coexist
+# One pattern per owner: @resource wins over resource-phase callbacks (with a
+# warning); duplicate @resource name raises; different keys coexist
 # ---------------------------------------------------------------------------
 
 
-async def test_collision_resource_then_callback_raises_at_boot() -> None:
+async def test_resource_wins_over_callback_same_key_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When an owner declares both ``@resource('db')`` and an ``on_startup``
+    callback writing ``'db'``, the ``@resource`` bracket wins: the worker boots,
+    the handler sees the ``@resource`` value (the callback is ignored), and a
+    warning is logged (mirrors FastAPI lifespan-vs-on_event)."""
+    import logging
+
+    captured: dict[str, Any] = {}
     worker = _make_worker()
-    node = _ProbeNode({}, node_id="collide_a", subscribe_topics=["collide_a.in"])
+    node = _ProbeNode(captured, node_id="collide_a", subscribe_topics=["collide_a.in"])
 
     @node.resource("db")
     async def db(ctx: Any) -> Any:
@@ -302,25 +313,37 @@ async def test_collision_resource_then_callback_raises_at_boot() -> None:
 
     @node.on_startup
     async def also_db(ctx: Any) -> None:
-        ctx.resources["db"] = "from-callback"
+        ctx.resources["db"] = "from-callback"  # ignored: @resource wins
 
     worker.add_nodes(node)
     broker = worker._client.broker
 
-    async with TestKafkaBroker(broker):
-        with pytest.raises(LifecycleConfigError, match="one owner per key"):
+    with caplog.at_level(logging.WARNING):
+        async with TestKafkaBroker(broker):
             await worker.start()
+            assert node.resources["db"] == "from-resource"
+            await _publish(broker, _frame_envelope("collide_a.in"), "collide_a.in", "cid-collide-a")
+            await worker.stop()
+
+    # Handler saw the @resource value; the callback never wrote into the bag.
+    assert captured["resources"] == {"db": "from-resource"}
+    assert any("callbacks are ignored" in r.message for r in caplog.records)
 
 
-async def test_collision_callback_then_resource_raises_at_boot() -> None:
-    """Opposite registration order — collision must still raise (the bag's
-    ``claim`` is order-independent)."""
+async def test_resource_wins_regardless_of_registration_order_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Opposite registration order (callback first, then ``@resource``) — the
+    ``@resource`` bracket still wins and a warning is still logged."""
+    import logging
+
+    captured: dict[str, Any] = {}
     worker = _make_worker()
-    node = _ProbeNode({}, node_id="collide_b", subscribe_topics=["collide_b.in"])
+    node = _ProbeNode(captured, node_id="collide_b", subscribe_topics=["collide_b.in"])
 
     @node.on_startup
     async def first_db(ctx: Any) -> None:
-        ctx.resources["db"] = "from-callback"
+        ctx.resources["db"] = "from-callback"  # ignored: @resource wins
 
     @node.resource("db")
     async def db(ctx: Any) -> Any:
@@ -329,33 +352,74 @@ async def test_collision_callback_then_resource_raises_at_boot() -> None:
     worker.add_nodes(node)
     broker = worker._client.broker
 
-    async with TestKafkaBroker(broker):
-        with pytest.raises(LifecycleConfigError, match="one owner per key"):
+    with caplog.at_level(logging.WARNING):
+        async with TestKafkaBroker(broker):
             await worker.start()
+            assert node.resources["db"] == "from-resource"
+            await _publish(broker, _frame_envelope("collide_b.in"), "collide_b.in", "cid-collide-b")
+            await worker.stop()
+
+    assert captured["resources"] == {"db": "from-resource"}
+    assert any("callbacks are ignored" in r.message for r in caplog.records)
 
 
-async def test_different_keys_coexist_resource_and_callback() -> None:
+def test_duplicate_resource_name_on_one_owner_raises() -> None:
+    """A duplicate ``@resource`` NAME on a single owner still raises
+    ``LifecycleConfigError`` at registration time."""
+    node = _ProbeNode({}, node_id="dup", subscribe_topics=["dup.in"])
+
+    @node.resource("db")
+    async def db1(ctx: Any) -> Any:
+        yield "a"
+
+    with pytest.raises(LifecycleConfigError):
+
+        @node.resource("db")
+        async def db2(ctx: Any) -> Any:
+            yield "b"
+
+
+async def test_different_keys_coexist_resource_and_callback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ``@resource`` and callback patterns coexist when each owns its own
+    bag (one pattern *per owner*): a ``@resource`` node and a callback-shape
+    worker both run, with no "callbacks ignored" warning.
+
+    The node's handler sees only its own bag (the ``@resource`` value); the
+    worker's callback-managed key lives in the worker's bag.
+    """
+    import logging
+
     captured: dict[str, Any] = {}
     worker = _make_worker()
     node = _ProbeNode(captured, node_id="coexist", subscribe_topics=["coexist.in"])
 
+    # @resource pattern on the node.
     @node.resource("res_key")
     async def res_key(ctx: Any) -> Any:
         yield "res-value"
 
-    @node.on_startup
+    # Callback pattern on the worker (a different owner — no mixing, no warning).
+    @worker.on_startup
     async def cb_key(ctx: Any) -> None:
         ctx.resources["cb_key"] = "cb-value"
 
     worker.add_nodes(node)
     broker = worker._client.broker
 
-    async with TestKafkaBroker(broker):
-        await worker.start()
-        await _publish(broker, _frame_envelope("coexist.in"), "coexist.in", "cid-coexist")
-        await worker.stop()
+    with caplog.at_level(logging.WARNING):
+        async with TestKafkaBroker(broker):
+            await worker.start()
+            assert node.resources["res_key"] == "res-value"
+            assert worker.resources["cb_key"] == "cb-value"
+            await _publish(broker, _frame_envelope("coexist.in"), "coexist.in", "cid-coexist")
+            await worker.stop()
 
-    assert captured["resources"] == {"res_key": "res-value", "cb_key": "cb-value"}
+    # Both patterns ran; the handler saw the node's @resource value.
+    assert captured["resources"] == {"res_key": "res-value"}
+    # No mixing on a single owner, so no "callbacks ignored" warning fired.
+    assert not any("callbacks are ignored" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

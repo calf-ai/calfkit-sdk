@@ -149,22 +149,24 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
 
     @property
     def resources(self) -> Mapping[str, Any]:
-        """Read-only view of the owner's lifecycle-managed resources.
+        """The owner's lifecycle-managed resources (read-only by type).
 
-        Populated server-side by ``BaseNodeDef.prepare_context`` from the node's
-        resource bag. Read as ``ctx.resources["key"]``. Returns an empty
-        read-only mapping when unset (e.g. a context built outside a handler),
-        so reads never raise and writes always raise ``TypeError``.
+        Populated server-side by ``BaseNodeDef.prepare_context`` with a *shallow
+        copy* of the node's resource bag, so mutating it can't corrupt the shared
+        bag or other handlers. Typed ``Mapping`` so ``ctx.resources["k"] = ...``
+        is a type error at dev time (mirrors how ``deps`` is treated read-only).
+        Returns an empty mapping when unset (e.g. a context built outside a
+        handler), so reads never raise.
 
         Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be
         spoofed via the model constructor, and stamped *after* the
         ``model_copy(deep=True)`` in ``prepare_context`` (the bag is empty at
-        copy time). The stored mapping is plain (deep-copy-safe); the read-only
-        proxy is built here on read.
+        copy time, so the deep copy never duplicates live resources). Do not
+        deep-copy a *stamped* context — it references live resource objects.
         """
         if self._resources is None:
             return _EMPTY_RESOURCES
-        return MappingProxyType(self._resources)
+        return self._resources
 
     def _stamp_transport(self, *, correlation_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None) -> None:
         """Stamp transport-sourced identity onto this context.

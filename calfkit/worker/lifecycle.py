@@ -2,24 +2,30 @@
 
 Pure, Kafka-free building blocks for the lifecycle-hooks feature:
 
-- the resource bag with provenance (:class:`_ResourceBag`) and the views
-  that funnel writes through it,
-- the per-phase context dataclasses,
-- the async context-manager builders that run hooks and resource brackets,
+- the per-phase context dataclasses (resources writable in the resource phase,
+  read-only-typed elsewhere),
+- the async context-manager builders that run hooks and ``@resource`` brackets,
 - the :class:`LifecycleHookMixin` that gives owners (nodes/workers) their
-  decorator surface and hook storage.
+  decorator surface and a plain-``dict`` resource bag.
 
-See ``docs/research/node-worker-lifecycle-hooks-plan-v7.md`` for the design.
+Resources are stored in a plain ``dict`` per owner. A node's per-message handler
+receives a *shallow copy* of that bag (see ``BaseNodeDef.prepare_context``), so a
+handler can never corrupt the shared resources, and the read-side is typed
+read-only (``Mapping``) so writes are a type error at dev time.
+
+An owner uses **one** resource pattern: either ``@resource`` brackets *or*
+``on_startup``/``after_shutdown`` callbacks. If both are present the worker logs
+a warning and the ``@resource`` brackets win (mirrors FastAPI's lifespan-vs-
+on_event rule); see :meth:`Worker._owner_cms`.
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any, Generic, Protocol, runtime_checkable
 
 from faststream.kafka import KafkaBroker
@@ -31,83 +37,6 @@ logger = logging.getLogger(__name__)
 
 OwnerT = TypeVar("OwnerT", default=Any)
 ItemT = TypeVar("ItemT")
-
-
-def _collision_msg(key: str, prior: str, now: str) -> str:
-    """Build the message raised when two writers claim the same resource key."""
-    return f"resource {key!r} is owned by {prior}; {now} may not also write it. Use one owner per key."
-
-
-class _ResourceBag(dict):  # type: ignore[type-arg]
-    """A ``dict`` of resources plus a provenance map.
-
-    Every writer claims a key: callbacks via :class:`_ClaimingView`, the
-    ``@resource`` engine directly, and even a *direct* ``bag[key] = value``
-    (which funnels through :meth:`claim` so the invariant cannot be bypassed).
-    A *different* claimant writing an already-claimed key raises
-    :class:`LifecycleConfigError`; the *same* claimant may re-set the value.
-    The rule is order-independent. Provenance is per bag, so the same key on
-    two different owners' bags never collides.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._claims: dict[str, str] = {}
-
-    def claim(self, key: str, value: Any, claimant: str) -> None:
-        prior = self._claims.get(key)
-        if prior is not None and prior != claimant:
-            raise LifecycleConfigError(_collision_msg(key, prior, claimant))
-        self._claims[key] = claimant
-        dict.__setitem__(self, key, value)  # bypass our __setitem__ to avoid recursion
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        # Direct ``bag[key] = value`` writes funnel through claim() so the
-        # "one owner per key" invariant covers them too, not just the views.
-        self.claim(key, value, "a direct resources[...] = ... write")
-
-    def release(self, key: str) -> None:
-        """Drop a key's value and its provenance together (used on teardown)."""
-        dict.pop(self, key, None)
-        self._claims.pop(key, None)
-
-
-class _ClaimingView(MutableMapping[str, Any]):
-    """A writable ``Mapping`` view over a :class:`_ResourceBag` for one claimant.
-
-    Writes funnel through ``bag.claim`` so collisions are detected regardless
-    of which surface wrote first. Reads and deletes delegate to the bag.
-    """
-
-    def __init__(self, bag: _ResourceBag, claimant: str) -> None:
-        self._bag = bag
-        self._claimant = claimant
-
-    def __getitem__(self, key: str) -> Any:
-        return self._bag[key]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        self._bag.claim(key, value, self._claimant)
-
-    def __delitem__(self, key: str) -> None:
-        self._bag.release(key)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._bag)
-
-    def __len__(self) -> int:
-        return len(self._bag)
-
-
-def _read_only_resources(bag: _ResourceBag) -> Mapping[str, Any]:
-    """Build the read-only resources view for readers (serving hooks, ``@resource``
-    bodies, handlers).
-
-    Uses :class:`types.MappingProxyType` — the repo idiom — so a write raises
-    ``TypeError`` at runtime while the static type is a plain ``Mapping``. The
-    proxy is a live view: later ``claim``s on the bag are visible through it.
-    """
-    return MappingProxyType(bag)
 
 
 class _OwnerAliases(Generic[OwnerT]):
@@ -131,7 +60,11 @@ class _OwnerAliases(Generic[OwnerT]):
 
 @dataclass
 class LifecycleContext(_OwnerAliases[OwnerT]):
-    """Context for ``on_startup`` / ``after_shutdown`` — resources are WRITABLE."""
+    """Context for ``on_startup`` / ``after_shutdown`` — resources are WRITABLE.
+
+    This is the callback shape of resource management: a hook writes
+    ``ctx.resources["key"] = value`` into the owner's shared bag.
+    """
 
     owner: OwnerT
     resources: MutableMapping[str, Any]
@@ -139,7 +72,7 @@ class LifecycleContext(_OwnerAliases[OwnerT]):
 
 @dataclass
 class ResourceSetupContext(_OwnerAliases[OwnerT]):
-    """Context for a ``@resource`` body — resources are READ-ONLY."""
+    """Context for a ``@resource`` body — resources are read-only-typed."""
 
     owner: OwnerT
     resources: Mapping[str, Any]
@@ -147,7 +80,7 @@ class ResourceSetupContext(_OwnerAliases[OwnerT]):
 
 @dataclass
 class ServingContext(_OwnerAliases[OwnerT]):
-    """Context for ``after_startup`` / ``on_shutdown`` — READ-ONLY resources + broker."""
+    """Context for ``after_startup`` / ``on_shutdown`` — read-only resources + broker."""
 
     owner: OwnerT
     resources: Mapping[str, Any]
@@ -197,8 +130,8 @@ async def _safe_teardown(
 
 
 # A lifecycle hook receives a context and returns ``None`` (sync) or an
-# awaitable (async). ``Any`` for the context keeps the four phase-specific
-# context types assignable without per-phase overloads.
+# awaitable (async). ``Any`` for the context keeps the phase-specific context
+# types assignable without per-phase overloads.
 LifecycleHook = Callable[[Any], Awaitable[Any] | None]
 
 
@@ -210,7 +143,7 @@ class SupportsLifecycleHooks(Protocol):
     :class:`LifecycleHookMixin`.
     """
 
-    resources: Any
+    resources: dict[str, Any]
 
     def _hooks_for(self, phase: str) -> list[LifecycleHook]: ...
 
@@ -249,34 +182,24 @@ def _resource_cm(
 ) -> AbstractAsyncContextManager[None]:
     """Async CM that brackets a single ``@resource`` for the owner's lifetime.
 
-    Enters the user generator-CM (setup errors propagate so boot fails), claims
-    the yielded value into the bag under ``@resource`` provenance, then on exit
-    pops the key + its provenance entry and closes the user CM with
-    ``(None, None, None)``. Teardown is guarded log-not-raise.
+    Enters the user generator-CM (setup errors propagate so boot fails), stores
+    the yielded value in the owner's bag under ``name``, then on exit removes the
+    key and closes the user CM with ``(None, None, None)`` (guarded log-not-raise).
 
-    The user CM is always torn down via ``aclose``-style ``__aexit__(None, ...)``
-    because ``@resource`` is a worker-lifetime bracket, not a per-request
-    transaction — don't rely on exception-into-generator forwarding.
+    The user CM is always torn down via ``(None, None, None)`` because
+    ``@resource`` is a worker-lifetime bracket, not a per-request transaction —
+    don't rely on exception-into-generator forwarding.
     """
 
     @asynccontextmanager
     async def _cm() -> AsyncIterator[None]:
         cm = asynccontextmanager(genfn)(setup_ctx)
         value = await cm.__aenter__()
-        try:
-            owner.resources.claim(name, value, f"@resource({name!r})")
-        except BaseException:
-            # Claim collided (or was cancelled) AFTER the resource opened — close
-            # it so a misconfiguration doesn't leak the just-opened resource.
-            try:
-                await cm.__aexit__(None, None, None)
-            except Exception:
-                logger.exception("@resource %r close after failed claim", name)
-            raise
+        owner.resources[name] = value
         try:
             yield
         finally:
-            owner.resources.release(name)
+            owner.resources.pop(name, None)
             try:
                 await cm.__aexit__(None, None, None)
             except Exception:
@@ -294,17 +217,24 @@ class LifecycleHookMixin:
 
     Storage is created lazily on first access so the mixin is ``__init__``-free:
     dataclass node subclasses bypass cooperative ``__init__`` chains, so we must
-    not rely on an initializer to set up the hook registries.
+    not rely on an initializer to set up the registries.
 
-    Hooks are stored per phase; ``@resource`` brackets are stored as
-    ``(name, genfn)`` pairs with duplicate names rejected at registration.
+    Resources are a plain ``dict`` (the shared bag); hooks are stored per phase;
+    ``@resource`` brackets are stored as ``(name, genfn)`` pairs with duplicate
+    names rejected at registration.
     """
 
     @property
-    def resources(self) -> _ResourceBag:
+    def resources(self) -> dict[str, Any]:
+        """The owner's shared resource bag (a plain ``dict``).
+
+        Written by the engine (``@resource``) or by ``on_startup``/
+        ``after_shutdown`` callbacks. Per-message handlers receive a shallow copy
+        of this dict (typed read-only), so handler code cannot corrupt it.
+        """
         bag = self.__dict__.get("_lifecycle_resources")
         if bag is None:
-            bag = _ResourceBag()
+            bag = {}
             self.__dict__["_lifecycle_resources"] = bag
         return bag
 
@@ -364,10 +294,14 @@ class LifecycleHookMixin:
         """Register a ``@resource`` bracket under ``name``.
 
         The decorated function is a single-yield async generator that receives
-        a read-only :class:`ResourceSetupContext`. Its teardown always runs with
+        a :class:`ResourceSetupContext`. Its teardown always runs with
         ``(None, None, None)`` — ``@resource`` is a worker-lifetime bracket, not
         a per-request transaction, so don't rely on exception-into-generator
         forwarding.
+
+        Use one resource pattern per owner: combining ``@resource`` with
+        ``on_startup``/``after_shutdown`` callbacks makes the callbacks ignored
+        (with a warning), mirroring FastAPI's lifespan-vs-on_event rule.
 
         Raises:
             LifecycleConfigError: if ``name`` is already registered on this owner.

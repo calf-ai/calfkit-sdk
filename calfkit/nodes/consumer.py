@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
-from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Generic
 
 from faststream import Context, Response
@@ -214,7 +213,7 @@ class ConsumerNodeDef(Generic[OutputT], BaseNodeDef):
                 correlation_id=correlation_id,
                 strict=False,
                 type_adapter=self._type_adapter,
-                resources=MappingProxyType(self.resources),
+                resources=dict(self.resources),
             )
         except (DeserializationError, ValidationError):
             logger.exception(

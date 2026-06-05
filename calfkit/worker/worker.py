@@ -12,9 +12,15 @@ from calfkit.mcp._bridge import McpBridge
 from calfkit.mcp._dedup import IdempotencyCache
 from calfkit.mcp._server import McpServer
 from calfkit.nodes import BaseNodeDef
-from calfkit.worker.lifecycle import PHASE_PAIRS, LifecycleContext, LifecycleHookMixin, ResourceSetupContext, ServingContext, _resource_cm, _span_cm
-from calfkit.worker.lifecycle import _ClaimingView as ClaimingView
-from calfkit.worker.lifecycle import _read_only_resources as read_only_resources
+from calfkit.worker.lifecycle import (
+    PHASE_PAIRS,
+    LifecycleContext,
+    LifecycleHookMixin,
+    ResourceSetupContext,
+    ServingContext,
+    _resource_cm,
+    _span_cm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -245,34 +251,43 @@ class Worker(LifecycleHookMixin):
         return [self, *self._nodes]
 
     def _make_ctx(self, owner: Any, pair: str) -> Any:
-        """Build the per-phase context for ``owner`` (plan §3.3).
+        """Build the callback-span context for ``owner`` (plan §3.3).
 
-        ``serving`` phases get a read-only resources view plus the broker;
-        ``resource`` phases get a writable ``_ClaimingView`` so callbacks can
-        own keys (collisions funnel through the bag's ``claim``).
+        ``serving`` phases get a read-only-typed resources view plus the broker;
+        ``resource`` phases get a writable view so ``on_startup``/
+        ``after_shutdown`` callbacks can set ``ctx.resources["key"]``. Both share
+        the owner's plain-dict bag; the read-only-ness is type-level.
         """
         (_enter, _exit), has_res = PHASE_PAIRS[pair]
         if not has_res:
-            return ServingContext(owner, read_only_resources(owner.resources), self._client.broker)
-        return LifecycleContext(owner, ClaimingView(owner.resources, "an on_startup/after_shutdown callback"))
+            return ServingContext(owner, owner.resources, self._client.broker)
+        return LifecycleContext(owner, owner.resources)
 
     def _owner_cms(self, owner: Any, pair: str) -> list[Any]:
         """Build the async CMs for ``owner`` in ``pair`` (plan §3.3).
 
-        ``resource`` phases include one ``@resource`` bracket per declared
-        resource (read-only setup ctx, built once per owner) followed by the
-        callback span; ``serving`` phases include only the callback span. The
-        span is omitted entirely when the owner has no hooks for either phase.
+        One resource pattern per owner: if the owner declares ``@resource``
+        brackets, those win and any ``on_startup``/``after_shutdown`` callbacks
+        are ignored with a warning (mirrors FastAPI's lifespan-vs-on_event rule).
+        Otherwise the callback span runs. ``serving`` phases only ever have the
+        callback span. Returns ``[]`` when the owner has nothing for this pair.
         """
         (enter, exit_), has_res = PHASE_PAIRS[pair]
-        ctx = self._make_ctx(owner, pair)
-        cms: list[Any] = []
-        if has_res:
-            setup_ctx = ResourceSetupContext(owner, read_only_resources(owner.resources))
-            cms = [_resource_cm(owner, name, genfn, setup_ctx) for name, genfn in owner._resource_cms()]
-        if owner._hooks_for(enter) or owner._hooks_for(exit_):
-            cms.append(_span_cm(owner, enter, exit_, ctx))
-        return cms
+        has_callbacks = bool(owner._hooks_for(enter) or owner._hooks_for(exit_))
+        if has_res and owner._resource_cms():
+            if has_callbacks:
+                logger.warning(
+                    "%r registers @resource(...) and %s/%s callbacks; the callbacks are ignored. "
+                    "Use one resource pattern per owner (like FastAPI's lifespan vs on_event).",
+                    owner,
+                    enter,
+                    exit_,
+                )
+            setup_ctx = ResourceSetupContext(owner, owner.resources)
+            return [_resource_cm(owner, name, genfn, setup_ctx) for name, genfn in owner._resource_cms()]
+        if has_callbacks:
+            return [_span_cm(owner, enter, exit_, self._make_ctx(owner, pair))]
+        return []
 
     async def _enter_into(self, stack: AsyncExitStack, pair: str) -> None:
         """Enter every owner's CMs for ``pair`` into ``stack``, worker first."""

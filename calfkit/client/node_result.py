@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any, Generic
 
 from calfkit._types import OutputT
@@ -98,16 +97,14 @@ class NodeResult(Generic[OutputT]):
     the envelope (no defensive copy), so treat it as read-only at runtime too
     (see the read-only note above)."""
 
-    resources: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
-    """Read-only view of the consuming node's lifecycle-managed resources.
+    resources: Mapping[str, Any] = field(default_factory=dict)
+    """The consuming node's lifecycle-managed resources (read-only by type).
 
-    Stamped by the consumer handler from the node's resource bag (a
-    :class:`types.MappingProxyType`). Read it as ``result.resources["key"]``,
-    mirroring how tools read ``ctx.resources["key"]``. The default is an empty
-    read-only mapping when the node owns no resources.
-
-    Typed as a read-only ``Mapping`` so accidental ``result.resources[...] = ...``
-    is a type error (and a write raises at runtime even on the default)."""
+    Stamped by the consumer handler with a *shallow copy* of the node's resource
+    bag. Read it as ``result.resources["key"]``, mirroring how tools read
+    ``ctx.resources["key"]``. Typed as a read-only ``Mapping`` so
+    ``result.resources[...] = ...`` is a type error at dev time (like ``deps``).
+    Empty when the node owns no resources."""
 
     # NodeResult holds a mutable Pydantic model (state); the dataclass-
     # synthesized __hash__ would recursively try to hash unhashable fields and

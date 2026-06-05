@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def test_session_context_resources_defaults_to_empty_read_only_mapping() -> None:
+def test_session_context_resources_defaults_to_empty_mapping() -> None:
     from collections.abc import Mapping
 
     from calfkit.models.session_context import SessionRunContext
@@ -25,8 +25,6 @@ def test_session_context_resources_defaults_to_empty_read_only_mapping() -> None
 
 
 def test_session_context_resources_never_serialize_and_survive_deep_copy() -> None:
-    from types import MappingProxyType
-
     from calfkit.models.session_context import SessionRunContext
     from calfkit.models.state import State
 
@@ -39,13 +37,15 @@ def test_session_context_resources_never_serialize_and_survive_deep_copy() -> No
     assert "_resources" not in ctx.model_dump_json()
 
     # model_copy(deep=True) (used by prepare_context) given an empty bag at copy
-    # time: the copy still has an empty read-only resources view.
+    # time: the copy still has an empty resources view.
     stamped = ctx.model_copy(deep=True)
     assert dict(stamped.resources) == {}
 
-    # The server stamps a live read-only view after the copy; reads see it.
-    stamped._resources = MappingProxyType({"db": object()})
+    # The server stamps a shallow-copy dict after the copy; reads see it.
+    sentinel = object()
+    stamped._resources = {"db": sentinel}
     assert set(stamped.resources) == {"db"}
+    assert stamped.resources["db"] is sentinel
 
 
 def test_tool_context_resources_defaults_empty_and_accepts_kw_only() -> None:

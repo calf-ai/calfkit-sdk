@@ -40,11 +40,9 @@ class _FakeOwner:
         hooks: dict[str, list[Callable[..., Any]]] | None = None,
         resource_cms: list[tuple[str, Callable[..., Any]]] | None = None,
     ) -> None:
-        from calfkit.worker.lifecycle import _ResourceBag
-
         self._hooks = hooks or {}
         self._cms = resource_cms or []
-        self.resources = _ResourceBag()
+        self.resources: dict[str, Any] = {}
 
     def _hooks_for(self, phase: str) -> list[Callable[..., Any]]:
         return self._hooks.get(phase, [])
@@ -128,15 +126,16 @@ def test_make_ctx_serving_returns_serving_context_with_broker() -> None:
 
     worker = _make_worker()
     owner = _FakeOwner()
+    owner.resources["db"] = "pool"
 
     ctx = worker._make_ctx(owner, "serving")
 
     assert isinstance(ctx, ServingContext)
     assert ctx.owner is owner
     assert ctx.broker is worker._client.broker
-    # Serving resources are read-only.
-    with pytest.raises(TypeError):
-        ctx.resources["db"] = "x"  # type: ignore[index]
+    # Serving resources share the owner's plain-dict bag (read-only by type only).
+    assert ctx.resources is owner.resources
+    assert ctx.resources["db"] == "pool"
 
 
 def test_make_ctx_resource_returns_writable_lifecycle_context() -> None:
@@ -149,10 +148,10 @@ def test_make_ctx_resource_returns_writable_lifecycle_context() -> None:
 
     assert isinstance(ctx, LifecycleContext)
     assert ctx.owner is owner
-    # Writes funnel through the bag's claim mechanism.
+    # The context wraps the owner's plain-dict bag; writes land in it directly.
+    assert ctx.resources is owner.resources
     ctx.resources["db"] = "pool"
     assert owner.resources["db"] == "pool"
-    assert owner.resources._claims["db"] == "an on_startup/after_shutdown callback"
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +159,12 @@ def test_make_ctx_resource_returns_writable_lifecycle_context() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_owner_cms_resource_includes_resource_bracket_and_span() -> None:
+async def test_owner_cms_resource_brackets_win_over_callbacks_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One pattern per owner: when both ``@resource`` and resource-phase
+    callbacks are present, the ``@resource`` brackets win, the callbacks are
+    ignored, and a warning is logged (mirrors FastAPI lifespan-vs-on_event)."""
     worker = _make_worker()
 
     events: list[str] = []
@@ -183,8 +187,12 @@ async def test_owner_cms_resource_includes_resource_bracket_and_span() -> None:
         resource_cms=[("db", genfn)],
     )
 
-    cms = worker._owner_cms(owner, "resource")
-    assert len(cms) == 2  # one @resource bracket + one callback span
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        cms = worker._owner_cms(owner, "resource")
+    assert len(cms) == 1  # only the @resource bracket; the callback span is dropped
+    assert any("callbacks are ignored" in r.message for r in caplog.records)
 
     from contextlib import AsyncExitStack
 
@@ -193,7 +201,8 @@ async def test_owner_cms_resource_includes_resource_bracket_and_span() -> None:
             await stack.enter_async_context(cm)
         assert owner.resources["db"] == "pool"
 
-    assert events == ["res-enter", "cb-enter", "cb-exit", "res-exit"]
+    # The callbacks never ran; only the @resource bracket entered/exited.
+    assert events == ["res-enter", "res-exit"]
 
 
 def test_owner_cms_resource_omits_span_when_no_hooks() -> None:
@@ -356,6 +365,13 @@ async def test_on_startup_failure_rolls_back_resource_stack_and_mcp() -> None:
 
 
 async def test_full_lifecycle_runs_all_phases_in_order() -> None:
+    """Resource-pattern owner: ``@resource`` bracket + serving callbacks.
+
+    Per the "one pattern per owner" rule, resource-phase callbacks
+    (``on_startup``/``after_shutdown``) are *not* mixed with ``@resource`` here —
+    that combination is covered separately. The serving callbacks
+    (``after_startup``/``on_shutdown``) run independently around the broker.
+    """
     from faststream.kafka import TestKafkaBroker
 
     worker = _make_worker()
@@ -369,9 +385,44 @@ async def test_full_lifecycle_runs_all_phases_in_order() -> None:
         finally:
             events.append("resource-exit")
 
+    @worker.after_startup
+    async def after_startup(ctx: Any) -> None:
+        events.append("after_startup")
+
+    @worker.on_shutdown
+    async def on_shutdown(ctx: Any) -> None:
+        events.append("on_shutdown")
+
+    async with TestKafkaBroker(worker._client.broker):
+        await worker.start()
+        # During serving the @resource value is visible via the shared bag.
+        assert worker.resources["db"] == "pool"
+        await worker.stop()
+
+    # Entry: resource bracket, then serving span. Teardown is LIFO: serving span
+    # (on_shutdown) unwinds before the resource bracket (resource-exit).
+    assert events == [
+        "resource-enter",
+        "after_startup",
+        "on_shutdown",
+        "resource-exit",
+    ]
+    # Resource key popped after stop (start/stop clean).
+    assert "db" not in worker.resources
+
+
+async def test_full_lifecycle_callback_pattern_runs_all_phases_in_order() -> None:
+    """Callback-pattern owner: ``on_startup``/``after_shutdown`` callbacks own
+    the resource bag (no ``@resource``); all four phases fire in order."""
+    from faststream.kafka import TestKafkaBroker
+
+    worker = _make_worker()
+    events: list[str] = []
+
     @worker.on_startup
     async def on_startup(ctx: Any) -> None:
         events.append("on_startup")
+        ctx.resources["db"] = "pool"
 
     @worker.after_startup
     async def after_startup(ctx: Any) -> None:
@@ -387,24 +438,17 @@ async def test_full_lifecycle_runs_all_phases_in_order() -> None:
 
     async with TestKafkaBroker(worker._client.broker):
         await worker.start()
-        # During serving the @resource value is visible to read-only views.
         assert worker.resources["db"] == "pool"
         await worker.stop()
 
-    # Entry order per owner: @resource brackets, then callback span. Teardown
-    # is LIFO within the resource stack, so after_shutdown (callback span) runs
-    # before resource-exit (the @resource bracket).
+    # Resource span (on_startup/after_shutdown) brackets the serving span
+    # (after_startup/on_shutdown), with LIFO teardown.
     assert events == [
-        "resource-enter",
         "on_startup",
         "after_startup",
         "on_shutdown",
         "after_shutdown",
-        "resource-exit",
     ]
-    # Resource key + provenance popped after stop (start/stop clean).
-    assert "db" not in worker.resources
-    assert "db" not in worker.resources._claims
 
 
 async def test_async_context_manager_starts_and_stops() -> None:

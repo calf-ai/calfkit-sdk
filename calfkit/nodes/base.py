@@ -169,7 +169,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
         if current_frame.overrides:
             ctx.state.overrides = current_frame.overrides
         ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
-        ctx._resources = self.resources
+        ctx._resources = dict(self.resources)  # shallow copy: handler can't corrupt the shared bag
         ctx._frame_id = current_frame.frame_id
         return ctx
 
