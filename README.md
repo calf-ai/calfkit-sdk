@@ -92,6 +92,18 @@ You will be provided a Calfkit broker API to deploy your agents instead of setti
 
 <br>
 
+> **A note on Kafka topics.** This quickstart "just works" because the local
+> calfkit-broker has broker-side topic auto-creation enabled — node inboxes are
+> created on first use. Most hardened/managed brokers have that **disabled**, in
+> which case producers and consumers silently stall on a missing topic. Calfkit
+> ships an **EXPERIMENTAL, opt-in** topic provisioner (off by default) for the
+> dev/CI case: `Client.connect("localhost:9092", provisioning=ProvisioningConfig(enabled=True))`.
+> It is a development convenience (`replication_factor=1`, no ACLs) — **review it
+> before production**, where topic creation is typically ops-governed. See
+> [`docs/topic-provisioning.md`](docs/topic-provisioning.md).
+
+<br>
+
 ### 3. Define and Deploy the Tool Node
 
 Define and deploy a tool as an independent service. Tools are not owned by or coupled to any specific agent—once deployed, any agent in your system can discover and invoke the tool. Deploy once, use everywhere.

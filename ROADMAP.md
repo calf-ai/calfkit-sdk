@@ -5,6 +5,7 @@ An index of potential features and changes under consideration for Calf SDK. Eac
 ## Accepted
 
 - [Deps-as-dict refactor](docs/deps-as-dict-refactor.md) — `ctx.deps`/`result.deps` are plain dicts and `correlation_id` is a top-level context attribute (closes #144; breaking)
+- [Topic Provisioning](docs/topic-provisioning.md) — EXPERIMENTAL opt-in `ProvisioningConfig` to best-effort create Kafka topics for dev/CI (off by default; review for prod)
 
 ## Proposed
 

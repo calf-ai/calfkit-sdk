@@ -41,6 +41,29 @@ skip_if_no_npx = pytest.mark.skipif(
 )
 
 
+def _kafka_integration_enabled() -> bool:
+    """Return True if real-broker Kafka integration tests are opted in.
+
+    Driven SYNCHRONOUSLY by the ``CALF_TEST_KAFKA`` env var — an instant,
+    ``shutil.which``-style check mirroring :func:`_have_npx`. We deliberately do
+    NOT open a TCP socket to the broker here: collection-time network probes are
+    slow, flaky, and make a missing/cold broker look like a collection error
+    rather than a clean skip. The dedicated CI lane (see
+    ``.github/workflows/kafka-integration.yml``) sets this var once a Redpanda
+    services container is up; locally the tests skip cleanly because it is unset.
+
+    Any non-empty value enables the lane.
+    """
+    return bool(os.getenv("CALF_TEST_KAFKA"))
+
+
+# Skip real-broker Kafka integration tests unless explicitly opted in.
+skip_if_no_kafka = pytest.mark.skipif(
+    not _kafka_integration_enabled(),
+    reason="Skipping Kafka integration test: CALF_TEST_KAFKA not set (set it once a real broker is reachable to enable)",
+)
+
+
 async def wait_for_condition(
     predicate: Callable[[], bool],
     timeout: float = 20.0,

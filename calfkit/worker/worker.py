@@ -8,6 +8,7 @@ from calfkit.mcp._bridge import McpBridge
 from calfkit.mcp._dedup import IdempotencyCache
 from calfkit.mcp._server import McpServer
 from calfkit.nodes import BaseNodeDef
+from calfkit.provisioning import TopicProvisioner, topics_for_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,13 @@ class Worker:
         self._extra_publish_kwargs = extra_publish_kwargs
         self._extra_subscribe_kwargs = extra_subscribe_kwargs
         self._prepared = False
+        # Snapshot of the nodes actually wired up by ``register_handlers``.
+        # Recorded once on the first (effective) call and used as the single
+        # source of truth for ``provision_topics`` — it survives the idempotent
+        # second call (which is a no-op once ``_prepared`` is set), so the
+        # topic set reflects exactly what was registered (including MCP bridges
+        # appended just before registration in ``_on_startup``).
+        self._registered_nodes: list[BaseNodeDef] = []
 
         # MCP-specific state. Segregating at construction time means the
         # ``add_nodes`` API path also routes McpServer instances correctly.
@@ -92,6 +100,11 @@ class Worker:
         if self._prepared:
             logger.debug("register_handlers() called again; skipping (already prepared)")
             return
+        # Record the nodes we are about to register as the single source of
+        # truth for ``provision_topics``. Snapshot (not alias) so later
+        # ``add_nodes`` calls can't retroactively widen the provisioned set
+        # beyond what was actually wired up.
+        self._registered_nodes = list(self._nodes)
         for node in self._nodes:
             group_id = self._group_id or node.name
             # Subscribe to the node's public inboxes plus its
@@ -121,6 +134,61 @@ class Worker:
                 self._client._connection.publisher(node.publish_topic, **self._extra_publish_kwargs)(handler)
 
         self._prepared = True
+
+    async def provision_topics(self) -> None:
+        """Best-effort, opt-in creation of every topic the registered nodes use.
+
+        Idempotent and safe to call directly: this is the explicit entry point
+        for the manual ``register_handlers()``-without-``app.run()`` path. When
+        ``self._client.provisioning.enabled`` is ``False`` it is a pure no-op
+        (no admin client is constructed).
+
+        The topic set is :func:`~calfkit.provisioning.topics_for_nodes` over the
+        nodes recorded by :meth:`register_handlers` (the single source of truth):
+        each node's ``subscribe_topics``, its framework-private ``_return_topic``,
+        its ``publish_topic``, and — for agent nodes — each tool's input
+        ``subscribe_topics``. MCP bridges appended in :meth:`_on_startup` are
+        included because registration runs before this call.
+
+        Every node's ``_return_topic`` is a framework inbox, so it is passed in
+        ``framework_topics`` to ensure user ``topic_configs`` (retention /
+        compaction overrides) are never applied to those correlation-keyed
+        return inboxes.
+
+        This is a **development convenience** (rf=1, no ACLs); review before
+        relying on it in production, where topics are typically ops-governed.
+        See :class:`~calfkit.provisioning.ProvisioningConfig` for the caveats.
+        """
+        config = self._client.provisioning
+        if not config.enabled:
+            return
+
+        topics = topics_for_nodes(self._registered_nodes)
+        if not topics:
+            return
+
+        framework_topics = {node._return_topic for node in self._registered_nodes}
+
+        security_kwargs = dict(self._client.security_kwargs)
+        security = security_kwargs.pop("security", None)
+
+        # Normalize to the admin client's accepted shape (str | list[str]).
+        server_urls = self._client.server_urls
+        bootstrap_servers: str | list[str]
+        if server_urls is None:
+            bootstrap_servers = "localhost"
+        elif isinstance(server_urls, str):
+            bootstrap_servers = server_urls
+        else:
+            bootstrap_servers = list(server_urls)
+
+        provisioner = TopicProvisioner(
+            bootstrap_servers=bootstrap_servers,
+            config=config,
+            security=security,
+            **security_kwargs,
+        )
+        await provisioner.provision(topics, framework_topics=framework_topics)
 
     async def _on_startup(self) -> None:
         """FastStream startup hook — runs before broker.start().
@@ -157,6 +225,15 @@ class Worker:
             # native nodes so subscribers are wired identically.
             self._nodes.extend(self._mcp_bridges)
             self.register_handlers()
+            # Eager, opt-in topic provisioning. Runs AFTER register_handlers so
+            # the MCP bridges just appended are part of the registered set, and
+            # BEFORE broker.start() (FastStream starts the broker only after
+            # this on_startup hook returns) so every subscriber's inbox exists
+            # before consumption begins. Kept inside this try so a provisioning
+            # failure still triggers the BaseException cleanup below, closing
+            # any MCP sessions opened above.
+            if self._client.provisioning.enabled:
+                await self.provision_topics()
         except BaseException:
             # Cancellation, OSError, any other failure — close every
             # session we successfully opened so subprocesses don't outlive
