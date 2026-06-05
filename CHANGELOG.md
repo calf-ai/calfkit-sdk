@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.0...v0.5.1) (2026-06-05)
+
+
+### Features
+
+* opt-in Kafka topic provisioning (experimental) ([#174](https://github.com/calf-ai/calfkit-sdk/issues/174)) ([#177](https://github.com/calf-ai/calfkit-sdk/issues/177)) ([12fd012](https://github.com/calf-ai/calfkit-sdk/commit/12fd01280ac87f4116bd6dad4b6a6620383cb878))
+
 ## [0.5.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.1...v0.5.0) (2026-06-05)
 
 
