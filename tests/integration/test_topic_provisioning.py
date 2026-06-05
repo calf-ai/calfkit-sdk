@@ -63,7 +63,7 @@ from calfkit.models.session_context import (
 from calfkit.models.state import State
 from calfkit.nodes import consumer
 from calfkit.nodes.tool import ToolNodeDef
-from calfkit.provisioning import ProvisioningConfig
+from calfkit.provisioning import ProvisioningConfig, TopicProvisioner
 from calfkit.worker.worker import Worker
 from tests.utils import skip_if_no_kafka
 
@@ -285,6 +285,19 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
         client,
         nodes=[sink],
         extra_subscribe_kwargs={"auto_offset_reset": "earliest"},
+    )
+
+    # Pre-provision the client's reply topic. ``Client.connect`` registers a
+    # reply dispatcher on the shared broker; on an auto-create-OFF broker, that
+    # subscriber hammers the cluster with metadata refreshes on its missing
+    # inbox while the sink consumer is trying to join its group — on a
+    # single-core CI broker that storm starves the join and the round-trip never
+    # delivers. This raw-publish round-trip never invokes the client, so the
+    # lazy reply-topic provisioning on the invoke path doesn't fire; create it
+    # explicitly here (as a framework topic, so user ``topic_configs`` skip it).
+    await TopicProvisioner.from_connection(server_urls=BOOTSTRAP, config=client.provisioning).provision(
+        [client.reply_topic],
+        framework_topics={client.reply_topic},
     )
 
     async with _running_worker(worker), _admin() as admin:
