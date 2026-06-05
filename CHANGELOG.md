@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.1...v0.5.0) (2026-06-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* true one-way Client.emit_to_node fire-and-forget ([#132](https://github.com/calf-ai/calfkit-sdk/issues/132)) (#176)
+
+### Features
+
+* true one-way Client.emit_to_node fire-and-forget ([#132](https://github.com/calf-ai/calfkit-sdk/issues/132)) ([#176](https://github.com/calf-ai/calfkit-sdk/issues/176)) ([c0d120c](https://github.com/calf-ai/calfkit-sdk/commit/c0d120c93b57e31b1f7c0eb90d3a75910400318c))
+
 ## [0.4.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.0...v0.4.1) (2026-06-04)
 
 
