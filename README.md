@@ -275,6 +275,31 @@ result = await client.execute_node(
 )
 ```
 
+**Fire-and-forget** — dispatch work to a node without waiting for (or producing) a reply via `emit_to_node`:
+
+```python
+correlation_id = await client.emit_to_node(
+    "Re-index the catalog.",
+    "indexer.input",
+)
+# Returns the correlation_id immediately; no reply is produced and no
+# client-side reply future is allocated.
+```
+
+`emit_to_node` takes the same input-shaping arguments as `invoke_node` (`deps`, `temp_instructions`, `message_history`, `run_args`, `model_settings`, `tool_overrides`, `correlation_id`) — but no `reply_topic` or `output_type`, since there is nothing to route back or deserialize.
+
+Because there's no reply, **traceability comes from the target node's `publish_topic` broadcast stream**, not a point-to-point callback. Set a `publish_topic` on the node you emit to and tap it with a [consumer node](#consumer-nodes-optional) to observe terminals (`result.output` is populated exactly as it is for `execute_node`). A node with no `publish_topic` produces no observable record for a fire-and-forget send — there is neither a reply nor a broadcast.
+
+Use `emit_to_node` for true one-way sends, `invoke_node` for async dispatch with a handle to await later, and `execute_node` for synchronous request/reply.
+
+> **Bounding `invoke_node` memory** — each pending `invoke_node` handle holds a reply future until it resolves. If a reply is lost or a handle is abandoned, that future leaks. Pass an opt-in TTL to bound it:
+>
+> ```python
+> client = Client.connect("localhost:9092", reply_ttl=30.0)
+> ```
+>
+> When set, an unanswered handle is evicted after `reply_ttl` seconds and `handle.result()` raises `ReplyExpiredError`. The default (`None`) waits indefinitely. `emit_to_node` allocates no future, so the TTL does not apply to it.
+
 <br>
 
 ### Gating Node Invocations (Optional)

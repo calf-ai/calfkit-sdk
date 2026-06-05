@@ -5,6 +5,27 @@ class DeserializationError(Exception):
     """Raised when client-side output deserialization fails."""
 
 
+class ReplyExpiredError(Exception):
+    """Raised when an awaited reply does not arrive within the dispatcher's
+    ``reply_ttl`` and the pending future is evicted.
+
+    Surfacing this (instead of a bare ``CancelledError``) gives callers an
+    actionable signal carrying the offending ``correlation_id`` and the ``ttl``
+    (seconds) that elapsed.
+    """
+
+    def __init__(self, correlation_id: str, ttl: float):
+        self.correlation_id = correlation_id
+        self.ttl = ttl
+        super().__init__(f"No reply for correlation_id={correlation_id!r} within reply_ttl={ttl}s")
+
+    def __reduce__(self) -> tuple[Any, tuple[str, float]]:
+        # The default reduction replays ``self.args`` (the formatted message
+        # string) through ``__init__``, which would fail because the constructor
+        # requires both positional fields. Reconstruct from the real fields.
+        return (self.__class__, (self.correlation_id, self.ttl))
+
+
 class ToolExecutionError(Exception):
     """The original traceback is not preserved across the Kafka boundary; it is
     logged at the worker that ran the tool. ``exc_type`` and ``exc_message`` are

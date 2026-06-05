@@ -5,6 +5,7 @@ An index of potential features and changes under consideration for Calf SDK. Eac
 ## Accepted
 
 - [Deps-as-dict refactor](docs/deps-as-dict-refactor.md) — `ctx.deps`/`result.deps` are plain dicts and `correlation_id` is a top-level context attribute (closes #144; breaking)
+- [Fire-and-forget emit](docs/fire-and-forget-emit.md) — true one-way Client.emit_to_node; nullable callback terminal; opt-in reply TTL (closes #132)
 
 ## Proposed
 
