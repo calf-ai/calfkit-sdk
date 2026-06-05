@@ -1,0 +1,127 @@
+name: Kafka Integration Tests
+
+# Dedicated gated lane for REAL-broker Kafka topic-provisioning tests
+# (opt-in topic provisioning, issue #174). Stands up a single-node Redpanda
+# broker with topic auto-create DISABLED, then runs the tests under
+# tests/integration/test_topic_provisioning.py with CALF_TEST_KAFKA set so the
+# `skip_if_no_kafka` gate opens. The rest of the suite skips these by default
+# (the env var is only set here), so no broker is needed elsewhere.
+#
+# Templated on mcp-e2e.yml. Uses no untrusted-input context vars in run: steps;
+# only safe meta vars (workflow, ref) for concurrency grouping.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "calfkit/provisioning/**"
+      - "calfkit/client/**"
+      - "calfkit/worker/**"
+      - "calfkit/cli/topics.py"
+      - "tests/integration/test_topic_provisioning.py"
+      - "tests/test_provisioning*.py"
+      - "tests/utils.py"
+      - "pyproject.toml"
+      - ".github/workflows/kafka-integration.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kafka-integration:
+    name: Kafka Integration (Redpanda)
+    runs-on: ubuntu-latest
+
+    env:
+      # Single source of truth for the broker address, shared by the broker
+      # bring-up below and the tests (which read CALF_TEST_KAFKA_BOOTSTRAP).
+      BOOTSTRAP: localhost:9092
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Start Redpanda broker (auto-create DISABLED)
+        # Run Redpanda directly (not via `services:`) so we control the
+        # `redpanda start` command. Deliberately NOT `--mode dev-container`:
+        # that dev mode enables topic auto-create, which would defeat the
+        # "no silent create" assertion. Single-node overprovisioned flags keep
+        # it light for CI.
+        run: |
+          docker run -d --name redpanda \
+            -p 9092:9092 -p 9644:9644 \
+            docker.redpanda.com/redpandadata/redpanda:latest \
+            redpanda start \
+              --overprovisioned \
+              --smp 1 \
+              --memory 1G \
+              --reserve-memory 0M \
+              --node-id 0 \
+              --check=false \
+              --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+              --advertise-kafka-addr PLAINTEXT://localhost:9092
+
+      - name: Wait for broker to be ready
+        # Poll the admin API until the cluster reports healthy. rpk runs inside
+        # the container, so no local rpk install is needed.
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec redpanda rpk cluster info >/dev/null 2>&1; then
+              echo "Redpanda is ready."
+              exit 0
+            fi
+            echo "Waiting for Redpanda... ($i)"
+            sleep 2
+          done
+          echo "Redpanda did not become ready in time." >&2
+          docker logs redpanda >&2 || true
+          exit 1
+
+      - name: Disable topic auto-create (cluster property)
+        # The CLUSTER property `auto_create_topics_enabled` (NOT a
+        # `redpanda.`-prefixed broker property). False means a producer/consumer
+        # referencing a missing topic does NOT silently create it — the
+        # precondition for scenario (a).
+        run: |
+          docker exec redpanda rpk cluster config set auto_create_topics_enabled false
+
+      - name: Guard - assert auto-create is disabled
+        # Fail the lane loudly if the cluster property is anything but false.
+        # `rpk cluster config get` prints just the value (scripting-friendly).
+        run: |
+          value="$(docker exec redpanda rpk cluster config get auto_create_topics_enabled | tr -d '[:space:]')"
+          echo "auto_create_topics_enabled=${value}"
+          if [ "${value}" != "false" ]; then
+            echo "Guard failed: auto_create_topics_enabled must be 'false' but was '${value}'." >&2
+            exit 1
+          fi
+
+      - name: Run Kafka integration tests
+        # CALF_TEST_KAFKA opens the skip_if_no_kafka gate; the bootstrap address
+        # matches the broker started above (job-level BOOTSTRAP env).
+        run: |
+          CALF_TEST_KAFKA=1 CALF_TEST_KAFKA_BOOTSTRAP="$BOOTSTRAP" \
+            uv run pytest tests/integration/test_topic_provisioning.py \
+              -v --tb=short --timeout=120
+
+      - name: Dump broker logs on failure
+        if: failure()
+        run: docker logs redpanda || true
