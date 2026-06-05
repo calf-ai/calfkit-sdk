@@ -33,7 +33,7 @@ class Stack(Generic[StackItemT]):
 @dataclass(frozen=True)
 class CallFrame:
     target_topic: str
-    callback_topic: str  # return address
+    callback_topic: str | None  # return address; ``None`` = fire-and-forget, no requester to return to
     input_args: Sequence[Any] | None = field(default=None)
     frame_id: str = field(default_factory=lambda: uuid_utils.uuid7().hex)
     overrides: OverridesState | None = field(default=None)
@@ -59,7 +59,7 @@ class WorkflowState(BaseModel):
     def unwind_frame(self) -> CallFrame:
         return self.call_stack.pop()
 
-    def invoke_frame(self, call: _Call, callback_topic: str) -> None:
+    def invoke_frame(self, call: _Call, callback_topic: str | None) -> None:
         if call.target_topic is None:
             raise Exception("")
         frame = CallFrame(
