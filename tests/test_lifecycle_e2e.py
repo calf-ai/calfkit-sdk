@@ -225,6 +225,39 @@ async def test_resources_reach_consumer_result() -> None:
     assert received[-1].resources["db"] is sentinel
 
 
+async def test_consumer_gate_reads_resources() -> None:
+    """A consumer's *gate* can read ``ctx.resources`` (parity with regular-node
+    gates), so a gate can branch on a lifecycle resource — not just the consumer
+    function via ``result.resources``."""
+    received: list[NodeResult] = []
+    gate_saw: list[Any] = []
+
+    def gate(ctx: SessionRunContext) -> bool:
+        flag = ctx.resources.get("flag")
+        gate_saw.append(flag)
+        return flag == "ON"
+
+    worker = _make_worker()
+
+    @consumer(subscribe_topics="gate_res.in", gates=[gate])
+    def sink(result: NodeResult) -> None:
+        received.append(result)
+
+    sink.resources["flag"] = "ON"
+
+    worker.add_nodes(sink)
+    broker = worker._client.broker
+
+    async with TestKafkaBroker(broker):
+        await worker.start()
+        await _publish(broker, _text_envelope("hi"), "gate_res.in", "cid-gate")
+        await worker.stop()
+
+    # The gate saw the resource and admitted the message.
+    assert gate_saw == ["ON"]
+    assert received, "consumer never ran (gate should have admitted on flag=ON)"
+
+
 def _tool_then_text(captured: dict[str, Any]) -> FunctionModel:
     """A FunctionModel that calls ``read_resource`` once, then emits text."""
 
