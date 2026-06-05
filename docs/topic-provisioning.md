@@ -6,6 +6,11 @@
 > see [Dev-safe / review-for-prod](#dev-safe--review-for-prod) before relying on
 > it outside local/CI use.
 
+> **Runnable example:** [`examples/topic_provisioning.py`](../examples/topic_provisioning.py)
+> exercises this surface end-to-end — `ProvisioningConfig` knobs,
+> `topics_for_nodes` inspection, programmatic `TopicProvisioner` + `ProvisionReport`,
+> and idempotency.
+
 ## 1. Problem
 
 A calfkit deployment is a mesh of nodes that publish to and subscribe from named
