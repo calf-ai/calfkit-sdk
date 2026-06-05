@@ -169,26 +169,25 @@ class Worker:
 
         framework_topics = {node._return_topic for node in self._registered_nodes}
 
-        security_kwargs = dict(self._client.security_kwargs)
-        security = security_kwargs.pop("security", None)
-
-        # Normalize to the admin client's accepted shape (str | list[str]).
-        server_urls = self._client.server_urls
-        bootstrap_servers: str | list[str]
-        if server_urls is None:
-            bootstrap_servers = "localhost"
-        elif isinstance(server_urls, str):
-            bootstrap_servers = server_urls
-        else:
-            bootstrap_servers = list(server_urls)
-
-        provisioner = TopicProvisioner(
-            bootstrap_servers=bootstrap_servers,
+        provisioner = TopicProvisioner.from_connection(
+            server_urls=self._client.server_urls,
             config=config,
-            security=security,
-            **security_kwargs,
+            security_kwargs=self._client.security_kwargs,
         )
-        await provisioner.provision(topics, framework_topics=framework_topics)
+        report = await provisioner.provision(topics, framework_topics=framework_topics)
+        logger.info(
+            "provisioned topics: %d created, %d existing, %d unauthorized",
+            len(report.created),
+            len(report.existing),
+            len(report.unauthorized),
+        )
+        if report.unauthorized:
+            logger.warning(
+                "topic provisioning: %d unauthorized topic(s) NOT created "
+                "(producers/consumers will stall): %s",
+                len(report.unauthorized),
+                ", ".join(report.unauthorized),
+            )
 
     async def _on_startup(self) -> None:
         """FastStream startup hook — runs before broker.start().
@@ -231,9 +230,9 @@ class Worker:
             # this on_startup hook returns) so every subscriber's inbox exists
             # before consumption begins. Kept inside this try so a provisioning
             # failure still triggers the BaseException cleanup below, closing
-            # any MCP sessions opened above.
-            if self._client.provisioning.enabled:
-                await self.provision_topics()
+            # any MCP sessions opened above. ``provision_topics`` self-guards on
+            # the disabled config (a documented no-op), so no guard here.
+            await self.provision_topics()
         except BaseException:
             # Cancellation, OSError, any other failure — close every
             # session we successfully opened so subprocesses don't outlive

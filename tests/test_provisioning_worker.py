@@ -78,6 +78,22 @@ class _FakeResponse:
         self.topic_errors = topic_errors
 
 
+class _CodeAdmin(_FakeAdmin):
+    """Fake admin returning a configurable per-topic error code.
+
+    ``code_for`` maps a topic name to the Kafka error code the broker should
+    return, so a test can drive an ``unauthorized`` (29) outcome.
+    """
+
+    def __init__(self, *, code_for, **kwargs: Any) -> None:  # noqa: ANN001
+        super().__init__(**kwargs)
+        self._code_for = code_for
+
+    async def create_topics(self, new_topics, *args: Any, **kwargs: Any):  # noqa: ANN001
+        self.create_calls.append(list(new_topics))
+        return _FakeResponse([(nt.name, self._code_for(nt.name)) for nt in new_topics])
+
+
 def _install_fake_admin(monkeypatch) -> list[_FakeAdmin]:
     """Patch the provisioner seam; return a list capturing created fakes."""
     created: list[_FakeAdmin] = []
@@ -308,3 +324,79 @@ def test_provision_topics_uses_only_registered_nodes_not_later_additions(monkeyp
     # The late node was not registered, so its topics are not provisioned.
     assert "late.in" not in names
     assert "late.out" not in names
+
+
+# ---------------------------------------------------------------------------
+# Provision report logging ([4c])
+# ---------------------------------------------------------------------------
+
+
+def test_provision_topics_logs_summary(monkeypatch, caplog) -> None:
+    import logging
+
+    _install_fake_admin(monkeypatch)  # all topics -> created (code 0)
+    client = _make_client(ProvisioningConfig(enabled=True))
+    worker = Worker(client, nodes=[_tool_node("echo", "echo.in", "echo.out")])
+    worker.register_handlers()
+
+    with caplog.at_level(logging.INFO, logger="calfkit.worker.worker"):
+        asyncio.run(worker.provision_topics())
+
+    summaries = [r.getMessage() for r in caplog.records if "provisioned topics:" in r.getMessage()]
+    assert len(summaries) == 1
+    # echo.in, echo.out, and the framework return inbox were all created.
+    assert "3 created" in summaries[0]
+    assert "0 existing" in summaries[0]
+    assert "0 unauthorized" in summaries[0]
+
+
+def test_provision_topics_warns_on_unauthorized(monkeypatch, caplog) -> None:
+    import logging
+
+    created: list[_FakeAdmin] = []
+
+    def _factory(**kwargs: Any) -> _CodeAdmin:
+        # "echo.in" is denied (code 29); everything else is created (code 0).
+        admin = _CodeAdmin(code_for=lambda name: 29 if name == "echo.in" else 0, **kwargs)
+        created.append(admin)
+        return admin
+
+    monkeypatch.setattr(provisioner_mod, "_make_admin_client", _factory)
+
+    client = _make_client(ProvisioningConfig(enabled=True))
+    worker = Worker(client, nodes=[_tool_node("echo", "echo.in", "echo.out")])
+    worker.register_handlers()
+
+    with caplog.at_level(logging.WARNING, logger="calfkit.worker.worker"):
+        asyncio.run(worker.provision_topics())
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("echo.in" in m and "unauthorized" in m.lower() for m in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Security passthrough end-to-end ([7])
+# ---------------------------------------------------------------------------
+
+
+def test_worker_security_passes_through_to_admin(monkeypatch) -> None:
+    """A FastStream SASLPlaintext security object given to ``Client.connect``
+    must reach the provisioner's admin client as real SASL kwargs — not be
+    silently dropped to PLAINTEXT."""
+    from faststream.security import SASLPlaintext
+
+    created = _install_fake_admin(monkeypatch)
+    client = Client.connect(
+        "localhost:9092",
+        provisioning=ProvisioningConfig(enabled=True),
+        security=SASLPlaintext(username="u", password="p"),
+    )
+    worker = Worker(client, nodes=[_tool_node("echo", "echo.in", "echo.out")])
+    worker.register_handlers()
+
+    asyncio.run(worker.provision_topics())
+
+    assert len(created) == 1
+    kw = created[0].kwargs
+    assert kw["security_protocol"] == "SASL_PLAINTEXT"
+    assert kw["sasl_plain_username"] == "u"

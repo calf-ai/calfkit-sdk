@@ -55,7 +55,7 @@ from calfkit.provisioning import (
 ```python
 @dataclass
 class ProvisioningConfig:
-    enabled: bool                                    # master switch (no default)
+    enabled: bool = False                            # master switch (default: off)
     num_partitions: int = 1
     replication_factor: int = 1                      # NOT durable; see caveats
     topic_configs: dict[str, str] = {}               # data topics only
@@ -86,11 +86,12 @@ references. For each node:
   `TailCall` inbox — issue #141), and
 - `publish_topic` when set.
 
-**Agent nodes** additionally contribute each tool's input topic
-(`tool.subscribe_topics[0]`): an agent publishes tool `Call` envelopes onto its
-tools' input topics, so those must exist for dispatch to land. Agent nodes are
-detected *structurally* (they expose a `tools` collection) so
-`calfkit.provisioning` stays decoupled from `calfkit.nodes`.
+**Agent nodes** additionally contribute *all* of each tool's `subscribe_topics`
+(every declared inbox is provisioned). At runtime the agent publishes tool
+`Call` envelopes onto `tools_registry[name].subscribe_topics[0]`, but the full
+`subscribe_topics` list for each tool is created so no declared inbox is left
+missing. Agent nodes are detected *structurally* (they expose a `tools`
+collection) so `calfkit.provisioning` stays decoupled from `calfkit.nodes`.
 
 ### 3.3 `ProvisionReport`
 

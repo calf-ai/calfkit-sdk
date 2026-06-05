@@ -109,7 +109,7 @@ class BaseClient:
         self._dispatcher = dispatcher
         self._emitter_id = emitter_id if emitter_id is not None else _new_client_emitter_id()
         # Never None: a disabled config makes `.enabled` always safe to read.
-        self._provisioning = provisioning or ProvisioningConfig(enabled=False)
+        self._provisioning = provisioning or ProvisioningConfig()
         self._server_urls = server_urls
         self._security_kwargs: dict[str, Any] = dict(security_kwargs) if security_kwargs else {}
         # One-shot guard: the reply topic is provisioned at most once across the
@@ -294,26 +294,28 @@ class BaseClient:
         traffic), so it is passed in ``framework_topics`` to ensure user
         ``topic_configs`` (retention / compaction) are never applied to it.
         """
-        security_kwargs = dict(self._security_kwargs)
-        security = security_kwargs.pop("security", None)
-        # Normalize to the admin client's accepted shape (str | list[str]).
-        bootstrap_servers: str | list[str]
-        if self._server_urls is None:
-            bootstrap_servers = "localhost"
-        elif isinstance(self._server_urls, str):
-            bootstrap_servers = self._server_urls
-        else:
-            bootstrap_servers = list(self._server_urls)
-        provisioner = TopicProvisioner(
-            bootstrap_servers=bootstrap_servers,
+        provisioner = TopicProvisioner.from_connection(
+            server_urls=self._server_urls,
             config=self._provisioning,
-            security=security,
-            **security_kwargs,
+            security_kwargs=self._security_kwargs,
         )
-        await provisioner.provision(
+        report = await provisioner.provision(
             [self._reply_topic],
             framework_topics={self._reply_topic},
         )
+        logger.info(
+            "provisioned topics: %d created, %d existing, %d unauthorized",
+            len(report.created),
+            len(report.existing),
+            len(report.unauthorized),
+        )
+        if report.unauthorized:
+            logger.warning(
+                "topic provisioning: %d unauthorized topic(s) NOT created "
+                "(producers/consumers will stall): %s",
+                len(report.unauthorized),
+                ", ".join(report.unauthorized),
+            )
 
     async def close(self) -> None:
         """Shut down the client gracefully.

@@ -55,6 +55,47 @@ def test_config_defaults() -> None:
     assert cfg.create_timeout_ms == 30000
 
 
+def test_config_defaults_to_disabled() -> None:
+    # ``ProvisioningConfig()`` is valid and means provisioning is OFF.
+    cfg = ProvisioningConfig()
+    assert cfg.enabled is False
+
+
+def test_config_is_frozen() -> None:
+    import dataclasses
+
+    cfg = ProvisioningConfig(enabled=True)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.enabled = False  # type: ignore[misc]
+
+
+def test_config_valid_config_constructs() -> None:
+    cfg = ProvisioningConfig(
+        enabled=True,
+        num_partitions=3,
+        replication_factor=2,
+        create_timeout_ms=10000,
+    )
+    assert cfg.num_partitions == 3
+    assert cfg.replication_factor == 2
+    assert cfg.create_timeout_ms == 10000
+
+
+def test_config_invalid_num_partitions_raises() -> None:
+    with pytest.raises(ValueError, match="num_partitions"):
+        ProvisioningConfig(enabled=True, num_partitions=0)
+
+
+def test_config_invalid_replication_factor_raises() -> None:
+    with pytest.raises(ValueError, match="replication_factor"):
+        ProvisioningConfig(enabled=True, replication_factor=0)
+
+
+def test_config_invalid_create_timeout_ms_raises() -> None:
+    with pytest.raises(ValueError, match="create_timeout_ms"):
+        ProvisioningConfig(enabled=True, create_timeout_ms=0)
+
+
 def test_topics_for_nodes_plain_node_includes_subscribe_publish_and_return() -> None:
     node = _tool_node("echo", sub="echo.in", pub="echo.out")
 
@@ -267,6 +308,52 @@ def test_timeout_raises_naming_pending(monkeypatch) -> None:
     assert created[0].close_calls == 1
 
 
+def test_unaccounted_topic_in_response_raises(monkeypatch) -> None:
+    # The broker response omits a topic that was in the request — we must NOT
+    # silently treat it as done. Only "present.topic" comes back.
+    plan = [[("present.topic", 0)]]
+    created = _install_fake_admin(
+        monkeypatch,
+        lambda kw: _FakeAdmin(error_plan=plan, kwargs=kw),
+    )
+
+    with pytest.raises(TopicProvisioningError) as excinfo:
+        asyncio.run(
+            _provisioner().provision(
+                ["present.topic", "missing.topic"],
+                framework_topics=set(),
+            )
+        )
+
+    assert excinfo.value.code is None
+    assert "missing.topic" in str(excinfo.value)
+    # admin still closed despite the raise.
+    assert created[0].close_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-topic mixed-batch retry ([7])
+# ---------------------------------------------------------------------------
+
+
+def test_multi_topic_mixed_batch_retries_only_unresolved(monkeypatch) -> None:
+    monkeypatch.setattr(provisioner_mod, "_RETRY_BACKOFF_S", 0)
+    # attempt 0: "a" created (0), "b" retriable (5); attempt 1: "b" created.
+    plan = [[("a", 0), ("b", 5)], [("b", 0)]]
+    created = _install_fake_admin(
+        monkeypatch,
+        lambda kw: _FakeAdmin(error_plan=plan, kwargs=kw),
+    )
+
+    report = asyncio.run(_provisioner().provision(["a", "b"], framework_topics=set()))
+
+    assert report.created == ["a", "b"]
+    # Two create calls; the second re-issued ONLY the unresolved "b".
+    assert len(created[0].create_calls) == 2
+    second_names = [nt.name for nt in created[0].create_calls[1]]
+    assert second_names == ["b"]
+
+
 # ---------------------------------------------------------------------------
 # Security kwarg merge
 # ---------------------------------------------------------------------------
@@ -373,6 +460,19 @@ def test_new_topic_uses_concrete_positive_partitions_and_rf(monkeypatch) -> None
     assert nt.replication_factor != -1
 
 
+def test_admin_request_timeout_matches_create_timeout(monkeypatch) -> None:
+    plan = [[("d.topic", 0)]]
+    created = _install_fake_admin(
+        monkeypatch,
+        lambda kw: _FakeAdmin(error_plan=plan, kwargs=kw),
+    )
+
+    # _provisioner() uses create_timeout_ms=30000 by default below.
+    asyncio.run(_provisioner(create_timeout_ms=12345).provision(["d.topic"], framework_topics=set()))
+
+    assert created[0].kwargs["request_timeout_ms"] == 12345
+
+
 def test_topic_configs_applied_to_data_topics_not_framework_topics(monkeypatch) -> None:
     plan = [[("data.topic", 0), ("reply.private.return", 0)]]
     created = _install_fake_admin(
@@ -394,6 +494,59 @@ def test_topic_configs_applied_to_data_topics_not_framework_topics(monkeypatch) 
     # aiokafka). cleanup.policy/retention on correlation-keyed reply inboxes is
     # semantically wrong.
     assert by_name["reply.private.return"].topic_configs == {}
+
+
+# ---------------------------------------------------------------------------
+# from_connection / _normalize_bootstrap ([3c])
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_bootstrap_shapes() -> None:
+    from calfkit.provisioning.provisioner import _normalize_bootstrap
+
+    assert _normalize_bootstrap(None) == "localhost"
+    assert _normalize_bootstrap("broker:9092") == "broker:9092"
+    assert _normalize_bootstrap(["a:9092", "b:9092"]) == ["a:9092", "b:9092"]
+    # Any (non-str) iterable is materialized to a list.
+    assert _normalize_bootstrap(("a:9092", "b:9092")) == ["a:9092", "b:9092"]
+
+
+def test_from_connection_normalizes_and_splits_security(monkeypatch) -> None:
+    from faststream.security import SASLPlaintext
+
+    plan = [[("fc.topic", 0)]]
+    created = _install_fake_admin(
+        monkeypatch,
+        lambda kw: _FakeAdmin(error_plan=plan, kwargs=kw),
+    )
+
+    cfg = ProvisioningConfig(enabled=True)
+    prov = TopicProvisioner.from_connection(
+        server_urls=None,  # -> "localhost"
+        config=cfg,
+        security_kwargs={
+            "security": SASLPlaintext(username="u", password="p"),
+            "sasl_kerberos_service_name": "custom",
+        },
+    )
+    asyncio.run(prov.provision(["fc.topic"], framework_topics=set()))
+
+    kw = created[0].kwargs
+    assert kw["bootstrap_servers"] == "localhost"
+    assert kw["security_protocol"] == "SASL_PLAINTEXT"
+    assert kw["sasl_plain_username"] == "u"
+    assert kw["sasl_kerberos_service_name"] == "custom"
+
+
+def test_from_connection_does_not_mutate_security_kwargs() -> None:
+    sk = {"security": None, "security_protocol": "PLAINTEXT"}
+    TopicProvisioner.from_connection(
+        server_urls="localhost:9092",
+        config=ProvisioningConfig(enabled=True),
+        security_kwargs=sk,
+    )
+    # The caller's dict must be untouched (popped from a copy).
+    assert sk == {"security": None, "security_protocol": "PLAINTEXT"}
 
 
 # ---------------------------------------------------------------------------

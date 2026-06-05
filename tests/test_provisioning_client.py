@@ -205,3 +205,42 @@ def test_enabled_provisions_before_broker_start(monkeypatch) -> None:
 
     assert order == ["provision_start", "broker_start"]
     assert len(created) == 1
+
+
+def test_enabled_logs_provision_summary_once(monkeypatch, caplog) -> None:
+    import logging
+
+    _install_fake_admin(monkeypatch)
+    cfg = ProvisioningConfig(enabled=True)
+    client = Client.connect("localhost:9092", provisioning=cfg)
+    _stub_broker_io(client, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="calfkit.client.base"):
+        asyncio.run(_invoke_once(client, "c-log-1"))
+        asyncio.run(_invoke_once(client, "c-log-2"))
+
+    summaries = [r.getMessage() for r in caplog.records if "provisioned topics:" in r.getMessage()]
+    # One-shot reply-topic provisioning -> exactly one summary across invokes.
+    assert len(summaries) == 1
+    assert "1 created" in summaries[0]
+
+
+def test_client_security_passes_through_to_admin(monkeypatch) -> None:
+    """A SASLPlaintext security object given to ``Client.connect`` reaches the
+    reply-topic provisioner's admin client as real SASL kwargs (end-to-end)."""
+    from faststream.security import SASLPlaintext
+
+    created = _install_fake_admin(monkeypatch)
+    client = Client.connect(
+        "localhost:9092",
+        provisioning=ProvisioningConfig(enabled=True),
+        security=SASLPlaintext(username="u", password="p"),
+    )
+    _stub_broker_io(client, monkeypatch)
+
+    asyncio.run(_invoke_once(client, "c-sec"))
+
+    assert len(created) == 1
+    kw = created[0].kwargs
+    assert kw["security_protocol"] == "SASL_PLAINTEXT"
+    assert kw["sasl_plain_username"] == "u"

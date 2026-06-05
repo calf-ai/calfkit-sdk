@@ -66,14 +66,8 @@ def _resolve_nodes(specs: list[str]) -> list[Any]:
     """
     resolved: list[Any] = []
     for spec in specs:
-        if ":" not in spec:
-            typer.echo(
-                f"Error: --nodes must be in 'module:attr' form, got {spec!r}.",
-                err=True,
-            )
-            raise typer.Exit(2)
-        module_path, _, attr = spec.partition(":")
-        if not module_path or not attr:
+        module_path, sep, attr = spec.partition(":")
+        if not sep or not module_path or not attr:
             typer.echo(
                 f"Error: --nodes must be in 'module:attr' form, got {spec!r}.",
                 err=True,
@@ -81,8 +75,17 @@ def _resolve_nodes(specs: list[str]) -> list[Any]:
             raise typer.Exit(2)
         try:
             module = importlib.import_module(module_path)
-        except Exception as e:  # noqa: BLE001 -- surface any import failure
+        except (ModuleNotFoundError, ImportError) as e:
+            # The module (or one of its imports) does not exist / cannot load.
             typer.echo(f"Error: cannot import module {module_path!r}: {e}", err=True)
+            raise typer.Exit(2) from e
+        except Exception as e:  # noqa: BLE001 -- side-effect code at import time failed
+            # The module exists but its top-level code raised when executed.
+            typer.echo(
+                f"Error: module {module_path!r} raised during import "
+                f"(side-effect code failed): {e}",
+                err=True,
+            )
             raise typer.Exit(2) from e
         try:
             obj = getattr(module, attr)
@@ -98,6 +101,29 @@ def _resolve_nodes(specs: list[str]) -> list[Any]:
         else:
             resolved.extend(obj)
     return resolved
+
+
+def _validate_nodes(nodes: list[Any]) -> None:
+    """Ensure every resolved object exposes the node attributes the topic-set
+    derivation relies on (``subscribe_topics`` and ``_return_topic``).
+
+    Without this, a ``--nodes`` attr pointing at a non-node object would let an
+    ``AttributeError`` escape ``topics_for_nodes`` as an uncaught exit-1
+    traceback. Surface an actionable exit-2 error instead.
+
+    Raises:
+        typer.Exit: (code 2) if any object is missing a required node attribute.
+    """
+    for obj in nodes:
+        missing = [attr for attr in ("subscribe_topics", "_return_topic") if not hasattr(obj, attr)]
+        if missing:
+            typer.echo(
+                f"Error: resolved object {obj!r} is not a node "
+                f"(missing {', '.join(missing)}). --nodes must point at a "
+                "BaseNodeDef (or an iterable of them).",
+                err=True,
+            )
+            raise typer.Exit(2)
 
 
 def _partition_nodes(objs: list[Any]) -> list[Any]:
@@ -177,6 +203,7 @@ def provision(
 
     resolved = _resolve_nodes(nodes)
     node_list = _partition_nodes(resolved)
+    _validate_nodes(node_list)
 
     topics = topics_for_nodes(node_list)
     framework_topics = {node._return_topic for node in node_list}
@@ -200,8 +227,15 @@ def provision(
         create_timeout_ms=timeout_ms,
     )
     server_urls = [s.strip() for s in bootstrap_servers.split(",") if s.strip()]
-    provisioner = TopicProvisioner(
-        bootstrap_servers=server_urls if len(server_urls) > 1 else server_urls[0],
+    if not server_urls:
+        typer.echo(
+            "Error: --bootstrap-servers is empty after parsing; provide at "
+            "least one Kafka broker URL.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    provisioner = TopicProvisioner.from_connection(
+        server_urls=server_urls if len(server_urls) > 1 else server_urls[0],
         config=config,
     )
 

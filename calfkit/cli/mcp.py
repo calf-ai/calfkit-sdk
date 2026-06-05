@@ -1,8 +1,9 @@
 """``calfkit mcp`` typer subcommand.
 
-Currently exposes one command: ``codegen``. Spawns an MCP server, runs
-``initialize`` + ``tools/list``, and emits a generated Python module with
-:class:`McpToolDef` constants the user can import.
+Exposes two commands: ``codegen`` and ``schema``. ``codegen`` spawns an MCP
+server, runs ``initialize`` + ``tools/list``, and emits a generated Python
+module with :class:`McpToolDef` constants the user can import. ``schema`` emits
+the reference JSON Schema for ``mcp.json`` (no MCP server needed).
 
 Requires the ``cli`` optional extra (typer). If typer is not installed, the
 import raises with a clear remediation message rather than silently failing.

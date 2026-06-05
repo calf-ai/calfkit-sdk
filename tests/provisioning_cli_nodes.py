@@ -35,3 +35,8 @@ mixed = [
     _tool_node("gamma", sub="gamma.in", pub="gamma.out"),
     McpServer.stdio("echo", name="some_mcp", tools=[]),
 ]
+
+# An attr that resolves to a plain object that is NOT a node (no
+# ``subscribe_topics`` / ``_return_topic``). The CLI must reject it with an
+# actionable error rather than letting an AttributeError escape as exit 1.
+not_a_node = object()

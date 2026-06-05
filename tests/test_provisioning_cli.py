@@ -244,3 +244,122 @@ def test_unimportable_module_exits_2() -> None:
     )
     assert result.exit_code == 2
     assert "cannot import module" in _plain(result.stderr)
+
+
+def test_module_import_side_effect_failure_exits_2_with_distinct_message() -> None:
+    """A module that raises during import (not ImportError) is reported as a
+    side-effect failure, distinct from a missing module, and still exits 2."""
+    from typer.testing import CliRunner
+
+    from calfkit.cli.topics import app
+
+    result = CliRunner().invoke(
+        app,
+        ["provision", "--nodes", "tests.provisioning_cli_import_boom:thing", "--dry-run"],
+    )
+    assert result.exit_code == 2
+    err = _plain(result.stderr)
+    assert "raised during import" in err
+    assert "side-effect boom" in err
+    # Not misreported as a missing module.
+    assert "cannot import module" not in err
+
+
+def test_non_node_resolved_object_exits_2_no_traceback() -> None:
+    """A --nodes attr resolving to a non-node object is rejected with an
+    actionable error (exit 2), not an AttributeError traceback (exit 1)."""
+    from typer.testing import CliRunner
+
+    from calfkit.cli.topics import app
+
+    result = CliRunner().invoke(
+        app,
+        ["provision", "--nodes", "tests.provisioning_cli_nodes:not_a_node", "--dry-run"],
+    )
+    assert result.exit_code == 2
+    err = _plain(result.stderr)
+    assert "subscribe_topics" in err or "not a node" in err.lower()
+
+
+def test_empty_bootstrap_servers_exits_2() -> None:
+    """An empty --bootstrap-servers (after split/strip) errors with exit 2
+    rather than an IndexError traceback."""
+    from typer.testing import CliRunner
+
+    from calfkit.cli.topics import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "provision",
+            "--nodes",
+            "tests.provisioning_cli_nodes:nodes",
+            "--bootstrap-servers",
+            "  ,  ",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "bootstrap" in _plain(result.stderr).lower()
+
+
+def test_partitions_and_replication_factor_flow_to_new_topic(monkeypatch) -> None:  # noqa: ANN001
+    """--partitions / --replication-factor reach the NewTopic the admin gets."""
+    from typer.testing import CliRunner
+
+    from calfkit.cli.topics import app
+    from calfkit.provisioning import provisioner as provisioner_mod
+
+    seen: list = []
+
+    class _CapturingAdmin(_FakeAdmin):
+        async def create_topics(self, new_topics, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            seen.extend(new_topics)
+            return await super().create_topics(new_topics, *args, **kwargs)
+
+    monkeypatch.setattr(
+        provisioner_mod,
+        "_make_admin_client",
+        lambda **kw: _CapturingAdmin(code_for=lambda name: 0, kwargs=kw),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "provision",
+            "--nodes",
+            "tests.provisioning_cli_nodes:nodes",
+            "--partitions",
+            "3",
+            "--replication-factor",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert seen, "admin.create_topics was never called"
+    assert all(nt.num_partitions == 3 for nt in seen)
+    assert all(nt.replication_factor == 2 for nt in seen)
+
+
+def test_unauthorized_report_branch_prints_line(monkeypatch) -> None:  # noqa: ANN001
+    """An unauthorized (code 29) topic prints the unauthorized summary line."""
+    from typer.testing import CliRunner
+
+    from calfkit.cli.topics import app
+    from calfkit.provisioning import provisioner as provisioner_mod
+
+    # "alpha.in" is denied (29); everything else created (0). 29 is a
+    # warn-and-continue outcome, so provisioning still returns a report.
+    monkeypatch.setattr(
+        provisioner_mod,
+        "_make_admin_client",
+        lambda **kw: _FakeAdmin(code_for=lambda name: 29 if name == "alpha.in" else 0, kwargs=kw),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["provision", "--nodes", "tests.provisioning_cli_nodes:nodes"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    out = _plain(result.stdout)
+    assert "unauthorized" in out
+    assert "alpha.in" in out

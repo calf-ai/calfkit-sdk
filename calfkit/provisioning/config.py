@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProvisioningConfig:
     """Opt-in configuration for best-effort Kafka topic auto-creation.
 
@@ -23,7 +23,8 @@ class ProvisioningConfig:
 
     Args:
         enabled: Master switch. When ``True``, the worker/client provisions the
-            referenced topics on startup; when ``False`` it is a no-op.
+            referenced topics on startup; when ``False`` (the default) it is a
+            no-op.
         num_partitions: Partition count for every newly-created data topic.
             Always supplied as a concrete positive value (never broker-default
             ``-1``).
@@ -37,12 +38,24 @@ class ProvisioningConfig:
             request/reply traffic.
         create_timeout_ms: Overall budget for the provisioning operation
             (connect + create + retry + inspect). Exceeding it raises
-            :class:`~calfkit.provisioning.TopicProvisioningError`-adjacent
-            timeout behavior naming the still-pending topics.
+            :class:`~calfkit.provisioning.TopicProvisioningError` (with
+            ``code=None``) naming the still-pending topics.
+
+    Raises:
+        ValueError: If ``num_partitions < 1``, ``replication_factor < 1``, or
+            ``create_timeout_ms <= 0``.
     """
 
-    enabled: bool
+    enabled: bool = False
     num_partitions: int = 1
     replication_factor: int = 1
     topic_configs: dict[str, str] = field(default_factory=dict)
     create_timeout_ms: int = 30000
+
+    def __post_init__(self) -> None:
+        if self.num_partitions < 1:
+            raise ValueError(f"num_partitions must be >= 1, got {self.num_partitions!r}")
+        if self.replication_factor < 1:
+            raise ValueError(f"replication_factor must be >= 1, got {self.replication_factor!r}")
+        if self.create_timeout_ms <= 0:
+            raise ValueError(f"create_timeout_ms must be > 0, got {self.create_timeout_ms!r}")

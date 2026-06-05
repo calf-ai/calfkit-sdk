@@ -89,6 +89,19 @@ class TopicProvisioningError(Exception):
         super().__init__(message)
 
 
+def _normalize_bootstrap(server_urls: str | Iterable[str] | None) -> str | list[str]:
+    """Normalize connect server URL(s) to the admin client's accepted shape.
+
+    ``None`` falls back to ``"localhost"``; a ``str`` is passed through as-is;
+    any other iterable is materialized to a ``list``.
+    """
+    if server_urls is None:
+        return "localhost"
+    if isinstance(server_urls, str):
+        return server_urls
+    return list(server_urls)
+
+
 def _make_admin_client(**kwargs: Any) -> Any:
     """Construct an ``AIOKafkaAdminClient``.
 
@@ -146,6 +159,9 @@ class TopicProvisioner:
     See :class:`~calfkit.provisioning.ProvisioningConfig` for the dev-safe /
     review-for-prod caveats. Construction performs NO network I/O — the admin
     client is only created (and connected) inside :meth:`provision`.
+
+    A single instance handles one :meth:`provision` call at a time; it is not
+    safe to reuse concurrently (``_last_pending`` is per-operation state).
     """
 
     def __init__(
@@ -162,6 +178,31 @@ class TopicProvisioner:
         # Topics still unresolved at the latest create attempt; surfaced by the
         # timeout path so the error names what is missing.
         self._last_pending: list[str] = []
+
+    @classmethod
+    def from_connection(
+        cls,
+        *,
+        server_urls: str | Iterable[str] | None,
+        config: ProvisioningConfig,
+        security_kwargs: dict[str, Any] | None = None,
+    ) -> "TopicProvisioner":
+        """Build a provisioner from connect-style inputs.
+
+        Centralizes the bootstrap normalization (:func:`_normalize_bootstrap`)
+        and the ``security=`` object split that the client, worker, and CLI all
+        otherwise mirror. ``security_kwargs`` is treated read-only: ``security``
+        is popped out of a copy and the remaining raw kwargs are forwarded to
+        the admin client.
+        """
+        kwargs = dict(security_kwargs) if security_kwargs else {}
+        security = kwargs.pop("security", None)
+        return cls(
+            bootstrap_servers=_normalize_bootstrap(server_urls),
+            config=config,
+            security=security,
+            **kwargs,
+        )
 
     async def provision(
         self,
@@ -182,6 +223,9 @@ class TopicProvisioner:
             TopicProvisioningError: On a non-retriable per-topic error, or when
                 the timeout elapses with topics still pending.
         """
+        # Reset per-operation state so a prior call's pending set can't leak
+        # into this one's timeout/error reporting.
+        self._last_pending = []
         pending = list(dict.fromkeys(topics))
         if not pending:
             return ProvisionReport()
@@ -208,6 +252,7 @@ class TopicProvisioner:
         self._last_pending = list(pending)
         admin = _make_admin_client(
             bootstrap_servers=self._bootstrap_servers,
+            request_timeout_ms=self._config.create_timeout_ms,
             **self._conn_kwargs,
         )
         try:
@@ -217,8 +262,10 @@ class TopicProvisioner:
                 new_topics = [self._new_topic(t, framework_topics) for t in pending]
                 resp = await admin.create_topics(new_topics)
                 next_pending: list[str] = []
+                accounted: set[str] = set()
                 for row in resp.topic_errors:
                     topic, code = self._unpack(row)
+                    accounted.add(topic)
                     decision = self._classify(topic, code)
                     if decision == "created":
                         report.created.append(topic)
@@ -234,6 +281,17 @@ class TopicProvisioner:
                         )
                     elif decision == "retry":
                         next_pending.append(topic)
+                # Defensive: every requested topic must appear in the response.
+                # A broker that silently drops a topic from its reply must not be
+                # treated as success — name the unaccounted topic(s) and fail.
+                unaccounted = [t for t in pending if t not in accounted]
+                if unaccounted:
+                    raise TopicProvisioningError(
+                        "Topic provisioning response omitted requested "
+                        f"topic(s): {', '.join(unaccounted)}.",
+                        topic=unaccounted[0],
+                        code=None,
+                    )
                 pending = next_pending
                 if pending:
                     await asyncio.sleep(_RETRY_BACKOFF_S)
