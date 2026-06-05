@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 class ProvisioningConfig:
     """Opt-in configuration for best-effort Kafka topic auto-creation.
 
+    **Experimental** (opt-in; off by default). This API may change or be
+    removed in a minor release — calfkit is pre-1.0. Feedback welcome.
+
     .. warning::
 
         This is a **development convenience**, not a production provisioning

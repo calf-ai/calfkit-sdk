@@ -135,11 +135,13 @@ class BaseClient:
                 ``CALF_HOST_URL`` environment variable, then ``"localhost"``.
             reply_topic: Explicit reply topic name. When ``None`` (default), a
                 unique topic is generated using a uuid7 client ID.
-            provisioning: Opt-in Kafka topic auto-creation config. When enabled,
-                the client provisions its reply topic on first invocation.
-                Defaults to ``None``, which is normalized to a disabled config
-                (a no-op). See :class:`~calfkit.provisioning.ProvisioningConfig`
-                for the dev-safe / review-for-prod caveats.
+            provisioning: **Experimental** (may change or be removed in a minor
+                release; calfkit is pre-1.0). Opt-in Kafka topic auto-creation
+                config. When enabled, the client provisions its reply topic on
+                first invocation. Defaults to ``None``, which is normalized to a
+                disabled config (a no-op). See
+                :class:`~calfkit.provisioning.ProvisioningConfig` for the
+                dev-safe / review-for-prod caveats.
             **broker_kwargs: Additional keyword arguments forwarded to
                 ``KafkaBroker`` (e.g. ``security``, ``client_id``).
 

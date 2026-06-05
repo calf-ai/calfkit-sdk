@@ -1,5 +1,8 @@
 """``calfkit topics`` typer subcommand.
 
+**Experimental** (part of the opt-in topic-provisioning feature; may change or
+be removed in a minor release — calfkit is pre-1.0).
+
 Currently exposes one command: ``provision``. Resolves the Kafka topics a set
 of nodes reference and best-effort creates them via the admin client — a
 **development convenience** for getting a local/CI broker into the right shape
@@ -42,7 +45,7 @@ except ImportError as e:  # pragma: no cover -- exercised manually
 
 app = typer.Typer(
     name="topics",
-    help="Kafka topic management commands.",
+    help="Kafka topic management commands. [EXPERIMENTAL]",
     no_args_is_help=True,
 )
 
@@ -183,6 +186,9 @@ def provision(
     ),
 ) -> None:
     """Provision every Kafka topic referenced by the given nodes.
+
+    **Experimental** (opt-in feature; may change or be removed in a minor
+    release — calfkit is pre-1.0).
 
     Resolves ``--nodes module:attr`` specs, computes the full topic set
     (subscribe inboxes, framework return inboxes, publish topics, and agent

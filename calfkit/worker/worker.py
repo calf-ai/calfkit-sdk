@@ -155,6 +155,9 @@ class Worker:
         compaction overrides) are never applied to those correlation-keyed
         return inboxes.
 
+        **Experimental** (opt-in; off by default): this API may change or be
+        removed in a minor release — calfkit is pre-1.0.
+
         This is a **development convenience** (rf=1, no ACLs); review before
         relying on it in production, where topics are typically ops-governed.
         See :class:`~calfkit.provisioning.ProvisioningConfig` for the caveats.

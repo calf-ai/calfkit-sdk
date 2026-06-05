@@ -22,6 +22,9 @@ _RETRY_BACKOFF_S = 0.5
 def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
     """Compute the full set of Kafka topics referenced by ``nodes``.
 
+    **Experimental** (part of the opt-in provisioning API; may change or be
+    removed in a minor release — calfkit is pre-1.0).
+
     For every node this includes, in encounter order:
 
     * each entry of ``subscribe_topics`` (the node's public inbox(es)),
@@ -155,6 +158,9 @@ def _merge_security_kwargs(
 
 class TopicProvisioner:
     """Best-effort, opt-in creator of Kafka topics via the admin client.
+
+    **Experimental** (opt-in; off by default): this API may change or be
+    removed in a minor release — calfkit is pre-1.0. Feedback welcome.
 
     See :class:`~calfkit.provisioning.ProvisioningConfig` for the dev-safe /
     review-for-prod caveats. Construction performs NO network I/O — the admin
