@@ -21,6 +21,7 @@ from calfkit.models import (
 from calfkit.models.envelope import Envelope
 from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.session_context import SessionRunContext
+from calfkit.worker.lifecycle import LifecycleHookMixin
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ on the first rejection.
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(BaseNodeSchema):
+class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
     _run_accepts_input: bool
     _node_kind: ClassVar[NodeKind] = "node"
     """Coarse classification of this node, stamped onto every outbound publish as the
@@ -168,6 +169,7 @@ class BaseNodeDef(BaseNodeSchema):
         if current_frame.overrides:
             ctx.state.overrides = current_frame.overrides
         ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
+        ctx._resources = self.resources
         ctx._frame_id = current_frame.frame_id
         return ctx
 

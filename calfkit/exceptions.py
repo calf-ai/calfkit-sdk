@@ -5,6 +5,15 @@ class DeserializationError(Exception):
     """Raised when client-side output deserialization fails."""
 
 
+class LifecycleConfigError(Exception):
+    """Raised when a node/worker lifecycle configuration is invalid.
+
+    Covers misconfiguration that is detectable at registration or boot
+    time, such as two writers claiming the same resource key, or a
+    duplicate ``@resource`` name on a single owner.
+    """
+
+
 class ToolExecutionError(Exception):
     """The original traceback is not preserved across the Kafka boundary; it is
     logged at the worker that ran the tool. ``exc_type`` and ``exc_message`` are

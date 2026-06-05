@@ -1,18 +1,25 @@
 import logging
+from contextlib import AsyncExitStack
+from types import TracebackType
 from typing import Any
 
+import uuid_utils
 from faststream import FastStream
+from typing_extensions import Self
 
 from calfkit.client import Client
 from calfkit.mcp._bridge import McpBridge
 from calfkit.mcp._dedup import IdempotencyCache
 from calfkit.mcp._server import McpServer
 from calfkit.nodes import BaseNodeDef
+from calfkit.worker.lifecycle import PHASE_PAIRS, LifecycleContext, LifecycleHookMixin, ResourceSetupContext, ServingContext, _resource_cm, _span_cm
+from calfkit.worker.lifecycle import _ClaimingView as ClaimingView
+from calfkit.worker.lifecycle import _read_only_resources as read_only_resources
 
 logger = logging.getLogger(__name__)
 
 
-class Worker:
+class Worker(LifecycleHookMixin):
     def __init__(
         self,
         client: Client,
@@ -22,6 +29,8 @@ class Worker:
         extra_publish_kwargs: dict[str, Any] = {},
         extra_subscribe_kwargs: dict[str, Any] = {},
         idempotency_cache: IdempotencyCache | None = None,
+        id: str | None = None,
+        name: str | None = None,
     ):
         """Initialize a worker.
 
@@ -40,13 +49,34 @@ class Worker:
                 constructed with default parameters (1hr TTL, 10k entries).
                 One cache is shared across all MCP bridges in this worker
                 so multi-tool redeliveries dedup correctly.
+            id: Stable wire identity for this worker (e.g. for fleet presence).
+                Validated non-empty; a uuid7 hex is generated when ``None``.
+                Read-only after construction — mirrors ``BaseClient.emitter_id``.
+            name: Display-only label; defaults to ``id``. Never put on the wire.
         """
+        if id is not None and not id.strip():
+            raise ValueError("id must be a non-empty string or None")
+        if name is not None and not name.strip():
+            raise ValueError("name must be a non-empty string or None")
         self._client = client
         self._max_workers = max_workers
         self._group_id = group_id
         self._extra_publish_kwargs = extra_publish_kwargs
         self._extra_subscribe_kwargs = extra_subscribe_kwargs
         self._prepared = False
+        self._id = id if id is not None else uuid_utils.uuid7().hex
+        self._name = name if name is not None else self._id
+        self._started = False
+
+        # Lifecycle bracket stacks. ``resource`` brackets (callbacks + @resource)
+        # are entered before the broker starts and torn down after it stops;
+        # ``serving`` brackets run while the broker consumes. Built lazily by the
+        # hooks; ``None`` means "not yet entered" so ``_safe_aclose`` is a no-op.
+        self._resource_stack: AsyncExitStack | None = None
+        self._serving_stack: AsyncExitStack | None = None
+        # The FastStream app, built once on start()/run(). ``None`` until then so
+        # stop() before start() is a safe no-op rather than an AttributeError.
+        self._app: FastStream | None = None
 
         # MCP-specific state. Segregating at construction time means the
         # ``add_nodes`` API path also routes McpServer instances correctly.
@@ -59,6 +89,16 @@ class Worker:
         self._nodes: list[BaseNodeDef] = []
         for node in nodes or []:
             self._add_node(node)
+
+    @property
+    def id(self) -> str:
+        """Stable wire identity for this worker (read-only; set at construction)."""
+        return self._id
+
+    @property
+    def name(self) -> str:
+        """Display-only label (read-only; defaults to ``id``). Never on the wire."""
+        return self._name
 
     def add_nodes(self, *nodes: BaseNodeDef | McpServer) -> None:
         """Add nodes after construction.
@@ -123,9 +163,10 @@ class Worker:
         self._prepared = True
 
     async def _on_startup(self) -> None:
-        """FastStream startup hook — runs before broker.start().
+        """Open MCP sessions and register handlers, before the broker starts.
 
-        FastStream's ``on_startup`` fires before any Kafka subscriber
+        Invoked by :meth:`_hook_on_startup` (the wired FastStream ``on_startup``
+        hook) and by the rollback paths. Runs before any Kafka subscriber
         begins consuming, so we use this window to:
 
         1. Open each McpServer's MCP session (subprocess spawn or HTTP
@@ -171,11 +212,12 @@ class Worker:
             raise
 
     async def _on_shutdown(self) -> None:
-        """FastStream shutdown hook — close MCP sessions cleanly.
+        """Close MCP sessions cleanly.
 
-        Runs before ``broker.stop()`` so in-flight bridge handlers can
-        still complete (the FastStream subscribers are still alive at this
-        point — see the audit's lifecycle ordering).
+        Invoked by :meth:`_hook_on_shutdown` (the wired FastStream
+        ``on_shutdown`` hook) and by the startup / after-startup rollback paths,
+        always while the broker is still up so in-flight bridge handlers can
+        still complete.
 
         Errors in individual session teardown are logged and swallowed so
         a slow / hung MCP server doesn't prevent the other sessions from
@@ -189,16 +231,200 @@ class Worker:
             except Exception:
                 logger.exception("failed to close MCP session for %r during shutdown", server.raw_name)
 
-    async def run(self, **extra_run_args: Any) -> None:
-        """Blocking method to run worker as a service until stopped."""
+    # ------------------------------------------------------------------
+    # Lifecycle engine (plan §3.3): build per-owner brackets and enter them
+    # into a phase stack. Owners are the worker itself then its nodes.
+    # ------------------------------------------------------------------
+
+    def _owners(self) -> list[Any]:
+        """Owners that participate in the lifecycle, worker first then nodes.
+
+        ``McpServer`` instances are *not* owners here — they're managed by the
+        existing MCP open/close logic, not the generic bracket engine.
+        """
+        return [self, *self._nodes]
+
+    def _make_ctx(self, owner: Any, pair: str) -> Any:
+        """Build the per-phase context for ``owner`` (plan §3.3).
+
+        ``serving`` phases get a read-only resources view plus the broker;
+        ``resource`` phases get a writable ``_ClaimingView`` so callbacks can
+        own keys (collisions funnel through the bag's ``claim``).
+        """
+        (_enter, _exit), has_res = PHASE_PAIRS[pair]
+        if not has_res:
+            return ServingContext(owner, read_only_resources(owner.resources), self._client.broker)
+        return LifecycleContext(owner, ClaimingView(owner.resources, "an on_startup/after_shutdown callback"))
+
+    def _owner_cms(self, owner: Any, pair: str) -> list[Any]:
+        """Build the async CMs for ``owner`` in ``pair`` (plan §3.3).
+
+        ``resource`` phases include one ``@resource`` bracket per declared
+        resource (read-only setup ctx, built once per owner) followed by the
+        callback span; ``serving`` phases include only the callback span. The
+        span is omitted entirely when the owner has no hooks for either phase.
+        """
+        (enter, exit_), has_res = PHASE_PAIRS[pair]
+        ctx = self._make_ctx(owner, pair)
+        cms: list[Any] = []
+        if has_res:
+            setup_ctx = ResourceSetupContext(owner, read_only_resources(owner.resources))
+            cms = [_resource_cm(owner, name, genfn, setup_ctx) for name, genfn in owner._resource_cms()]
+        if owner._hooks_for(enter) or owner._hooks_for(exit_):
+            cms.append(_span_cm(owner, enter, exit_, ctx))
+        return cms
+
+    async def _enter_into(self, stack: AsyncExitStack, pair: str) -> None:
+        """Enter every owner's CMs for ``pair`` into ``stack``, worker first."""
+        for owner in self._owners():
+            for cm in self._owner_cms(owner, pair):
+                await stack.enter_async_context(cm)
+
+    @staticmethod
+    async def _safe_aclose(stack: AsyncExitStack | None) -> None:
+        """Close a phase stack if it was entered; teardown logs-never-raises.
+
+        Each CM's own ``finally`` is guarded (``_safe_teardown`` /
+        ``_resource_cm``), so ``aclose`` here unwinds the whole stack without
+        re-raising teardown errors.
+        """
+        if stack is not None:
+            await stack.aclose()
+
+    # ------------------------------------------------------------------
+    # Four FastStream hooks (plan §3.4). MCP open/close is preserved as-is
+    # (``_on_startup`` / ``_on_shutdown``); the resource/serving brackets are
+    # layered on top.
+    # ------------------------------------------------------------------
+
+    async def _hook_on_startup(self) -> None:
+        """``on_startup``: open MCP + register handlers, then enter resource brackets.
+
+        If entering the resource stack fails (or is cancelled), roll back the
+        resource stack *and* the MCP sessions opened by ``_on_startup`` before
+        re-raising the original error so boot fails cleanly.
+        """
+        # Existing MCP open + register_handlers; this method does its own MCP
+        # cleanup if it fails, so a failure here needs no extra MCP teardown.
+        await self._on_startup()
+        self._resource_stack = AsyncExitStack()
+        try:
+            await self._enter_into(self._resource_stack, "resource")
+        except BaseException:
+            await self._safe_aclose(self._resource_stack)
+            self._resource_stack = None
+            await self._on_shutdown()  # close MCP sessions opened above
+            raise
+
+    async def _hook_after_startup(self) -> None:
+        """``after_startup``: enter serving brackets while the broker consumes.
+
+        FastStream skips shutdown hooks when ``after_startup`` raises, so a
+        failure here must unwind both stacks, close MCP, and stop the broker
+        itself before re-raising.
+        """
+        self._serving_stack = AsyncExitStack()
+        try:
+            await self._enter_into(self._serving_stack, "serving")
+        except BaseException:
+            # Mirror the normal shutdown order so an in-flight handler never
+            # reads a torn-down resource: serving teardown + MCP close while the
+            # broker is up, then drain (broker.stop), then resource teardown.
+            await self._safe_aclose(self._serving_stack)
+            self._serving_stack = None
+            await self._on_shutdown()  # close MCP sessions (broker still up)
+            try:
+                await self._client.broker.stop()  # drain in-flight handlers
+            except Exception:
+                logger.exception("broker.stop() failed during after_startup rollback")
+            await self._safe_aclose(self._resource_stack)  # tear down resources post-drain
+            self._resource_stack = None
+            raise
+
+    async def _hook_on_shutdown(self) -> None:
+        """``on_shutdown``: tear down serving brackets, then close MCP sessions.
+
+        Runs before ``broker.stop()`` so in-flight handlers can still complete.
+        """
+        await self._safe_aclose(self._serving_stack)
+        self._serving_stack = None
+        await self._on_shutdown()
+
+    async def _hook_after_shutdown(self) -> None:
+        """``after_shutdown``: tear down resource brackets (post-drain)."""
+        await self._safe_aclose(self._resource_stack)
+        self._resource_stack = None
+
+    def _build_app(self) -> FastStream:
+        """Build the FastStream app once, wiring all four lifecycle hooks."""
+        return FastStream(
+            self._client._connection,
+            on_startup=[self._hook_on_startup],
+            after_startup=[self._hook_after_startup],
+            on_shutdown=[self._hook_on_shutdown],
+            after_shutdown=[self._hook_after_shutdown],
+        )
+
+    def _mark_started(self) -> None:
+        if self._started:
+            raise RuntimeError("Worker is single-use; create a new Worker to restart")
+        self._started = True
+
+    # ------------------------------------------------------------------
+    # Three-surface lifecycle (plan §3.6): start/stop, async-with, run.
+    # ------------------------------------------------------------------
+
+    async def start(self, **run_extra: Any) -> None:
+        """Start the worker without installing signal handlers (programmatic use).
+
+        Raises:
+            RuntimeError: if the worker was already started (single-use).
+        """
+        self._mark_started()
         logger.info(
-            "worker starting with %d regular node(s), %d MCP server(s)",
+            "worker %s starting with %d regular node(s), %d MCP server(s)",
+            self.id,
             len(self._nodes),
             len(self._mcp_servers),
         )
-        app = FastStream(
-            self._client._connection,
-            on_startup=[self._on_startup],
-            on_shutdown=[self._on_shutdown],
+        self._app = self._build_app()
+        await self._app.start(**run_extra)
+
+    async def stop(self) -> None:
+        """Stop the worker (drains then disconnects the broker).
+
+        A no-op if the worker was never started, so a defensive
+        ``try/finally: await worker.stop()`` is safe.
+        """
+        if self._app is not None:
+            await self._app.stop()
+
+    async def __aenter__(self) -> Self:
+        await self.start()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.stop()
+
+    async def run(self, **extra_run_args: Any) -> None:
+        """Blocking method to run worker as a service until stopped.
+
+        Installs signal handlers and blocks until the worker is signalled.
+
+        Raises:
+            RuntimeError: if the worker was already started (single-use).
+        """
+        self._mark_started()
+        logger.info(
+            "worker %s starting with %d regular node(s), %d MCP server(s)",
+            self.id,
+            len(self._nodes),
+            len(self._mcp_servers),
         )
-        await app.run(**extra_run_args)
+        self._app = self._build_app()
+        await self._app.run(**extra_run_args)

@@ -1,5 +1,6 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Generic
 
 import uuid_utils
@@ -8,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
 from calfkit.models.state import OverridesState, State
+
+_EMPTY_RESOURCES: Mapping[str, Any] = MappingProxyType({})
 
 
 @dataclass
@@ -85,6 +88,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     _emitter_node_id: str | None = PrivateAttr(default=None)
     _emitter_node_kind: str | None = PrivateAttr(default=None)
     _frame_id: str | None = PrivateAttr(default=None)
+    _resources: Mapping[str, Any] | None = PrivateAttr(default=None)
 
     @property
     def correlation_id(self) -> str:
@@ -142,6 +146,25 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         cannot be spoofed via the model constructor.
         """
         return self._frame_id
+
+    @property
+    def resources(self) -> Mapping[str, Any]:
+        """Read-only view of the owner's lifecycle-managed resources.
+
+        Populated server-side by ``BaseNodeDef.prepare_context`` from the node's
+        resource bag. Read as ``ctx.resources["key"]``. Returns an empty
+        read-only mapping when unset (e.g. a context built outside a handler),
+        so reads never raise and writes always raise ``TypeError``.
+
+        Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be
+        spoofed via the model constructor, and stamped *after* the
+        ``model_copy(deep=True)`` in ``prepare_context`` (the bag is empty at
+        copy time). The stored mapping is plain (deep-copy-safe); the read-only
+        proxy is built here on read.
+        """
+        if self._resources is None:
+            return _EMPTY_RESOURCES
+        return MappingProxyType(self._resources)
 
     def _stamp_transport(self, *, correlation_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None) -> None:
         """Stamp transport-sourced identity onto this context.

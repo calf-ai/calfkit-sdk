@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 import pydantic_core
@@ -103,6 +104,7 @@ class ToolNodeDef(BaseToolNodeDef):
             tool_name=tool_call_part.tool_name,
             messages=ctx.state.message_history,
             run_id=ctx.correlation_id,
+            resources=MappingProxyType(self.resources),
         )
 
         # TODO(#143): bounded retries / backoff for non-ModelRetry exceptions.

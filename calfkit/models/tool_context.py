@@ -1,4 +1,6 @@
 import dataclasses
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 from calfkit._vendor.pydantic_ai._run_context import RunContext
@@ -19,6 +21,15 @@ class ToolContext(RunContext[dict[str, Any]]):
     """
 
     agent_name: str | None = None
+
+    resources: Mapping[str, Any] = dataclasses.field(default_factory=lambda: MappingProxyType({}), kw_only=True)
+    """Read-only view of the owning node's lifecycle-managed resources.
+
+    Stamped by ``ToolNodeDef.run`` from the node's resource bag (a
+    :class:`types.MappingProxyType`). Read as ``ctx.resources["key"]``. Typed as
+    a read-only ``Mapping`` so accidental ``ctx.resources[...] = ...`` is a type
+    error; the default is an empty read-only mapping so a write raises at
+    runtime even when the node owns no resources."""
 
     @property
     def correlation_id(self) -> str:
