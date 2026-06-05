@@ -2,7 +2,7 @@ import inspect
 import logging
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from faststream import Context, Response
 from faststream.kafka.annotations import (
@@ -23,6 +23,9 @@ from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.session_context import SessionRunContext
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
+if TYPE_CHECKING:
+    from calfkit.worker.worker import Worker
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +45,11 @@ on the first rejection.
 
 class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
     _run_accepts_input: bool
+    _worker: "Worker | None" = None
+    """Back-reference to the owning worker, set by ``Worker._add_node``. ``None``
+    for a node not attached to a worker. Used by :meth:`_effective_resources` to
+    merge worker-scoped lifecycle resources under the node's own. Not a dataclass
+    field (``BaseNodeDef`` is not a ``@dataclass``), so it never rides the wire."""
     _node_kind: ClassVar[NodeKind] = "node"
     """Coarse classification of this node, stamped onto every outbound publish as the
     ``x-calf-emitter-kind`` Kafka header. Subclasses override to one of the values in
@@ -169,9 +177,21 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
         if current_frame.overrides:
             ctx.state.overrides = current_frame.overrides
         ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
-        ctx._resources = dict(self.resources)  # shallow copy: handler can't corrupt the shared bag
+        ctx._resources = self._effective_resources()
         ctx._frame_id = current_frame.frame_id
         return ctx
+
+    def _effective_resources(self) -> dict[str, Any]:
+        """The resources a per-message handler sees: worker-scoped merged under
+        this node's own (node wins on key collision).
+
+        Returns a fresh shallow copy each call so handler code can't corrupt the
+        node's or the worker's shared bag. ``{}`` when neither owns resources.
+        """
+        worker = self._worker
+        if worker is None:
+            return dict(self.resources)
+        return {**worker.resources, **self.resources}
 
     def _emitter_headers(self) -> dict[str, str]:
         return {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind}

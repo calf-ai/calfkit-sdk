@@ -277,6 +277,107 @@ result = await client.execute_node(
 
 <br>
 
+### Lifecycle Hooks & Resources (Optional)
+
+Nodes and workers can open long-lived **resources** — database pools, HTTP clients, caches — when the service boots and close them cleanly on shutdown. A resource is a live, server-side object that handlers read via `ctx.resources["key"]`. Unlike `deps`, resources are never serialized or sent over the wire; they live inside the running worker process.
+
+**`@resource` context-manager pattern (recommended)** — decorate a single-yield async generator on a node. Whatever you `yield` is the resource value; code after the `yield` runs at teardown. A tool reads it from `ctx.resources`:
+
+```python
+# weather_tool.py
+import asyncio
+import httpx
+from calfkit.nodes import agent_tool
+from calfkit.client import Client
+from calfkit.worker import Worker
+from calfkit import ToolContext  # type for ctx, optional
+
+@agent_tool
+async def get_weather(ctx: ToolContext, location: str) -> str:
+    """Get the current weather at a location"""
+    http: httpx.AsyncClient = ctx.resources["http"]  # the live, shared client
+    resp = await http.get(f"https://api.example.com/weather?q={location}")
+    return resp.text
+
+# Open one httpx client at startup, close it at shutdown.
+@get_weather.resource("http")
+async def http_client(ctx):              # ctx: ResourceSetupContext
+    async with httpx.AsyncClient() as client:
+        yield client                     # value lands in ctx.resources["http"]
+    # exiting the `async with` closes the client on teardown
+
+async def main():
+    client = Client.connect("localhost:9092")
+    worker = Worker(client, nodes=[get_weather])
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+The decorator surface (`resource`, `on_startup`, `after_startup`, `on_shutdown`, `after_shutdown`) is available on every node *and* on the `Worker`.
+
+**Callback pattern (alternative)** — `@node.on_startup` writes into the bag and `@node.after_shutdown` cleans up. Use this when a context manager doesn't fit:
+
+```python
+@get_weather.on_startup
+async def open_pool(ctx):                 # ctx: LifecycleContext (resources writable)
+    ctx.resources["pool"] = await create_pool()
+
+@get_weather.after_shutdown
+async def close_pool(ctx):
+    await ctx.resources["pool"].close()
+```
+
+**One pattern per owner** — pick `@resource` *or* the `on_startup`/`after_shutdown` callbacks on a given owner, not both. If you mix them, the `@resource` brackets win and the callbacks are silently ignored (with a warning) — this mirrors FastAPI's lifespan-vs-`on_event` rule. Registering two `@resource` brackets under the same name on one owner raises `LifecycleConfigError` immediately.
+
+**Worker-scoped resources** — declare a resource on the `Worker` to open **one shared object visible to every node's handler** as `ctx.resources["key"]`. This is the canonical "one shared pool for all nodes" pattern:
+
+```python
+async def main():
+    client = Client.connect("localhost:9092")
+    worker = Worker(client, nodes=[get_weather])
+
+    @worker.resource("pool")
+    async def shared_pool(ctx):
+        pool = await create_pool()
+        try:
+            yield pool                    # reachable as ctx.resources["pool"] in every node
+        finally:
+            await pool.close()
+
+    await worker.run()
+```
+
+Worker resources are merged under each node's own resources; if a node declares a resource with the same key, **the node's value wins** for that node's handlers.
+
+**`resources` vs `deps`** — keep these distinct:
+
+- **`resources`** are live, server-side objects (pools, clients) opened by lifecycle hooks, scoped to a worker or node, and **never serialized**. They never travel on the wire.
+- **`deps`** are per-request, JSON-serializable values the caller passes at invoke time (`client.execute_node(..., deps={...})`). They ride along on the Kafka envelope and are read by tools as `ctx.deps["key"]`.
+
+Use `resources` for connections you open once and reuse; use `deps` for request-specific data supplied by the caller.
+
+**Presence / announcement** — `@worker.after_startup` and `@worker.on_shutdown` receive a `ServingContext` while the broker is live (`ctx.broker`) and expose the worker as `ctx.owner`, so you can announce a worker's arrival and departure to the fleet:
+
+```python
+from calfkit.worker import Worker, ServingContext
+
+@worker.after_startup
+async def announce_up(ctx: ServingContext[Worker]) -> None:
+    await ctx.broker.publish({"id": ctx.owner.id, "status": "up"}, topic="fleet.presence")
+
+@worker.on_shutdown
+async def announce_down(ctx: ServingContext[Worker]) -> None:
+    await ctx.broker.publish({"id": ctx.owner.id, "status": "down"}, topic="fleet.presence")
+```
+
+Typing the hook as `ServingContext[Worker]` makes `ctx.owner.id` autocomplete. The context types are importable from the top level too: `from calfkit import ServingContext, LifecycleContext, ResourceSetupContext, LifecycleConfigError`.
+
+**At-least-once caveat**: presence publishes are *not* exactly-once. Under consumer-group rebalances an `after_startup` hook may fire more than once, and a hard crash skips the `on_shutdown` "down" entirely. Pair presence events with a consumer-side TTL / liveness check rather than treating them as a perfectly balanced up/down ledger.
+
+<br>
+
 ### Gating Node Invocations (Optional)
 
 When multiple agents share an input topic (each with its own consumer group), every agent receives every message published to that topic. A **gate stack** lets a node decide whether to handle an inbound event *before* `run()` runs — avoiding wasted LLM tokens on messages addressed elsewhere.

@@ -18,6 +18,7 @@ from calfkit.worker.lifecycle import (
     LifecycleHookMixin,
     ResourceSetupContext,
     ServingContext,
+    SupportsLifecycleHooks,
     _resource_cm,
     _span_cm,
 )
@@ -26,6 +27,32 @@ logger = logging.getLogger(__name__)
 
 
 class Worker(LifecycleHookMixin):
+    """Hosts nodes against a Kafka broker and manages their lifecycle.
+
+    A worker registers each node's FastStream subscribers/publishers and brackets
+    them with lifecycle hooks (``@resource`` / ``on_startup`` / ``after_startup``
+    / ``on_shutdown`` / ``after_shutdown``) inherited from
+    :class:`~calfkit.worker.lifecycle.LifecycleHookMixin`. Resources opened by
+    the worker are merged into every node handler's ``ctx.resources`` (node keys
+    win on collision); resources opened by a node are visible only to that node.
+
+    A worker is **single-use**: once started it cannot be restarted; create a new
+    ``Worker`` instead. Pick one of three run surfaces:
+
+    =========================  ===============  ======  ============================
+    Surface                    Signal handlers  Blocks  Use when
+    =========================  ===============  ======  ============================
+    ``await worker.run()``     yes              yes     deploying as a service
+    ``await worker.start()``   no               no      programmatic/embedded control
+    / ``await worker.stop()``
+    ``async with worker:``     no               no      tests, short-lived embedding
+    =========================  ===============  ======  ============================
+
+    On a failed boot (e.g. the broker can't reach Kafka), ``start()``, ``run()``,
+    and ``async with`` all run teardown automatically before re-raising, so a
+    failed start never leaks resources or MCP sessions.
+    """
+
     def __init__(
         self,
         client: Client,
@@ -122,12 +149,16 @@ class Worker(LifecycleHookMixin):
         if isinstance(node, McpServer):
             self._mcp_servers.append(node)
         else:
+            # Back-reference so the node's per-message handler can merge this
+            # worker's lifecycle resources under its own (see
+            # BaseNodeDef._effective_resources / prepare_context).
+            node._worker = self
             self._nodes.append(node)
 
     def register_handlers(self) -> None:
         """Register FastStream subscribers + publishers for every node.
 
-        Idempotent: a second call logs a warning and returns. This lets the
+        Idempotent: a second call logs at debug and returns. This lets the
         Worker.run() lifecycle hook call it safely even if a test driver
         called it manually first (the existing ``tests/providers.py`` pattern).
 
@@ -201,7 +232,11 @@ class Worker(LifecycleHookMixin):
                         )
                     )
             # Bridges go through the same handler-registration path as
-            # native nodes so subscribers are wired identically.
+            # native nodes so subscribers are wired identically; give them the
+            # same worker back-reference as _add_node so worker-scoped resources
+            # merge into bridge handlers too.
+            for bridge in self._mcp_bridges:
+                bridge._worker = self
             self._nodes.extend(self._mcp_bridges)
             self.register_handlers()
         except BaseException:
@@ -238,20 +273,23 @@ class Worker(LifecycleHookMixin):
                 logger.exception("failed to close MCP session for %r during shutdown", server.raw_name)
 
     # ------------------------------------------------------------------
-    # Lifecycle engine (plan §3.3): build per-owner brackets and enter them
-    # into a phase stack. Owners are the worker itself then its nodes.
+    # Lifecycle engine: build per-owner brackets and enter them into a phase
+    # stack. Owners are the worker itself then its nodes.
     # ------------------------------------------------------------------
 
-    def _owners(self) -> list[Any]:
+    def _owners(self) -> list[SupportsLifecycleHooks]:
         """Owners that participate in the lifecycle, worker first then nodes.
 
         ``McpServer`` instances are *not* owners here — they're managed by the
-        existing MCP open/close logic, not the generic bracket engine.
+        existing MCP open/close logic, not the generic bracket engine. The
+        return type also exercises ``SupportsLifecycleHooks`` conformance: this
+        line fails to type-check if ``Worker``/``BaseNodeDef`` ever drift from
+        the structural surface the CM builders rely on.
         """
         return [self, *self._nodes]
 
     def _make_ctx(self, owner: Any, pair: str) -> Any:
-        """Build the callback-span context for ``owner`` (plan §3.3).
+        """Build the callback-span context for ``owner``.
 
         ``serving`` phases get a read-only-typed resources view plus the broker;
         ``resource`` phases get a writable view so ``on_startup``/
@@ -264,7 +302,7 @@ class Worker(LifecycleHookMixin):
         return LifecycleContext(owner, owner.resources)
 
     def _owner_cms(self, owner: Any, pair: str) -> list[Any]:
-        """Build the async CMs for ``owner`` in ``pair`` (plan §3.3).
+        """Build the async CMs for ``owner`` in ``pair``.
 
         One resource pattern per owner: if the owner declares ``@resource``
         brackets, those win and any ``on_startup``/``after_shutdown`` callbacks
@@ -307,7 +345,7 @@ class Worker(LifecycleHookMixin):
             await stack.aclose()
 
     # ------------------------------------------------------------------
-    # Four FastStream hooks (plan §3.4). MCP open/close is preserved as-is
+    # Four FastStream hooks. MCP open/close is preserved as-is
     # (``_on_startup`` / ``_on_shutdown``); the resource/serving brackets are
     # layered on top.
     # ------------------------------------------------------------------
@@ -386,7 +424,7 @@ class Worker(LifecycleHookMixin):
         self._started = True
 
     # ------------------------------------------------------------------
-    # Three-surface lifecycle (plan §3.6): start/stop, async-with, run.
+    # Three-surface lifecycle: start/stop, async-with, run.
     # ------------------------------------------------------------------
 
     async def start(self, **run_extra: Any) -> None:
@@ -403,16 +441,51 @@ class Worker(LifecycleHookMixin):
             len(self._mcp_servers),
         )
         self._app = self._build_app()
-        await self._app.start(**run_extra)
+        try:
+            await self._app.start(**run_extra)
+        except BaseException:
+            # FastStream runs no shutdown hooks if startup fails *after*
+            # on_startup (e.g. broker.start() can't reach Kafka), which would
+            # orphan the resource brackets + MCP sessions opened in
+            # _hook_on_startup. Python also skips __aexit__ when __aenter__
+            # raises, so `async with worker:` couldn't recover either. Run our
+            # own teardown (idempotent) before re-raising so a failed boot
+            # never leaks. A failure *in* teardown is logged, not raised, so it
+            # never masks the original boot error.
+            await self._cleanup_after_failed_start()
+            raise
 
     async def stop(self) -> None:
         """Stop the worker (drains then disconnects the broker).
 
         A no-op if the worker was never started, so a defensive
         ``try/finally: await worker.stop()`` is safe.
+
+        Cancellation caveat: resource/serving teardown is best-effort under
+        *cancellation*. If the surrounding task is cancelled mid-shutdown, a
+        ``CancelledError`` propagates out of the serving-teardown hook and
+        FastStream then skips ``broker.stop()`` and the resource-bracket
+        teardown — those resources may not close. The signal-driven
+        :meth:`run` surface is unaffected (FastStream runs shutdown to
+        completion before cancelling its task group); this only affects
+        external cancellation of the programmatic ``start``/``stop`` /
+        ``async with`` surfaces.
         """
         if self._app is not None:
             await self._app.stop()
+
+    async def _cleanup_after_failed_start(self) -> None:
+        """Best-effort teardown after a failed ``start()``/``run()``.
+
+        Runs the shutdown hooks (via ``stop()``) to release any resource
+        brackets / MCP sessions opened before the failure. A failure *here* is
+        logged, never raised, so it cannot mask the original boot error that the
+        caller is about to re-raise. ``CancelledError`` still propagates.
+        """
+        try:
+            await self.stop()
+        except Exception:
+            logger.exception("worker %s teardown after failed start failed; original boot error will be raised", self.id)
 
     async def __aenter__(self) -> Self:
         await self.start()
@@ -442,4 +515,12 @@ class Worker(LifecycleHookMixin):
             len(self._mcp_servers),
         )
         self._app = self._build_app()
-        await self._app.run(**extra_run_args)
+        try:
+            await self._app.run(**extra_run_args)
+        except BaseException:
+            # FastStream's run() never reaches its own _shutdown() when startup
+            # raises inside the task group, so (as in start()) run our teardown
+            # to release resources + MCP. stop() is idempotent, so this is safe
+            # even when run() already shut down cleanly before failing.
+            await self._cleanup_after_failed_start()
+            raise

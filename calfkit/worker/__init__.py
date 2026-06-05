@@ -1,10 +1,21 @@
 from typing import TYPE_CHECKING, Any
 
+# The lifecycle context types are safe to import eagerly: ``lifecycle`` is a leaf
+# module (it imports only faststream + calfkit.exceptions, never ``nodes`` or
+# ``worker.worker``), so it can't re-enter the circular graph that forces the
+# lazy ``Worker``/``WorkerConfig`` re-exports below.
+from calfkit.exceptions import LifecycleConfigError
+from calfkit.worker.lifecycle import LifecycleContext, ResourceSetupContext, ServingContext
+
 if TYPE_CHECKING:
     from calfkit.worker.worker import Worker
     from calfkit.worker.worker_config import WorkerConfig
 
 __all__ = [
+    "LifecycleConfigError",
+    "LifecycleContext",
+    "ResourceSetupContext",
+    "ServingContext",
     "Worker",
     "WorkerConfig",
 ]

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Protocol, runtime_checkable
 
 from faststream.kafka import KafkaBroker
-from typing_extensions import TypeVar
+from typing_extensions import Self, TypeVar
 
 from calfkit.exceptions import LifecycleConfigError
 
@@ -39,31 +39,15 @@ OwnerT = TypeVar("OwnerT", default=Any)
 ItemT = TypeVar("ItemT")
 
 
-class _OwnerAliases(Generic[OwnerT]):
-    """Shared ``owner``/``node``/``worker`` accessors for the context types.
-
-    A single owner is exposed under three names so a hook body can read
-    whichever reads most naturally (``ctx.node`` on a node, ``ctx.worker`` on
-    a worker) without LSP-violating subclassing.
-    """
-
-    owner: OwnerT
-
-    @property
-    def node(self) -> OwnerT:
-        return self.owner
-
-    @property
-    def worker(self) -> OwnerT:
-        return self.owner
-
-
 @dataclass
-class LifecycleContext(_OwnerAliases[OwnerT]):
+class LifecycleContext(Generic[OwnerT]):
     """Context for ``on_startup`` / ``after_shutdown`` — resources are WRITABLE.
 
     This is the callback shape of resource management: a hook writes
-    ``ctx.resources["key"] = value`` into the owner's shared bag.
+    ``ctx.resources["key"] = value`` into the owner's shared bag. ``ctx.owner``
+    is the node or worker the hook was registered on; it is typed precisely
+    (e.g. ``LifecycleContext[Worker]``) when the hook is registered via the
+    owner's decorator, so ``ctx.owner.id`` autocompletes.
     """
 
     owner: OwnerT
@@ -71,16 +55,25 @@ class LifecycleContext(_OwnerAliases[OwnerT]):
 
 
 @dataclass
-class ResourceSetupContext(_OwnerAliases[OwnerT]):
-    """Context for a ``@resource`` body — resources are read-only-typed."""
+class ResourceSetupContext(Generic[OwnerT]):
+    """Context for a ``@resource`` body — resources are read-only-typed.
+
+    ``ctx.owner`` is the owning node or worker (see :class:`LifecycleContext`).
+    """
 
     owner: OwnerT
     resources: Mapping[str, Any]
 
 
 @dataclass
-class ServingContext(_OwnerAliases[OwnerT]):
-    """Context for ``after_startup`` / ``on_shutdown`` — read-only resources + broker."""
+class ServingContext(Generic[OwnerT]):
+    """Context for ``after_startup`` / ``on_shutdown`` — read-only resources + broker.
+
+    ``ctx.broker`` is the live :class:`~faststream.kafka.KafkaBroker` (the
+    producer is up during these phases), so a presence/announcement hook can
+    ``await ctx.broker.publish(...)``. ``ctx.owner`` is the owning node or
+    worker (see :class:`LifecycleContext`).
+    """
 
     owner: OwnerT
     resources: Mapping[str, Any]
@@ -119,8 +112,8 @@ async def _safe_teardown(
     """Run ``action`` over ``items`` in reverse (LIFO) order, logs-never-raises.
 
     A failing item is logged and skipped so siblings still tear down. A
-    ``CancelledError`` is *not* caught — cancellation must propagate and aborts
-    the remaining items (see plan §4).
+    ``CancelledError`` is *not* caught — cancellation must propagate (it derives
+    from ``BaseException``, not ``Exception``) and aborts the remaining items.
     """
     for it in reversed(items):
         try:
@@ -129,10 +122,19 @@ async def _safe_teardown(
             logger.exception("%s teardown failed: %r", label, it)
 
 
-# A lifecycle hook receives a context and returns ``None`` (sync) or an
-# awaitable (async). ``Any`` for the context keeps the phase-specific context
-# types assignable without per-phase overloads.
+# Internal, loose storage type: a lifecycle hook receives a context and returns
+# ``None`` (sync) or an awaitable (async). ``Any`` for the context keeps the
+# heterogeneous per-phase hooks in one registry list.
 LifecycleHook = Callable[[Any], Awaitable[Any] | None]
+
+# Public, phase-specific hook types. The decorators are typed with these (over
+# ``Self``) so a hook annotated ``ctx: ServingContext`` type-checks and
+# ``ctx.owner`` resolves to the owning node/worker. ``resource`` phases
+# (``on_startup``/``after_shutdown``) get a writable :class:`LifecycleContext`;
+# ``serving`` phases (``after_startup``/``on_shutdown``) get a
+# :class:`ServingContext` with the live broker.
+_ResourceHook = Callable[[LifecycleContext[OwnerT]], Awaitable[Any] | None]
+_ServingHook = Callable[[ServingContext[OwnerT]], Awaitable[Any] | None]
 
 
 @runtime_checkable
@@ -140,14 +142,17 @@ class SupportsLifecycleHooks(Protocol):
     """Structural type for an owner (node/worker) the CM builders operate on.
 
     The builders read only this surface; concrete owners gain it via
-    :class:`LifecycleHookMixin`.
+    :class:`LifecycleHookMixin`. ``resources`` is a read-only property returning
+    the owner's mutable bag — the engine writes into it via ``@resource``
+    (``_resource_cm``) but never rebinds the attribute.
     """
 
-    resources: dict[str, Any]
+    @property
+    def resources(self) -> MutableMapping[str, Any]: ...
 
     def _hooks_for(self, phase: str) -> list[LifecycleHook]: ...
 
-    def _resource_cms(self) -> list[tuple[str, Callable[..., Any]]]: ...
+    def _resource_cms(self) -> list[tuple[str, ResourceGenFn]]: ...
 
 
 def _span_cm(
@@ -169,7 +174,7 @@ def _span_cm(
         try:
             yield
         finally:
-            await _safe_teardown(owner._hooks_for(exit_phase), lambda cb: _maybe_await(cb(ctx)), exit_phase)
+            await _safe_teardown(owner._hooks_for(exit_phase), lambda cb: _maybe_await(cb(ctx)), f"{owner!r} {exit_phase}")
 
     return _cm()
 
@@ -203,13 +208,15 @@ def _resource_cm(
             try:
                 await cm.__aexit__(None, None, None)
             except Exception:
-                logger.exception("@resource %r teardown failed", name)
+                logger.exception("@resource %r on %r teardown failed", name, owner)
 
     return _cm()
 
 
 # A ``@resource`` body: a single-yield async generator taking the setup context.
-ResourceGenFn = Callable[[Any], AsyncIterator[Any]]
+# Generic over the owner type so a decorated body can annotate
+# ``ctx: ResourceSetupContext[MyNode]``; bare ``ResourceGenFn`` is ``[Any]``.
+ResourceGenFn = Callable[[ResourceSetupContext[OwnerT]], AsyncIterator[Any]]
 
 
 class LifecycleHookMixin:
@@ -265,32 +272,48 @@ class LifecycleHookMixin:
         reg[phase] = [*reg.get(phase, []), fn]
         return fn
 
-    def on_startup(self, fn: LifecycleHook) -> LifecycleHook:
-        """Register an ``on_startup`` hook (pre-broker; writable resources)."""
-        return self._register_hook("on_startup", fn)
+    def on_startup(self, fn: _ResourceHook[Self]) -> _ResourceHook[Self]:
+        """Register an ``on_startup`` hook (pre-broker; writable resources).
 
-    def after_startup(self, fn: LifecycleHook) -> LifecycleHook:
+        The hook receives a :class:`LifecycleContext` (``ctx.resources`` is
+        writable). ``ctx.owner`` is typed as the owning node/worker.
+        """
+        self._register_hook("on_startup", fn)
+        return fn
+
+    def after_startup(self, fn: _ServingHook[Self]) -> _ServingHook[Self]:
         """Register an ``after_startup`` hook (broker up; read-only + broker).
+
+        The hook receives a :class:`ServingContext` (``ctx.broker`` is live).
 
         Caveat: under at-least-once delivery + rebalances a presence-style
         publish here may fire more than once, and a hard crash publishes
         nothing — pair with a consumer-side TTL/liveness check.
         """
-        return self._register_hook("after_startup", fn)
+        self._register_hook("after_startup", fn)
+        return fn
 
-    def on_shutdown(self, fn: LifecycleHook) -> LifecycleHook:
+    def on_shutdown(self, fn: _ServingHook[Self]) -> _ServingHook[Self]:
         """Register an ``on_shutdown`` hook (broker up; read-only + broker).
+
+        The hook receives a :class:`ServingContext` (``ctx.broker`` is live).
 
         Caveat: see :meth:`after_startup` — departure publishes are not
         guaranteed exactly once and may be skipped on a hard crash.
         """
-        return self._register_hook("on_shutdown", fn)
+        self._register_hook("on_shutdown", fn)
+        return fn
 
-    def after_shutdown(self, fn: LifecycleHook) -> LifecycleHook:
-        """Register an ``after_shutdown`` hook (post-drain; writable resources)."""
-        return self._register_hook("after_shutdown", fn)
+    def after_shutdown(self, fn: _ResourceHook[Self]) -> _ResourceHook[Self]:
+        """Register an ``after_shutdown`` hook (post-drain; writable resources).
 
-    def resource(self, name: str) -> Callable[[ResourceGenFn], ResourceGenFn]:
+        The hook receives a :class:`LifecycleContext` (``ctx.resources`` is
+        writable).
+        """
+        self._register_hook("after_shutdown", fn)
+        return fn
+
+    def resource(self, name: str) -> Callable[[ResourceGenFn[Self]], ResourceGenFn[Self]]:
         """Register a ``@resource`` bracket under ``name``.
 
         The decorated function is a single-yield async generator that receives
@@ -307,7 +330,7 @@ class LifecycleHookMixin:
             LifecycleConfigError: if ``name`` is already registered on this owner.
         """
 
-        def _decorator(fn: ResourceGenFn) -> ResourceGenFn:
+        def _decorator(fn: ResourceGenFn[Self]) -> ResourceGenFn[Self]:
             cms = self._resource_registry()
             if any(existing == name for existing, _ in cms):
                 raise LifecycleConfigError(f"@resource({name!r}) is already registered on this owner; resource names must be unique per owner")

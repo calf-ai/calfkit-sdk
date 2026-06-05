@@ -152,17 +152,21 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         """The owner's lifecycle-managed resources (read-only by type).
 
         Populated server-side by ``BaseNodeDef.prepare_context`` with a *shallow
-        copy* of the node's resource bag, so mutating it can't corrupt the shared
-        bag or other handlers. Typed ``Mapping`` so ``ctx.resources["k"] = ...``
-        is a type error at dev time (mirrors how ``deps`` is treated read-only).
-        Returns an empty mapping when unset (e.g. a context built outside a
-        handler), so reads never raise.
+        copy* of the node's (and its worker's) resource bag, so mutating it can't
+        corrupt the shared bag or other handlers. Typed ``Mapping`` so
+        ``ctx.resources["k"] = ...`` is a type error at dev time (mirrors how
+        ``deps`` is treated read-only). Returns an empty mapping when unset (e.g.
+        a context built outside a handler), so reads never raise.
 
         Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be
         spoofed via the model constructor, and stamped *after* the
-        ``model_copy(deep=True)`` in ``prepare_context`` (the bag is empty at
-        copy time, so the deep copy never duplicates live resources). Do not
-        deep-copy a *stamped* context — it references live resource objects.
+        ``model_copy(deep=True)`` in ``prepare_context``: the inbound context's
+        ``_resources`` is unset (``None``) at copy time, so the deep copy never
+        duplicates live resources. The stored value is a plain ``dict`` (not a
+        proxy), so the framework's deep copy is mechanically safe; avoid
+        deep-copying a *stamped* context in application code, though, since the
+        values are live resource objects (pools, clients) meant to be shared, not
+        duplicated.
         """
         if self._resources is None:
             return _EMPTY_RESOURCES

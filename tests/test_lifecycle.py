@@ -56,15 +56,13 @@ def test_lifecycle_config_error_is_an_exception() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_lifecycle_context_aliases_owner_as_node_and_worker() -> None:
+def test_lifecycle_context_exposes_owner() -> None:
     from calfkit.worker.lifecycle import LifecycleContext
 
     owner = object()
     ctx = LifecycleContext(owner, {})
 
     assert ctx.owner is owner
-    assert ctx.node is owner
-    assert ctx.worker is owner
 
 
 def test_lifecycle_context_resources_are_writable() -> None:
@@ -78,15 +76,13 @@ def test_lifecycle_context_resources_are_writable() -> None:
     assert bag["db"] == "pool"
 
 
-def test_resource_setup_context_aliases_owner_and_reads_resources() -> None:
+def test_resource_setup_context_exposes_owner_and_reads_resources() -> None:
     from calfkit.worker.lifecycle import ResourceSetupContext
 
     owner = object()
     ctx = ResourceSetupContext(owner, {"db": "pool"})
 
     assert ctx.owner is owner
-    assert ctx.node is owner
-    assert ctx.worker is owner
     # Read-only is type-level only; reads work against the plain dict.
     assert ctx.resources["db"] == "pool"
 
@@ -102,8 +98,6 @@ def test_serving_context_carries_broker_and_resources() -> None:
     ctx = ServingContext(owner, {"db": "pool"}, broker)
 
     assert ctx.owner is owner
-    assert ctx.node is owner
-    assert ctx.worker is owner
     assert ctx.broker is broker
     # Read-only is type-level only; reads work against the plain dict.
     assert ctx.resources["db"] == "pool"

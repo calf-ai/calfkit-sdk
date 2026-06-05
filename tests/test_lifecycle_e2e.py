@@ -50,7 +50,7 @@ from calfkit.models.state import State
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, agent_tool, consumer
 from calfkit.nodes.base import BaseNodeDef
-from calfkit.worker import Worker
+from calfkit.worker import ServingContext, Worker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -189,7 +189,7 @@ async def test_resources_reach_custom_basenodedef_subclass() -> None:
     worker = _make_worker()
     node = _ProbeNode(captured, node_id="surface_node", subscribe_topics=["surface_node.in"])
     sentinel = object()
-    node.resources["db"] = sentinel  # callback/direct claim
+    node.resources["db"] = sentinel  # direct write into the node's bag (no provenance machinery)
 
     worker.add_nodes(node)
     broker = worker._client.broker
@@ -386,8 +386,9 @@ async def test_different_keys_coexist_resource_and_callback(
     bag (one pattern *per owner*): a ``@resource`` node and a callback-shape
     worker both run, with no "callbacks ignored" warning.
 
-    The node's handler sees only its own bag (the ``@resource`` value); the
-    worker's callback-managed key lives in the worker's bag.
+    The node's handler sees the *merged* view — the worker's callback-managed
+    key plus the node's own ``@resource`` value — because worker-scoped
+    resources merge into every node handler (node wins on key collision).
     """
     import logging
 
@@ -416,10 +417,78 @@ async def test_different_keys_coexist_resource_and_callback(
             await _publish(broker, _frame_envelope("coexist.in"), "coexist.in", "cid-coexist")
             await worker.stop()
 
-    # Both patterns ran; the handler saw the node's @resource value.
-    assert captured["resources"] == {"res_key": "res-value"}
+    # Both patterns ran; the handler saw the merged view (worker key + node key).
+    assert captured["resources"] == {"cb_key": "cb-value", "res_key": "res-value"}
     # No mixing on a single owner, so no "callbacks ignored" warning fired.
     assert not any("callbacks are ignored" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Worker-scoped resources merge into node handlers (node wins on key collision)
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_resource_reaches_node_handler() -> None:
+    """A ``@worker.resource`` (worker-scoped) is visible to every node's handler
+    as ``ctx.resources[...]`` — the canonical "one shared pool for all nodes"
+    pattern."""
+    captured: dict[str, Any] = {}
+    closed: list[str] = []
+
+    worker = _make_worker()
+    node = _ProbeNode(captured, node_id="wres_probe", subscribe_topics=["wres_probe.in"])
+
+    @worker.resource("shared_pool")
+    async def shared_pool(ctx: Any) -> Any:
+        try:
+            yield "WORKER-POOL"
+        finally:
+            closed.append("shared_pool")
+
+    worker.add_nodes(node)
+    broker = worker._client.broker
+
+    async with TestKafkaBroker(broker):
+        await worker.start()
+        await _publish(broker, _frame_envelope("wres_probe.in"), "wres_probe.in", "cid-wres")
+        await worker.stop()
+
+    # The node handler saw the worker-scoped resource even though the node
+    # declared none of its own.
+    assert captured["resources"] == {"shared_pool": "WORKER-POOL"}
+    assert closed == ["shared_pool"]
+
+
+async def test_node_resource_wins_over_worker_resource_on_same_key() -> None:
+    """When a worker and a node both own a resource under the same key, the
+    node's value wins in that node's handler (merge is ``{**worker, **node}``)."""
+    captured: dict[str, Any] = {}
+
+    worker = _make_worker()
+    node = _ProbeNode(captured, node_id="merge_probe", subscribe_topics=["merge_probe.in"])
+
+    @worker.resource("db")
+    async def worker_db(ctx: Any) -> Any:
+        yield "WORKER-DB"
+
+    @node.resource("db")
+    async def node_db(ctx: Any) -> Any:
+        yield "NODE-DB"
+
+    worker.add_nodes(node)
+    broker = worker._client.broker
+
+    async with TestKafkaBroker(broker):
+        await worker.start()
+        # While serving, the two bags are independent (the merge copies, never
+        # mutates): worker holds its value, node holds its own.
+        assert worker.resources["db"] == "WORKER-DB"
+        assert node.resources["db"] == "NODE-DB"
+        await _publish(broker, _frame_envelope("merge_probe.in"), "merge_probe.in", "cid-merge")
+        await worker.stop()
+
+    # Node key wins; the worker's same-key value is shadowed for this handler.
+    assert captured["resources"] == {"db": "NODE-DB"}
 
 
 # ---------------------------------------------------------------------------
@@ -437,12 +506,12 @@ async def test_presence_publishes_up_and_down_keyed_on_worker_id() -> None:
         captured.append(msg)
 
     @worker.after_startup
-    async def up(ctx: Any) -> None:
-        await ctx.broker.publish({"id": ctx.worker.id, "status": "up"}, topic="fleet.presence")
+    async def up(ctx: ServingContext[Worker]) -> None:
+        await ctx.broker.publish({"id": ctx.owner.id, "status": "up"}, topic="fleet.presence")
 
     @worker.on_shutdown
-    async def down(ctx: Any) -> None:
-        await ctx.broker.publish({"id": ctx.worker.id, "status": "down"}, topic="fleet.presence")
+    async def down(ctx: ServingContext[Worker]) -> None:
+        await ctx.broker.publish({"id": ctx.owner.id, "status": "down"}, topic="fleet.presence")
 
     async with TestKafkaBroker(broker):
         await worker.start()

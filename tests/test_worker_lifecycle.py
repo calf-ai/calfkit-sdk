@@ -89,6 +89,11 @@ def test_worker_name_uses_provided_value() -> None:
     assert worker.name == "Fleet Worker One"
 
 
+def test_worker_blank_name_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        _make_worker(name="   ")
+
+
 # ---------------------------------------------------------------------------
 # Single-start guard (§3.6)
 # ---------------------------------------------------------------------------
@@ -359,6 +364,128 @@ async def test_on_startup_failure_rolls_back_resource_stack_and_mcp() -> None:
     assert mcp_closed == [True]
 
 
+async def test_after_startup_failure_tears_down_resources_when_broker_stop_raises() -> None:
+    """Rollback must still tear down resources even if the drain (broker.stop)
+    itself raises — the guarded broker.stop in _hook_after_startup logs and
+    continues to resource teardown (covers worker.py:353-354)."""
+    from unittest.mock import AsyncMock, patch
+
+    from faststream.kafka import TestKafkaBroker
+
+    worker = _make_worker()
+    torn_down: list[str] = []
+
+    @worker.resource("db")
+    async def db(ctx: Any) -> Any:
+        try:
+            yield "pool"
+        finally:
+            torn_down.append("resource")
+
+    @worker.after_startup
+    async def boom(ctx: Any) -> None:
+        raise RuntimeError("serving boom")
+
+    broker = worker._client.broker
+    async with TestKafkaBroker(broker):
+        with patch.object(broker, "stop", new=AsyncMock(side_effect=RuntimeError("drain failed"))):
+            # The original after_startup error surfaces (not the drain error).
+            with pytest.raises(RuntimeError, match="serving boom"):
+                await worker.start()
+
+    # A failing drain did not strand the resource bracket.
+    assert torn_down == ["resource"]
+    assert worker._resource_stack is None
+
+
+# ---------------------------------------------------------------------------
+# broker.start() failure tears down resources + MCP across all run surfaces
+# ---------------------------------------------------------------------------
+
+
+async def test_broker_start_failure_tears_down_resources_via_start() -> None:
+    """If broker.start() raises (e.g. Kafka unreachable), FastStream runs no
+    shutdown hooks — Worker.start() must run its own teardown so the resource
+    bracket opened in on_startup never leaks."""
+    from unittest.mock import AsyncMock, patch
+
+    from faststream.kafka import TestKafkaBroker
+
+    worker = _make_worker()
+    torn_down: list[str] = []
+
+    @worker.resource("db")
+    async def db(ctx: Any) -> Any:
+        try:
+            yield "pool"
+        finally:
+            torn_down.append("resource")
+
+    broker = worker._client.broker
+    async with TestKafkaBroker(broker):
+        with patch.object(broker, "start", new=AsyncMock(side_effect=RuntimeError("broker down"))):
+            with pytest.raises(RuntimeError, match="broker down"):
+                await worker.start()
+
+    assert torn_down == ["resource"]
+    assert worker._resource_stack is None
+
+
+async def test_broker_start_failure_tears_down_resources_via_async_with() -> None:
+    """Python skips __aexit__ when __aenter__ raises, so the self-cleaning
+    start() is what makes `async with worker:` recover from a boot failure."""
+    from unittest.mock import AsyncMock, patch
+
+    from faststream.kafka import TestKafkaBroker
+
+    worker = _make_worker()
+    torn_down: list[str] = []
+
+    @worker.resource("db")
+    async def db(ctx: Any) -> Any:
+        try:
+            yield "pool"
+        finally:
+            torn_down.append("resource")
+
+    broker = worker._client.broker
+    async with TestKafkaBroker(broker):
+        with patch.object(broker, "start", new=AsyncMock(side_effect=RuntimeError("broker down"))):
+            with pytest.raises(RuntimeError, match="broker down"):
+                async with worker:
+                    pass  # pragma: no cover — __aenter__ raises before the body
+
+    assert torn_down == ["resource"]
+    assert worker._resource_stack is None
+
+
+async def test_run_startup_failure_tears_down_resources() -> None:
+    """run() never reaches its own _shutdown() when startup fails inside the
+    task group, so Worker.run() must run teardown on the failure path too."""
+    from unittest.mock import AsyncMock, patch
+
+    from faststream.kafka import TestKafkaBroker
+
+    worker = _make_worker()
+    torn_down: list[str] = []
+
+    @worker.resource("db")
+    async def db(ctx: Any) -> Any:
+        try:
+            yield "pool"
+        finally:
+            torn_down.append("resource")
+
+    broker = worker._client.broker
+    async with TestKafkaBroker(broker):
+        with patch.object(broker, "start", new=AsyncMock(side_effect=RuntimeError("broker down"))):
+            with pytest.raises(RuntimeError, match="broker down"):
+                await worker.run()
+
+    assert torn_down == ["resource"]
+    assert worker._resource_stack is None
+
+
 # ---------------------------------------------------------------------------
 # Happy-path full lifecycle: all four phases fire in order (start/stop)
 # ---------------------------------------------------------------------------
@@ -479,8 +606,8 @@ async def test_after_startup_can_publish_presence_with_worker_id() -> None:
 
     @worker.after_startup
     async def announce(ctx: Any) -> None:
-        seen_ids.append(ctx.worker.id)
-        await ctx.broker.publish({"id": ctx.worker.id, "status": "up"}, topic="fleet.presence")
+        seen_ids.append(ctx.owner.id)
+        await ctx.broker.publish({"id": ctx.owner.id, "status": "up"}, topic="fleet.presence")
 
     async with TestKafkaBroker(worker._client.broker):
         await worker.start()

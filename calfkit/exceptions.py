@@ -8,9 +8,9 @@ class DeserializationError(Exception):
 class LifecycleConfigError(Exception):
     """Raised when a node/worker lifecycle configuration is invalid.
 
-    Covers misconfiguration that is detectable at registration or boot
-    time, such as two writers claiming the same resource key, or a
-    duplicate ``@resource`` name on a single owner.
+    Covers misconfiguration detectable at registration time. Currently: a
+    duplicate ``@resource`` name on a single owner (resource names must be
+    unique per owner).
     """
 
 

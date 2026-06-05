@@ -213,7 +213,7 @@ class ConsumerNodeDef(Generic[OutputT], BaseNodeDef):
                 correlation_id=correlation_id,
                 strict=False,
                 type_adapter=self._type_adapter,
-                resources=dict(self.resources),
+                resources=self._effective_resources(),
             )
         except (DeserializationError, ValidationError):
             logger.exception(
