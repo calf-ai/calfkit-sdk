@@ -5,6 +5,15 @@ class DeserializationError(Exception):
     """Raised when client-side output deserialization fails."""
 
 
+class LifecycleConfigError(Exception):
+    """Raised when a node/worker lifecycle configuration is invalid.
+
+    Covers misconfiguration detectable at registration time. Currently: a
+    duplicate ``@resource`` name on a single owner (resource names must be
+    unique per owner).
+    """
+
+
 class ReplyExpiredError(Exception):
     """Raised when an awaited reply does not arrive within the dispatcher's
     ``reply_ttl`` and the pending future is evicted.

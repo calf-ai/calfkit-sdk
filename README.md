@@ -314,6 +314,14 @@ Use `emit_to_node` for true one-way sends, `invoke_node` for async dispatch with
 
 <br>
 
+### Lifecycle Hooks & Resources (Optional)
+
+Nodes and workers can open long-lived **resources** (database pools, HTTP clients, caches) at startup and close them on shutdown, publish **presence/departure** events, and run under `run()`, the embeddable `start()`/`stop()`, or `async with worker:`.
+
+See **[Worker Lifecycle & Embedding](docs/worker-lifecycle.md)** for the full walkthrough — the `@resource` and callback hook patterns, worker-scoped resources, `resources` vs `deps`, presence events, and the three run surfaces with their guarantees.
+
+<br>
+
 ### Gating Node Invocations (Optional)
 
 When multiple agents share an input topic (each with its own consumer group), every agent receives every message published to that topic. A **gate stack** lets a node decide whether to handle an inbound event *before* `run()` runs — avoiding wasted LLM tokens on messages addressed elsewhere.
@@ -418,6 +426,10 @@ See [`docs/mcp-overview.md`](docs/mcp-overview.md) for the quickstart, deploymen
 ## Documentation
 
 Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.
+
+Deep-dive guides:
+
+- [Worker Lifecycle & Embedding](docs/worker-lifecycle.md) — running a worker with `run()` vs the embeddable `start()`/`stop()` and `async with` surfaces, composing it with other long-running services, and the lifecycle guarantees.
 
 <br>
 

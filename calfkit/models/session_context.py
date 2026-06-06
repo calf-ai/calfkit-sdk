@@ -1,5 +1,6 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Generic
 
 import uuid_utils
@@ -8,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
 from calfkit.models.state import OverridesState, State
+
+_EMPTY_RESOURCES: Mapping[str, Any] = MappingProxyType({})
 
 
 @dataclass
@@ -85,6 +88,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     _emitter_node_id: str | None = PrivateAttr(default=None)
     _emitter_node_kind: str | None = PrivateAttr(default=None)
     _frame_id: str | None = PrivateAttr(default=None)
+    _resources: Mapping[str, Any] | None = PrivateAttr(default=None)
 
     @property
     def correlation_id(self) -> str:
@@ -142,6 +146,31 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         cannot be spoofed via the model constructor.
         """
         return self._frame_id
+
+    @property
+    def resources(self) -> Mapping[str, Any]:
+        """The owner's lifecycle-managed resources (read-only by type).
+
+        Populated server-side by ``BaseNodeDef.prepare_context`` with a *shallow
+        copy* of the node's (and its worker's) resource bag, so mutating it can't
+        corrupt the shared bag or other handlers. Typed ``Mapping`` so
+        ``ctx.resources["k"] = ...`` is a type error at dev time (mirrors how
+        ``deps`` is treated read-only). Returns an empty mapping when unset (e.g.
+        a context built outside a handler), so reads never raise.
+
+        Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be
+        spoofed via the model constructor, and stamped *after* the
+        ``model_copy(deep=True)`` in ``prepare_context``: the inbound context's
+        ``_resources`` is unset (``None``) at copy time, so the deep copy never
+        duplicates live resources. The stored value is a plain ``dict`` (not a
+        proxy), so the framework's deep copy is mechanically safe; avoid
+        deep-copying a *stamped* context in application code, though, since the
+        values are live resource objects (pools, clients) meant to be shared, not
+        duplicated.
+        """
+        if self._resources is None:
+            return _EMPTY_RESOURCES
+        return self._resources
 
     def _stamp_transport(self, *, correlation_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None) -> None:
         """Stamp transport-sourced identity onto this context.

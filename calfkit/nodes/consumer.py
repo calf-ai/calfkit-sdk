@@ -198,9 +198,14 @@ class ConsumerNodeDef(Generic[OutputT], BaseNodeDef):
         # Consumer is outside the call/return flow, so the inbound call_stack
         # may be empty (e.g. when tapping publish_topic post-ReturnCall) — we
         # bypass BaseNodeDef.prepare_context which peeks the stack. The stamped
-        # ids are PrivateAttr (calfkit.models.session_context), so they never
-        # ride on the wire; stamping the inbound context directly is safe.
+        # ids and resources are PrivateAttr (calfkit.models.session_context), so
+        # they never ride on the wire (verified: excluded from serialization);
+        # stamping the inbound context directly is safe. Stamping _resources here
+        # (not only on the result) lets a consumer's gate read ctx.resources,
+        # matching the regular-node path (BaseNodeDef.prepare_context).
+        resources = self._effective_resources()
         envelope.context._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter, emitter_node_kind=emitter_kind)
+        envelope.context._resources = resources
         ctx = envelope.context
 
         if not await self._evaluate_gates(ctx, correlation_id):
@@ -213,6 +218,7 @@ class ConsumerNodeDef(Generic[OutputT], BaseNodeDef):
                 correlation_id=correlation_id,
                 strict=False,
                 type_adapter=self._type_adapter,
+                resources=resources,
             )
         except (DeserializationError, ValidationError):
             logger.exception(
