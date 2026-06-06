@@ -92,6 +92,18 @@ You will be provided a Calfkit broker API to deploy your agents instead of setti
 
 <br>
 
+> **A note on Kafka topics.** This quickstart "just works" because the local
+> calfkit-broker has broker-side topic auto-creation enabled — node inboxes are
+> created on first use. Most hardened/managed brokers have that **disabled**, in
+> which case producers and consumers silently stall on a missing topic. Calfkit
+> ships an **EXPERIMENTAL, opt-in** topic provisioner (off by default) for the
+> dev/CI case: `Client.connect("localhost:9092", provisioning=ProvisioningConfig(enabled=True))`.
+> It is a development convenience (`replication_factor=1`, no ACLs) — **review it
+> before production**, where topic creation is typically ops-governed. See
+> [`docs/topic-provisioning.md`](docs/topic-provisioning.md).
+
+<br>
+
 ### 3. Define and Deploy the Tool Node
 
 Define and deploy a tool as an independent service. Tools are not owned by or coupled to any specific agent—once deployed, any agent in your system can discover and invoke the tool. Deploy once, use everywhere.
@@ -274,6 +286,31 @@ result = await client.execute_node(
     temp_instructions="Always respond in Japanese.",
 )
 ```
+
+**Fire-and-forget** — dispatch work to a node without waiting for (or producing) a reply via `emit_to_node`:
+
+```python
+correlation_id = await client.emit_to_node(
+    "Re-index the catalog.",
+    "indexer.input",
+)
+# Returns the correlation_id immediately; no reply is produced and no
+# client-side reply future is allocated.
+```
+
+`emit_to_node` takes the same input-shaping arguments as `invoke_node` (`deps`, `temp_instructions`, `message_history`, `run_args`, `model_settings`, `tool_overrides`, `correlation_id`) — but no `reply_topic` or `output_type`, since there is nothing to route back or deserialize.
+
+Because there's no reply, **traceability comes from the target node's `publish_topic` broadcast stream**, not a point-to-point callback. Set a `publish_topic` on the node you emit to and tap it with a [consumer node](#consumer-nodes-optional) to observe terminals (`result.output` is populated exactly as it is for `execute_node`). A node with no `publish_topic` produces no observable record for a fire-and-forget send — there is neither a reply nor a broadcast.
+
+Use `emit_to_node` for true one-way sends, `invoke_node` for async dispatch with a handle to await later, and `execute_node` for synchronous request/reply.
+
+> **Bounding `invoke_node` memory** — each pending `invoke_node` handle holds a reply future until it resolves. If a reply is lost or a handle is abandoned, that future leaks. Pass an opt-in TTL to bound it:
+>
+> ```python
+> client = Client.connect("localhost:9092", reply_ttl=30.0)
+> ```
+>
+> When set, an unanswered handle is evicted after `reply_ttl` seconds and `handle.result()` raises `ReplyExpiredError`. The default (`None`) waits indefinitely. `emit_to_node` allocates no future, so the TTL does not apply to it.
 
 <br>
 

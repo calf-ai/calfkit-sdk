@@ -29,7 +29,16 @@ class InvocationHandle(Generic[OutputT]):
 
         Raises:
             asyncio.TimeoutError: If *timeout* elapses before a reply arrives.
-            RuntimeError: If this handle was created without a future (fire-and-forget).
+            ReplyExpiredError: If the client was created with a ``reply_ttl`` and
+                no reply arrived before it elapsed — the reply future is evicted
+                and this raises instead of waiting forever. Carries the
+                ``correlation_id`` and ``ttl``. Not raised when ``reply_ttl`` is
+                ``None`` (the default), where the await blocks indefinitely.
+            RuntimeError: Defensive guard for a handle constructed without a
+                future. Not reachable in normal use — handles are only built by
+                ``_invoke`` with a real future; true one-way sends use
+                :meth:`Client.emit_to_node`, which returns a ``correlation_id`` and
+                no handle at all.
             DeserializationError: If the expected output part type is missing
                 from ``final_output_parts``.
             pydantic.ValidationError: If ``output_type`` is provided and the

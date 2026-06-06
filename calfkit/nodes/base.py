@@ -240,14 +240,21 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
             )
-            logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self.node_id)
-            await broker.publish(
-                publish_envelope,
-                topic=frame.callback_topic,
-                correlation_id=correlation_id,
-                key=correlation_id.encode(),
-                headers=self._emitter_headers(),
-            )
+            if frame.callback_topic is None:
+                # Fire-and-forget terminal: no requester to return to. Skip the
+                # point-to-point callback publish, but still return
+                # ``publish_envelope`` below so the worker's @publisher broadcasts
+                # the terminal result to ``publish_topic`` (the traceability channel).
+                logger.debug("[%s] ReturnCall no-callback fire-and-forget terminal node=%s", correlation_id[:8], self.node_id)
+            else:
+                logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self.node_id)
+                await broker.publish(
+                    publish_envelope,
+                    topic=frame.callback_topic,
+                    correlation_id=correlation_id,
+                    key=correlation_id.encode(),
+                    headers=self._emitter_headers(),
+                )
 
         elif isinstance(output, TailCall):
             # tailcall optimization: replace current call frame with new tailcall

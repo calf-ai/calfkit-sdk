@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.5.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.0...v0.5.1) (2026-06-05)
+
+
+### Features
+
+* opt-in Kafka topic provisioning (experimental) ([#174](https://github.com/calf-ai/calfkit-sdk/issues/174)) ([#177](https://github.com/calf-ai/calfkit-sdk/issues/177)) ([12fd012](https://github.com/calf-ai/calfkit-sdk/commit/12fd01280ac87f4116bd6dad4b6a6620383cb878))
+
+## [0.5.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.1...v0.5.0) (2026-06-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* true one-way Client.emit_to_node fire-and-forget ([#132](https://github.com/calf-ai/calfkit-sdk/issues/132)) (#176)
+
+### Features
+
+* true one-way Client.emit_to_node fire-and-forget ([#132](https://github.com/calf-ai/calfkit-sdk/issues/132)) ([#176](https://github.com/calf-ai/calfkit-sdk/issues/176)) ([c0d120c](https://github.com/calf-ai/calfkit-sdk/commit/c0d120c93b57e31b1f7c0eb90d3a75910400318c))
+
+## [0.4.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.0...v0.4.1) (2026-06-04)
+
+
+### Features
+
+* reference JSON Schema for mcp.json ([#172](https://github.com/calf-ai/calfkit-sdk/issues/172)) ([1262f51](https://github.com/calf-ai/calfkit-sdk/commit/1262f51a5d1923598ace30e882bd67c9b2586599))
+
 ## [0.4.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.6...v0.4.0) (2026-06-04)
 
 
