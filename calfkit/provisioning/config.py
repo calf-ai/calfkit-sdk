@@ -39,8 +39,15 @@ class ProvisioningConfig:
             deliberately excluded — settings like ``cleanup.policy=compact`` or
             short retention are semantically wrong for correlation-keyed
             request/reply traffic.
-        create_timeout_ms: Overall budget for the provisioning operation
-            (connect + create + retry + inspect). Exceeding it raises
+        create_timeout_ms: Budget for topic creation. The create/classify/retry
+            loop is bounded by it (the ``asyncio.wait_for`` inside
+            :func:`~calfkit.provisioning.provision_topics`); the standalone
+            :class:`~calfkit.provisioning.TopicProvisioner` additionally bounds
+            the admin ``start()`` (connect) under the same per-phase budget and
+            reuses it as that admin client's ``request_timeout_ms``. (When
+            provisioning runs via the broker's own admin client — the client /
+            worker path — this does not change the broker admin's request
+            timeout.) Exceeding it raises
             :class:`~calfkit.provisioning.TopicProvisioningError` (with
             ``code=None``) naming the still-pending topics.
 

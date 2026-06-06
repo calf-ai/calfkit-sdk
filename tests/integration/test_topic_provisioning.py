@@ -169,9 +169,10 @@ async def _await_topics_visible(
 async def _running_worker(worker: Worker) -> AsyncIterator[None]:
     """Run a worker's FastStream app in the background for the test duration.
 
-    Starts ``worker.run()`` as a task (which fires ``_on_startup`` -> eager
-    provisioning -> ``broker.start()``), waits for the broker connection to come
-    up, yields, then cancels and drains cleanly.
+    Starts ``worker.run()`` as a task (which fires ``_on_startup`` -> declare
+    node topics into the ensurer -> ``broker.start()``, whose pre-start hook
+    provisions reply + node topics in one pass), waits for the broker connection
+    to come up, yields, then cancels and drains cleanly.
     """
     task = asyncio.ensure_future(worker.run())
     try:
@@ -302,7 +303,7 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
 
     async with _running_worker(worker), _admin() as admin:
         # (b.1) topics exist in metadata. The consumer's inbox plus its
-        # framework return inbox were eagerly provisioned at _on_startup.
+        # framework return inbox were provisioned by the broker's pre-start hook.
         node = worker._registered_nodes[0]
         await _await_topics_visible(admin, [inbox, node._return_topic])
 
@@ -332,7 +333,10 @@ async def test_provisioning_is_idempotent_across_restart() -> None:
 
     inbox = _unique("calf-it-idem.in")
     out = _unique("calf-it-idem.out")
-    node = _tool_node("idem_echo", inbox, out)
+    # Unique node_id so the derived ``_return_topic`` is also unique per run —
+    # otherwise a reused (non-fresh) broker already has it and the first pass
+    # reports it ``existing`` rather than ``created``.
+    node = _tool_node(_unique("idem_echo"), inbox, out)
     topics = topics_for_nodes([node])
     framework = {node._return_topic}
 
@@ -382,3 +386,44 @@ async def test_acl_denied_is_reported_and_does_not_raise() -> None:
     assert denied_topic in report.unauthorized, f"ACL-denied topic {denied_topic!r} must be reported as unauthorized; report={report!r}"
     assert denied_topic not in report.created
     assert denied_topic not in report.existing
+
+
+# ---------------------------------------------------------------------------
+# (#180) reply-topic provisioning at broker start — no hang on a no-auto-create
+# broker. Regression tests for the silent infinite hang; the reply consumer's
+# inbox is created before it subscribes, on every start path.
+# ---------------------------------------------------------------------------
+
+
+async def test_issue_180_bare_broker_start_provisions_reply_topic() -> None:
+    """ENABLED client + a DIRECT ``client.broker.start()`` returns (it HUNG
+    before the fix) and the reply topic exists — the exact #180 repro."""
+    reply = f"calf-test-180-{uuid.uuid4().hex[:8]}.reply"
+    client = Client.connect(BOOTSTRAP, reply_topic=reply, provisioning=ProvisioningConfig(enabled=True))
+    try:
+        # An infinite hang before the fix; the bounded wait turns a regression
+        # into a clear failure rather than a stuck suite.
+        await asyncio.wait_for(client.broker.start(), timeout=_VISIBLE_TIMEOUT_S)
+        async with _admin() as admin:
+            await _await_topics_visible(admin, [reply])
+    finally:
+        await client.close()
+
+
+async def test_issue_180_worker_run_does_not_hang_on_reply_topic() -> None:
+    """A Worker on a no-auto-create broker reaches serving without hanging on
+    its client's reply topic (the worker path also hung before the fix). The
+    reply topic appearing in metadata proves the reply inbox was provisioned at
+    broker start, so the reply consumer never looped on missing metadata."""
+    inbox = f"calf-test-180-{uuid.uuid4().hex[:8]}.in"
+    client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
+    reply = client.reply_topic
+
+    @consumer(subscribe_topics=inbox)
+    async def _sink(result: Any) -> None:
+        return None
+
+    worker = Worker(client, nodes=[_sink])
+    async with _running_worker(worker):
+        async with _admin() as admin:
+            await _await_topics_visible(admin, [inbox, reply])

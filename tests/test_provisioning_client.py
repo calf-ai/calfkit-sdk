@@ -1,67 +1,17 @@
-"""Integration tests for client-side reply-topic provisioning.
+"""Tests for the client's provisioning config + security handling.
 
-These tests exercise the REAL ``BaseClient`` provisioning wiring against the
-``calfkit.provisioning.provisioner._make_admin_client`` seam (patched to a fake
-admin), so no live Kafka broker is required. They verify:
-
-* the new read-only ``provisioning`` / ``server_urls`` / ``security_kwargs``
-  properties exist and carry the right values,
-* default-off is a pure no-op (the admin seam is never reached through
-  ``_invoke``), and
-* when enabled, the reply topic is provisioned exactly ONCE even across many
-  ``_invoke`` calls.
+The reply-topic *provisioning behaviour* (declared into a ``StartupTopicEnsurer``
+and created at broker start, reusing FastStream's admin client) lives in
+``tests/test_startup_provisioning.py``. Since provisioning no longer builds a
+second admin client, the client no longer captures ``server_urls`` /
+``security_kwargs``: security is configured the FastStream way, via a
+``security=`` object that flows to the broker (and its admin client).
 """
 
-import asyncio
+import pytest
 
 from calfkit.client import Client
-from calfkit.models.state import State
 from calfkit.provisioning import ProvisioningConfig
-from calfkit.provisioning import provisioner as provisioner_mod
-
-
-class _FakeAdmin:
-    """Minimal stand-in for ``AIOKafkaAdminClient`` returning code-0 (created)
-    for every requested topic, so the real provisioning flow runs end-to-end."""
-
-    def __init__(self, **kwargs) -> None:  # noqa: ANN003
-        self.kwargs = kwargs
-        self.create_calls: list[list] = []
-        self.start_calls = 0
-        self.close_calls = 0
-
-    async def start(self) -> None:
-        self.start_calls += 1
-
-    async def create_topics(self, new_topics, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        self.create_calls.append(list(new_topics))
-        return _FakeResponse([(nt.name, 0) for nt in new_topics])
-
-    async def close(self) -> None:
-        self.close_calls += 1
-
-
-class _FakeResponse:
-    def __init__(self, topic_errors: list[tuple]) -> None:
-        self.topic_errors = topic_errors
-
-
-def _install_fake_admin(monkeypatch) -> list[_FakeAdmin]:
-    """Patch the provisioner seam; return a list capturing created fakes."""
-    created: list[_FakeAdmin] = []
-
-    def _factory(**kwargs):  # noqa: ANN003
-        admin = _FakeAdmin(**kwargs)
-        created.append(admin)
-        return admin
-
-    monkeypatch.setattr(provisioner_mod, "_make_admin_client", _factory)
-    return created
-
-
-# ---------------------------------------------------------------------------
-# Properties: provisioning / server_urls / security_kwargs
-# ---------------------------------------------------------------------------
 
 
 def test_default_provisioning_property_is_disabled_config() -> None:
@@ -79,168 +29,30 @@ def test_provisioning_property_reflects_passed_config() -> None:
     assert client.provisioning is cfg
 
 
-def test_server_urls_property_reflects_connect_argument() -> None:
-    client = Client.connect("broker-a:9092")
-
-    assert client.server_urls == "broker-a:9092"
-
-
-def test_security_kwargs_captures_security_object_and_raw_kwargs() -> None:
+def test_connect_accepts_a_faststream_security_object() -> None:
+    # The supported way to configure security: a FastStream `security=` object,
+    # which flows to the broker (and the admin client used for provisioning).
     from faststream.security import SASLPlaintext
 
-    sec = SASLPlaintext(username="u", password="p")
-    client = Client.connect(
-        "localhost:9092",
-        security=sec,
-        security_protocol="SASL_PLAINTEXT",
-        sasl_kerberos_service_name="custom",
-    )
+    client = Client.connect("localhost:9092", security=SASLPlaintext(username="u", password="p"))
 
-    sk = client.security_kwargs
-    assert sk["security"] is sec
-    assert sk["security_protocol"] == "SASL_PLAINTEXT"
-    assert sk["sasl_kerberos_service_name"] == "custom"
+    assert client.provisioning.enabled is False  # constructed without error
 
 
-def test_security_kwargs_excludes_non_security_broker_kwargs() -> None:
-    client = Client.connect("localhost:9092", client_id="my-client")
-
-    assert "client_id" not in client.security_kwargs
-
-
-# ---------------------------------------------------------------------------
-# _invoke: reply-topic provisioning (default-off no-op + enabled one-shot)
-# ---------------------------------------------------------------------------
+def test_connect_rejects_raw_security_protocol_kwarg() -> None:
+    # Raw security kwargs are no longer accepted; the client gives an actionable
+    # migration error pointing at `security=`, not a cryptic KafkaBroker TypeError.
+    with pytest.raises(ValueError, match="security="):
+        Client.connect("localhost:9092", security_protocol="SASL_PLAINTEXT")
 
 
-def _stub_broker_io(client: Client, monkeypatch) -> None:
-    """Neutralize the broker's network I/O so ``_invoke`` runs without Kafka.
-
-    Forces the connect-guard to fire on every call (``_connection`` falsy) and
-    replaces ``start`` / ``publish`` with async no-ops. Provisioning happens
-    *before* ``start`` inside the guard, which is exactly what we want to assert
-    on without a live broker.
-    """
-    broker = client.broker
-    monkeypatch.setattr(broker, "_connection", None, raising=False)
-
-    async def _noop_start() -> None:
-        return None
-
-    async def _noop_publish(*args, **kwargs):  # noqa: ANN002, ANN003
-        return None
-
-    monkeypatch.setattr(broker, "start", _noop_start, raising=False)
-    monkeypatch.setattr(broker, "publish", _noop_publish, raising=False)
+def test_connect_rejects_raw_sasl_plain_kwargs() -> None:
+    with pytest.raises(ValueError, match="security="):
+        Client.connect("localhost:9092", sasl_plain_username="u", sasl_plain_password="p")
 
 
-async def _invoke_once(client: Client, correlation_id: str) -> None:
-    await client._invoke(
-        topic="some.node.in",
-        reply_topic=client.reply_topic,
-        correlation_id=correlation_id,
-        state=State(message_history=[], temp_instructions=None),
-    )
+def test_client_no_longer_exposes_server_urls_or_security_kwargs() -> None:
+    client = Client.connect("localhost:9092")
 
-
-def test_default_off_is_pure_noop_admin_never_constructed(monkeypatch) -> None:
-    created = _install_fake_admin(monkeypatch)
-    client = Client.connect("localhost:9092")  # provisioning defaults to disabled
-    _stub_broker_io(client, monkeypatch)
-
-    asyncio.run(_invoke_once(client, "c-default-off"))
-
-    # Disabled provisioning must never reach the admin-client seam.
-    assert created == []
-
-
-def test_enabled_provisions_reply_topic_once_across_invokes(monkeypatch) -> None:
-    created = _install_fake_admin(monkeypatch)
-    cfg = ProvisioningConfig(enabled=True)
-    client = Client.connect("localhost:9092", provisioning=cfg)
-    _stub_broker_io(client, monkeypatch)
-
-    asyncio.run(_invoke_once(client, "c-1"))
-    asyncio.run(_invoke_once(client, "c-2"))
-    asyncio.run(_invoke_once(client, "c-3"))
-
-    # Provisioned exactly once: a single admin client built, one create call,
-    # carrying exactly the client's reply topic.
-    assert len(created) == 1
-    assert created[0].start_calls == 1
-    assert created[0].close_calls == 1
-    assert len(created[0].create_calls) == 1
-    names = [nt.name for nt in created[0].create_calls[0]]
-    assert names == [client.reply_topic]
-
-
-def test_enabled_provisions_before_broker_start(monkeypatch) -> None:
-    created = _install_fake_admin(monkeypatch)
-    cfg = ProvisioningConfig(enabled=True)
-    client = Client.connect("localhost:9092", provisioning=cfg)
-
-    order: list[str] = []
-    broker = client.broker
-    monkeypatch.setattr(broker, "_connection", None, raising=False)
-
-    async def _start() -> None:
-        order.append("broker_start")
-
-    async def _publish(*args, **kwargs):  # noqa: ANN002, ANN003
-        return None
-
-    monkeypatch.setattr(broker, "start", _start, raising=False)
-    monkeypatch.setattr(broker, "publish", _publish, raising=False)
-
-    # Record when the admin start runs relative to the broker start.
-    real_start = _FakeAdmin.start
-
-    async def _tracking_start(self) -> None:  # noqa: ANN001
-        order.append("provision_start")
-        await real_start(self)
-
-    monkeypatch.setattr(_FakeAdmin, "start", _tracking_start, raising=False)
-
-    asyncio.run(_invoke_once(client, "c-order"))
-
-    assert order == ["provision_start", "broker_start"]
-    assert len(created) == 1
-
-
-def test_enabled_logs_provision_summary_once(monkeypatch, caplog) -> None:
-    import logging
-
-    _install_fake_admin(monkeypatch)
-    cfg = ProvisioningConfig(enabled=True)
-    client = Client.connect("localhost:9092", provisioning=cfg)
-    _stub_broker_io(client, monkeypatch)
-
-    with caplog.at_level(logging.INFO, logger="calfkit.client.base"):
-        asyncio.run(_invoke_once(client, "c-log-1"))
-        asyncio.run(_invoke_once(client, "c-log-2"))
-
-    summaries = [r.getMessage() for r in caplog.records if "provisioned topics:" in r.getMessage()]
-    # One-shot reply-topic provisioning -> exactly one summary across invokes.
-    assert len(summaries) == 1
-    assert "1 created" in summaries[0]
-
-
-def test_client_security_passes_through_to_admin(monkeypatch) -> None:
-    """A SASLPlaintext security object given to ``Client.connect`` reaches the
-    reply-topic provisioner's admin client as real SASL kwargs (end-to-end)."""
-    from faststream.security import SASLPlaintext
-
-    created = _install_fake_admin(monkeypatch)
-    client = Client.connect(
-        "localhost:9092",
-        provisioning=ProvisioningConfig(enabled=True),
-        security=SASLPlaintext(username="u", password="p"),
-    )
-    _stub_broker_io(client, monkeypatch)
-
-    asyncio.run(_invoke_once(client, "c-sec"))
-
-    assert len(created) == 1
-    kw = created[0].kwargs
-    assert kw["security_protocol"] == "SASL_PLAINTEXT"
-    assert kw["sasl_plain_username"] == "u"
+    assert not hasattr(client, "server_urls")
+    assert not hasattr(client, "security_kwargs")
