@@ -127,3 +127,53 @@ def test_dedupe_by_node_id_drops_repeats_preserving_order() -> None:
     objs = resolve_specs([f"{_FIXTURE}:single", f"{_FIXTURE}:single", f"{_FIXTURE}:nodes"])
     deduped = dedupe_by_node_id(objs)
     assert [o.node_id for o in deduped] == ["tool_echo", "tool_alpha", "tool_beta"]
+
+
+def test_dedupe_keeps_distinct_mcp_servers() -> None:
+    """McpServer instances have no node_id, so dedupe keys them by identity and
+    always retains them (it must not collapse all node_id-less objects to one)."""
+    from calfkit.cli._loader import dedupe_by_node_id, resolve_specs
+    from calfkit.mcp._server import McpServer
+
+    # solo_mcp + the McpServer inside `mixed` are two distinct instances.
+    objs = resolve_specs([f"{_FIXTURE}:solo_mcp", f"{_FIXTURE}:mixed"])
+    deduped = dedupe_by_node_id(objs)
+    mcp_servers = [o for o in deduped if isinstance(o, McpServer)]
+    assert len(mcp_servers) == 2
+
+
+def test_resolve_specs_later_bad_spec_exits_2() -> None:
+    """A malformed spec is caught even when it follows a valid one."""
+    from calfkit.cli._loader import resolve_specs
+
+    with pytest.raises(typer.Exit) as exc:
+        resolve_specs([f"{_FIXTURE}:single", "no_colon_here"])
+    assert exc.value.exit_code == 2
+
+
+def test_resolve_specs_source_label_appears_in_error(capsys: pytest.CaptureFixture[str]) -> None:
+    """source_label names the spec source in the malformed-spec message so
+    `topics provision` can say "--nodes" while `run` says "target"."""
+    from calfkit.cli._loader import resolve_specs
+
+    with pytest.raises(typer.Exit):
+        resolve_specs(["no_colon"], source_label="--nodes")
+    err = capsys.readouterr().err
+    assert "--nodes must be in 'module:attr' form" in err
+
+
+def test_load_nodes_resolves_validates_and_dedupes() -> None:
+    """load_nodes returns the deduped node list for valid targets."""
+    from calfkit.cli._loader import load_nodes
+
+    nodes = load_nodes([f"{_FIXTURE}:single", f"{_FIXTURE}:single", f"{_FIXTURE}:nodes"])
+    assert [n.node_id for n in nodes] == ["tool_echo", "tool_alpha", "tool_beta"]
+
+
+def test_load_nodes_empty_resolution_exits_2() -> None:
+    """load_nodes raises exit 2 when targets resolve to zero nodes."""
+    from calfkit.cli._loader import load_nodes
+
+    with pytest.raises(typer.Exit) as exc:
+        load_nodes([f"{_FIXTURE}:empty_list"])
+    assert exc.value.exit_code == 2

@@ -111,10 +111,137 @@ def test_serve_empty_resolution_exits_2(captured: dict) -> None:
     assert exc.value.exit_code == 2
 
 
-def test_serve_prints_banner_with_node_id(captured: dict, capsys: pytest.CaptureFixture[str]) -> None:
-    """serve prints a startup banner naming the resolved node(s)."""
+def test_serve_prints_banner_with_node_details(captured: dict, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The banner names the node, its kind, its topics, provisioning state, and
+    the effective broker (localhost when --host and CALF_HOST_URL are unset)."""
     from calfkit.cli._run import serve
 
+    monkeypatch.delenv("CALF_HOST_URL", raising=False)
     serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
     out = capsys.readouterr().out
     assert "tool_echo" in out
+    assert "[tool]" in out
+    assert "echo.in" in out  # subscribe topic
+    assert "echo.out" in out  # publish topic
+    assert "provisioning: off" in out
+    assert "localhost" in out  # effective broker fallback
+
+
+def test_serve_banner_shows_mcp_server(captured: dict, capsys: pytest.CaptureFixture[str]) -> None:
+    """A directly-served McpServer renders in the banner with the [mcp] kind."""
+    from calfkit.cli._run import serve
+
+    serve([f"{_FIXTURE}:solo_mcp"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
+    out = capsys.readouterr().out
+    assert "solo_mcp" in out
+    assert "[mcp]" in out
+
+
+def test_serve_banner_shows_env_host_when_no_flag(captured: dict, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no --host, the banner reflects CALF_HOST_URL (the effective broker)."""
+    from calfkit.cli._run import serve
+
+    monkeypatch.setenv("CALF_HOST_URL", "envhost:9092")
+    serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
+    out = capsys.readouterr().out
+    assert "envhost:9092" in out
+
+
+# ---------------------------------------------------------------------------
+# _parse_host
+# ---------------------------------------------------------------------------
+
+
+def test_parse_host_none_returns_none() -> None:
+    from calfkit.cli._run import _parse_host
+
+    assert _parse_host(None) is None
+
+
+def test_parse_host_empty_returns_none() -> None:
+    from calfkit.cli._run import _parse_host
+
+    assert _parse_host("") is None
+
+
+def test_parse_host_separators_only_returns_none() -> None:
+    """A non-empty value that strips to nothing falls back to None (so env/
+    localhost still win), not an empty/garbage server list."""
+    from calfkit.cli._run import _parse_host
+
+    assert _parse_host(" , ") is None
+
+
+def test_parse_host_single_returns_str() -> None:
+    from calfkit.cli._run import _parse_host
+
+    assert _parse_host("h:9092") == "h:9092"
+
+
+def test_parse_host_comma_returns_list() -> None:
+    from calfkit.cli._run import _parse_host
+
+    assert _parse_host("a:9092, b:9092") == ["a:9092", "b:9092"]
+
+
+# ---------------------------------------------------------------------------
+# _load_env
+# ---------------------------------------------------------------------------
+
+
+def test_load_env_explicit_file_is_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    """An explicit --env-file that exists is passed to load_dotenv."""
+    import dotenv
+
+    import calfkit.cli._run as run_mod
+
+    env_path = tmp_path / "custom.env"  # type: ignore[operator]
+    env_path.write_text("FOO=bar\n")
+    calls: list[str] = []
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
+
+    run_mod._load_env(str(env_path))
+    assert calls == [str(env_path)]
+
+
+def test_load_env_missing_explicit_file_warns_and_skips(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A missing explicit --env-file warns (not silent) and does not load."""
+    import dotenv
+
+    import calfkit.cli._run as run_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
+
+    run_mod._load_env("/no/such/file.env")
+    assert calls == []
+    assert "not found" in capsys.readouterr().err
+
+
+def test_load_env_autoloads_dotenv_when_present(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    """With no explicit file, ./.env is auto-loaded when it exists."""
+    import dotenv
+
+    import calfkit.cli._run as run_mod
+
+    monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
+    (tmp_path / ".env").write_text("FOO=bar\n")  # type: ignore[operator]
+    calls: list[str] = []
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
+
+    run_mod._load_env(None)
+    assert calls == [".env"]
+
+
+def test_load_env_no_file_no_autoload(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    """With no explicit file and no ./.env, load_dotenv is not called."""
+    import dotenv
+
+    import calfkit.cli._run as run_mod
+
+    monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
+    calls: list[str] = []
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
+
+    run_mod._load_env(None)
+    assert calls == []

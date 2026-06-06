@@ -27,7 +27,7 @@ except ImportError as e:  # pragma: no cover -- exercised manually
     raise ImportError("the calfkit CLI requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
 
 
-def resolve_specs(specs: list[str], *, app_dir: str | None = None) -> list[Any]:
+def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label: str = "target") -> list[Any]:
     """Resolve ``module:attr`` specs into a flat list of resolved objects.
 
     Each ``attr`` may be a single object or an iterable of objects; iterables
@@ -40,6 +40,9 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None) -> list[Any]:
             so targets are resolvable relative to it (e.g. the project root the
             user runs the command from). The path is absolutised; duplicates are
             not re-inserted.
+        source_label: How to name the spec source in error messages (e.g.
+            ``"target"`` for ``calfkit run`` or ``"--nodes"`` for
+            ``calfkit topics provision``).
 
     Raises:
         typer.Exit: (code 2) on a malformed spec, an import failure, or a
@@ -57,7 +60,7 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None) -> list[Any]:
         module_path, sep, attr = spec.partition(":")
         if not sep or not module_path or not attr:
             typer.echo(
-                f"Error: target must be in 'module:attr' form, got {spec!r}.",
+                f"Error: {source_label} must be in 'module:attr' form, got {spec!r}.",
                 err=True,
             )
             raise typer.Exit(2)
@@ -91,13 +94,17 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None) -> list[Any]:
     return resolved
 
 
-def validate_nodes(objs: list[Any]) -> None:
+def validate_nodes(objs: list[Any], *, source_label: str = "target") -> None:
     """Ensure every object is a node or an ``McpServer``.
 
     A node is duck-typed by the attributes the worker wiring relies on
     (``subscribe_topics`` and ``_return_topic``). ``McpServer`` instances are
     allowed through unconditionally — the worker expands them into per-tool
     bridges at startup.
+
+    Args:
+        objs: Resolved objects to validate.
+        source_label: How to name the spec source in error messages.
 
     Raises:
         typer.Exit: (code 2) if any object is neither a node nor an McpServer.
@@ -111,11 +118,32 @@ def validate_nodes(objs: list[Any]) -> None:
         if missing:
             typer.echo(
                 f"Error: resolved object {obj!r} is not a node "
-                f"(missing {', '.join(missing)}). Target must point at a "
+                f"(missing {', '.join(missing)}). {source_label} must point at a "
                 "BaseNodeDef or McpServer (or an iterable of them).",
                 err=True,
             )
             raise typer.Exit(2)
+
+
+def load_nodes(targets: list[str], *, app_dir: str | None = None, source_label: str = "target") -> list[Any]:
+    """Resolve, validate, and de-duplicate ``targets`` into a non-empty node list.
+
+    The composition used by ``calfkit run`` for both the inline (no-reload) path
+    and the parent-side pre-flight before the reload supervisor starts. Raising
+    on an empty result means a misconfigured run fails fast and loud (exit 2)
+    instead of starting an idle worker.
+
+    Raises:
+        typer.Exit: (code 2) on a bad spec, import failure, non-node object, or
+            if ``targets`` resolve to zero nodes.
+    """
+    objs = resolve_specs(targets, app_dir=app_dir, source_label=source_label)
+    validate_nodes(objs, source_label=source_label)
+    nodes = dedupe_by_node_id(objs)
+    if not nodes:
+        typer.echo("Error: no nodes resolved from the given target(s).", err=True)
+        raise typer.Exit(2)
+    return nodes
 
 
 def dedupe_by_node_id(objs: list[Any]) -> list[Any]:

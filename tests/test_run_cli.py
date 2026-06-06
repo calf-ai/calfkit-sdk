@@ -91,11 +91,13 @@ def test_run_reload_hands_serve_to_watchfiles(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(watchfiles, "run_process", fake_run_process)
 
-    result = CliRunner().invoke(_build_app(), ["run", "mymod:agent", "--reload"])
+    # A real, resolvable target: the parent pre-flights (imports + validates) it
+    # before handing off to the supervisor.
+    result = CliRunner().invoke(_build_app(), ["run", "tests.provisioning_cli_nodes:single", "--reload"])
     assert result.exit_code == 0, result.stdout + result.stderr
     # The supervised target is the real serve engine; targets ride in args[0].
     assert cap["target"] is run_engine.serve
-    assert cap["args"][0] == ["mymod:agent"]
+    assert cap["args"][0] == ["tests.provisioning_cli_nodes:single"]
     # Default watch dir is the cwd.
     assert os.getcwd() in cap["paths"]
 
@@ -114,9 +116,65 @@ def test_run_reload_watch_dir_override(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setattr(watchfiles, "run_process", fake_run_process)
 
     watched = str(tmp_path)  # type: ignore[arg-type]
-    result = CliRunner().invoke(_build_app(), ["run", "mymod:agent", "--reload", "--reload-dir", watched])
+    result = CliRunner().invoke(_build_app(), ["run", "tests.provisioning_cli_nodes:single", "--reload", "--reload-dir", watched])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert cap["paths"] == (watched,)
+
+
+def test_run_reload_bad_target_exits_2_before_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under --reload a broken target fails fast (exit 2) and the supervisor
+    (watchfiles.run_process) is never started — no idle watcher around a child
+    that never came up."""
+    import watchfiles
+
+    from calfkit.cli import _build_app
+
+    cap = {"called": False}
+
+    def fake_run_process(*paths: str, **kwargs: object) -> None:
+        cap["called"] = True
+
+    monkeypatch.setattr(watchfiles, "run_process", fake_run_process)
+
+    result = CliRunner().invoke(_build_app(), ["run", "no_colon_here", "--reload"])
+    assert result.exit_code == 2
+    assert "module:attr" in _plain(result.stderr)
+    assert cap["called"] is False
+
+
+def test_run_multiple_targets_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The variadic positional collects every target and forwards the full list."""
+    import calfkit.cli.run as run_mod
+    from calfkit.cli import _build_app
+
+    cap: dict = {}
+
+    def fake_serve(targets: list[str], host: str | None, provision: bool, group_id: str | None, env_file: str | None, app_dir: str) -> None:
+        cap["targets"] = targets
+
+    monkeypatch.setattr(run_mod, "serve", fake_serve)
+
+    result = CliRunner().invoke(_build_app(), ["run", "a:x", "b:y", "c:z"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert cap["targets"] == ["a:x", "b:y", "c:z"]
+
+
+def test_run_custom_app_dir_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    """--app-dir is absolutised and forwarded to serve."""
+    import calfkit.cli.run as run_mod
+    from calfkit.cli import _build_app
+
+    cap: dict = {}
+
+    def fake_serve(targets: list[str], host: str | None, provision: bool, group_id: str | None, env_file: str | None, app_dir: str) -> None:
+        cap["app_dir"] = app_dir
+
+    monkeypatch.setattr(run_mod, "serve", fake_serve)
+
+    target_dir = str(tmp_path)  # type: ignore[arg-type]
+    result = CliRunner().invoke(_build_app(), ["run", "m:a", "--app-dir", target_dir])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert cap["app_dir"] == os.path.abspath(target_dir)
 
 
 def test_run_bad_spec_exits_2() -> None:

@@ -21,7 +21,7 @@ try:
 except ImportError as e:  # pragma: no cover -- exercised manually
     raise ImportError("the calfkit CLI requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
 
-from calfkit.cli._loader import dedupe_by_node_id, resolve_specs, validate_nodes
+from calfkit.cli._loader import load_nodes
 
 
 def _load_env(env_file: str | None) -> None:
@@ -30,10 +30,17 @@ def _load_env(env_file: str | None) -> None:
     An explicit ``env_file`` is loaded as given; otherwise ``./.env`` is loaded
     if present. A development convenience so ``OPENAI_API_KEY`` and friends are
     available without exporting them by hand.
+
+    An explicit ``env_file`` that does not exist is surfaced as a warning rather
+    than silently ignored (``load_dotenv`` no-ops on a missing path), so a typo'd
+    ``--env-file`` doesn't turn into a confusing "missing API key" failure later.
     """
     from dotenv import load_dotenv
 
     if env_file:
+        if not os.path.exists(env_file):
+            typer.echo(f"Warning: --env-file {env_file!r} not found; continuing without it.", err=True)
+            return
         load_dotenv(env_file)
     elif os.path.exists(".env"):
         load_dotenv(".env")
@@ -56,8 +63,12 @@ def _parse_host(host: str | None) -> str | list[str] | None:
 
 def _print_banner(nodes: list[Any], server_urls: str | list[str] | None, provision: bool) -> None:
     """Print a concise startup banner describing what is being served."""
+    # Show the broker the worker will actually connect to. When --host is
+    # omitted, mirror Client.connect's own CALF_HOST_URL -> localhost fallback
+    # so the banner reflects the effective target, not a placeholder.
+    broker = server_urls if server_urls else (os.getenv("CALF_HOST_URL") or "localhost")
     typer.echo("🐮 Calfkit — starting dev worker")
-    typer.echo(f"   broker: {server_urls if server_urls else '$CALF_HOST_URL or localhost'}")
+    typer.echo(f"   broker: {broker}")
     typer.echo(f"   topic provisioning: {'on' if provision else 'off'}")
     for node in nodes:
         node_id = getattr(node, "node_id", None) or getattr(node, "raw_name", repr(node))
@@ -94,18 +105,14 @@ def serve(
         typer.Exit: (code 2) on a bad spec, import failure, non-node object, or
             if the targets resolve to zero nodes.
     """
+    _load_env(env_file)
+    nodes = load_nodes(list(targets), app_dir=app_dir)
+
+    # Import the broker-facing modules only after the targets validate, so a
+    # bad spec fails fast without paying these imports.
     from calfkit.client import Client
     from calfkit.provisioning import ProvisioningConfig
     from calfkit.worker import Worker
-
-    _load_env(env_file)
-
-    objs = resolve_specs(list(targets), app_dir=app_dir)
-    validate_nodes(objs)
-    nodes = dedupe_by_node_id(objs)
-    if not nodes:
-        typer.echo("Error: no nodes resolved from the given target(s).", err=True)
-        raise typer.Exit(2)
 
     server_urls = _parse_host(host)
     provisioning = ProvisioningConfig(enabled=True) if provision else None

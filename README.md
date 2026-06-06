@@ -215,7 +215,7 @@ python invoke.py
 
 ### Run nodes without the boilerplate (dev CLI)
 
-Steps 3–5 wrap each node in `Client.connect(...)` → `Worker(...)` → `worker.run()`. For local development you can skip that and point the `calfkit` CLI at a node instead — like running a FastAPI app with `fastapi dev`.
+Steps 3–4 wrap each node in `Client.connect(...)` → `Worker(...)` → `worker.run()`. For local development you can skip that and point the `calfkit` CLI at a node instead — like running a FastAPI app with `fastapi dev`.
 
 Install the CLI extra:
 
@@ -260,7 +260,7 @@ Common flags:
 | `--group-id` | Kafka consumer-group override applied to every node. |
 | `--env-file` | dotenv file to load (defaults to `./.env` if present). |
 
-> **Development only.** This is a convenience for running nodes locally; production deployments should use an explicit `Worker` (steps 3–5) so startup, scaling, and topic governance stay under your control. Targets must be importable from where you run the command — run from your project root, or pass `--app-dir`.
+> **Development only.** This is a convenience for running nodes locally; production deployments should use an explicit `Worker` (steps 3–4) so startup, scaling, and topic governance stay under your control. Targets must be importable from where you run the command — run from your project root, or pass `--app-dir`.
 
 <br>
 

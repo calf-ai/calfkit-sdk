@@ -136,9 +136,9 @@ def provision(
         topics_for_nodes,
     )
 
-    resolved = resolve_specs(nodes)
+    resolved = resolve_specs(nodes, source_label="--nodes")
     node_list = _partition_nodes(resolved)
-    validate_nodes(node_list)
+    validate_nodes(node_list, source_label="--nodes")
 
     topics = topics_for_nodes(node_list)
     framework_topics = {node._return_topic for node in node_list}
