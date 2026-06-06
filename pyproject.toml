@@ -61,9 +61,10 @@ calfkit = "calfkit.cli:main"
 [project.optional-dependencies]
 dev = []
 # Installed via `pip install calfkit[cli]`. Off the critical install path
-# because the CLI is only invoked at schema-generation / provisioning time,
-# not runtime. Gates the whole `calfkit` console script (typer).
-cli = ["typer>=0.12"]
+# because the CLI is only invoked at schema-generation / provisioning /
+# dev-run time, not at library runtime. Gates the whole `calfkit` console
+# script (typer); `watchfiles` powers `calfkit run --reload`.
+cli = ["typer>=0.12", "watchfiles>=0.21"]
 # Backwards-compatible alias for the original extra name; resolves to the same
 # typer dependency via `calfkit[cli]`.
 mcp-codegen = ["calfkit[cli]"]
@@ -112,6 +113,9 @@ dev = [
     # typer is the dep for the `cli` optional extra; dev includes it
     # so the CLI tests can run against the same install.
     "typer>=0.12",
+    # watchfiles powers `calfkit run --reload`; dev includes it so the
+    # CLI reload tests can import and patch it.
+    "watchfiles>=0.21",
 ]
 examples = [
     "plotext>=5.3.2",
