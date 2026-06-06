@@ -57,8 +57,10 @@ Calfkit is a Python SDK that builds event-stream agents out-the-box. You get the
 ### 1. Install
 
 ```bash
-pip install calfkit
+pip install "calfkit[cli]"
 ```
+
+The `[cli]` extra adds the `calfkit` command used below to run nodes during development. (The library itself is just `pip install calfkit`.)
 
 <br>
 
@@ -97,10 +99,11 @@ You will be provided a Calfkit broker API to deploy your agents instead of setti
 > created on first use. Most hardened/managed brokers have that **disabled**, in
 > which case producers and consumers silently stall on a missing topic. Calfkit
 > ships an **EXPERIMENTAL, opt-in** topic provisioner (off by default) for the
-> dev/CI case: `Client.connect("localhost:9092", provisioning=ProvisioningConfig(enabled=True))`.
-> It is a development convenience (`replication_factor=1`, no ACLs) — **review it
-> before production**, where topic creation is typically ops-governed. See
-> [`docs/topic-provisioning.md`](docs/topic-provisioning.md).
+> dev/CI case — pass `--provision` to `calfkit run` below (or
+> `Client.connect("localhost:9092", provisioning=ProvisioningConfig(enabled=True))`
+> in code). It is a development convenience (`replication_factor=1`, no ACLs) —
+> **review it before production**, where topic creation is typically ops-governed.
+> See [`docs/topic-provisioning.md`](docs/topic-provisioning.md).
 
 <br>
 
@@ -110,30 +113,19 @@ Define and deploy a tool as an independent service. Tools are not owned by or co
 
 ```python
 # weather_tool.py
-import asyncio
 from calfkit.nodes import agent_tool
-from calfkit.client import Client
-from calfkit.worker import Worker
 
 # Define a tool — the @agent_tool decorator turns any function into a deployable tool node
 @agent_tool
 def get_weather(location: str) -> str:
     """Get the current weather at a location"""
     return f"It's sunny in {location}"
-
-async def main():
-    client = Client.connect("localhost:9092")  # Connect to Kafka broker
-    worker = Worker(client, nodes=[get_weather])  # Initialize a worker with the tool node
-    await worker.run()  # (Blocking call) Deploy the service to start serving traffic
-
-if __name__ == "__main__":
-    asyncio.run(main())
 ```
 
-Run the file to deploy the tool service:
+Deploy the tool as a service. `calfkit run` points at a `module:attr` target and starts a worker for you — no `Client`/`Worker` wiring required:
 
 ```shell
-python weather_tool.py
+calfkit run weather_tool:get_weather
 ```
 
 <br>
@@ -144,11 +136,8 @@ Deploy the agent as its own service. The `Agent` handles LLM chat, tool orchestr
 
 ```python
 # agent_service.py
-import asyncio
 from calfkit.nodes import Agent
 from calfkit.providers import OpenAIResponsesModelClient
-from calfkit.client import Client
-from calfkit.worker import Worker
 from weather_tool import get_weather  # Import the tool definition (reusable)
 
 agent = Agent(
@@ -158,14 +147,6 @@ agent = Agent(
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
     tools=[get_weather],  # Register tool definitions with the agent
 )
-
-async def main():
-    client = Client.connect("localhost:9092")  # Connect to Kafka broker
-    worker = Worker(client, nodes=[agent])  # Initialize a worker with the agent node
-    await worker.run()  # (Blocking call) Deploy the service to start serving traffic
-
-if __name__ == "__main__":
-    asyncio.run(main())
 ```
 
 Set your OpenAI API key:
@@ -174,10 +155,10 @@ Set your OpenAI API key:
 export OPENAI_API_KEY=sk-...
 ```
 
-Run the file to deploy the agent service:
+Deploy the agent as its own service (run it alongside the tool service from step 3):
 
 ```shell
-python agent_service.py
+calfkit run agent_service:agent
 ```
 
 <br>
@@ -197,7 +178,7 @@ async def main():
     # Send a request and await the response
     result = await client.execute_node(
         "What's the weather in Tokyo?",
-        "agent.input",  # The topic the agent subscribes to
+        "weather_agent.input",  # The topic the agent subscribes to
     )
     print(f"Assistant: {result.output}")
 
@@ -213,54 +194,31 @@ python invoke.py
 
 <br>
 
-### Run nodes without the boilerplate (dev CLI)
+### Deploying to production
 
-Steps 3–4 wrap each node in `Client.connect(...)` → `Worker(...)` → `worker.run()`. For local development you can skip that and point the `calfkit` CLI at a node instead — like running a FastAPI app with `fastapi dev`.
-
-Install the CLI extra:
-
-```bash
-pip install calfkit[cli]
-```
-
-Point it at a `module:attr` target (a dotted Python import path, where `attr` is a node or a list of nodes):
-
-```shell
-# Run the weather tool node defined in weather_tool.py
-calfkit run weather_tool:get_weather
-
-# Run several nodes in one worker (e.g. an agent and its tools)
-calfkit run agent_service:agent weather_tool:get_weather
-
-# Auto-restart on code changes
-calfkit run agent_service:agent --reload
-```
-
-Because the CLI imports your module and runs the node for you, the node file no longer needs a `main()` or `asyncio.run(...)` — just define the node at module scope:
+`calfkit run` is a **development** convenience — it imports your module and starts a worker for you (and `--reload` restarts it on edits). For production, deploy each node with an explicit `Worker` so startup, scaling, and topic governance stay under your control:
 
 ```python
-# weather_tool.py — the whole file
-from calfkit.nodes import agent_tool
+# serve_tool.py — deploy the tool as its own service
+import asyncio
+from calfkit.client import Client
+from calfkit.worker import Worker
+from weather_tool import get_weather
 
-@agent_tool
-def get_weather(location: str) -> str:
-    """Get the current weather at a location"""
-    return f"It's sunny in {location}"
+async def main():
+    client = Client.connect("localhost:9092")  # Connect to Kafka broker
+    worker = Worker(client, nodes=[get_weather])  # One service per node
+    await worker.run()  # (Blocking) serve until stopped
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-Common flags:
+```shell
+python serve_tool.py
+```
 
-| Flag | Description |
-| --- | --- |
-| `--host`, `-H` | Kafka bootstrap server(s), comma-separated. Precedence: this flag > `$CALF_HOST_URL` > `localhost`. |
-| `--provision` | Opt-in dev topic auto-creation (experimental; off by default). |
-| `--reload` | Watch source files and restart the worker on change. |
-| `--reload-dir` | Directory to watch with `--reload` (repeatable; defaults to the current directory). |
-| `--app-dir` | Directory added to the import path for resolving targets (defaults to the current directory). |
-| `--group-id` | Kafka consumer-group override applied to every node. |
-| `--env-file` | dotenv file to load (defaults to `./.env` if present). |
-
-> **Development only.** This is a convenience for running nodes locally; production deployments should use an explicit `Worker` (steps 3–4) so startup, scaling, and topic governance stay under your control. Targets must be importable from where you run the command — run from your project root, or pass `--app-dir`.
+See the **[CLI reference](docs/cli.md)** for every `calfkit run` flag (`--host`, `--provision`, `--reload`, `--app-dir`, …) and the other `calfkit` commands (`mcp`, `topics`).
 
 <br>
 
@@ -468,7 +426,11 @@ See [`docs/mcp-overview.md`](docs/mcp-overview.md) for the quickstart, deploymen
 
 ## Documentation
 
-Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.
+Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit. Deeper guides live in [`docs/`](docs/):
+
+- [CLI reference](docs/cli.md) — `calfkit run`, `mcp`, and `topics` commands
+- [MCP adaptor](docs/mcp-overview.md) — expose MCP servers as calfkit tools
+- [Topic provisioning](docs/topic-provisioning.md) — experimental dev topic auto-creation
 
 <br>
 
