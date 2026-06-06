@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.4...v0.6.0) (2026-06-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* provision inbox topics at broker start; no hang on no-auto-create brokers ([#180](https://github.com/calf-ai/calfkit-sdk/issues/180)) (#188)
+
+### Bug Fixes
+
+* provision inbox topics at broker start; no hang on no-auto-create brokers ([#180](https://github.com/calf-ai/calfkit-sdk/issues/180)) ([#188](https://github.com/calf-ai/calfkit-sdk/issues/188)) ([39e1b07](https://github.com/calf-ai/calfkit-sdk/commit/39e1b07303c22ee21cf2d36a2ba2d8397dcf9f56))
+
 ## [0.5.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.3...v0.5.4) (2026-06-06)
 
 
