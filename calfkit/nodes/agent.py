@@ -18,8 +18,10 @@ from calfkit.mcp._server import McpServer
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
 from calfkit.models.node_schema import BaseToolNodeSchema
+from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, PendingToolBatch
+from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -312,8 +314,12 @@ class BaseAgentNodeDef(
             ctx.state.commit_message_to_history()
 
         run_model_settings = cast(ModelSettings | None, ctx.state.overrides.model_settings) if ctx.state.overrides is not None else None
+        # Run the model on the agent's POV projection of the canonical history
+        # (docs/agent-pov-projection.md §6.1). ``project()`` returns a fresh list;
+        # the canonical ``ctx.state.message_history`` is left untouched for storage,
+        # republishing, and dispatch logic (which keys on canonical, §6.2).
         result = await self._agent_loop.run(
-            message_history=ctx.state.message_history,
+            message_history=project(ctx.state.message_history, viewer=self.name),
             instructions=ctx.state.temp_instructions,
             toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
             deps=ctx.deps,
@@ -328,7 +334,8 @@ class BaseAgentNodeDef(
                 self.name,
             )
             messages = result.new_messages()
-            ctx.state.message_history.extend(messages)
+            # stamp author identity onto the agent's own responses (§4, §6.1)
+            ctx.state.extend_with_responses(messages, self.name)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
             for tool_call in result.output.calls:
@@ -484,11 +491,24 @@ class BaseAgentNodeDef(
 
         else:
             logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
-            ctx.state.message_history.extend(result.new_messages())
+            new_messages = result.new_messages()
+            # stamp author identity onto the agent's own responses (§4, §6.1)
+            ctx.state.extend_with_responses(new_messages, self.name)
             if isinstance(result.output, str):
                 ctx.state.final_output_parts = [TextPart(text=result.output)]
             else:
-                ctx.state.final_output_parts = [DataPart(data=result.output)]
+                # Surface a text preamble alongside the structured value when present (§7).
+                # ``structured_output_preamble`` reads the run's last ModelResponse and
+                # returns text ONLY in tool mode (where it is a genuine preamble distinct
+                # from the ``final_result`` call); in native/prompted mode the response's
+                # TextPart IS the JSON answer, so it returns "" to avoid duplicating it
+                # alongside the DataPart.
+                parts: list[ContentPart] = []
+                preamble = structured_output_preamble(new_messages)
+                if preamble:
+                    parts.append(TextPart(text=preamble))
+                parts.append(DataPart(data=result.output))
+                ctx.state.final_output_parts = parts
             return ReturnCall[State](state=ctx.state)
 
     def add_tools(self, *tools: ToolLike) -> None:

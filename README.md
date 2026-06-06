@@ -276,6 +276,8 @@ result = await client.execute_node(
 )
 ```
 
+The same `message_history` can carry turns from *multiple* agents — see [`examples/multi_agent_panel/`](examples/multi_agent_panel/) for a multi-agent discussion over one shared transcript.
+
 **Runtime dependency injection** — pass runtime data to tools via the `deps` parameter:
 
 ```python

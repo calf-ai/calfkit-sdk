@@ -9,6 +9,7 @@ from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
+    ModelResponse,
     RetryPromptPart,
     ToolCallPart,
     ToolReturn,
@@ -47,6 +48,21 @@ class CoreMessageState(BaseAgentActivityState):
             elif isinstance(msg.tool_calls, list):
                 pending_tool_calls.extend(msg.tool_calls)
         return pending_tool_calls
+
+    def extend_with_responses(self, messages: list[ModelMessage], author: str) -> None:
+        """Append run-produced messages, stamping author identity on un-named responses.
+
+        Every ``ModelResponse`` in ``messages`` whose ``name`` is still ``None`` is
+        tagged with ``author`` (the producing agent's id) before the messages are
+        appended to the canonical ``message_history``. The ``if m.name is None``
+        guard makes this idempotent — re-stamping an already-stamped list is a no-op
+        (no current pydantic-ai provider sets ``ModelResponse.name``, so any non-None
+        name here is one calfkit already applied; §4). ``ModelRequest``s are untouched.
+        """
+        for m in messages:
+            if isinstance(m, ModelResponse) and m.name is None:
+                m.name = author
+        self.message_history.extend(messages)
 
     def stage_message(self, message: ModelMessage) -> None:
         self.uncommitted_message = message

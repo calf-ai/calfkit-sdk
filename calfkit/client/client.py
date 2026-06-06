@@ -46,15 +46,16 @@ class Client(BaseClient):
         message_history: list[ModelMessage] | None,
         tool_overrides: list[BaseToolNodeSchema] | None,
         model_settings: ModelSettings | dict[str, Any] | None,
+        author: str | None,
     ) -> tuple[str, State, OverridesState | None]:
         """Shared input-shaping for :meth:`invoke_node` / :meth:`emit_to_node`.
 
         Validates that *model_settings* is JSON-serializable (it crosses the Kafka
         boundary), defaults *correlation_id* to a fresh uuid7 hex, builds and
-        stages the :class:`State` from *user_prompt* + *message_history*, and
-        builds the :class:`OverridesState` (or ``None`` when neither
-        *tool_overrides* nor *model_settings* is set). Returns
-        ``(correlation_id, state, overrides)``.
+        stages the :class:`State` from *user_prompt* + *message_history* (stamping
+        *author* as the staged message's participant name), and builds the
+        :class:`OverridesState` (or ``None`` when neither *tool_overrides* nor
+        *model_settings* is set). Returns ``(correlation_id, state, overrides)``.
 
         Raises:
             ValueError: If *model_settings* is not JSON-serializable.
@@ -69,7 +70,7 @@ class Client(BaseClient):
             correlation_id = uuid_utils.uuid7().hex
 
         state = State(message_history=message_history or list(), temp_instructions=temp_instructions)
-        state.stage_message(ModelRequest.user_text_prompt(user_prompt))
+        state.stage_message(ModelRequest.user_text_prompt(user_prompt, name=author))
         overrides = (
             OverridesState(
                 override_agent_tools=tool_overrides,
@@ -87,6 +88,7 @@ class Client(BaseClient):
         topic: str,
         *,
         output_type: type[OutputT],
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -103,6 +105,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -118,6 +121,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = None,
         tool_overrides: list[BaseToolNodeSchema] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
@@ -140,6 +144,10 @@ class Client(BaseClient):
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
+            author: Optional name for the human author of *user_prompt*. When set,
+                it is stamped onto the staged ``UserPromptPart.name`` and surfaces
+                as a ``<user:author>`` attribution prefix once two or more named
+                humans share a channel. Defaults to ``None`` (anonymous ``<user>``).
             tool_overrides: Runtime agent tool overrides.
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used (``DataPart`` →
@@ -172,6 +180,7 @@ class Client(BaseClient):
             message_history=message_history,
             tool_overrides=tool_overrides,
             model_settings=model_settings,
+            author=author,
         )
         if reply_topic is None:
             reply_topic = self._reply_topic
@@ -198,6 +207,7 @@ class Client(BaseClient):
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         model_settings: ModelSettings | dict[str, Any] | None = None,
+        author: str | None = None,
     ) -> str:
         """Emit a true one-way (fire-and-forget) invocation to an agent node.
 
@@ -232,6 +242,10 @@ class Client(BaseClient):
                 that merge over the agent's constructor defaults, which in turn
                 merge over the model client's defaults. Must be JSON-serializable
                 since it travels over Kafka.
+            author: Optional name for the human author of *user_prompt*. When set,
+                it rides on the staged message and surfaces to multi-agent agents
+                as a ``<user:author>`` attribution prefix once two or more named
+                humans are present; otherwise human messages read as ``<user>``.
 
         Returns:
             The ``correlation_id`` of the emitted invocation, for tracing.
@@ -246,6 +260,7 @@ class Client(BaseClient):
             message_history=message_history,
             tool_overrides=tool_overrides,
             model_settings=model_settings,
+            author=author,
         )
         return await self._emit(
             topic=topic,
@@ -263,6 +278,7 @@ class Client(BaseClient):
         topic: str,
         *,
         output_type: type[OutputT],
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -280,6 +296,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -296,6 +313,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = None,
         tool_overrides: list[BaseToolNodeSchema] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
@@ -319,6 +337,8 @@ class Client(BaseClient):
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
+            author: Optional name for the human author of *user_prompt*. See
+                :meth:`invoke_node` for details.
             tool_overrides: Runtime agent tool overrides.
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used.
@@ -356,6 +376,7 @@ class Client(BaseClient):
         handle = await self.invoke_node(
             user_prompt,
             topic,
+            author=author,
             tool_overrides=tool_overrides,
             output_type=output_type,
             reply_topic=reply_topic,
