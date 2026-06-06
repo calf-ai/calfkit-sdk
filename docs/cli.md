@@ -3,8 +3,8 @@
 The `calfkit` command bundles the SDK's command-line tooling. It is installed
 via the **`cli` optional extra** (it pulls in `typer` and `watchfiles`):
 
-```bash
-pip install "calfkit[cli]"
+```console
+$ pip install "calfkit[cli]"
 ```
 
 If the extra isn't installed, invoking `calfkit` raises a clear remediation
@@ -51,12 +51,12 @@ Targets are resolved with Python's import machinery, so the module must be
 **importable** from where you run the command. By default the current directory
 is placed on the import path (see `--app-dir`), so run from your project root:
 
-```bash
-# project root contains weather_tool.py
-calfkit run weather_tool:get_weather
+```console
+$ # project root contains weather_tool.py
+$ calfkit run weather_tool:get_weather
 
-# nested package (dots, not slashes; no .py suffix)
-calfkit run app.tools.weather:get_weather
+$ # nested package (dots, not slashes; no .py suffix)
+$ calfkit run app.tools.weather:get_weather
 ```
 
 Nested directories work as packages, including
@@ -122,18 +122,18 @@ re-import) on every change.
 
 ### Examples
 
-```bash
-# One tool node
-calfkit run weather_tool:get_weather
+```console
+$ # One tool node
+$ calfkit run weather_tool:get_weather
 
-# An agent and its tool in one worker, against a specific broker
-calfkit run agent_service:agent weather_tool:get_weather --host localhost:9092
+$ # An agent and its tool in one worker, against a specific broker
+$ calfkit run agent_service:agent weather_tool:get_weather --host localhost:9092
 
-# Auto-restart on edits, auto-create dev topics
-calfkit run agent_service:agent --reload --provision
+$ # Auto-restart on edits, auto-create dev topics
+$ calfkit run agent_service:agent --reload --provision
 
-# Resolve targets relative to ./src, load a custom env file
-calfkit run workers:all_nodes --app-dir src --env-file .env.local
+$ # Resolve targets relative to ./src, load a custom env file
+$ calfkit run workers:all_nodes --app-dir src --env-file .env.local
 ```
 
 ### Production deployment
@@ -157,8 +157,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-```bash
-python serve_tool.py
+```console
+$ python serve_tool.py
 ```
 
 ---

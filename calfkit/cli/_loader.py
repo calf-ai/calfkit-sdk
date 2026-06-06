@@ -24,7 +24,7 @@ from typing import Any
 try:
     import typer
 except ImportError as e:  # pragma: no cover -- exercised manually
-    raise ImportError("the calfkit CLI requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
+    raise ImportError("the calfkit CLI requires the 'cli' optional extra. Install with: pip install \"calfkit[cli]\"") from e
 
 
 def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label: str = "target") -> list[Any]:
