@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.3...v0.5.4) (2026-06-06)
+
+
+### Features
+
+* agent-POV message-history projection for multi-agent channels ([#154](https://github.com/calf-ai/calfkit-sdk/issues/154)) ([#185](https://github.com/calf-ai/calfkit-sdk/issues/185)) ([86e69c5](https://github.com/calf-ai/calfkit-sdk/commit/86e69c5436369d088c8cf02122135adecda43759))
+
 ## [0.5.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.2...v0.5.3) (2026-06-06)
 
 
