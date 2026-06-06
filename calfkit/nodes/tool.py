@@ -103,6 +103,7 @@ class ToolNodeDef(BaseToolNodeDef):
             tool_name=tool_call_part.tool_name,
             messages=ctx.state.message_history,
             run_id=ctx.correlation_id,
+            resources=self._effective_resources(),
         )
 
         # TODO(#143): bounded retries / backoff for non-ModelRetry exceptions.

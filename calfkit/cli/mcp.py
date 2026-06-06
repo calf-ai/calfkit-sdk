@@ -1,12 +1,12 @@
 """``calfkit mcp`` typer subcommand.
 
-Currently exposes one command: ``codegen``. Spawns an MCP server, runs
-``initialize`` + ``tools/list``, and emits a generated Python module with
-:class:`McpToolDef` constants the user can import.
+Exposes two commands: ``codegen`` and ``schema``. ``codegen`` spawns an MCP
+server, runs ``initialize`` + ``tools/list``, and emits a generated Python
+module with :class:`McpToolDef` constants the user can import. ``schema`` emits
+the reference JSON Schema for ``mcp.json`` (no MCP server needed).
 
-Requires the ``mcp-codegen`` optional extra (typer). If typer is not
-installed, the import raises with a clear remediation message rather than
-silently failing.
+Requires the ``cli`` optional extra (typer). If typer is not installed, the
+import raises with a clear remediation message rather than silently failing.
 
 Example invocations::
 
@@ -42,7 +42,7 @@ from pathlib import Path
 try:
     import typer
 except ImportError as e:  # pragma: no cover -- exercised manually
-    raise ImportError("calfkit mcp codegen requires the 'mcp-codegen' optional extra. Install with: pip install calfkit[mcp-codegen]") from e
+    raise ImportError("calfkit mcp codegen requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
 
 from calfkit.mcp._codegen import diff_modules, render_module
 from calfkit.mcp._session import HttpTransport, McpSession, McpTransport, StdioTransport

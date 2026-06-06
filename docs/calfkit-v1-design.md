@@ -649,7 +649,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-The classifier does not import `enricher`, never names its topic, and is unchanged whether 0, 1, or N consumers subscribe to its events. The enricher is unchanged whether the classifier exists yet or not (the topic auto-creates). This is choreography. Critically, both `classifier` and `enricher` are pure declarations — they can live in a shared library and be reused across deployments with different wiring.
+The classifier does not import `enricher`, never names its topic, and is unchanged whether 0, 1, or N consumers subscribe to its events. The enricher is unchanged whether the classifier exists yet or not. This is choreography. Critically, both `classifier` and `enricher` are pure declarations — they can live in a shared library and be reused across deployments with different wiring.
+
+> **Topics do not auto-create by default.** The decoupling above is about *declarations*, not topic existence. Whether the underlying Kafka topic exists is a separate, deployment-time concern: it is created either by your broker's `auto.create.topics.enable` (a broker property calfkit can't assume), by an ops-governed pipeline, or by calfkit's EXPERIMENTAL opt-in `ProvisioningConfig` (off by default — see [docs/topic-provisioning.md](topic-provisioning.md) and open question #11).
 
 **Pub/sub fan-out (one producer, N independent consumers).** A news-watcher emits `NewsArticle` events; three independent agents react in parallel.
 
@@ -3319,7 +3321,7 @@ I list each with my current lean. None are blocking the start of implementation,
     *Lean:* full state on `Interrupt` (we need it for resume); just metadata on `RunStarted`/`Completed` (we don't need to checkpoint mid-run by default).
 
 11. **Should tool topics be auto-created or must they pre-exist?**
-    *Lean:* auto-create by default (with `Worker(auto_create_topics=True)`), with a flag to disable for prod environments where topic creation is gated.
+    *Resolved (EXPERIMENTAL, opt-in, OFF by default):* not auto-created by default — topics must pre-exist (via the broker's `auto.create.topics.enable` or an ops-governed pipeline). Calfkit ships an opt-in `ProvisioningConfig` that best-effort creates them; it is passed to the **client**, not the worker — `Client.connect(provisioning=ProvisioningConfig(enabled=True))` — because provisioning needs the broker URL + credentials that already live on the client, and the client's own reply topic needs the same switch. The earlier `Worker(auto_create_topics=True)` shape is **rejected** for that reason. When enabled, the worker provisions every topic its registered nodes reference at startup (before consumption), the client provisions its reply topic once, and `calfkit topics provision --nodes module:attr` covers the static/CI path. `replication_factor=1` and no ACLs make this a dev convenience, not a production provisioning story. See [docs/topic-provisioning.md](topic-provisioning.md).
 
 12. **Envelope `schema_version` bumps mid-deploy?**
     *Lean:* Workers ship a one-version-back decoder; unknown future versions DLQ. Schema bumps are coordinated cluster-wide.

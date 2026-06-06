@@ -31,6 +31,28 @@ def test_envelope_serialization_roundtrip(make_envelope):
     assert_json_roundtrip(make_envelope)
 
 
+def test_envelope_with_null_callback_topic_roundtrips():
+    """A fire-and-forget bottom call frame (``callback_topic=None``) must survive
+    a real JSON hop unchanged. ``None`` means "no requester to return to"; the
+    nullable wire field is what lets the worker's terminal guard skip the
+    point-to-point callback publish (``BaseNodeDef._publish_action``)."""
+    from calfkit.models.envelope import Envelope
+    from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
+    from calfkit.models.state import State
+
+    stack = CallFrameStack()
+    stack.push(CallFrame(target_topic="agent.input", callback_topic=None))
+    envelope = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=stack),
+    )
+
+    assert_json_roundtrip(envelope)
+
+    restored = Envelope.model_validate_json(envelope.model_dump_json())
+    assert restored.internal_workflow_state.current_frame.callback_topic is None
+
+
 def test_nested_deps_survive_json_roundtrip_and_correlation_id_stays_off_the_wire():
     """The deps dict (incl. nested/list values) must survive a real JSON hop
     verbatim, while ``correlation_id`` (a transport-sourced PrivateAttr) must NOT

@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.5.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.2...v0.5.3) (2026-06-06)
+
+
+### Features
+
+* CLI add `calfkit run` to run nodes without Worker boilerplate ([#181](https://github.com/calf-ai/calfkit-sdk/issues/181)) ([6c1e38e](https://github.com/calf-ai/calfkit-sdk/commit/6c1e38e006f1481016dc132e502fa4eeb734d9ef))
+
+## [0.5.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.1...v0.5.2) (2026-06-06)
+
+
+### Features
+
+* node & worker lifecycle hooks ([#165](https://github.com/calf-ai/calfkit-sdk/issues/165)) ([#175](https://github.com/calf-ai/calfkit-sdk/issues/175)) ([c9cbb3e](https://github.com/calf-ai/calfkit-sdk/commit/c9cbb3eb45ea0a7332d93705e91b1e65e7604a52))
+
+## [0.5.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.0...v0.5.1) (2026-06-05)
+
+
+### Features
+
+* opt-in Kafka topic provisioning (experimental) ([#174](https://github.com/calf-ai/calfkit-sdk/issues/174)) ([#177](https://github.com/calf-ai/calfkit-sdk/issues/177)) ([12fd012](https://github.com/calf-ai/calfkit-sdk/commit/12fd01280ac87f4116bd6dad4b6a6620383cb878))
+
+## [0.5.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.1...v0.5.0) (2026-06-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* true one-way Client.emit_to_node fire-and-forget ([#132](https://github.com/calf-ai/calfkit-sdk/issues/132)) (#176)
+
+### Features
+
+* true one-way Client.emit_to_node fire-and-forget ([#132](https://github.com/calf-ai/calfkit-sdk/issues/132)) ([#176](https://github.com/calf-ai/calfkit-sdk/issues/176)) ([c0d120c](https://github.com/calf-ai/calfkit-sdk/commit/c0d120c93b57e31b1f7c0eb90d3a75910400318c))
+
+## [0.4.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.4.0...v0.4.1) (2026-06-04)
+
+
+### Features
+
+* reference JSON Schema for mcp.json ([#172](https://github.com/calf-ai/calfkit-sdk/issues/172)) ([1262f51](https://github.com/calf-ai/calfkit-sdk/commit/1262f51a5d1923598ace30e882bd67c9b2586599))
+
 ## [0.4.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.3.6...v0.4.0) (2026-06-04)
 
 

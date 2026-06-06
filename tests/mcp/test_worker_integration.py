@@ -435,9 +435,13 @@ async def test_e2e_worker_dispatches_via_constructed_bridge() -> None:
 
 
 def test_worker_run_constructs_faststream_with_hooks() -> None:
-    """Verify Worker.run wires the lifecycle hooks into FastStream construction.
+    """Verify Worker.run wires all four lifecycle hooks into FastStream construction.
 
-    We mock FastStream itself so the test doesn't block on app.run().
+    Phase 4 layers the resource/serving brackets onto the existing MCP
+    open/close logic by routing every FastStream phase through a ``_hook_*``
+    method (each of which composes the MCP ``_on_startup``/``_on_shutdown``
+    internally). We mock FastStream itself so the test doesn't block on
+    app.run().
     """
     from unittest.mock import AsyncMock, patch
 
@@ -453,8 +457,10 @@ def test_worker_run_constructs_faststream_with_hooks() -> None:
 
         asyncio.run(worker.run())
 
-    # FastStream was constructed with on_startup and on_shutdown
+    # FastStream was constructed with all four lifecycle phases wired.
     _, kwargs = mock_faststream_cls.call_args
-    assert kwargs["on_startup"] == [worker._on_startup]
-    assert kwargs["on_shutdown"] == [worker._on_shutdown]
+    assert kwargs["on_startup"] == [worker._hook_on_startup]
+    assert kwargs["after_startup"] == [worker._hook_after_startup]
+    assert kwargs["on_shutdown"] == [worker._hook_on_shutdown]
+    assert kwargs["after_shutdown"] == [worker._hook_after_shutdown]
     mock_app.run.assert_awaited_once()
