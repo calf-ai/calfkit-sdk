@@ -12,7 +12,7 @@ from calfkit.mcp._bridge import McpBridge
 from calfkit.mcp._dedup import IdempotencyCache
 from calfkit.mcp._server import McpServer
 from calfkit.nodes import BaseNodeDef
-from calfkit.provisioning import TopicProvisioner, topics_for_nodes
+from calfkit.provisioning import topics_for_nodes
 from calfkit.worker.lifecycle import (
     PHASE_PAIRS,
     LifecycleContext,
@@ -217,61 +217,29 @@ class Worker(LifecycleHookMixin):
 
         self._prepared = True
 
-    async def provision_topics(self) -> None:
-        """Best-effort, opt-in creation of every topic the registered nodes use.
+    def _declare_startup_topics(self) -> None:
+        """Declare the registered nodes' topics into the client's startup ensurer.
 
-        Idempotent and safe to call directly: this is the explicit entry point
-        for the manual ``register_handlers()``-without-``app.run()`` path. When
-        ``self._client.provisioning.enabled`` is ``False`` it is a pure no-op
-        (no admin client is constructed).
+        The ensurer (the broker's pre-start hook) creates them — when
+        provisioning is enabled — at broker start, before any subscriber
+        consumes, alongside the client's reply topic. This keeps a single
+        provisioning pass over one admin client (FastStream's) for the whole
+        process. Declaration itself is cheap and unconditional; the enabled gate
+        lives in the ensurer.
 
         The topic set is :func:`~calfkit.provisioning.topics_for_nodes` over the
         nodes recorded by :meth:`register_handlers` (the single source of truth):
         each node's ``subscribe_topics``, its framework-private ``_return_topic``,
         its ``publish_topic``, and — for agent nodes — each tool's input
         ``subscribe_topics``. MCP bridges appended in :meth:`_on_startup` are
-        included because registration runs before this call.
-
-        Every node's ``_return_topic`` is a framework inbox, so it is passed in
-        ``framework_topics`` to ensure user ``topic_configs`` (retention /
-        compaction overrides) are never applied to those correlation-keyed
+        included because registration runs before this call. Every node's
+        ``_return_topic`` is declared ``framework=True`` so user ``topic_configs``
+        (retention / compaction) are never applied to those correlation-keyed
         return inboxes.
-
-        **Experimental** (opt-in; off by default): this API may change or be
-        removed in a minor release — calfkit is pre-1.0.
-
-        This is a **development convenience** (rf=1, no ACLs); review before
-        relying on it in production, where topics are typically ops-governed.
-        See :class:`~calfkit.provisioning.ProvisioningConfig` for the caveats.
         """
-        config = self._client.provisioning
-        if not config.enabled:
-            return
-
-        topics = topics_for_nodes(self._registered_nodes)
-        if not topics:
-            return
-
-        framework_topics = {node._return_topic for node in self._registered_nodes}
-
-        provisioner = TopicProvisioner.from_connection(
-            server_urls=self._client.server_urls,
-            config=config,
-            security_kwargs=self._client.security_kwargs,
-        )
-        report = await provisioner.provision(topics, framework_topics=framework_topics)
-        logger.info(
-            "provisioned topics: %d created, %d existing, %d unauthorized",
-            len(report.created),
-            len(report.existing),
-            len(report.unauthorized),
-        )
-        if report.unauthorized:
-            logger.warning(
-                "topic provisioning: %d unauthorized topic(s) NOT created (producers/consumers will stall): %s",
-                len(report.unauthorized),
-                ", ".join(report.unauthorized),
-            )
+        ensurer = self._client._startup_ensurer
+        ensurer.declare(topics_for_nodes(self._registered_nodes))
+        ensurer.declare({node._return_topic for node in self._registered_nodes}, framework=True)
 
     async def _on_startup(self) -> None:
         """Open MCP sessions and register handlers, before the broker starts.
@@ -313,15 +281,14 @@ class Worker(LifecycleHookMixin):
                 bridge._worker = self
             self._nodes.extend(self._mcp_bridges)
             self.register_handlers()
-            # Eager, opt-in topic provisioning. Runs AFTER register_handlers so
-            # the MCP bridges just appended are part of the registered set, and
-            # BEFORE broker.start() (FastStream starts the broker only after
-            # this on_startup hook returns) so every subscriber's inbox exists
-            # before consumption begins. Kept inside this try so a provisioning
-            # failure still triggers the BaseException cleanup below, closing
-            # any MCP sessions opened above. ``provision_topics`` self-guards on
-            # the disabled config (a documented no-op), so no guard here.
-            await self.provision_topics()
+            # Declare the registered nodes' topics into the client's startup
+            # ensurer. Runs AFTER register_handlers so the MCP bridges just
+            # appended are part of the registered set. The ensurer (the broker's
+            # pre-start hook) provisions them — when provisioning is enabled —
+            # at broker.start(), before any subscriber consumes, alongside the
+            # client's reply topic. A provisioning failure there surfaces through
+            # the start()/run() teardown, which closes these MCP sessions.
+            self._declare_startup_topics()
         except BaseException:
             # Cancellation, OSError, any other failure — close every
             # session we successfully opened so subprocesses don't outlive

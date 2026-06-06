@@ -1,10 +1,14 @@
-"""Tests for the client's provisioning-related read-only properties.
+"""Tests for the client's provisioning config + security handling.
 
-The reply-topic *provisioning behaviour* itself (declared into a
-``StartupTopicEnsurer`` and created at broker start) lives in
-``tests/test_startup_provisioning.py``; this file only covers the public
-``provisioning`` / ``server_urls`` / ``security_kwargs`` surface on the client.
+The reply-topic *provisioning behaviour* (declared into a ``StartupTopicEnsurer``
+and created at broker start, reusing FastStream's admin client) lives in
+``tests/test_startup_provisioning.py``. Since provisioning no longer builds a
+second admin client, the client no longer captures ``server_urls`` /
+``security_kwargs``: security is configured the FastStream way, via a
+``security=`` object that flows to the broker (and its admin client).
 """
+
+import pytest
 
 from calfkit.client import Client
 from calfkit.provisioning import ProvisioningConfig
@@ -25,30 +29,26 @@ def test_provisioning_property_reflects_passed_config() -> None:
     assert client.provisioning is cfg
 
 
-def test_server_urls_property_reflects_connect_argument() -> None:
-    client = Client.connect("broker-a:9092")
-
-    assert client.server_urls == "broker-a:9092"
-
-
-def test_security_kwargs_captures_security_object_and_raw_kwargs() -> None:
+def test_connect_accepts_a_faststream_security_object() -> None:
+    # The supported way to configure security: a FastStream `security=` object,
+    # which flows to the broker (and the admin client used for provisioning).
     from faststream.security import SASLPlaintext
 
-    sec = SASLPlaintext(username="u", password="p")
-    client = Client.connect(
-        "localhost:9092",
-        security=sec,
-        security_protocol="SASL_PLAINTEXT",
-        sasl_kerberos_service_name="custom",
-    )
+    client = Client.connect("localhost:9092", security=SASLPlaintext(username="u", password="p"))
 
-    sk = client.security_kwargs
-    assert sk["security"] is sec
-    assert sk["security_protocol"] == "SASL_PLAINTEXT"
-    assert sk["sasl_kerberos_service_name"] == "custom"
+    assert client.provisioning.enabled is False  # constructed without error
 
 
-def test_security_kwargs_excludes_non_security_broker_kwargs() -> None:
-    client = Client.connect("localhost:9092", client_id="my-client")
+def test_connect_rejects_raw_security_protocol_kwarg() -> None:
+    # Raw security kwargs are no longer captured/stripped for a second admin
+    # client; they flow straight to KafkaBroker, which rejects `security_protocol`.
+    # Users must pass a `security=` object instead.
+    with pytest.raises(TypeError):
+        Client.connect("localhost:9092", security_protocol="SASL_PLAINTEXT")
 
-    assert "client_id" not in client.security_kwargs
+
+def test_client_no_longer_exposes_server_urls_or_security_kwargs() -> None:
+    client = Client.connect("localhost:9092")
+
+    assert not hasattr(client, "server_urls")
+    assert not hasattr(client, "security_kwargs")
