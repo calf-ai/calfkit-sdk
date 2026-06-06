@@ -18,6 +18,8 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
+from faststream.kafka import KafkaBroker
+
 from calfkit.exceptions import MissingTopicsError
 from calfkit.provisioning.config import ProvisioningConfig
 from calfkit.provisioning.provisioner import provision_topics
@@ -25,7 +27,7 @@ from calfkit.provisioning.provisioner import provision_topics
 logger = logging.getLogger(__name__)
 
 
-def _admin_client_or_none(broker: Any) -> Any | None:
+def _admin_client_or_none(broker: KafkaBroker) -> Any | None:
     """Return FastStream's broker-managed admin client, or ``None`` when it is
     unavailable (a ``consumer_only`` broker, or one that is not yet connected).
 
@@ -63,7 +65,7 @@ class StartupTopicEnsurer:
         for topic in topics:
             self._declared[topic] = self._declared.get(topic, False) or framework
 
-    async def run(self, broker: Any) -> None:
+    async def run(self, broker: KafkaBroker) -> None:
         """Provision the declared topics if provisioning is enabled.
 
         No-op (and the admin client is never touched) when disabled or when

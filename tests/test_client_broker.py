@@ -81,6 +81,43 @@ def test_pre_start_raise_propagates_and_super_start_not_reached(monkeypatch) -> 
     assert "parent_start" not in calls  # subscribers never started
 
 
+def test_pre_start_re_runs_after_a_failed_hook(monkeypatch) -> None:
+    # A hook that RAISES must not be marked done — a retry start() must re-run
+    # it (otherwise a transient provisioning failure would silently skip
+    # provisioning on the next start and re-introduce the #180 hang).
+    calls: list[str] = []
+    fail = {"on": True}
+
+    async def hook(broker) -> None:  # noqa: ANN001
+        calls.append("hook")
+        if fail["on"]:
+            raise RuntimeError("boom")
+
+    broker = _PreStartHookBroker("localhost:9092", pre_start=hook)
+    _stub_connect(monkeypatch, broker, calls)
+    _stub_parent_start(monkeypatch, calls)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(broker.start())
+    assert "parent_start" not in calls  # first start aborted before subscribers
+
+    fail["on"] = False
+    asyncio.run(broker.start())  # retry without stop(): the hook must run again
+
+    assert calls.count("hook") == 2
+    assert "parent_start" in calls
+
+
+def test_stop_before_start_is_safe(monkeypatch) -> None:
+    calls: list[str] = []
+    broker = _PreStartHookBroker("localhost:9092", pre_start=None)
+    _stub_parent_stop(monkeypatch, calls)
+
+    asyncio.run(broker.stop())  # stop() before any start() must not raise
+
+    assert calls == ["parent_stop"]
+
+
 def test_stop_resets_one_shot_so_a_restart_reprovisions(monkeypatch) -> None:
     calls: list[str] = []
 

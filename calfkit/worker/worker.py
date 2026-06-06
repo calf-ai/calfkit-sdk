@@ -113,10 +113,10 @@ class Worker(LifecycleHookMixin):
         self._app: FastStream | None = None
         # Snapshot of the nodes actually wired up by ``register_handlers``.
         # Recorded once on the first (effective) call and used as the single
-        # source of truth for ``provision_topics`` — it survives the idempotent
-        # second call (which is a no-op once ``_prepared`` is set), so the
-        # topic set reflects exactly what was registered (including MCP bridges
-        # appended just before registration in ``_on_startup``).
+        # source of truth for ``_declare_startup_topics`` — it survives the
+        # idempotent second call (which is a no-op once ``_prepared`` is set), so
+        # the topic set reflects exactly what was registered (including MCP
+        # bridges appended just before registration in ``_on_startup``).
         self._registered_nodes: list[BaseNodeDef] = []
 
         # MCP-specific state. Segregating at construction time means the
@@ -183,7 +183,7 @@ class Worker(LifecycleHookMixin):
             logger.debug("register_handlers() called again; skipping (already prepared)")
             return
         # Record the nodes we are about to register as the single source of
-        # truth for ``provision_topics``. Snapshot (not alias) so later
+        # truth for ``_declare_startup_topics``. Snapshot (not alias) so later
         # ``add_nodes`` calls can't retroactively widen the provisioned set
         # beyond what was actually wired up.
         self._registered_nodes = list(self._nodes)

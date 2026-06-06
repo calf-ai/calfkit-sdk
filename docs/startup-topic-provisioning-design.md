@@ -291,19 +291,23 @@ Notes:
 
 ### 7.3 The stateless executor — `provisioner.py`
 
-`TopicProvisioner` is demoted from "owns an admin client + security merge" to a pure
-function that receives an already‑started admin client:
+The create/classify/retry loop is **extracted** into a stateless function that receives
+an already‑started admin client:
 
 ```python
 async def provision_topics(admin, topics, *, framework_topics, config) -> ProvisionReport
 ```
 
-Keeps the existing classify logic (code 0 created / 36 existing / 29 unauthorized /
+It keeps the existing classify logic (code 0 created / 36 existing / 29 unauthorized /
 retriable → retry / else raise), `NewTopic` shaping from `config`, the `framework_topics`
-carve‑out, and `ProvisionReport`. It no longer constructs or closes a client (FastStream
-owns that lifecycle), so `_make_admin_client`, `_merge_security_kwargs`, `from_connection`,
-and `_normalize_bootstrap` are removed. `describe_missing` is **not** added (no always‑on
-verify).
+carve‑out, and `ProvisionReport`, and it never constructs or closes a client (the caller
+owns that lifecycle). The ensurer calls it on FastStream's broker‑managed admin client.
+
+The `TopicProvisioner` class is **retained** (it still owns the build → start → close
+admin lifecycle via `from_connection` / `_make_admin_client` / `_merge_security_kwargs` /
+`_normalize_bootstrap`) because the standalone `calfkit topics` CLI provisions out‑of‑band
+with no broker; it now just delegates its loop to `provision_topics`. `describe_missing`
+is **not** added (no always‑on verify).
 
 ### 7.4 The fail‑fast exception
 
@@ -351,11 +355,11 @@ reusing FastStream's admin client — and only when enabled.
 |---|---|
 | `calfkit/client/_broker.py` | **New.** `_PreStartHookBroker(KafkaBroker)` — generic one‑shot pre‑start hook. |
 | `calfkit/provisioning/ensurer.py` | **New.** `StartupTopicEnsurer` — policy + declared‑topic registry + `run(broker)` (no‑op when disabled). |
-| `calfkit/provisioning/provisioner.py` | Demote `TopicProvisioner` to stateless `provision_topics(admin, …)`. Remove `_make_admin_client`, `_merge_security_kwargs`, `from_connection`, `_normalize_bootstrap`. Keep `ProvisionReport`, `topics_for_nodes`, classify logic, error types. |
+| `calfkit/provisioning/provisioner.py` | **Extract** the create/classify/retry loop into stateless `provision_topics(admin, …)`; `TopicProvisioner` **retained** (delegates its loop to it) since the `calfkit topics` CLI still needs the standalone admin lifecycle (`from_connection` / `_make_admin_client` / `_merge_security_kwargs` / `_normalize_bootstrap` kept). Keep `ProvisionReport`, `topics_for_nodes`, classify logic, error types. |
 | `calfkit/client/base.py` | `connect()` builds `_PreStartHookBroker` + `StartupTopicEnsurer`, declares the reply topic, wires `pre_start`. **Delete** the lazy provisioning block in `_publish_call`, the `_reply_topic_provisioned` flag, and `_provision_reply_topic`. **Remove** the `server_urls`/`security_kwargs` capture/strip that existed only for the second admin client (keep `provisioning` property; drop `server_urls`/`security_kwargs` properties if unused elsewhere). |
 | `calfkit/worker/worker.py` | `_on_startup` declares node topics into the ensurer instead of calling `provision_topics()`. **Delete** `Worker.provision_topics()` (hard break — no‑start provisioning path removed). |
 | `calfkit/exceptions.py` | **New** `MissingTopicsError`. |
-| `calfkit/provisioning/__init__.py` | Export `StartupTopicEnsurer`, `provision_topics`; drop removed symbols. |
+| `calfkit/provisioning/__init__.py` | Export `StartupTopicEnsurer`, `provision_topics`, `MissingTopicsError`. |
 | `docs/topic-provisioning.md` | Update to the new ownership model. |
 
 ---
@@ -366,9 +370,12 @@ reusing FastStream's admin client — and only when enabled.
   declared topic could not be created. Previously this case warned and then stalled.
 - **No new `connect()` kwargs.** (The earlier `verify_topics` / `topic_verify_timeout`
   idea is dropped — no always‑on verify.)
-- **Removed:** `Worker.provision_topics()` (provisioning now happens at broker start).
-- **Removed:** `TopicProvisioner.from_connection()` / its self‑owned admin client;
-  `Client.server_urls` / `Client.security_kwargs` properties if unused elsewhere.
+- **Removed:** `Worker.provision_topics()` (provisioning now happens at broker start);
+  `Client.server_urls` / `Client.security_kwargs` properties; the client's raw
+  security‑kwarg capture (raw `security_protocol` / `sasl_plain_*` / `ssl_context` to
+  `connect()` now raise a clear migration error — use a `security=` object).
+- **Retained:** `TopicProvisioner` / `from_connection` (still used by the `calfkit topics`
+  CLI for out‑of‑band provisioning); it delegates its loop to `provision_topics`.
 - **Unchanged:** the default (provisioning‑disabled) behaviour, `ProvisioningConfig`,
   `Client.provisioning`, `topics_for_nodes`, the request path, the worker's three run
   surfaces, `reply_topic` behaviour.

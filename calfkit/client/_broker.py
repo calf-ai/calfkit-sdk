@@ -15,7 +15,7 @@ client wires a :class:`~calfkit.provisioning.StartupTopicEnsurer` as the hook.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from types import TracebackType
 from typing import Any
 
@@ -32,8 +32,14 @@ class _PreStartHookBroker(KafkaBroker):
     and the registered subscribers without the broker holding any extra state.
     """
 
-    def __init__(self, *args: Any, pre_start: PreStartHook | None = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        bootstrap_servers: str | Iterable[str] = "localhost",
+        *,
+        pre_start: PreStartHook | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(bootstrap_servers, **kwargs)
         self._pre_start = pre_start
         self._pre_start_done = False
 
@@ -42,10 +48,13 @@ class _PreStartHookBroker(KafkaBroker):
         # client exists for the hook before subscribers start consuming.
         await self.connect()
         if self._pre_start is not None and not self._pre_start_done:
-            # Set the flag BEFORE awaiting so a concurrent second start() can't
-            # double-run the hook.
-            self._pre_start_done = True
             await self._pre_start(self)
+            # Mark done only AFTER the hook succeeds: a hook that RAISES must be
+            # retried on the next start() — silently skipping provisioning would
+            # re-introduce the #180 hang. A concurrent double-run is harmless
+            # (topic provisioning is idempotent), and start() is not a
+            # concurrent-call surface anyway.
+            self._pre_start_done = True
         await super().start()
 
     async def stop(

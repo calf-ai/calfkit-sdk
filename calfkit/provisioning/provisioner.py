@@ -2,20 +2,26 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from calfkit.provisioning.config import ProvisioningConfig
 
 logger = logging.getLogger(__name__)
+
+# Closed set of per-topic create outcomes the loop dispatches on (never escapes
+# this module / serialized): a Literal so mypy enforces exhaustive handling.
+_Decision = Literal["created", "existing", "unauthorized", "retry"]
 
 # Kafka error codes we classify explicitly (see aiokafka.errors.for_code).
 _CODE_NONE = 0  # NoError -> created
 _CODE_TOPIC_ALREADY_EXISTS = 36  # idempotent success
 _CODE_TOPIC_AUTHORIZATION_FAILED = 29  # ACL denied -> warn + continue
 
-# Bounded backoff between retriable create attempts (seconds). The overall
-# operation is still capped by ``ProvisioningConfig.create_timeout_ms`` via the
-# single ``asyncio.wait_for`` wrapping the whole flow.
+# Bounded backoff between retriable create attempts (seconds). The
+# create/classify/retry loop is capped by ``ProvisioningConfig.create_timeout_ms``
+# via the ``asyncio.wait_for`` inside :func:`provision_topics`; the standalone
+# ``TopicProvisioner.provision`` bounds the admin ``start()`` under the same
+# budget separately.
 _RETRY_BACKOFF_S = 0.5
 
 
@@ -179,7 +185,7 @@ def _unpack(row: tuple[Any, ...]) -> tuple[str, int]:
     return row[0], row[1]
 
 
-def _classify(topic: str, code: int) -> str:
+def _classify(topic: str, code: int) -> _Decision:
     from aiokafka.errors import for_code  # type: ignore[import-untyped]
 
     if code == _CODE_NONE:
@@ -347,14 +353,17 @@ class TopicProvisioner:
         """Create ``topics`` if missing via a freshly-built admin client.
 
         Owns the admin client's lifecycle (build → start → close) and delegates
-        the create/classify/retry to :func:`provision_topics`. ``topic_configs``
-        from the config are applied to data topics only, never to
-        ``framework_topics`` (reply / ``*.private.return`` inboxes), for which
-        overrides like ``cleanup.policy=compact`` would be semantically wrong.
+        the create/classify/retry to :func:`provision_topics`. Both the admin
+        ``start()`` (network connect) and the create loop are bounded by
+        ``config.create_timeout_ms`` so an unreachable broker can't hang the
+        connect. ``topic_configs`` from the config are applied to data topics
+        only, never to ``framework_topics`` (reply / ``*.private.return``
+        inboxes), for which overrides like ``cleanup.policy=compact`` would be
+        semantically wrong.
 
         Raises:
             TopicProvisioningError: On a non-retriable per-topic error, or when
-                the timeout elapses with topics still pending.
+                the timeout elapses (during connect or with topics still pending).
         """
         pending = list(dict.fromkeys(topics))
         if not pending:
@@ -366,7 +375,14 @@ class TopicProvisioner:
             **self._conn_kwargs,
         )
         try:
-            await admin.start()
+            try:
+                await asyncio.wait_for(admin.start(), timeout=self._config.create_timeout_ms / 1000)
+            except asyncio.TimeoutError as exc:
+                raise TopicProvisioningError(
+                    f"Admin client connect timed out after {self._config.create_timeout_ms}ms",
+                    topic=pending[0],
+                    code=None,
+                ) from exc
             return await provision_topics(admin, pending, framework_topics=framework_topics, config=self._config)
         finally:
             # Best-effort idempotent close on every path, including

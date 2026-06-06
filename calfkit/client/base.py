@@ -139,6 +139,19 @@ class BaseClient:
         if server_urls is None:
             server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
+        # Raw security kwargs were accepted pre-#180 (for calfkit's own admin
+        # client); now all kwargs flow straight to KafkaBroker, which rejects
+        # these. Fail with an actionable migration message instead of a cryptic
+        # "unexpected keyword argument" TypeError from KafkaBroker.
+        rejected_security = [k for k in broker_kwargs if k in ("security_protocol", "ssl_context") or k.startswith(("sasl_plain_", "sasl_mechanism"))]
+        if rejected_security:
+            raise ValueError(
+                f"Client.connect() no longer accepts raw security kwargs {rejected_security}; "
+                "configure security with a FastStream `security=` object "
+                "(e.g. `security=faststream.security.SASLPlaintext(username=..., password=...)`), "
+                "which is applied to the producer, consumer, and the admin client used for provisioning."
+            )
+
         client_id = uuid_utils.uuid7().hex
         if reply_topic is None:
             reply_topic = f"calf-client-reply-{client_id}"

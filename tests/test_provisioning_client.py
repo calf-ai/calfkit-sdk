@@ -40,11 +40,15 @@ def test_connect_accepts_a_faststream_security_object() -> None:
 
 
 def test_connect_rejects_raw_security_protocol_kwarg() -> None:
-    # Raw security kwargs are no longer captured/stripped for a second admin
-    # client; they flow straight to KafkaBroker, which rejects `security_protocol`.
-    # Users must pass a `security=` object instead.
-    with pytest.raises(TypeError):
+    # Raw security kwargs are no longer accepted; the client gives an actionable
+    # migration error pointing at `security=`, not a cryptic KafkaBroker TypeError.
+    with pytest.raises(ValueError, match="security="):
         Client.connect("localhost:9092", security_protocol="SASL_PLAINTEXT")
+
+
+def test_connect_rejects_raw_sasl_plain_kwargs() -> None:
+    with pytest.raises(ValueError, match="security="):
+        Client.connect("localhost:9092", sasl_plain_username="u", sasl_plain_password="p")
 
 
 def test_client_no_longer_exposes_server_urls_or_security_kwargs() -> None:

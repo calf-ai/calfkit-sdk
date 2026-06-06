@@ -8,7 +8,6 @@ executor, and `StartupTopicEnsurer` — all exercised with a fake admin client
 import asyncio
 
 import pytest
-from faststream.exceptions import IncorrectState
 
 from calfkit.exceptions import MissingTopicsError
 from calfkit.provisioning import (
@@ -19,16 +18,13 @@ from calfkit.provisioning import (
     provision_topics,
 )
 from calfkit.provisioning import provisioner as provisioner_mod
+from tests._provisioning_fakes import EnsurerBroker as _Broker
+from tests._provisioning_fakes import FakeResponse
 
 # ---------------------------------------------------------------------------
 # Fake admin (already "started" — provision_topics receives a live admin client
 # and must NOT own its lifecycle; FastStream's broker owns it).
 # ---------------------------------------------------------------------------
-
-
-class _Resp:
-    def __init__(self, topic_errors: list[tuple]) -> None:
-        self.topic_errors = topic_errors
 
 
 class _Admin:
@@ -43,7 +39,7 @@ class _Admin:
         idx = len(self.create_calls)
         self.create_calls.append(list(new_topics))
         rows = self._error_plan[min(idx, len(self._error_plan) - 1)]
-        return _Resp([(t, c) for (t, c) in rows])
+        return FakeResponse([(t, c) for (t, c) in rows])
 
     async def close(self) -> None:
         self.close_calls += 1
@@ -162,39 +158,6 @@ def test_provision_topics_timeout_raises_naming_pending(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _BrokerConfig:
-    """Mimics FastStream's ``KafkaBrokerConfig.admin_client`` property."""
-
-    def __init__(self, admin, raise_incorrect_state: bool = False) -> None:
-        self._admin = admin
-        self._raise = raise_incorrect_state
-        self.admin_access_count = 0
-
-    @property
-    def admin_client(self):  # noqa: ANN201
-        self.admin_access_count += 1
-        if self._raise:
-            raise IncorrectState("Admin client is not initialized. Call connect() first.")
-        return self._admin
-
-
-class _ConfigComposition:
-    def __init__(self, broker_config: _BrokerConfig) -> None:
-        self.broker_config = broker_config
-
-
-class _Broker:
-    """Minimal stand-in exposing ``broker.config.broker_config.admin_client``."""
-
-    def __init__(self, admin=None, raise_incorrect_state: bool = False) -> None:  # noqa: ANN001
-        self._bc = _BrokerConfig(admin, raise_incorrect_state)
-        self.config = _ConfigComposition(self._bc)
-
-    @property
-    def admin_access_count(self) -> int:
-        return self._bc.admin_access_count
-
-
 def test_ensurer_disabled_is_a_noop_admin_never_touched() -> None:
     admin = _Admin([[]])
     broker = _Broker(admin)
@@ -305,3 +268,44 @@ def test_connect_disabled_ensurer_is_a_noop() -> None:
 
     assert broker.admin_access_count == 0  # default path: admin client never reached
     assert admin.create_calls == []
+
+
+def test_client_wired_ensurer_provisions_reply_topic_before_subscribers(monkeypatch) -> None:
+    # End-to-end wiring: the client's OWN ensurer, run as the REAL broker's
+    # pre-start hook, provisions the reply topic strictly BEFORE super().start()
+    # starts the subscribers — the #180 ordering guarantee, asserted through the
+    # real _PreStartHookBroker.start (not the two halves in isolation).
+    from faststream.kafka import KafkaBroker
+
+    from calfkit.client import Client
+    from calfkit.client._broker import _PreStartHookBroker
+    from calfkit.provisioning import ensurer as ensurer_mod
+
+    client = Client.connect("localhost:9092", reply_topic="r.reply", provisioning=ProvisioningConfig(enabled=True))
+    broker = client.broker
+    assert isinstance(broker, _PreStartHookBroker)
+
+    order: list[str] = []
+    admin = _Admin([[("r.reply", 0)]])
+    _orig_create = admin.create_topics
+
+    async def _recording_create(new_topics, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        order.append("create:" + ",".join(nt.name for nt in new_topics))
+        return await _orig_create(new_topics, *args, **kwargs)
+
+    admin.create_topics = _recording_create  # type: ignore[method-assign]
+    monkeypatch.setattr(ensurer_mod, "_admin_client_or_none", lambda b: admin)  # noqa: ARG005
+
+    async def _fake_connect() -> None:
+        return None
+
+    monkeypatch.setattr(broker, "connect", _fake_connect)
+
+    async def _fake_parent_start(self) -> None:  # noqa: ANN001
+        order.append("parent_start")
+
+    monkeypatch.setattr(KafkaBroker, "start", _fake_parent_start)
+
+    asyncio.run(broker.start())
+
+    assert order == ["create:r.reply", "parent_start"]
