@@ -504,6 +504,12 @@ async def test_node_resource_wins_over_worker_resource_on_same_key() -> None:
     async def worker_db(ctx: Any) -> Any:
         yield "WORKER-DB"
 
+    # A worker-only key so the assertion can distinguish "merge happened, node
+    # wins" from "no merge" and from "wrong precedence".
+    @worker.resource("shared")
+    async def worker_shared(ctx: Any) -> Any:
+        yield "SHARED"
+
     @node.resource("db")
     async def node_db(ctx: Any) -> Any:
         yield "NODE-DB"
@@ -520,8 +526,10 @@ async def test_node_resource_wins_over_worker_resource_on_same_key() -> None:
         await _publish(broker, _frame_envelope("merge_probe.in"), "merge_probe.in", "cid-merge")
         await worker.stop()
 
-    # Node key wins; the worker's same-key value is shadowed for this handler.
-    assert captured["resources"] == {"db": "NODE-DB"}
+    # Merged view: worker-only key present, and on the shared key the node wins.
+    # (Fails if the merge is dropped -> missing "shared"; or precedence reversed
+    # -> db == "WORKER-DB".)
+    assert captured["resources"] == {"db": "NODE-DB", "shared": "SHARED"}
 
 
 # ---------------------------------------------------------------------------

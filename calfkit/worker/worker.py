@@ -151,7 +151,12 @@ class Worker(LifecycleHookMixin):
         else:
             # Back-reference so the node's per-message handler can merge this
             # worker's lifecycle resources under its own (see
-            # BaseNodeDef._effective_resources / prepare_context).
+            # BaseNodeDef._effective_resources / prepare_context). Last writer
+            # wins: re-using one node-def instance across workers (a common test
+            # pattern) points it at whichever worker is currently hosting it.
+            # Hosting the SAME instance in two *concurrently live* workers is
+            # unsupported (one shared resource bag, double subscriber
+            # registration) — use a separate instance per live worker.
             node._worker = self
             self._nodes.append(node)
 
@@ -461,18 +466,26 @@ class Worker(LifecycleHookMixin):
         A no-op if the worker was never started, so a defensive
         ``try/finally: await worker.stop()`` is safe.
 
-        Cancellation caveat: resource/serving teardown is best-effort under
-        *cancellation*. If the surrounding task is cancelled mid-shutdown, a
-        ``CancelledError`` propagates out of the serving-teardown hook and
-        FastStream then skips ``broker.stop()`` and the resource-bracket
-        teardown — those resources may not close. The signal-driven
-        :meth:`run` surface is unaffected (FastStream runs shutdown to
-        completion before cancelling its task group); this only affects
-        external cancellation of the programmatic ``start``/``stop`` /
-        ``async with`` surfaces.
+        FastStream's ``stop()`` runs ``on_shutdown`` → ``broker.stop()`` →
+        ``after_shutdown`` with no ``try/finally``, so if ``broker.stop()``
+        raises (flaky disconnect) or shutdown is cancelled, it skips
+        ``after_shutdown`` — where the resource brackets are torn down. We
+        therefore release the resource stack in a ``finally`` regardless, so a
+        failed/cancelled drain never strands pools, clients, or MCP sessions.
+        Resource teardown still happens *after* the drain attempt, preserving
+        the "drain before close" order. ``CancelledError`` still propagates
+        after the best-effort teardown attempt.
         """
-        if self._app is not None:
+        if self._app is None:
+            return
+        try:
             await self._app.stop()
+        finally:
+            # Idempotent: _hook_after_shutdown nulls the stack on the clean
+            # path, so this is a no-op then; it only does real work when
+            # after_shutdown was skipped by a failing/cancelled drain.
+            await self._safe_aclose(self._resource_stack)
+            self._resource_stack = None
 
     async def _cleanup_after_failed_start(self) -> None:
         """Best-effort teardown after a failed ``start()``/``run()``.
@@ -485,7 +498,17 @@ class Worker(LifecycleHookMixin):
         try:
             await self.stop()
         except Exception:
-            logger.exception("worker %s teardown after failed start failed; original boot error will be raised", self.id)
+            # Name what may still be open so an operator knows a manual
+            # cleanup / restart is warranted rather than assuming graceful release.
+            leaked_resources = self._resource_stack is not None
+            open_mcp = sum(1 for s in self._mcp_servers if s.session is not None)
+            logger.exception(
+                "worker %s teardown after failed start failed; original boot error will be raised "
+                "(resource brackets still open=%s, MCP sessions still open=%d)",
+                self.id,
+                leaked_resources,
+                open_mcp,
+            )
 
     async def __aenter__(self) -> Self:
         await self.start()

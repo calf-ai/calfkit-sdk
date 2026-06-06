@@ -364,6 +364,37 @@ async def test_on_startup_failure_rolls_back_resource_stack_and_mcp() -> None:
     assert mcp_closed == [True]
 
 
+async def test_normal_stop_tears_down_resources_when_broker_stop_raises() -> None:
+    """On a *clean* shutdown, FastStream skips after_shutdown (where the resource
+    brackets are torn down) if broker.stop() raises. stop() must release the
+    resource stack itself so a flaky drain never strands pools/clients."""
+    from unittest.mock import AsyncMock, patch
+
+    from faststream.kafka import TestKafkaBroker
+
+    worker = _make_worker()
+    torn_down: list[str] = []
+
+    @worker.resource("db")
+    async def db(ctx: Any) -> Any:
+        try:
+            yield "pool"
+        finally:
+            torn_down.append("resource")
+
+    broker = worker._client.broker
+    async with TestKafkaBroker(broker):
+        await worker.start()
+        assert worker.resources["db"] == "pool"  # opened, serving
+        with patch.object(broker, "stop", new=AsyncMock(side_effect=RuntimeError("drain failed"))):
+            with pytest.raises(RuntimeError, match="drain failed"):
+                await worker.stop()
+
+    # The failing drain surfaced, but the resource bracket still closed.
+    assert torn_down == ["resource"]
+    assert worker._resource_stack is None
+
+
 async def test_after_startup_failure_tears_down_resources_when_broker_stop_raises() -> None:
     """Rollback must still tear down resources even if the drain (broker.stop)
     itself raises — the guarded broker.stop in _hook_after_startup logs and
