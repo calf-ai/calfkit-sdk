@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.1...v0.5.2) (2026-06-06)
+
+
+### Features
+
+* node & worker lifecycle hooks ([#165](https://github.com/calf-ai/calfkit-sdk/issues/165)) ([#175](https://github.com/calf-ai/calfkit-sdk/issues/175)) ([c9cbb3e](https://github.com/calf-ai/calfkit-sdk/commit/c9cbb3eb45ea0a7332d93705e91b1e65e7604a52))
+
 ## [0.5.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.0...v0.5.1) (2026-06-05)
 
 
