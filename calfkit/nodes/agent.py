@@ -8,8 +8,7 @@ from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
-from calfkit._vendor.pydantic_ai.messages import ModelResponse, RetryPromptPart
-from calfkit._vendor.pydantic_ai.messages import TextPart as _RespTextPart
+from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
 from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
@@ -22,7 +21,7 @@ from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, PendingToolBatch
-from calfkit.nodes._projection import project
+from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -335,8 +334,7 @@ class BaseAgentNodeDef(
                 self.name,
             )
             messages = result.new_messages()
-            # Stamp the agent's own responses with its identity before appending to
-            # canonical (docs/agent-pov-projection.md §4, §6.1).
+            # stamp author identity onto the agent's own responses (§4, §6.1)
             ctx.state.extend_with_responses(messages, self.name)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
@@ -494,24 +492,19 @@ class BaseAgentNodeDef(
         else:
             logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
             new_messages = result.new_messages()
-            # Stamp the agent's own responses with its identity before appending to
-            # canonical (docs/agent-pov-projection.md §4, §6.1).
+            # stamp author identity onto the agent's own responses (§4, §6.1)
             ctx.state.extend_with_responses(new_messages, self.name)
             if isinstance(result.output, str):
                 ctx.state.final_output_parts = [TextPart(text=result.output)]
             else:
-                # Surface BOTH a text preamble and the structured value (§7).
-                # CRITICAL (§7): read the preamble from the LAST ``ModelResponse``
-                # via a reverse-scan, NOT ``new_messages()[-1]`` — in tool mode
-                # (the default) the trailing message is the ``final_result``
-                # ToolReturn ``ModelRequest`` appended after the response
-                # (_agent_graph.py:809-814), which carries no preamble. Read with
-                # the VENDORED ``TextPart`` (field ``.content``); build with
-                # calfkit's payload ``TextPart`` (field ``.text``).
-                final_resp = next((m for m in reversed(new_messages) if isinstance(m, ModelResponse)), None)
-                preamble = "".join(p.content for p in final_resp.parts if isinstance(p, _RespTextPart)) if final_resp else ""
-
+                # Surface a text preamble alongside the structured value when present (§7).
+                # ``structured_output_preamble`` reads the run's last ModelResponse and
+                # returns text ONLY in tool mode (where it is a genuine preamble distinct
+                # from the ``final_result`` call); in native/prompted mode the response's
+                # TextPart IS the JSON answer, so it returns "" to avoid duplicating it
+                # alongside the DataPart.
                 parts: list[ContentPart] = []
+                preamble = structured_output_preamble(new_messages)
                 if preamble:
                     parts.append(TextPart(text=preamble))
                 parts.append(DataPart(data=result.output))

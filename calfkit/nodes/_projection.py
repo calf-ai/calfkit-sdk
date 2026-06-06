@@ -1,6 +1,6 @@
-"""Agent-POV message-history projection.
+"""Agent-POV message-history projection and final-output surface helpers.
 
-See ``docs/agent-pov-projection.md`` §5 for the authoritative design.
+See ``docs/agent-pov-projection.md`` §5/§7 for the authoritative design.
 
 ``project(history, viewer)`` is a **pure** function: it returns a new
 ``list[ModelMessage]``, constructs new message/part objects (never mutating the
@@ -12,11 +12,17 @@ Detection (§5.1): if a single role is unambiguous (one agent, ≤1 named human)
 the history passes through transparently (byte-identical model input to today,
 but with ``name`` stripped); otherwise other participants are re-roled to
 attributed, surface-only ``ModelRequest`` user turns.
+
+``structured_output_preamble`` is the client-facing sibling (§7): given a run's
+new messages it returns the tool-mode text preamble that accompanies a structured
+answer. It lives here because it shares the ``final_result``/``TextPart`` shape
+with the projection surface (``_surface``).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 
 from calfkit._vendor.pydantic_ai.messages import (
@@ -28,6 +34,8 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
+
+logger = logging.getLogger(__name__)
 
 # The default name pydantic-ai gives the structured-output tool (§5.5). A user
 # who customizes it via ``ToolOutput(Model, name=...)`` is a documented
@@ -52,7 +60,38 @@ def project(history: list[ModelMessage], viewer: str) -> list[ModelMessage]:
 
     if not multi_participant:
         return _project_transparent(history)
+    # The no-flag design has no other signal that projection engaged (and that the
+    # prompt prefix — hence provider prompt caches — changed for ``viewer``). Log so
+    # the engage point is greppable (§5.1).
+    logger.debug(
+        "projecting multi-participant POV for viewer=%s (agents=%d, named_humans=%d)",
+        viewer,
+        len(agent_names),
+        len(human_names),
+    )
     return _project_multi(history, viewer)
+
+
+def structured_output_preamble(new_messages: list[ModelMessage]) -> str:
+    """Text preamble accompanying a **tool-mode** structured final output (§7).
+
+    Returns the concatenated ``TextPart`` text of the run's last ``ModelResponse``
+    **only** when that response also carries a ``final_result`` tool call — i.e.
+    tool mode (the default), where the text is a genuine preamble distinct from the
+    structured answer. In ``native``/``prompted`` mode the response's ``TextPart``
+    *is* the JSON answer (no ``final_result`` call), so this returns ``""`` to avoid
+    duplicating the structured value alongside the ``DataPart``.
+
+    Reads via the vendored ``TextPart`` because ``new_messages`` are vendored
+    message objects; ``calfkit.models.payload.TextPart`` is a different type.
+    """
+    final_resp = next((m for m in reversed(new_messages) if isinstance(m, ModelResponse)), None)
+    if final_resp is None:
+        return ""
+    has_final_result = any(p.tool_name == _FINAL_RESULT_TOOL_NAME for p in final_resp.tool_calls)
+    if not has_final_result:
+        return ""  # native/prompted: the TextPart is the answer, not a preamble
+    return "".join(p.content for p in final_resp.parts if isinstance(p, TextPart))
 
 
 # --------------------------------------------------------------------------- #
@@ -104,21 +143,24 @@ def _project_multi(history: list[ModelMessage], viewer: str) -> list[ModelMessag
 
 
 def _tool_call_owner_map(history: list[ModelMessage]) -> dict[str, str]:
-    """Map ``tool_call_id`` → owning ``ModelResponse.name`` (or ``<unknown>``)."""
+    """Map ``tool_call_id`` → owning ``ModelResponse.name`` (or the bare string ``"unknown"``)."""
     owners: dict[str, str] = {}
     for m in history:
         if isinstance(m, ModelResponse):
             author = m.name or _UNKNOWN_AUTHOR
-            for p in m.parts:
-                if isinstance(p, ToolCallPart):
-                    owners[p.tool_call_id] = author
+            for tc in m.tool_calls:
+                owners[tc.tool_call_id] = author
     return owners
 
 
 def _project_response(m: ModelResponse, viewer: str) -> list[ModelMessage]:
     author = m.name or _UNKNOWN_AUTHOR
     if author == viewer:
-        # Self — full fidelity, name stripped, parts unchanged (§5.2).
+        # Self — full fidelity, name stripped, parts kept VERBATIM (§5.2). The
+        # verbatim ToolCallPart ids matter: on a deferred-results re-entry pydantic-ai
+        # reverse-scans the projected input for the viewer's last ModelResponse and
+        # raises UserError if its in-flight tool calls are missing (_agent_graph.py
+        # :301-308, §6.2). Do not drop tool-call-only self turns.
         return [replace(m, name=None)]
 
     # Other — surface-only, attributed (§5.2, §5.5).
@@ -145,8 +187,7 @@ def _project_request(
         new_parts: list[ModelRequestPart] = []
         for p in m.parts:
             if isinstance(p, UserPromptPart):
-                prefix = _human_prefix(p)
-                new_parts.append(UserPromptPart(content=f"{prefix} {p.content}"))
+                new_parts.append(_prefix_user_prompt(p))
             # Any non-UserPromptPart in a human request is internal — drop it.
         return [ModelRequest(parts=new_parts)] if new_parts else []
 
@@ -162,16 +203,24 @@ def _project_request(
             kept_parts.append(p)
     if not kept_parts:
         return []
-    if len(kept_parts) == len(m.parts):
-        # All parts kept → preserve the original request verbatim (self-view).
-        return [m]
-    return [ModelRequest(parts=kept_parts)]
+    # Fresh ModelRequest preserving the original's non-parts fields and (for the
+    # all-kept self-view) the verbatim tool-call ids the §6.2 re-entry needs. Parts
+    # are never mutated in place, so sharing the part objects is purity-safe (§5).
+    return [replace(m, parts=kept_parts)]
 
 
-def _human_prefix(p: UserPromptPart) -> str:
-    if p.name:
-        return f"<user:{p.name}>"
-    return "<user>"
+def _prefix_user_prompt(p: UserPromptPart) -> UserPromptPart:
+    """Attribute a human ``UserPromptPart`` with ``<user>``/``<user:name>``, preserving multimodal content.
+
+    ``UserPromptPart.content`` is ``str | Sequence[UserContent]``. For a plain string
+    we concatenate; for multimodal content (text + images/binaries) we prepend the
+    prefix as a leading text element so non-text parts (e.g. ``BinaryContent``) are
+    preserved verbatim rather than stringified to their repr.
+    """
+    prefix = f"<user:{p.name}>" if p.name else "<user>"
+    if isinstance(p.content, str):
+        return UserPromptPart(content=f"{prefix} {p.content}")
+    return UserPromptPart(content=[prefix, *p.content])
 
 
 def _surface(m: ModelResponse) -> str:
@@ -189,7 +238,19 @@ def _surface(m: ModelResponse) -> str:
             # Branch on truthiness of args directly (NOT the rendered string, and
             # NOT has_content() which drops {"x": 0}). (§5.5)
             if p.args:
-                components.append(_render_structured_args(p))
+                # ``args_as_dict()`` can raise on off-spec/legacy stored args (non-dict
+                # JSON, non-str args). project() runs inside the agent handler with no
+                # surrounding catch, so an escape here would hang the caller (the same
+                # failure the dispatch path guards at agent.py). Degrade: log and drop
+                # the structured component (any text preamble still surfaces).
+                try:
+                    components.append(_render_structured_args(p))
+                except Exception:
+                    logger.warning(
+                        "could not render final_result args for projection surface (tool_call_id=%s); omitting structured component",
+                        p.tool_call_id,
+                        exc_info=True,
+                    )
         # Ordinary tool calls / thinking / file parts are internal → dropped.
     return "\n".join(components)
 
