@@ -376,6 +376,8 @@ Typing the hook as `ServingContext[Worker]` makes `ctx.owner.id` autocomplete. T
 
 **At-least-once caveat**: presence publishes are *not* exactly-once. Under consumer-group rebalances an `after_startup` hook may fire more than once, and a hard crash skips the `on_shutdown` "down" entirely. Pair presence events with a consumer-side TTL / liveness check rather than treating them as a perfectly balanced up/down ledger.
 
+**Running & embedding** — `worker.run()` is the batteries-included default (installs signal handlers and blocks), but a worker can also be brought up non-blocking with `await worker.start()` / `await worker.stop()` or scoped with `async with worker:`, so its consumers and resources run alongside another long-running service under your own run loop. See [Worker Lifecycle & Embedding](docs/worker-lifecycle.md).
+
 <br>
 
 ### Gating Node Invocations (Optional)
@@ -482,6 +484,10 @@ See [`docs/mcp-overview.md`](docs/mcp-overview.md) for the quickstart, deploymen
 ## Documentation
 
 Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit.
+
+Deep-dive guides:
+
+- [Worker Lifecycle & Embedding](docs/worker-lifecycle.md) — running a worker with `run()` vs the embeddable `start()`/`stop()` and `async with` surfaces, composing it with other long-running services, and the lifecycle guarantees.
 
 <br>
 
