@@ -7,17 +7,21 @@ See :class:`ProvisioningConfig` for the dev-safe / review-for-prod caveats.
 """
 
 from calfkit.provisioning.config import ProvisioningConfig
+from calfkit.provisioning.ensurer import StartupTopicEnsurer
 from calfkit.provisioning.provisioner import (
     ProvisionReport,
     TopicProvisioner,
     TopicProvisioningError,
+    provision_topics,
     topics_for_nodes,
 )
 
 __all__ = [
     "ProvisioningConfig",
     "ProvisionReport",
+    "StartupTopicEnsurer",
     "TopicProvisioner",
     "TopicProvisioningError",
+    "provision_topics",
     "topics_for_nodes",
 ]

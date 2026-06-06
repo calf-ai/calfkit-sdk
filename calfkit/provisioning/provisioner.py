@@ -156,6 +156,137 @@ def _merge_security_kwargs(
     return merged
 
 
+def _build_new_topic(topic: str, framework_topics: set[str], config: ProvisioningConfig) -> Any:
+    from aiokafka.admin import NewTopic
+
+    # NewTopic(num_partitions=-1, ...) raises client-side (XOR validator), so
+    # always supply concrete positive values. User ``topic_configs`` apply to
+    # data topics only — never to framework inboxes (reply / *.private.return).
+    topic_configs = None
+    if topic not in framework_topics and config.topic_configs:
+        topic_configs = dict(config.topic_configs)
+    return NewTopic(
+        name=topic,
+        num_partitions=config.num_partitions,
+        replication_factor=config.replication_factor,
+        topic_configs=topic_configs,
+    )
+
+
+def _unpack(row: tuple[Any, ...]) -> tuple[str, int]:
+    # ``topic_errors`` rows are (topic, code) on response v0 and
+    # (topic, code, message) on v1+. We only need topic + code.
+    return row[0], row[1]
+
+
+def _classify(topic: str, code: int) -> str:
+    from aiokafka.errors import for_code  # type: ignore[import-untyped]
+
+    if code == _CODE_NONE:
+        return "created"
+    if code == _CODE_TOPIC_ALREADY_EXISTS:
+        return "existing"
+    if code == _CODE_TOPIC_AUTHORIZATION_FAILED:
+        return "unauthorized"
+    err = for_code(code)
+    if getattr(err, "retriable", False):
+        return "retry"
+    raise TopicProvisioningError(
+        f"Topic {topic!r} failed provisioning with non-retriable error {err.__name__} (code {code}).",
+        topic=topic,
+        code=code,
+    )
+
+
+async def _provision_loop(
+    admin: Any,
+    pending: list[str],
+    framework_topics: set[str],
+    config: ProvisioningConfig,
+    last_pending: list[str],
+) -> ProvisionReport:
+    """Create-classify-retry loop. ``last_pending`` is updated in place so the
+    timeout handler in :func:`provision_topics` can name what is still missing."""
+    report = ProvisionReport()
+    while pending:
+        last_pending[:] = pending
+        new_topics = [_build_new_topic(t, framework_topics, config) for t in pending]
+        resp = await admin.create_topics(new_topics)
+        next_pending: list[str] = []
+        accounted: set[str] = set()
+        for row in resp.topic_errors:
+            topic, code = _unpack(row)
+            accounted.add(topic)
+            decision = _classify(topic, code)
+            if decision == "created":
+                report.created.append(topic)
+            elif decision == "existing":
+                report.existing.append(topic)
+            elif decision == "unauthorized":
+                report.unauthorized.append(topic)
+                logger.warning(
+                    "Topic %r authorization failed (code 29): not created. "
+                    "Producers/consumers on this topic will silently stall "
+                    "unless it is pre-created out-of-band.",
+                    topic,
+                )
+            elif decision == "retry":
+                next_pending.append(topic)
+        # Defensive: every requested topic must appear in the response. A broker
+        # that silently drops a topic from its reply must not be treated as
+        # success — name the unaccounted topic(s) and fail.
+        unaccounted = [t for t in pending if t not in accounted]
+        if unaccounted:
+            raise TopicProvisioningError(
+                f"Topic provisioning response omitted requested topic(s): {', '.join(unaccounted)}.",
+                topic=unaccounted[0],
+                code=None,
+            )
+        pending = next_pending
+        if pending:
+            await asyncio.sleep(_RETRY_BACKOFF_S)
+            last_pending[:] = pending
+    return report
+
+
+async def provision_topics(
+    admin: Any,
+    topics: Iterable[str],
+    *,
+    framework_topics: set[str],
+    config: ProvisioningConfig,
+) -> ProvisionReport:
+    """Create ``topics`` (if missing) on an already-started admin client.
+
+    Stateless executor: the caller owns the admin client's lifecycle (it is
+    **not** closed here), so this runs against FastStream's broker-managed admin
+    client or a standalone one alike. The create/classify/retry loop is bounded
+    by ``config.create_timeout_ms``; ``topic_configs`` apply to data topics only,
+    never to ``framework_topics`` (reply / ``*.private.return`` inboxes).
+
+    Raises:
+        TopicProvisioningError: on a non-retriable per-topic error, or when the
+            timeout elapses with topics still pending.
+    """
+    pending = list(dict.fromkeys(topics))
+    if not pending:
+        return ProvisionReport()
+
+    last_pending = list(pending)  # mutated by the loop; named if the timeout fires
+    try:
+        return await asyncio.wait_for(
+            _provision_loop(admin, pending, framework_topics, config, last_pending),
+            timeout=config.create_timeout_ms / 1000,
+        )
+    except asyncio.TimeoutError as exc:
+        still = ", ".join(last_pending) if last_pending else "<unknown>"
+        raise TopicProvisioningError(
+            f"Topic provisioning timed out after {config.create_timeout_ms}ms; still pending: {still}",
+            topic=last_pending[0] if last_pending else "",
+            code=None,
+        ) from exc
+
+
 class TopicProvisioner:
     """Best-effort, opt-in creator of Kafka topics via the admin client.
 
@@ -166,8 +297,8 @@ class TopicProvisioner:
     review-for-prod caveats. Construction performs NO network I/O — the admin
     client is only created (and connected) inside :meth:`provision`.
 
-    A single instance handles one :meth:`provision` call at a time; it is not
-    safe to reuse concurrently (``_last_pending`` is per-operation state).
+    A single instance builds one admin client per :meth:`provision` call and
+    delegates the create/classify/retry to :func:`provision_topics`.
     """
 
     def __init__(
@@ -181,9 +312,6 @@ class TopicProvisioner:
         self._bootstrap_servers = bootstrap_servers
         self._config = config
         self._conn_kwargs = _merge_security_kwargs(security, security_kwargs)
-        # Topics still unresolved at the latest create attempt; surfaced by the
-        # timeout path so the error names what is missing.
-        self._last_pending: list[str] = []
 
     @classmethod
     def from_connection(
@@ -216,11 +344,10 @@ class TopicProvisioner:
         *,
         framework_topics: set[str],
     ) -> ProvisionReport:
-        """Create ``topics`` if missing, returning a :class:`ProvisionReport`.
+        """Create ``topics`` if missing via a freshly-built admin client.
 
-        The entire operation — admin ``start()``, ``create_topics``, retriable
-        re-issues, and response inspection — is bounded by a single
-        ``asyncio.wait_for`` using ``config.create_timeout_ms``. ``topic_configs``
+        Owns the admin client's lifecycle (build → start → close) and delegates
+        the create/classify/retry to :func:`provision_topics`. ``topic_configs``
         from the config are applied to data topics only, never to
         ``framework_topics`` (reply / ``*.private.return`` inboxes), for which
         overrides like ``cleanup.policy=compact`` would be semantically wrong.
@@ -229,33 +356,10 @@ class TopicProvisioner:
             TopicProvisioningError: On a non-retriable per-topic error, or when
                 the timeout elapses with topics still pending.
         """
-        # Reset per-operation state so a prior call's pending set can't leak
-        # into this one's timeout/error reporting.
-        self._last_pending = []
         pending = list(dict.fromkeys(topics))
         if not pending:
             return ProvisionReport()
 
-        self._last_pending = list(pending)
-        timeout_s = self._config.create_timeout_ms / 1000
-        try:
-            return await asyncio.wait_for(
-                self._run(pending, framework_topics),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError as exc:
-            # ``self._last_pending`` reflects topics not yet resolved when the
-            # deadline hit. Name them so the operator knows what is missing.
-            still = ", ".join(self._last_pending) if self._last_pending else "<unknown>"
-            raise TopicProvisioningError(
-                f"Topic provisioning timed out after {self._config.create_timeout_ms}ms; still pending: {still}",
-                topic=self._last_pending[0] if self._last_pending else "",
-                code=None,
-            ) from exc
-
-    async def _run(self, pending: list[str], framework_topics: set[str]) -> ProvisionReport:
-        report = ProvisionReport()
-        self._last_pending = list(pending)
         admin = _make_admin_client(
             bootstrap_servers=self._bootstrap_servers,
             request_timeout_ms=self._config.create_timeout_ms,
@@ -263,45 +367,7 @@ class TopicProvisioner:
         )
         try:
             await admin.start()
-            while pending:
-                self._last_pending = list(pending)
-                new_topics = [self._new_topic(t, framework_topics) for t in pending]
-                resp = await admin.create_topics(new_topics)
-                next_pending: list[str] = []
-                accounted: set[str] = set()
-                for row in resp.topic_errors:
-                    topic, code = self._unpack(row)
-                    accounted.add(topic)
-                    decision = self._classify(topic, code)
-                    if decision == "created":
-                        report.created.append(topic)
-                    elif decision == "existing":
-                        report.existing.append(topic)
-                    elif decision == "unauthorized":
-                        report.unauthorized.append(topic)
-                        logger.warning(
-                            "Topic %r authorization failed (code 29): not created. "
-                            "Producers/consumers on this topic will silently stall "
-                            "unless it is pre-created out-of-band.",
-                            topic,
-                        )
-                    elif decision == "retry":
-                        next_pending.append(topic)
-                # Defensive: every requested topic must appear in the response.
-                # A broker that silently drops a topic from its reply must not be
-                # treated as success — name the unaccounted topic(s) and fail.
-                unaccounted = [t for t in pending if t not in accounted]
-                if unaccounted:
-                    raise TopicProvisioningError(
-                        f"Topic provisioning response omitted requested topic(s): {', '.join(unaccounted)}.",
-                        topic=unaccounted[0],
-                        code=None,
-                    )
-                pending = next_pending
-                if pending:
-                    await asyncio.sleep(_RETRY_BACKOFF_S)
-                    self._last_pending = list(pending)
-            return report
+            return await provision_topics(admin, pending, framework_topics=framework_topics, config=self._config)
         finally:
             # Best-effort idempotent close on every path, including
             # cancellation/timeout. A failure here must not mask an in-flight
@@ -311,52 +377,11 @@ class TopicProvisioner:
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to close Kafka admin client", exc_info=True)
 
-    def _new_topic(self, topic: str, framework_topics: set[str]) -> Any:
-        from aiokafka.admin import NewTopic
-
-        # NewTopic(num_partitions=-1, ...) raises client-side (XOR validator),
-        # so always supply concrete positive values.
-        num_partitions = self._config.num_partitions
-        replication_factor = self._config.replication_factor
-        topic_configs = None
-        if topic not in framework_topics and self._config.topic_configs:
-            topic_configs = dict(self._config.topic_configs)
-        return NewTopic(
-            name=topic,
-            num_partitions=num_partitions,
-            replication_factor=replication_factor,
-            topic_configs=topic_configs,
-        )
-
-    @staticmethod
-    def _unpack(row: tuple[Any, ...]) -> tuple[str, int]:
-        # ``topic_errors`` rows are (topic, code) on response v0 and
-        # (topic, code, message) on v1+. We only need topic + code.
-        return row[0], row[1]
-
-    @staticmethod
-    def _classify(topic: str, code: int) -> str:
-        from aiokafka.errors import for_code  # type: ignore[import-untyped]
-
-        if code == _CODE_NONE:
-            return "created"
-        if code == _CODE_TOPIC_ALREADY_EXISTS:
-            return "existing"
-        if code == _CODE_TOPIC_AUTHORIZATION_FAILED:
-            return "unauthorized"
-        err = for_code(code)
-        if getattr(err, "retriable", False):
-            return "retry"
-        raise TopicProvisioningError(
-            f"Topic {topic!r} failed provisioning with non-retriable error {err.__name__} (code {code}).",
-            topic=topic,
-            code=code,
-        )
-
 
 __all__ = [
     "ProvisionReport",
     "TopicProvisioner",
     "TopicProvisioningError",
+    "provision_topics",
     "topics_for_nodes",
 ]
