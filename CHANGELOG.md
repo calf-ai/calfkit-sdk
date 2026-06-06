@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.2...v0.5.3) (2026-06-06)
+
+
+### Features
+
+* CLI add `calfkit run` to run nodes without Worker boilerplate ([#181](https://github.com/calf-ai/calfkit-sdk/issues/181)) ([6c1e38e](https://github.com/calf-ai/calfkit-sdk/commit/6c1e38e006f1481016dc132e502fa4eeb734d9ef))
+
 ## [0.5.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.1...v0.5.2) (2026-06-06)
 
 
