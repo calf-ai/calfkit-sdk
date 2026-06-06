@@ -598,3 +598,14 @@ def test_construction_does_no_network(monkeypatch) -> None:
     cfg = ProvisioningConfig(enabled=True)
     # Must not raise — no admin client is created until provision() runs.
     TopicProvisioner(bootstrap_servers="localhost:9092", config=cfg)
+
+
+def test_provision_empty_topics_is_a_noop_no_admin_built(monkeypatch) -> None:
+    # An empty request returns an empty report WITHOUT constructing an admin
+    # client (the create/connect work is skipped entirely).
+    created = _install_fake_admin(monkeypatch, lambda kw: _FakeAdmin(error_plan=[[]], kwargs=kw))
+
+    report = asyncio.run(_provisioner().provision([], framework_topics=set()))
+
+    assert report == ProvisionReport()
+    assert created == []

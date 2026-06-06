@@ -8,6 +8,7 @@ from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
 from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND
+from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.middleware import ContextInjectionMiddleware
@@ -21,7 +22,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import OverridesState
-from calfkit.provisioning import ProvisioningConfig, TopicProvisioner
+from calfkit.provisioning import ProvisioningConfig, StartupTopicEnsurer
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class BaseClient:
         provisioning: ProvisioningConfig | None = None,
         server_urls: str | Iterable[str] | None = None,
         security_kwargs: dict[str, Any] | None = None,
+        startup_ensurer: StartupTopicEnsurer | None = None,
     ) -> None:
         """Initialize the client with pre-configured components.
 
@@ -112,9 +114,11 @@ class BaseClient:
         self._provisioning = provisioning or ProvisioningConfig()
         self._server_urls = server_urls
         self._security_kwargs: dict[str, Any] = dict(security_kwargs) if security_kwargs else {}
-        # One-shot guard: the reply topic is provisioned at most once across the
-        # lifetime of this client, regardless of how many times `_invoke` runs.
-        self._reply_topic_provisioned = False
+        # Startup topic ensurer: declares + (when provisioning is enabled)
+        # creates this client's inbox topics at broker start, before any
+        # subscriber consumes. ``connect`` builds it with the reply topic already
+        # declared; direct construction gets a fresh, empty one.
+        self._startup_ensurer = startup_ensurer if startup_ensurer is not None else StartupTopicEnsurer(config=self._provisioning)
 
     @classmethod
     def connect(
@@ -180,9 +184,19 @@ class BaseClient:
                     continue
             broker_forwarded[key] = value
 
-        broker_connection = KafkaBroker(
+        # The reply topic is a framework inbox: declare it (framework=True so
+        # user topic_configs never apply) into the startup ensurer, wired as the
+        # broker's one-shot pre-start hook. The ensurer creates it — when
+        # provisioning is enabled — after connect() and before the reply consumer
+        # subscribes, on every start path (issue #180).
+        provisioning = provisioning or ProvisioningConfig()
+        ensurer = StartupTopicEnsurer(config=provisioning)
+        ensurer.declare([reply_topic], framework=True)
+
+        broker_connection = _PreStartHookBroker(
             server_urls,
             middlewares=[ContextInjectionMiddleware],
+            pre_start=ensurer.run,
             **broker_forwarded,
         )
 
@@ -197,6 +211,7 @@ class BaseClient:
             provisioning=provisioning,
             server_urls=server_urls,
             security_kwargs=security_kwargs,
+            startup_ensurer=ensurer,
         )
 
     @property
@@ -293,14 +308,9 @@ class BaseClient:
         ``expect()`` *before* this so a reply can never race an unregistered future.
         """
         if not self._connection._connection:
-            # Best-effort, opt-in reply-topic provisioning. This is a dev-safe
-            # convenience (rf=1, no ACLs) — review before relying on it in
-            # production, where topics are typically ops-governed. See
-            # ProvisioningConfig for the full caveats. Provision exactly ONCE,
-            # before the broker connects, so the reply consumer has its inbox.
-            if self._provisioning.enabled and not self._reply_topic_provisioned:
-                self._reply_topic_provisioned = True
-                await self._provision_reply_topic()
+            # First publish before an explicit start(): bring the broker up. The
+            # broker's pre-start hook (the startup ensurer) provisions the reply
+            # topic before the reply consumer subscribes — see ``connect``.
             await self._connection.start()
 
         call_stack = CallFrameStack()
@@ -363,35 +373,6 @@ class BaseClient:
             deps=deps,
         )
         return correlation_id
-
-    async def _provision_reply_topic(self) -> None:
-        """Best-effort creation of this client's reply topic via the admin client.
-
-        The reply topic is a framework inbox (correlation-keyed request/reply
-        traffic), so it is passed in ``framework_topics`` to ensure user
-        ``topic_configs`` (retention / compaction) are never applied to it.
-        """
-        provisioner = TopicProvisioner.from_connection(
-            server_urls=self._server_urls,
-            config=self._provisioning,
-            security_kwargs=self._security_kwargs,
-        )
-        report = await provisioner.provision(
-            [self._reply_topic],
-            framework_topics={self._reply_topic},
-        )
-        logger.info(
-            "provisioned topics: %d created, %d existing, %d unauthorized",
-            len(report.created),
-            len(report.existing),
-            len(report.unauthorized),
-        )
-        if report.unauthorized:
-            logger.warning(
-                "topic provisioning: %d unauthorized topic(s) NOT created (producers/consumers will stall): %s",
-                len(report.unauthorized),
-                ", ".join(report.unauthorized),
-            )
 
     async def close(self) -> None:
         """Shut down the client gracefully.

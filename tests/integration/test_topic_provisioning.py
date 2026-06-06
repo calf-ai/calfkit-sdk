@@ -382,3 +382,44 @@ async def test_acl_denied_is_reported_and_does_not_raise() -> None:
     assert denied_topic in report.unauthorized, f"ACL-denied topic {denied_topic!r} must be reported as unauthorized; report={report!r}"
     assert denied_topic not in report.created
     assert denied_topic not in report.existing
+
+
+# ---------------------------------------------------------------------------
+# (#180) reply-topic provisioning at broker start — no hang on a no-auto-create
+# broker. Regression tests for the silent infinite hang; the reply consumer's
+# inbox is created before it subscribes, on every start path.
+# ---------------------------------------------------------------------------
+
+
+async def test_issue_180_bare_broker_start_provisions_reply_topic() -> None:
+    """ENABLED client + a DIRECT ``client.broker.start()`` returns (it HUNG
+    before the fix) and the reply topic exists — the exact #180 repro."""
+    reply = f"calf-test-180-{uuid.uuid4().hex[:8]}.reply"
+    client = Client.connect(BOOTSTRAP, reply_topic=reply, provisioning=ProvisioningConfig(enabled=True))
+    try:
+        # An infinite hang before the fix; the bounded wait turns a regression
+        # into a clear failure rather than a stuck suite.
+        await asyncio.wait_for(client.broker.start(), timeout=_VISIBLE_TIMEOUT_S)
+        async with _admin() as admin:
+            await _await_topics_visible(admin, [reply])
+    finally:
+        await client.close()
+
+
+async def test_issue_180_worker_run_does_not_hang_on_reply_topic() -> None:
+    """A Worker on a no-auto-create broker reaches serving without hanging on
+    its client's reply topic (the worker path also hung before the fix). The
+    reply topic appearing in metadata proves the reply inbox was provisioned at
+    broker start, so the reply consumer never looped on missing metadata."""
+    inbox = f"calf-test-180-{uuid.uuid4().hex[:8]}.in"
+    client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
+    reply = client.reply_topic
+
+    @consumer(subscribe_topics=inbox)
+    async def _sink(result: Any) -> None:
+        return None
+
+    worker = Worker(client, nodes=[_sink])
+    async with _running_worker(worker):
+        async with _admin() as admin:
+            await _await_topics_visible(admin, [inbox, reply])

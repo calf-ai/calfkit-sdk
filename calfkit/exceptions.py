@@ -35,6 +35,25 @@ class ReplyExpiredError(Exception):
         return (self.__class__, (self.correlation_id, self.ttl))
 
 
+class MissingTopicsError(RuntimeError):
+    """Raised at broker start when topic provisioning was **enabled** but one or
+    more required topics could not be created (e.g. the principal lacks the
+    ``CreateTopics`` ACL). Starting the consumers would otherwise stall forever
+    on cluster metadata, so we fail loud instead.
+
+    Carries the offending ``topics`` so the caller can see exactly what is
+    missing; the message names them plus the remedies.
+    """
+
+    def __init__(self, topics: list[str]):
+        self.topics = topics
+        names = ", ".join(topics)
+        super().__init__(
+            f"Topic provisioning was enabled but these topic(s) could not be created: {names}. "
+            "Grant the client CreateTopics authorization, or pre-create the topic(s) out-of-band."
+        )
+
+
 class ToolExecutionError(Exception):
     """The original traceback is not preserved across the Kafka boundary; it is
     logged at the worker that ran the tool. ``exc_type`` and ``exc_message`` are
