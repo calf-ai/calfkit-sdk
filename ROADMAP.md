@@ -12,3 +12,4 @@ An index of potential features and changes under consideration for Calf SDK. Eac
 - [Hook System](docs/hooks-design.md) — two-layer middleware proposal for pre/post-run extensibility on nodes
 - [Durable Fan-Out Aggregator](docs/durable-fanout-aggregator.md) — replace in-process `_pending_batches` with a Kafka-backed compacted-state aggregator for parallel tool calls
 - [MCP-over-Kafka RPC Discovery](docs/mcp-discovery-rpc-design.md) — runtime tool discovery alternative to codegen; bridge exposes MCP methods as Kafka request/reply topics; generalizes to resources and prompts
+- [Agent-POV History Projection](docs/agent-pov-projection.md) — pure POV projection over `message_history` + `ModelResponse.name` stamping for shared-channel multi-agent; portable content-prefix attribution (closes #154)

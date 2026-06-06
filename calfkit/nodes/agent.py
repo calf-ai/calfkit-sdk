@@ -8,7 +8,8 @@ from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
-from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
+from calfkit._vendor.pydantic_ai.messages import ModelResponse, RetryPromptPart
+from calfkit._vendor.pydantic_ai.messages import TextPart as _RespTextPart
 from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
@@ -18,8 +19,10 @@ from calfkit.mcp._server import McpServer
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
 from calfkit.models.node_schema import BaseToolNodeSchema
+from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, PendingToolBatch
+from calfkit.nodes._projection import project
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -312,8 +315,12 @@ class BaseAgentNodeDef(
             ctx.state.commit_message_to_history()
 
         run_model_settings = cast(ModelSettings | None, ctx.state.overrides.model_settings) if ctx.state.overrides is not None else None
+        # Run the model on the agent's POV projection of the canonical history
+        # (docs/agent-pov-projection.md §6.1). ``project()`` returns a fresh list;
+        # the canonical ``ctx.state.message_history`` is left untouched for storage,
+        # republishing, and dispatch logic (which keys on canonical, §6.2).
         result = await self._agent_loop.run(
-            message_history=ctx.state.message_history,
+            message_history=project(ctx.state.message_history, viewer=self.name),
             instructions=ctx.state.temp_instructions,
             toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
             deps=ctx.deps,
@@ -328,7 +335,9 @@ class BaseAgentNodeDef(
                 self.name,
             )
             messages = result.new_messages()
-            ctx.state.message_history.extend(messages)
+            # Stamp the agent's own responses with its identity before appending to
+            # canonical (docs/agent-pov-projection.md §4, §6.1).
+            ctx.state.extend_with_responses(messages, self.name)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
             for tool_call in result.output.calls:
@@ -484,11 +493,29 @@ class BaseAgentNodeDef(
 
         else:
             logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
-            ctx.state.message_history.extend(result.new_messages())
+            new_messages = result.new_messages()
+            # Stamp the agent's own responses with its identity before appending to
+            # canonical (docs/agent-pov-projection.md §4, §6.1).
+            ctx.state.extend_with_responses(new_messages, self.name)
             if isinstance(result.output, str):
                 ctx.state.final_output_parts = [TextPart(text=result.output)]
             else:
-                ctx.state.final_output_parts = [DataPart(data=result.output)]
+                # Surface BOTH a text preamble and the structured value (§7).
+                # CRITICAL (§7): read the preamble from the LAST ``ModelResponse``
+                # via a reverse-scan, NOT ``new_messages()[-1]`` — in tool mode
+                # (the default) the trailing message is the ``final_result``
+                # ToolReturn ``ModelRequest`` appended after the response
+                # (_agent_graph.py:809-814), which carries no preamble. Read with
+                # the VENDORED ``TextPart`` (field ``.content``); build with
+                # calfkit's payload ``TextPart`` (field ``.text``).
+                final_resp = next((m for m in reversed(new_messages) if isinstance(m, ModelResponse)), None)
+                preamble = "".join(p.content for p in final_resp.parts if isinstance(p, _RespTextPart)) if final_resp else ""
+
+                parts: list[ContentPart] = []
+                if preamble:
+                    parts.append(TextPart(text=preamble))
+                parts.append(DataPart(data=result.output))
+                ctx.state.final_output_parts = parts
             return ReturnCall[State](state=ctx.state)
 
     def add_tools(self, *tools: ToolLike) -> None:

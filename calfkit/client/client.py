@@ -34,6 +34,7 @@ class Client(BaseClient):
         topic: str,
         *,
         output_type: type[OutputT],
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -50,6 +51,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -65,6 +67,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = None,
         tool_overrides: list[BaseToolNodeSchema] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
@@ -84,6 +87,10 @@ class Client(BaseClient):
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
+            author: Optional name for the human author of *user_prompt*. When set,
+                it is stamped onto the staged ``UserPromptPart.name`` and surfaces
+                as a ``<user:author>`` attribution prefix once two or more named
+                humans share a channel. Defaults to ``None`` (anonymous ``<user>``).
             tool_overrides: Runtime agent tool overrides.
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used (``DataPart`` →
@@ -121,7 +128,7 @@ class Client(BaseClient):
             reply_topic = self._reply_topic
 
         state = State(message_history=message_history or list(), temp_instructions=temp_instructions)
-        state.stage_message(ModelRequest.user_text_prompt(user_prompt))
+        state.stage_message(ModelRequest.user_text_prompt(user_prompt, name=author))
         overrides = (
             OverridesState(
                 override_agent_tools=tool_overrides,
@@ -148,6 +155,7 @@ class Client(BaseClient):
         topic: str,
         *,
         output_type: type[OutputT],
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -165,6 +173,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = ...,
         tool_overrides: list[BaseToolNodeSchema] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
@@ -181,6 +190,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
+        author: str | None = None,
         tool_overrides: list[BaseToolNodeSchema] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
@@ -204,6 +214,8 @@ class Client(BaseClient):
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
+            author: Optional name for the human author of *user_prompt*. See
+                :meth:`invoke_node` for details.
             tool_overrides: Runtime agent tool overrides.
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used.
@@ -236,6 +248,7 @@ class Client(BaseClient):
         handle = await self.invoke_node(
             user_prompt,
             topic,
+            author=author,
             tool_overrides=tool_overrides,
             output_type=output_type,
             reply_topic=reply_topic,
