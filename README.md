@@ -11,8 +11,8 @@ The SDK to build AI agents as orchestratable, event-driven microservices.
 
 Calfkit lets you compose agents as decoupled microservices–agents, tools, workflows–that communicate asynchronously. Add agents to teams without hardcoding any orchestration logic, scale each component independently, and stream agent outputs to any downstream listener. 
 
-```bash
-pip install calfkit
+```console
+$ pip install calfkit
 ```
 
 <br>
@@ -56,8 +56,8 @@ Calfkit is a Python SDK that builds event-stream agents out-the-box. You get the
 
 ### 1. Install
 
-```bash
-pip install "calfkit[cli]"
+```console
+$ pip install "calfkit[cli]"
 ```
 
 The `[cli]` extra adds the `calfkit` command used below to run nodes during development. (The library itself is just `pip install calfkit`.)
@@ -72,8 +72,8 @@ The `[cli]` extra adds the `calfkit` command used below to run nodes during deve
 
 Calfkit uses Kafka as the event broker. Run the following command to clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local Kafka broker container:
 
-```shell
-git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
+```console
+$ git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
 ```
 
 Once the broker is ready, open a new terminal tab to continue with the quickstart.
@@ -124,8 +124,8 @@ def get_weather(location: str) -> str:
 
 Deploy the tool as a service. `calfkit run` points at a `module:attr` target and starts a worker for you — no `Client`/`Worker` wiring required:
 
-```shell
-calfkit run weather_tool:get_weather
+```console
+$ calfkit run weather_tool:get_weather
 ```
 
 <br>
@@ -151,14 +151,14 @@ agent = Agent(
 
 Set your OpenAI API key:
 
-```shell
-export OPENAI_API_KEY=sk-...
+```console
+$ export OPENAI_API_KEY=sk-...
 ```
 
 Deploy the agent as its own service (run it alongside the tool service from step 3):
 
-```shell
-calfkit run agent_service:agent
+```console
+$ calfkit run agent_service:agent
 ```
 
 <br>
@@ -188,8 +188,8 @@ if __name__ == "__main__":
 
 Run the file to invoke the agent:
 
-```shell
-python invoke.py
+```console
+$ python invoke.py
 ```
 
 <br>
@@ -214,8 +214,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-```shell
-python serve_tool.py
+```console
+$ python serve_tool.py
 ```
 
 See the **[CLI reference](docs/cli.md)** for every `calfkit run` flag (`--host`, `--provision`, `--reload`, `--app-dir`, …) and the other `calfkit` commands (`mcp`, `topics`).
@@ -405,8 +405,8 @@ if __name__ == "__main__":
 
 Run alongside the agent service:
 
-```shell
-python weather_sink.py
+```console
+$ python weather_sink.py
 ```
 
 An agent's `publish_topic` emits on **every** state transition — intermediate hops, tool completions, and terminals — so `result.output` is `None` on hops without final output parts. Filter via a gate if you only want agent terminals:

@@ -25,7 +25,7 @@ def _build_app() -> Any:
     try:
         import typer
     except ImportError as e:
-        raise SystemExit("The calfkit CLI requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
+        raise SystemExit("The calfkit CLI requires the 'cli' optional extra. Install with: pip install \"calfkit[cli]\"") from e
 
     from calfkit.cli.mcp import app as mcp_app
     from calfkit.cli.run import run as run_command
