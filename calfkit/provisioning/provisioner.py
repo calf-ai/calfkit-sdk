@@ -353,13 +353,13 @@ class TopicProvisioner:
         """Create ``topics`` if missing via a freshly-built admin client.
 
         Owns the admin client's lifecycle (build → start → close) and delegates
-        the create/classify/retry to :func:`provision_topics`. Both the admin
-        ``start()`` (network connect) and the create loop are bounded by
-        ``config.create_timeout_ms`` so an unreachable broker can't hang the
-        connect. ``topic_configs`` from the config are applied to data topics
-        only, never to ``framework_topics`` (reply / ``*.private.return``
-        inboxes), for which overrides like ``cleanup.policy=compact`` would be
-        semantically wrong.
+        the create/classify/retry to :func:`provision_topics`. The admin
+        ``start()`` (network connect) and the create loop are **each** bounded by
+        ``config.create_timeout_ms`` — a per-phase cap (worst case ~2× total), so
+        an unreachable broker can't hang the connect. ``topic_configs`` from the
+        config are applied to data topics only, never to ``framework_topics``
+        (reply / ``*.private.return`` inboxes), for which overrides like
+        ``cleanup.policy=compact`` would be semantically wrong.
 
         Raises:
             TopicProvisioningError: On a non-retriable per-topic error, or when

@@ -77,7 +77,11 @@ class BaseClient:
                 always safe to read.
             startup_ensurer: The topic ensurer wired as the broker's pre-start
                 hook (see :meth:`connect`). When ``None``, a fresh empty one is
-                created from *provisioning* for direct (non-``connect``) use.
+                created from *provisioning*. NOTE: provisioning only actually
+                runs when the broker is the ``connect()``-built
+                ``_PreStartHookBroker`` (whose ``start()`` invokes the hook);
+                constructing a client directly with a plain ``KafkaBroker``
+                leaves provisioning a no-op even when enabled.
         """
         if emitter_id is not None and not emitter_id.strip():
             raise ValueError("emitter_id must be a non-empty string or None")

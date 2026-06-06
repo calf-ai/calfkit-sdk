@@ -169,9 +169,10 @@ async def _await_topics_visible(
 async def _running_worker(worker: Worker) -> AsyncIterator[None]:
     """Run a worker's FastStream app in the background for the test duration.
 
-    Starts ``worker.run()`` as a task (which fires ``_on_startup`` -> eager
-    provisioning -> ``broker.start()``), waits for the broker connection to come
-    up, yields, then cancels and drains cleanly.
+    Starts ``worker.run()`` as a task (which fires ``_on_startup`` -> declare
+    node topics into the ensurer -> ``broker.start()``, whose pre-start hook
+    provisions reply + node topics in one pass), waits for the broker connection
+    to come up, yields, then cancels and drains cleanly.
     """
     task = asyncio.ensure_future(worker.run())
     try:
@@ -302,7 +303,7 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
 
     async with _running_worker(worker), _admin() as admin:
         # (b.1) topics exist in metadata. The consumer's inbox plus its
-        # framework return inbox were eagerly provisioned at _on_startup.
+        # framework return inbox were provisioned by the broker's pre-start hook.
         node = worker._registered_nodes[0]
         await _await_topics_visible(admin, [inbox, node._return_topic])
 
@@ -332,7 +333,10 @@ async def test_provisioning_is_idempotent_across_restart() -> None:
 
     inbox = _unique("calf-it-idem.in")
     out = _unique("calf-it-idem.out")
-    node = _tool_node("idem_echo", inbox, out)
+    # Unique node_id so the derived ``_return_topic`` is also unique per run —
+    # otherwise a reused (non-fresh) broker already has it and the first pass
+    # reports it ``existing`` rather than ``created``.
+    node = _tool_node(_unique("idem_echo"), inbox, out)
     topics = topics_for_nodes([node])
     framework = {node._return_topic}
 
