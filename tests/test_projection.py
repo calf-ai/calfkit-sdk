@@ -597,4 +597,6 @@ def test_self_response_is_new_object_via_replace():
     # new object, name stripped, but parts unchanged (shared part objects are fine)
     assert emitted[0] is not self_resp
     assert emitted[0].name is None
-    assert emitted[0].parts is self_resp.parts or list(emitted[0].parts) == list(self_resp.parts)
+    # Shallow ``replace`` shares the part list verbatim (parts are never mutated in
+    # place, and the ids must survive for the §6.2 deferred-results re-entry).
+    assert emitted[0].parts is self_resp.parts

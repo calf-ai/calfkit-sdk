@@ -131,6 +131,39 @@ async def test_final_output_parts_tool_mode_structured_no_preamble_is_data_only(
     assert parts[0].data == FlightPlan(flights=7)
 
 
+def _prompted_mode_structured(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """Prompted/native-mode final response: the structured answer IS the response text
+    (JSON), with NO ``final_result`` tool call (``info.output_tools`` is empty)."""
+    return ModelResponse(parts=[TextPart(content='{"flights": 5}')])
+
+
+async def test_final_output_parts_prompted_mode_is_data_only_no_duplication():
+    """§7: when the structured answer comes back as the response TEXT (native/prompted
+    mode, no ``final_result`` call), ``final_output_parts`` is ``[DataPart]`` only — the
+    JSON text must NOT be duplicated as a ``TextPart`` preamble alongside it.
+    """
+    from calfkit._vendor.pydantic_ai import PromptedOutput
+
+    model = FunctionModel(_prompted_mode_structured)
+    agent: Agent[FlightPlan] = Agent[FlightPlan](
+        "prompted_agent",
+        system_prompt="You are a helpful AI assistant.",
+        subscribe_topics="prompted_agent.input",
+        model_client=model,  # pyright: ignore[reportArgumentType]
+        final_output_type=PromptedOutput(FlightPlan),  # type: ignore[arg-type]
+    )
+
+    state = State(message_history=[ModelRequest.user_text_prompt("book flights")])
+    ctx = _ctx(state)
+
+    await agent.run(ctx)
+
+    parts = ctx.state.final_output_parts
+    assert len(parts) == 1, parts  # only the structured value — no duplicated preamble
+    assert isinstance(parts[0], DataPart)
+    assert parts[0].data == FlightPlan(flights=5)
+
+
 def _str_output(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart(content="plain string answer")])
 
