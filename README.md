@@ -213,6 +213,57 @@ python invoke.py
 
 <br>
 
+### Run nodes without the boilerplate (dev CLI)
+
+Steps 3–5 wrap each node in `Client.connect(...)` → `Worker(...)` → `worker.run()`. For local development you can skip that and point the `calfkit` CLI at a node instead — like running a FastAPI app with `fastapi dev`.
+
+Install the CLI extra:
+
+```bash
+pip install calfkit[cli]
+```
+
+Point it at a `module:attr` target (a dotted Python import path, where `attr` is a node or a list of nodes):
+
+```shell
+# Run the weather tool node defined in weather_tool.py
+calfkit run weather_tool:get_weather
+
+# Run several nodes in one worker (e.g. an agent and its tools)
+calfkit run agent_service:agent weather_tool:get_weather
+
+# Auto-restart on code changes
+calfkit run agent_service:agent --reload
+```
+
+Because the CLI imports your module and runs the node for you, the node file no longer needs a `main()` or `asyncio.run(...)` — just define the node at module scope:
+
+```python
+# weather_tool.py — the whole file
+from calfkit.nodes import agent_tool
+
+@agent_tool
+def get_weather(location: str) -> str:
+    """Get the current weather at a location"""
+    return f"It's sunny in {location}"
+```
+
+Common flags:
+
+| Flag | Description |
+| --- | --- |
+| `--host`, `-H` | Kafka bootstrap server(s), comma-separated. Precedence: this flag > `$CALF_HOST_URL` > `localhost`. |
+| `--provision` | Opt-in dev topic auto-creation (experimental; off by default). |
+| `--reload` | Watch source files and restart the worker on change. |
+| `--reload-dir` | Directory to watch with `--reload` (repeatable; defaults to the current directory). |
+| `--app-dir` | Directory added to the import path for resolving targets (defaults to the current directory). |
+| `--group-id` | Kafka consumer-group override applied to every node. |
+| `--env-file` | dotenv file to load (defaults to `./.env` if present). |
+
+> **Development only.** This is a convenience for running nodes locally; production deployments should use an explicit `Worker` (steps 3–5) so startup, scaling, and topic governance stay under your control. Targets must be importable from where you run the command — run from your project root, or pass `--app-dir`.
+
+<br>
+
 ### Structured Outputs (Optional)
 
 Agents can be deployed with a `final_output_type` to enforce structured output from the LLM. The output is type-safe and deserialized automatically on the client side.

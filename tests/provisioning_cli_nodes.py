@@ -40,3 +40,13 @@ mixed = [
 # ``subscribe_topics`` / ``_return_topic``). The CLI must reject it with an
 # actionable error rather than letting an AttributeError escape as exit 1.
 not_a_node = object()
+
+# A single McpServer resolved directly (not nested in a list). The loader must
+# return it as-is — an McpServer is iterable (it yields its tool defs), so a
+# naive "expand iterables" pass would wrongly splat it into McpToolDef objects.
+solo_mcp = McpServer.stdio("echo", name="solo_mcp", tools=[])
+
+# An attr that is an empty iterable — resolves to zero nodes. ``calfkit run``
+# must treat "nothing resolved" as an error (exit 2), not silently start an
+# idle worker.
+empty_list: list = []

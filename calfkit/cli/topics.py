@@ -34,14 +34,14 @@ Exit codes:
 from __future__ import annotations
 
 import asyncio
-import importlib
-from collections.abc import Iterable
 from typing import Any
 
 try:
     import typer
 except ImportError as e:  # pragma: no cover -- exercised manually
     raise ImportError("calfkit topics provision requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
+
+from calfkit.cli._loader import resolve_specs, validate_nodes
 
 app = typer.Typer(
     name="topics",
@@ -56,76 +56,6 @@ def _topics_callback() -> None:
     invocation pattern even when provision is currently the only subcommand.
     Future subcommands will land alongside it.
     """
-
-
-def _resolve_nodes(specs: list[str]) -> list[Any]:
-    """Resolve ``module:attr`` specs into a flat list of node objects.
-
-    Each ``attr`` may be a single node or an iterable of nodes. Results are
-    concatenated in the order the ``--nodes`` flags were supplied.
-
-    Raises:
-        typer.Exit: (code 2) on a malformed spec or import/attribute failure.
-    """
-    resolved: list[Any] = []
-    for spec in specs:
-        module_path, sep, attr = spec.partition(":")
-        if not sep or not module_path or not attr:
-            typer.echo(
-                f"Error: --nodes must be in 'module:attr' form, got {spec!r}.",
-                err=True,
-            )
-            raise typer.Exit(2)
-        try:
-            module = importlib.import_module(module_path)
-        except (ModuleNotFoundError, ImportError) as e:
-            # The module (or one of its imports) does not exist / cannot load.
-            typer.echo(f"Error: cannot import module {module_path!r}: {e}", err=True)
-            raise typer.Exit(2) from e
-        except Exception as e:  # noqa: BLE001 -- side-effect code at import time failed
-            # The module exists but its top-level code raised when executed.
-            typer.echo(
-                f"Error: module {module_path!r} raised during import (side-effect code failed): {e}",
-                err=True,
-            )
-            raise typer.Exit(2) from e
-        try:
-            obj = getattr(module, attr)
-        except AttributeError as e:
-            typer.echo(f"Error: module {module_path!r} has no attribute {attr!r}.", err=True)
-            raise typer.Exit(2) from e
-
-        # A single node has subscribe_topics (str-keyed) but is not itself a
-        # plain iterable of nodes. Strings are iterable too, so treat str/bytes
-        # as scalars. Everything else iterable is expanded.
-        if isinstance(obj, (str, bytes)) or not isinstance(obj, Iterable):
-            resolved.append(obj)
-        else:
-            resolved.extend(obj)
-    return resolved
-
-
-def _validate_nodes(nodes: list[Any]) -> None:
-    """Ensure every resolved object exposes the node attributes the topic-set
-    derivation relies on (``subscribe_topics`` and ``_return_topic``).
-
-    Without this, a ``--nodes`` attr pointing at a non-node object would let an
-    ``AttributeError`` escape ``topics_for_nodes`` as an uncaught exit-1
-    traceback. Surface an actionable exit-2 error instead.
-
-    Raises:
-        typer.Exit: (code 2) if any object is missing a required node attribute.
-    """
-    for obj in nodes:
-        missing = [attr for attr in ("subscribe_topics", "_return_topic") if not hasattr(obj, attr)]
-        if missing:
-            typer.echo(
-                f"Error: resolved object {obj!r} is not a node "
-                f"(missing {', '.join(missing)}). --nodes must point at a "
-                "BaseNodeDef (or an iterable of them).",
-                err=True,
-            )
-            raise typer.Exit(2)
 
 
 def _partition_nodes(objs: list[Any]) -> list[Any]:
@@ -206,9 +136,9 @@ def provision(
         topics_for_nodes,
     )
 
-    resolved = _resolve_nodes(nodes)
+    resolved = resolve_specs(nodes)
     node_list = _partition_nodes(resolved)
-    _validate_nodes(node_list)
+    validate_nodes(node_list)
 
     topics = topics_for_nodes(node_list)
     framework_topics = {node._return_topic for node in node_list}
