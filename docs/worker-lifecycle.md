@@ -4,18 +4,166 @@ A `Worker` hosts your nodes (agents, tools, consumers) against a Kafka broker: i
 registers each node's subscribers/publishers, joins their consumer groups, opens
 any lifecycle resources, and later drains and closes everything cleanly.
 
+This guide covers both halves of that:
+
+- **[Resources & lifecycle hooks](#resources--lifecycle-hooks)** — open long-lived
+  resources at startup and close them on shutdown, and publish presence/departure
+  events.
+- **[Running & embedding the worker](#running--embedding-the-worker)** — `run()`
+  as a standalone service, or the non-blocking `start()`/`stop()` and
+  `async with` surfaces to embed the worker beside other services.
+
+---
+
+## Resources & lifecycle hooks
+
+Nodes and workers can open long-lived **resources** — database pools, HTTP
+clients, caches — when the service boots and close them cleanly on shutdown. A
+resource is a live, server-side object that handlers read via
+`ctx.resources["key"]`.
+
+The decorator surface — `resource`, `on_startup`, `after_startup`, `on_shutdown`,
+`after_shutdown` — is available on every node *and* on the `Worker`.
+
+### Resources vs deps
+
+Keep these distinct:
+
+- **`resources`** are live, server-side objects (pools, clients) opened by
+  lifecycle hooks, scoped to a worker or node, and **never serialized**. They
+  never travel on the wire. Read them as `ctx.resources["key"]` (consumers:
+  `result.resources["key"]`). The read side is typed as a read-only `Mapping`, so
+  `ctx.resources[...] = ...` is a type error.
+- **`deps`** are per-request, JSON-serializable values the caller passes at invoke
+  time (`client.execute_node(..., deps={...})`). They ride along on the Kafka
+  envelope and are read by tools as `ctx.deps["key"]`.
+
+Use `resources` for connections you open once and reuse; use `deps` for
+request-specific data supplied by the caller.
+
+### The `@resource` pattern (recommended)
+
+Decorate a single-yield async generator. Whatever you `yield` is the resource
+value; code after the `yield` runs at teardown. A tool reads it from
+`ctx.resources`:
+
+```python
+# weather_tool.py
+import asyncio
+import httpx
+from calfkit.nodes import agent_tool
+from calfkit.client import Client
+from calfkit.worker import Worker
+from calfkit import ToolContext  # type for ctx, optional
+
+@agent_tool
+async def get_weather(ctx: ToolContext, location: str) -> str:
+    """Get the current weather at a location"""
+    http: httpx.AsyncClient = ctx.resources["http"]  # the live, shared client
+    resp = await http.get(f"https://api.example.com/weather?q={location}")
+    return resp.text
+
+# Open one httpx client at startup, close it at shutdown.
+@get_weather.resource("http")
+async def http_client(ctx):              # ctx: ResourceSetupContext
+    async with httpx.AsyncClient() as client:
+        yield client                     # value lands in ctx.resources["http"]
+    # exiting the `async with` closes the client on teardown
+
+async def main():
+    client = Client.connect("localhost:9092")
+    worker = Worker(client, nodes=[get_weather])
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### The callback pattern (alternative)
+
+`@node.on_startup` writes into the bag and `@node.after_shutdown` cleans up. Use
+this when a context manager doesn't fit:
+
+```python
+@get_weather.on_startup
+async def open_pool(ctx):                 # ctx: LifecycleContext (resources writable)
+    ctx.resources["pool"] = await create_pool()
+
+@get_weather.after_shutdown
+async def close_pool(ctx):
+    await ctx.resources["pool"].close()
+```
+
+### One pattern per owner
+
+Pick `@resource` *or* the `on_startup`/`after_shutdown` callbacks on a given
+owner, not both. If you mix them, the `@resource` brackets win and the callbacks
+are ignored (with a warning) — this mirrors FastAPI's lifespan-vs-`on_event`
+rule. Registering two `@resource` brackets under the same name on one owner raises
+`LifecycleConfigError` immediately.
+
+### Worker-scoped resources
+
+Declare a resource on the `Worker` to open **one shared object visible to every
+node's handler** as `ctx.resources["key"]`. This is the canonical "one shared
+pool for all nodes" pattern:
+
+```python
+async def main():
+    client = Client.connect("localhost:9092")
+    worker = Worker(client, nodes=[get_weather])
+
+    @worker.resource("pool")
+    async def shared_pool(ctx):
+        pool = await create_pool()
+        try:
+            yield pool                    # reachable as ctx.resources["pool"] in every node
+        finally:
+            await pool.close()
+
+    await worker.run()
+```
+
+Worker resources are merged under each node's own resources; if a node declares a
+resource with the same key, **the node's value wins** for that node's handlers.
+
+### Presence & departure events
+
+`@worker.after_startup` and `@worker.on_shutdown` receive a `ServingContext`
+while the broker is live (`ctx.broker`) and expose the worker as `ctx.owner`, so
+you can announce a worker's arrival and departure to the fleet:
+
+```python
+from calfkit.worker import Worker, ServingContext
+
+@worker.after_startup
+async def announce_up(ctx: ServingContext[Worker]) -> None:
+    await ctx.broker.publish({"id": ctx.owner.id, "status": "up"}, topic="fleet.presence")
+
+@worker.on_shutdown
+async def announce_down(ctx: ServingContext[Worker]) -> None:
+    await ctx.broker.publish({"id": ctx.owner.id, "status": "down"}, topic="fleet.presence")
+```
+
+Typing the hook as `ServingContext[Worker]` makes `ctx.owner.id` autocomplete.
+The context types are importable from the top level too:
+`from calfkit import ServingContext, LifecycleContext, ResourceSetupContext, LifecycleConfigError`.
+
+**At-least-once caveat**: presence publishes are *not* exactly-once. Under
+consumer-group rebalances an `after_startup` hook may fire more than once, and a
+hard crash skips the `on_shutdown` "down" entirely. Pair presence events with a
+consumer-side TTL / liveness check rather than treating them as a perfectly
+balanced up/down ledger.
+
+---
+
+## Running & embedding the worker
+
 There are three ways to run a worker. They all bring up and tear down the *same*
 things — they differ only in whether the worker installs OS signal handlers and
 whether the call blocks the caller.
 
-> For the lifecycle **hooks** themselves (`@resource`, `on_startup`,
-> `after_startup`, `on_shutdown`, `after_shutdown`, presence events, and the
-> `resources` vs `deps` distinction), see
-> [Lifecycle Hooks & Resources](../README.md#lifecycle-hooks--resources-optional)
-> in the README. This guide is about *running* a worker and *embedding* it
-> alongside other services.
-
-## Choosing a surface
+### Choosing a surface
 
 | Surface | Installs signal handlers | Blocks the caller | Use it for |
 |---|---|---|---|
@@ -34,9 +182,7 @@ What **start** does, in order, on every surface:
 **stop** reverses it: `on_shutdown` hooks → drain the broker → `after_shutdown`
 and `@resource` teardown.
 
----
-
-## `run()` — standalone service (default)
+### `run()` — standalone service (default)
 
 The batteries-included way to deploy a worker as its own process. It installs
 SIGINT/SIGTERM handlers and blocks until the process is signalled, then shuts
@@ -59,9 +205,7 @@ if __name__ == "__main__":
 Use `run()` when the worker *is* the application. If you need to run anything
 else in the same process, use `start()`/`stop()` instead.
 
----
-
-## `start()` / `stop()` — embeddable, non-blocking
+### `start()` / `stop()` — embeddable, non-blocking
 
 `start()` returns as soon as the worker is fully up. It does **not** install
 signal handlers and does **not** block, so the worker's consumers run as one
@@ -71,8 +215,6 @@ loop — your application owns the foreground and signals.
 `stop()` drains in-flight consumers and closes resources/MCP sessions. It is a
 no-op if the worker was never started, so a defensive `try/finally` is always
 safe.
-
-### Basic
 
 ```python
 import asyncio
@@ -93,12 +235,10 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### Bring the worker up *before* you accept external events
-
-`start()` completes only after the consumers have subscribed and joined their
-groups, so you can guarantee they are live before your app starts accepting
-traffic — replies that arrive immediately after you go live aren't lost in a
-register→serve gap.
+**Bring the worker up *before* you accept external events.** `start()` completes
+only after the consumers have subscribed and joined their groups, so you can
+guarantee they are live before your app starts accepting traffic — replies that
+arrive immediately after you go live aren't lost in a register→serve gap.
 
 ```python
 async def main():
@@ -117,11 +257,10 @@ async def main():
         await worker.stop()
 ```
 
-### Run beside other services under your own supervisor
-
-Because `start()` is non-blocking, you can bring the worker up and then run
-several services concurrently under your own task group. Your run loop owns the
-foreground and signal handling; the worker is just one component it supervises.
+**Run beside other services under your own supervisor.** Because `start()` is
+non-blocking, you can bring the worker up and then run several services
+concurrently under your own task group. Your run loop owns the foreground and
+signal handling; the worker is just one component it supervises.
 
 ```python
 async def main():
@@ -138,9 +277,7 @@ async def main():
         await worker.stop()
 ```
 
----
-
-## `async with worker:` — scoped lifecycle
+### `async with worker:` — scoped lifecycle
 
 Entering the context calls `start()`; exiting calls `stop()` — even if the block
 raises. Ideal for tests and short-lived embedding.
@@ -162,38 +299,6 @@ async with TestKafkaBroker(worker._client.broker):
     # publish an envelope, assert the handler saw ctx.resources[...], etc.
     await worker.stop()
 ```
-
----
-
-## Resources and lifecycle hooks compose with every surface
-
-Anything you open with `@resource`, `@worker.resource`, or `on_startup` comes up
-during **start** and is torn down during **stop** — on all three surfaces, with
-no extra wiring. A worker-scoped resource is shared with every node's handler as
-`ctx.resources["key"]`.
-
-```python
-worker = Worker(client, nodes=[my_tool])
-
-@worker.resource("pool")
-async def pool(ctx):
-    p = await create_pool()
-    try:
-        yield p                 # reachable as ctx.resources["pool"] in every node handler
-    finally:
-        await p.close()         # closed on worker.stop()
-
-await worker.start()            # pool opened here, before consumers serve
-try:
-    await run_my_app()
-finally:
-    await worker.stop()         # pool closed here
-```
-
-See [Lifecycle Hooks & Resources](../README.md#lifecycle-hooks--resources-optional)
-for the full hook API (the `@resource` context-manager pattern, the
-`on_startup`/`after_shutdown` callback pattern, one-pattern-per-owner, presence
-events, and `resources` vs `deps`).
 
 ---
 
