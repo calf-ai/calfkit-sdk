@@ -14,6 +14,16 @@ class LifecycleConfigError(Exception):
     """
 
 
+class RegistryConfigError(Exception):
+    """Raised when a :class:`~calfkit._registry.RegistryMixin` subclass declares
+    an invalid handler set.
+
+    Covers misconfiguration detectable at class-definition time. Currently: two
+    methods in the same class hierarchy registered under the same ``handler``
+    name (handler names must be unique per class).
+    """
+
+
 class ReplyExpiredError(Exception):
     """Raised when an awaited reply does not arrive within the dispatcher's
     ``reply_ttl`` and the pending future is evicted.
