@@ -8,7 +8,7 @@ Do not add imports from ``calfkit.*`` to this module.
 
 from typing import Any, Literal
 
-NodeKind = Literal["node", "agent", "tool", "client", "consumer"]
+NodeKind = Literal["node", "agent", "tool", "client", "consumer", "bridge"]
 """Closed value space for the ``x-calf-emitter-kind`` Kafka header. Subclasses of
 ``BaseNodeDef`` declare their kind via ``_node_kind: ClassVar[NodeKind]``; the
 client publishes with ``CLIENT_KIND`` directly.
@@ -30,6 +30,11 @@ HDR_ROUTE = "x-calf-route"
 Ingress-only: set by a client invocation or an explicit peer ``Call(route=...)``;
 never auto-propagated across control-flow republishes. A node with registered
 ``@handler`` routes dispatches on this header (see ``BaseNodeDef.handler``)."""
+
+
+HDR_EVENT_TYPE = "x-calf-event-type"
+
+EventType = Literal["control-plane", "data-plane"]
 
 
 def decode_header_str(value: Any) -> str | None:
