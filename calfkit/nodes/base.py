@@ -10,6 +10,7 @@ from faststream.kafka.annotations import (
 )
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, NodeKind, decode_header_str
+from calfkit._registry import RegistryMixin
 from calfkit.models import (
     Call,
     NodeResult,
@@ -43,7 +44,7 @@ on the first rejection.
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
+class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
     _run_accepts_input: bool
     _worker: "Worker | None" = None
     """Back-reference to the owning worker, set by ``Worker._add_node``. ``None``
