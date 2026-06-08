@@ -1,7 +1,7 @@
 # Calfkit 1.0 Design — DX Review
 
 **Reviewer:** python-sdk-dx-reviewer (independent voice)
-**Doc reviewed:** docs/calfkit-v1-design.md (3,448 lines, 25 sections)
+**Doc reviewed:** docs/designs/calfkit-v1-design.md (3,448 lines, 25 sections)
 **Date:** 2026-05-18
 
 ---

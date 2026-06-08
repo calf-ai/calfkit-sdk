@@ -1,4 +1,4 @@
-"""Unit 3 — agent-loop integration tests (docs/agent-pov-projection.md §6, §7, §14).
+"""Unit 3 — agent-loop integration tests (docs/designs/agent-pov-projection.md §6, §7, §14).
 
 These drive the agent's ``run()`` / loop with the deterministic vendored
 ``FunctionModel`` (no API key required) so the projection + final-output wiring

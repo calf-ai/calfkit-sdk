@@ -3,7 +3,7 @@
 **Status:** Roadmap (post-v1)
 **Document version:** 1.0
 **Last updated:** 2026-05-30
-**Related to:** [`docs/mcp-overview.md`](./mcp-overview.md) (v1, codegen-based)
+**Related to:** [`docs/mcp-overview.md`](../mcp-overview.md) (v1, codegen-based)
 
 ---
 

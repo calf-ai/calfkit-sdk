@@ -58,7 +58,7 @@ MCP adaptor adds value when crossing the calfkit ↔ MCP boundary.
 | `$VAR` env-var expansion (tokens, headers, env, args) | ✅ v1 | construction-time |
 | Two-layer error semantics | ✅ v1 | [Errors](#error-semantics) |
 | MCP resources, prompts, sampling, elicitation | ❌ out of v1 | [What's NOT](#whats-not-in-v1) |
-| Runtime tool discovery (RPC-style) | 🛣 v1.x roadmap | [`mcp-discovery-rpc-design.md`](./mcp-discovery-rpc-design.md) |
+| Runtime tool discovery (RPC-style) | 🛣 v1.x roadmap | [`mcp-discovery-rpc-design.md`](./designs/mcp-discovery-rpc-design.md) |
 
 ---
 
@@ -518,6 +518,6 @@ its own README.
 ## Further reading
 
 - **Runnable example**: [`examples/quickstart_mcp/`](../examples/quickstart_mcp/)
-- **v1.x roadmap**: [`mcp-discovery-rpc-design.md`](./mcp-discovery-rpc-design.md) —
+- **v1.x roadmap**: [`mcp-discovery-rpc-design.md`](./designs/mcp-discovery-rpc-design.md) —
   runtime tool discovery (alternative to codegen)
 - **MCP protocol spec**: [`modelcontextprotocol.io`](https://modelcontextprotocol.io/specification/2025-11-25/)

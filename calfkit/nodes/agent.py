@@ -315,7 +315,7 @@ class BaseAgentNodeDef(
 
         run_model_settings = cast(ModelSettings | None, ctx.state.overrides.model_settings) if ctx.state.overrides is not None else None
         # Run the model on the agent's POV projection of the canonical history
-        # (docs/agent-pov-projection.md §6.1). ``project()`` returns a fresh list;
+        # (docs/designs/agent-pov-projection.md §6.1). ``project()`` returns a fresh list;
         # the canonical ``ctx.state.message_history`` is left untouched for storage,
         # republishing, and dispatch logic (which keys on canonical, §6.2).
         result = await self._agent_loop.run(

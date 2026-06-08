@@ -1,4 +1,4 @@
-"""Tests for the agent-POV message-history projection (docs/agent-pov-projection.md §5, §14).
+"""Tests for the agent-POV message-history projection (docs/designs/agent-pov-projection.md §5, §14).
 
 The `project(history, viewer)` function is pure: it returns a new list of
 `ModelMessage`, never mutates its input, and strips `name` from every emitted

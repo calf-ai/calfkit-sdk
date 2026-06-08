@@ -1,4 +1,4 @@
-"""Tests for the identity-stamping helper (docs/agent-pov-projection.md §4, §14.5).
+"""Tests for the identity-stamping helper (docs/designs/agent-pov-projection.md §4, §14.5).
 
 `CoreMessageState.extend_with_responses(messages, author)` appends run-produced
 messages to the canonical history, stamping `name=author` on any `ModelResponse`

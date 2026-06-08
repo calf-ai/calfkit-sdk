@@ -114,8 +114,8 @@ reply expected") and forms a clean three-way set:
 | `invoke_node` | async, reply via handle | `InvocationHandle` | a pending `Future` until resolved/evicted |
 | `execute_node` | sync request/reply | `NodeResult` | a pending `Future` (self-cleaning only when called with an explicit `timeout`) |
 
-A runnable end-to-end example lives at [`examples/quickstart/emit.py`](../examples/quickstart/emit.py).
-Pair it with [`examples/quickstart/weather_sink.py`](../examples/quickstart/weather_sink.py) — a
+A runnable end-to-end example lives at [`examples/quickstart/emit.py`](../../examples/quickstart/emit.py).
+Pair it with [`examples/quickstart/weather_sink.py`](../../examples/quickstart/weather_sink.py) — a
 `@consumer` tapping the agent's `publish_topic` — to watch the fire-and-forget result arrive on the
 broadcast channel even though no point-to-point reply is returned.
 
