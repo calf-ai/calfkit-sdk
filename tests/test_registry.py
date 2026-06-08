@@ -3,6 +3,7 @@
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from calfkit._registry import HandlerInfo, RegistryMixin, handler, handler_info
 from calfkit.exceptions import RegistryConfigError
@@ -18,19 +19,20 @@ def test_handler_returns_method_unchanged_and_marks_it() -> None:
     decorated = handler("a")(fn)
 
     assert decorated is fn  # returned unchanged, still an ordinary method
-    assert handler_info(fn) == HandlerInfo(name="a", schema=None)
+    assert handler_info(fn) == HandlerInfo(route="a", name="fn", schema=None)
 
 
 def test_handler_carries_schema_metadata() -> None:
-    sentinel = object()
+    class Body(BaseModel):
+        x: int
 
     def fn(self: object) -> None: ...
 
-    handler("a", schema=sentinel)(fn)
+    handler("a", schema=Body)(fn)
 
     info = handler_info(fn)
     assert info is not None
-    assert info.schema is sentinel
+    assert info.schema is Body
 
 
 def test_handler_rejects_empty_name() -> None:
@@ -85,16 +87,18 @@ def test_get_handler_returns_bound_method_and_raises_on_unknown() -> None:
 
 
 def test_handler_info_readable_from_bound_method() -> None:
-    schema = object()
+    class Body(BaseModel):
+        x: int
 
     class Node(RegistryMixin):
-        @handler("alpha", schema=schema)
+        @handler("alpha", schema=Body)
         def a(self) -> None: ...
 
     info = handler_info(Node().handlers()["alpha"])
     assert info is not None
-    assert info.name == "alpha"
-    assert info.schema is schema
+    assert info.route == "alpha"
+    assert info.name == "a"  # defaults to the method name
+    assert info.schema is Body
 
 
 async def test_async_handler_binds_and_awaits() -> None:
@@ -407,9 +411,53 @@ def test_handler_names_accessor() -> None:
     assert RegistryMixin.handler_names() == ()
 
 
-def test_handlerinfo_is_slotted_value_equal_and_rejects_empty_name() -> None:
-    info = HandlerInfo(name="a")
-    assert info == HandlerInfo(name="a", schema=None)
+def test_handlerinfo_is_slotted_value_equal_and_rejects_empty_route_or_name() -> None:
+    info = HandlerInfo(route="a", name="a")
+    assert info == HandlerInfo(route="a", name="a", schema=None)
     assert not hasattr(info, "__dict__")  # slots
     with pytest.raises(ValueError):
-        HandlerInfo(name="")
+        HandlerInfo(route="", name="a")
+    with pytest.raises(ValueError):
+        HandlerInfo(route="a", name="")
+
+
+# ---------------------------------------------------------------------------
+# Route reshape: grammar + schema validation at decoration, route_table, name
+# ---------------------------------------------------------------------------
+
+
+def test_handler_rejects_invalid_route_grammar_at_decoration() -> None:
+    with pytest.raises(ValueError):
+        handler("order.*.line")
+
+
+def test_handler_rejects_non_basemodel_schema() -> None:
+    with pytest.raises(ValueError):
+        handler("order.created", schema=object)  # type: ignore[arg-type]
+
+
+def test_handler_name_defaults_to_method_name_and_is_overridable() -> None:
+    class Node(RegistryMixin):
+        @handler("order.created")
+        def on_created(self) -> None: ...
+
+        @handler("order.shipped", name="ship")
+        def on_shipped(self) -> None: ...
+
+    table = Node.route_table()
+    assert table["order.created"].name == "on_created"
+    assert table["order.shipped"].name == "ship"
+
+
+def test_route_table_exposes_route_and_schema() -> None:
+    class Body(BaseModel):
+        x: int
+
+    class Node(RegistryMixin):
+        @handler("order.created", schema=Body)
+        def on_created(self) -> None: ...
+
+    table = Node.route_table()
+    assert set(table) == {"order.created"}
+    assert table["order.created"].route == "order.created"
+    assert table["order.created"].schema is Body

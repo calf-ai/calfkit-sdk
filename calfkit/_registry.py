@@ -1,22 +1,15 @@
-"""Per-subclass collection of methods marked with a decorator.
+"""Per-subclass collection of route handlers marked with :func:`handler`.
 
-A small, dependency-light foundation: subclasses of :class:`RegistryMixin` mark
-methods with :func:`handler`, and each subclass exposes its **own** registry of
-those methods. The registry is built once — when the subclass is created — and
-is unique per subclass (never shared with sibling subclasses).
+Subclasses of :class:`RegistryMixin` mark methods with :func:`handler`, giving
+each a **route pattern** (§6). Each subclass exposes its own registry of those
+handlers, built once when the subclass is created (never shared with siblings).
 
-Why a marker + collector (rather than the decorator registering directly)
--------------------------------------------------------------------------
-A decorator in a class body runs *before* the class object exists, so it cannot
-append to a per-class list itself. :func:`handler` therefore only stamps
-metadata onto the function; :meth:`RegistryMixin.__init_subclass__` does the
-collection after the class is built, assigning a fresh registry onto that
-specific subclass. That per-subclass assignment is what avoids a single list
-being shared across siblings via inheritance.
-
-Methods are stored by attribute name and resolved to bound methods on the
-instance via ``getattr`` at access time (see :meth:`RegistryMixin.handlers`), so
-an override — even one that does not re-apply :func:`handler` — is reflected.
+A decorator in a class body runs *before* the class object exists, so
+:func:`handler` only stamps metadata onto the function;
+:meth:`RegistryMixin.__init_subclass__` does the collection after the class is
+built. Handlers are stored by route and resolved to bound methods at access
+time, so an override — even one that does not re-apply :func:`handler` — is
+reflected.
 """
 
 from __future__ import annotations
@@ -25,6 +18,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, TypeVar
 
+from pydantic import BaseModel
+
+from calfkit._routing import validate_route_pattern
 from calfkit.exceptions import RegistryConfigError
 
 __all__ = ["HandlerInfo", "RegistryMixin", "handler", "handler_info"]
@@ -38,53 +34,55 @@ _MethodT = TypeVar("_MethodT", bound=Callable[..., Any])
 class HandlerInfo:
     """Metadata stamped on a method by :func:`handler`.
 
-    ``name`` is the stable, unique-per-class identifier the method is registered
-    under; ``schema`` is an optional, registry-opaque payload (e.g. an input
-    model) carried alongside it.
+    ``route`` is the route pattern the handler matches and its unique key in the
+    registry; ``name`` is a human/debug identifier (defaults to the method's
+    name); ``schema`` is an optional pydantic model the inbound body is validated
+    against before the handler runs.
     """
 
+    route: str
     name: str
-    schema: Any | None = None
+    schema: type[BaseModel] | None = None
 
     def __post_init__(self) -> None:
-        # Keep the type self-validating: the registry's whole contract rests on
-        # a usable name. ``handler()`` also rejects an empty name early (at the
-        # decorator call), but this guards direct construction of the public type.
+        # Self-validating: the registry's contract rests on a usable route + name.
+        if not self.route:
+            raise ValueError("HandlerInfo.route must be non-empty")
         if not self.name:
             raise ValueError("HandlerInfo.name must be non-empty")
 
 
-def handler(name: str, *, schema: Any | None = None) -> Callable[[_MethodT], _MethodT]:
-    """Mark a method for collection by :class:`RegistryMixin`.
+def handler(route: str, *, schema: type[BaseModel] | None = None, name: str | None = None) -> Callable[[_MethodT], _MethodT]:
+    """Mark a method as a route handler for collection by :class:`RegistryMixin`.
 
-    Returns the method **unchanged** — it stays an ordinary, callable method;
-    the only effect is a :class:`HandlerInfo` marker that
-    :meth:`RegistryMixin.__init_subclass__` reads when the owning class is
-    created.
-
-    The target must be a method — sync, async, ``staticmethod``, or
-    ``classmethod`` (the underlying function is unwrapped via ``__func__``). A
-    ``property`` is not a valid target.
+    Returns the method **unchanged** — it stays an ordinary, callable method; the
+    only effect is a :class:`HandlerInfo` marker read by
+    :meth:`RegistryMixin.__init_subclass__` when the owning class is built. The
+    target must be a method (sync/async/static/class — the underlying function is
+    unwrapped via ``__func__``); a ``property`` is not a valid target.
 
     Args:
-        name: Stable identifier the method is registered under. Must be
-            non-empty and unique within a class hierarchy — a duplicate raises
-            :class:`~calfkit.exceptions.RegistryConfigError` at class-definition
-            time.
-        schema: Optional payload carried with the handler; opaque to the
-            registry.
+        route: The route pattern (§6 grammar), validated here. Unique per class
+            hierarchy — a duplicate raises
+            :class:`~calfkit.exceptions.RegistryConfigError` at class definition.
+        schema: Optional pydantic ``BaseModel`` subclass the inbound body is
+            validated against before the handler runs.
+        name: Optional human/debug identifier; defaults to the method's name.
 
     Raises:
-        ValueError: If ``name`` is empty.
+        ValueError: If ``route`` violates the grammar, or ``schema`` is not a
+            ``BaseModel`` subclass.
     """
-    if not name:
-        raise ValueError("handler() requires a non-empty name")
+    validate_route_pattern(route)
+    if schema is not None and not (isinstance(schema, type) and issubclass(schema, BaseModel)):
+        raise ValueError(f"handler() schema must be a pydantic BaseModel subclass, got {schema!r}")
 
     def _decorate(method: _MethodT) -> _MethodT:
-        # Unwrap static/classmethod so the marker lands on the underlying
-        # function, where handler_info can find it from a bound method.
+        # Unwrap static/classmethod so the marker lands on the underlying function,
+        # where handler_info can find it from a bound method.
         target = getattr(method, "__func__", method)
-        setattr(target, _HANDLER_ATTR, HandlerInfo(name=name, schema=schema))
+        resolved_name = name if name is not None else getattr(target, "__name__", route)
+        setattr(target, _HANDLER_ATTR, HandlerInfo(route=route, name=resolved_name, schema=schema))
         return method
 
     return _decorate
@@ -102,72 +100,71 @@ def handler_info(method: Callable[..., Any]) -> HandlerInfo | None:
 
 
 class RegistryMixin:
-    """Base that collects methods marked with :func:`handler`, per subclass.
+    """Base that collects :func:`handler`-marked methods, per subclass, keyed by route.
 
-    Each subclass gets its **own** registry, built in :meth:`__init_subclass__`
-    when the subclass is created — never shared with sibling subclasses. The
-    registry merges markers across the MRO, so a subclass inherits its bases'
-    handlers; an override that re-applies :func:`handler` replaces the inherited
-    entry (most-derived wins). Handler ``name``\\ s must be unique within a
-    class hierarchy, else :class:`~calfkit.exceptions.RegistryConfigError` is
-    raised at class-definition time.
-
-    Methods are stored by attribute name and resolved to bound methods on the
-    instance at access time (see :meth:`handlers`), so a subclass that overrides
+    Each subclass gets its **own** registry, merged across the MRO (an override
+    that re-applies :func:`handler` replaces the inherited entry — most-derived
+    wins) and built in :meth:`__init_subclass__`. Route patterns must be unique
+    within a class hierarchy, else
+    :class:`~calfkit.exceptions.RegistryConfigError` is raised at class definition.
+    Handlers resolve to bound methods at access time, so a subclass that overrides
     a handler — even without re-decorating — is reflected.
     """
 
-    # Maps each handler ``name`` to the attribute name of the method that
-    # implements it. Assigned a fresh dict per subclass in __init_subclass__;
-    # the empty default on the base is a never-mutated sentinel.
+    # route -> attribute name; assigned fresh per subclass. The empty default on
+    # the base is a never-mutated sentinel.
     _handlers: ClassVar[dict[str, str]] = {}
+    # route -> HandlerInfo (name + schema metadata), parallel to _handlers.
+    _handler_info: ClassVar[dict[str, HandlerInfo]] = {}
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        # Walk base -> derived so the most-derived definition of an attribute
-        # wins on collision, while the dict preserves first-seen order.
-        marked: dict[str, HandlerInfo] = {}
+        # Walk base -> derived so the most-derived definition of an attribute wins,
+        # while the dict preserves first-seen order.
+        marked: dict[str, HandlerInfo] = {}  # attr -> info
         for klass in reversed(cls.__mro__):
             for attr, member in vars(klass).items():
                 info = handler_info(member)
                 if info is not None:
                     marked[attr] = info
 
-        registry: dict[str, str] = {}
+        route_to_attr: dict[str, str] = {}
+        route_to_info: dict[str, HandlerInfo] = {}
         for attr, info in marked.items():
-            owner = registry.get(info.name)
+            owner = route_to_attr.get(info.route)
             if owner is not None and owner != attr:
                 raise RegistryConfigError(
-                    f"{cls.__qualname__}: handler name {info.name!r} is registered by both "
-                    f"{owner!r} and {attr!r}; handler names must be unique per class"
+                    f"{cls.__qualname__}: route {info.route!r} is registered by both {owner!r} and {attr!r}; routes must be unique per class"
                 )
-            registry[info.name] = attr
-        cls._handlers = registry
+            route_to_attr[info.route] = attr
+            route_to_info[info.route] = info
+        cls._handlers = route_to_attr
+        cls._handler_info = route_to_info
 
     def handlers(self) -> dict[str, Callable[..., Any]]:
-        """Return this instance's handlers as ``{name: bound method}``.
+        """Return this instance's handlers as ``{route: bound method}``.
 
-        Each value is a method already bound to ``self`` — call it directly. A
-        fresh dict is returned each call, so mutating it cannot corrupt the
-        per-class registry.
+        Each value is a method already bound to ``self``. A fresh dict is returned
+        each call, so mutating it cannot corrupt the per-class registry.
         """
-        return {name: getattr(self, attr) for name, attr in type(self)._handlers.items()}
+        return {route: getattr(self, attr) for route, attr in type(self)._handlers.items()}
 
-    def get_handler(self, name: str) -> Callable[..., Any]:
-        """Return the bound method registered under ``name``.
+    def get_handler(self, route: str) -> Callable[..., Any]:
+        """Return the bound method registered under ``route``.
 
         Raises:
-            KeyError: If no handler is registered under ``name``.
+            KeyError: If no handler is registered under ``route``.
         """
-        method: Callable[..., Any] = getattr(self, type(self)._handlers[name])
+        method: Callable[..., Any] = getattr(self, type(self)._handlers[route])
         return method
 
     @classmethod
     def handler_names(cls) -> tuple[str, ...]:
-        """The handler names registered on this class, in registration order.
-
-        A read-only view for class-level introspection (no instance needed);
-        :meth:`handlers` gives the bound callables for an instance.
-        """
+        """The route patterns registered on this class, in registration order."""
         return tuple(cls._handlers)
+
+    @classmethod
+    def route_table(cls) -> dict[str, HandlerInfo]:
+        """Class-level introspection: ``{route: HandlerInfo}`` (human name + schema)."""
+        return dict(cls._handler_info)
