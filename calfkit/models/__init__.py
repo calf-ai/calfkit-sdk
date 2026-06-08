@@ -33,6 +33,7 @@ from calfkit.models.state import (
     State,
 )
 from calfkit.models.tool_context import ToolContext
+from calfkit.models.tool_dispatch import ToolCallRef
 
 __all__ = [
     # actions
@@ -73,4 +74,6 @@ __all__ = [
     "PendingToolBatch",
     # tool_context
     "ToolContext",
+    # tool_dispatch
+    "ToolCallRef",
 ]

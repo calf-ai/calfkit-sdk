@@ -30,26 +30,31 @@ def validate_route_pattern(pattern: str) -> None:
             raise ValueError(f"route pattern {pattern!r}: '*' is only valid as the entire final segment")
 
 
-def is_concrete_route_key(key: str) -> bool:
+def is_concrete_route_key(key: str | None) -> bool:
     """Whether ``key`` is a valid *concrete* route key — a producer-set value or an
     inbound header (not a pattern): non-empty, no ``*``, ``.``-delimited with
-    non-empty segments. Malformed keys (``order.``, ``a..b``) are rejected so they
-    can never partial-match a prefix pattern (§6 / §10)."""
-    return bool(key) and "*" not in key and all(key.split("."))
+    non-empty segments. Malformed keys (``order.``, ``a..b``) and an absent route
+    (``None``, the header-less case) are rejected so they can never partial-match a
+    prefix pattern (§6 / §10)."""
+    return key is not None and "*" not in key and all(key.split("."))
 
 
-def route_matches(pattern: str, key: str) -> bool:
+def route_matches(pattern: str, key: str | None) -> bool:
     """Whether a (validated) route ``pattern`` matches a concrete route ``key`` (§6.2).
 
-    ``*`` matches any key; an exact pattern matches an equal key; a trailing
-    ``prefix.*`` matches keys strictly *below* ``prefix`` (segment-aware), so
-    ``order.*`` matches ``order.created`` but not bare ``order`` nor
-    ``orders.created``.
+    ``*`` matches any key (including ``None`` — the header-less case); an exact
+    pattern matches an equal key; a trailing ``prefix.*`` matches keys strictly
+    *below* ``prefix`` (segment-aware), so ``order.*`` matches ``order.created`` but
+    not bare ``order`` nor ``orders.created``.
+
+    NOTE: the ``pattern == "*"`` check must stay first — it is the only branch that
+    accepts a ``None``/malformed key. Reordering it would silently break every
+    header-less and tool-dispatch message (run/handler unification relies on this).
     """
     if pattern == "*":
         return True
-    if not is_concrete_route_key(key):
-        # A malformed inbound key never partial-matches a specific pattern; only
+    if key is None or not is_concrete_route_key(key):
+        # A None/malformed inbound key never partial-matches a specific pattern; only
         # the universal "*" (handled above) can catch it.
         return False
     if pattern.endswith(".*"):
@@ -67,7 +72,7 @@ def _specificity(pattern: str) -> tuple[int, int]:
     return (fixed, int("*" not in pattern))
 
 
-def match_chain(key: str, patterns: Iterable[str]) -> list[str]:
+def match_chain(key: str | None, patterns: Iterable[str]) -> list[str]:
     """The patterns matching ``key``, ordered most-specific → most-general (§6.3).
 
     For trailing-prefix patterns the matches are nested prefixes of ``key`` and so

@@ -88,10 +88,9 @@ class Call(Generic[StateT], _Call[StateT]):
                 f"Call route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
                 "segments, no wildcard. ('*' is a route pattern for @handler, not a producer route key.)"
             )
-        if body is not None and route is None:
-            raise ValueError(
-                "Call body= requires route=; a body with no route reaches no @handler schema downstream (it would land unread in CallFrame.payload)."
-            )
+        # A routeless ``body`` is intentionally allowed: it lands in ``CallFrame.payload``
+        # and is read by the target node's inherited ``@handler('*')`` ``run`` when that
+        # ``run`` declares a ``schema`` (e.g. a tool node validating a ``ToolCallRef``).
         super().__init__(target_topic, state, *input_args)
         self.route = route
         self.body = body

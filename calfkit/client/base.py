@@ -281,8 +281,8 @@ class BaseClient:
                 f"producer route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
                 "segments, no wildcard. ('*' is a route pattern for @handler, not a producer route key.)"
             )
-        if body is not None and route is None:
-            raise ValueError("body= requires route=; a body with no route reaches no @handler schema (it would land unread in CallFrame.payload).")
+        # A routeless ``body`` is allowed — it rides ``CallFrame.payload`` and is read by
+        # the target node's inherited ``@handler('*')`` ``run`` when that ``run`` declares a schema.
         if not self._connection._connection:
             # First publish before an explicit start(): bring the broker up. The
             # broker's pre-start hook (the startup ensurer) provisions the reply

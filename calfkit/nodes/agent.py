@@ -20,6 +20,7 @@ from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, PendingToolBatch
+from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
@@ -272,7 +273,7 @@ class BaseAgentNodeDef(
                     return Call[State](
                         tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                         ctx.state,
-                        target_tool_call.tool_call_id,
+                        body=ToolCallRef(tool_call_id=target_tool_call.tool_call_id),
                     )
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
@@ -443,7 +444,7 @@ class BaseAgentNodeDef(
                 return Call[State](
                     tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                     ctx.state,
-                    target_tool_call.tool_call_id,
+                    body=ToolCallRef(tool_call_id=target_tool_call.tool_call_id),
                 )
             else:
                 launch_tool_call_ids = [tc.tool_call_id for tc in pending_tool_calls]
@@ -451,7 +452,7 @@ class BaseAgentNodeDef(
                     Call[State](
                         tools_registry[tc.tool_name].subscribe_topics[0],
                         ctx.state.model_copy(deep=True),
-                        tc.tool_call_id,
+                        body=ToolCallRef(tool_call_id=tc.tool_call_id),
                     )
                     for tc in pending_tool_calls
                 ]

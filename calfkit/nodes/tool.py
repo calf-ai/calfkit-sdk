@@ -7,6 +7,7 @@ import pydantic_core
 from typing_extensions import Self
 
 from calfkit._protocol import NodeKind
+from calfkit._registry import handler
 from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolReturn
@@ -14,6 +15,7 @@ from calfkit.models import SessionRunContext, Silent, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import FailedToolCall
+from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 
 logger = logging.getLogger(__name__)
@@ -80,7 +82,9 @@ class ToolNodeDef(BaseToolNodeDef):
             gates=list(gates) if gates else [],
         )
 
-    async def run(self, ctx: SessionRunContext, tool_call_id: str) -> NodeResult[State]:
+    @handler("*", schema=ToolCallRef)
+    async def run(self, ctx: SessionRunContext, payload: ToolCallRef) -> NodeResult[State]:  # type: ignore[override]
+        tool_call_id = payload.tool_call_id
         logger.debug(
             "[%s] tool run entered tool=%s tool_call_id=%s emitter=%s",
             ctx.correlation_id[:8],

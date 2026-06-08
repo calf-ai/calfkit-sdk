@@ -53,7 +53,7 @@ REPLY_DISPATCHER_LOGGER = "calfkit.client.reply_dispatcher"
 class _TerminalNode(BaseNodeDef):
     """Minimal concrete node so ``_publish_action`` can be exercised in isolation."""
 
-    async def run(self, ctx: SessionRunContext, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - unused
+    async def run(self, ctx: SessionRunContext) -> Any:
         return ReturnCall(state=ctx.state)
 
 
