@@ -1,17 +1,30 @@
 # Run/Handler Unification — Design & Implementation Spec (ADR)
 
-**Status:** Proposed — v2 (revised after a 3-agent adversarial review; ready for TDD)
+**Status:** Proposed — v3 (review-converged on the core; gated on the MCP-removal prerequisite)
 **Date:** 2026-06-08
 **Branch:** `feat/run-handler-unification` (worktree off `main`)
 **Builds on:** `calfkit/_registry.py` (`RegistryMixin` / `@handler`) and the shipped
 header-route-dispatch feature (PR #195).
 **Amends:** `docs/designs/header-route-dispatch-spec.md` decisions **#10** (run() fallback
 detected by identity) and **#11** + §3/§5.4/§7.1 (the `input_args` vs `payload` split).
-**mcp scope:** `calfkit/mcp/**` is being deprecated and is not refactored here — but the review
-found `worker.py` imports `McpBridge` at module top-level, so the framework import *is* coupled to
-it. We therefore **decouple `worker.py` from mcp** (§6.14) as part of this work; the
-`mcp/_bridge.py` + `tests/mcp/**` removal rides the concurrent deprecation effort (§10.1).
+**Prerequisite — MCP deleted first (separate PR):** the entire `calfkit/mcp/**` + `tests/mcp/**`
+subsystem is being removed as a standalone hard-break PR (its own session). **This branch rebases
+onto that mcp-free `main` before implementation.** Consequently there is **no `McpBridge`** (so no
+import-time pairing failure), **no `worker.py`↔mcp coupling**, and **no `tests/mcp/**`** — the v2
+`worker.py`-decouple section and the mcp-coupling note **no longer apply and are dropped** (§6.14 /
+§10.1). Post-rebase, `agent.py`'s tools API is already mcp-free (`McpServer` gone from `ToolLike`),
+so our `Call`-site changes (§6.4) layer cleanly on top. The only node types with an extra-positional
+`run` then are `ToolNodeDef` (migrated) and a test node (`_TerminalNode`, fixed) — see §7.
 
+> **v3 changelog (round-2 convergence):** Round 2 verified all round-1 fixes landed and found the
+> remaining non-converged area was *only* the `worker.py`↔mcp seam (in-scope provisioning tests
+> broke; the "`import calfkit` is safe" claim was false). **Resolution: MCP is deleted wholesale in
+> a separate prerequisite PR** (user decision), eliminating that seam entirely — so §6.14/§10.1 are
+> dropped and the spec converges on rebase. Also fixed two mcp-independent cosmetics the review
+> flagged: restored the `produced action=` debug log in the §6.3g sketch; reconciled the deferred-
+> F2-lint size estimate. **The dispatch/registry/typing/tool-payload core is review-converged** (no
+> open critical/major issues) per two independent rounds.
+>
 > **v2 changelog (post-review):** **Critical fix** — the original 3-stage rollout was unbuildable
 > (decorating base `run` as `@handler('*')` makes the un-migrated `ToolNodeDef`/`McpBridge` fail
 > the pairing check at *import*, and a routeless body is only *delivered* under the unified
@@ -316,6 +329,7 @@ else:
             logger.log(level, "[%s] ...and a non-None body was dropped (no schema handler consumed it)",
                        correlation_id[:8])
         return Response(envelope, headers=self._emitter_headers())
+    logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
     body = await self._publish_action(output, envelope, correlation_id, broker)
 return Response(body, headers=self._emitter_headers())
 ```
@@ -456,37 +470,21 @@ The runtime behavior is correct **only because** `route_matches` tests `"*"` bef
 key — keep that ordering; add a focused unit test for `route_matches('*', None) is True` and
 `match_chain(None, {...}) == ['*']` (§7) so a refactor can't regress it silently.
 
-### 6.14 `calfkit/worker/worker.py` — decouple from mcp (DECIDED)
+### 6.14 `calfkit/worker/worker.py` — DROPPED (subsumed by the MCP-removal prerequisite)
 
-Required: once base `run` is `@handler('*')`, `McpBridge.run(self, ctx, tool_call_id)` fails the
-pairing check at **class-definition time**, and `worker.py:11` imports `McpBridge` at module
-top-level — so `import calfkit.worker` (a core framework import) crashes. `import calfkit` itself
-is **safe** (`calfkit/mcp/__init__.py` imports `_config`/`_factory`/`_server`/`_tool_def`, **not**
-`_bridge`). The minimal, sufficient decouple:
-
-- **(a)** Remove `from calfkit.mcp._bridge import McpBridge` (≈11). (Keep `McpServer` /
-  `IdempotencyCache` imports — they are not nodes and don't fail the pairing check.)
-- **(b)** Remove `self._mcp_bridges` (≈125) and the bridge-construction + registration block in
-  `_on_startup` (≈263–283): the `for server in self._mcp_servers: ... McpBridge(...)` loop, the
-  `bridge._worker = self` loop, and `self._nodes.extend(self._mcp_bridges)`.
-
-This is the floor that unblocks import. **Full decouple (optional, recommended to ride the mcp
-deprecation PR, not this one):** also remove the `nodes: list[BaseNodeDef | McpServer]` /
-`idempotency_cache` constructor params, `add_nodes`/`_add_node` McpServer segregation,
-`_mcp_servers`, session open/close in `_on_startup`/`_on_shutdown`, and the mcp counts in logging
-(≈491/549/583) — that changes the public `Worker(...)` signature, so it belongs with deprecation.
-With only the minimal (a)+(b), a passed `McpServer` is **accepted but never expanded** (a dormant
-path) until the deprecation lands; note that explicitly so it isn't mistaken for working MCP
-support. `calfkit/mcp/_bridge.py` and `tests/mcp/**` stay broken-but-isolated (nothing in the kept
-framework imports `_bridge`); their removal is the deprecation's job (§10.1).
+v2 scoped a partial `worker.py`↔mcp decouple here. Round 2 showed it broke in-scope provisioning
+tests and rested on a false "`import calfkit` is safe" claim. **Resolved by deleting MCP wholesale
+in the prerequisite PR** (see header): after rebasing onto mcp-free `main`, `worker.py` has no
+`McpBridge`/`McpServer` references at all, so there is **nothing to do here** for this feature. No
+run-unification change touches `worker.py`.
 
 ---
 
 ## 7. Test touch points
 
-Migrate (per the blast-radius inventory + the completeness review). `tests/mcp/**` is **out of
-scope** (deprecated path). The v1 list was incomplete; the **bold** rows are review additions and
-several would fail `make check` / collection if missed.
+Migrate (per the blast-radius inventory + the completeness review). `tests/mcp/**` no longer
+exists (deleted in Stage 0), so there is no mcp test fallout here. The v1 list was incomplete; the
+**bold** rows are review additions and several would fail `make check` / collection if missed.
 
 | File | Change |
 |---|---|
@@ -552,13 +550,20 @@ several would fail `make check` / collection if missed.
 
 > **Why not 3 independently-green stages (v1's plan):** the review proved it's unbuildable.
 > (1) The pairing check runs at **import time**, so the moment base `run` is `@handler('*')` an
-> un-migrated `ToolNodeDef`/`McpBridge` (extra positional, no schema) fails class-definition →
-> package won't import. (2) A routeless `body=` is only *delivered* to `run` under the unified
-> dispatch, so the tool's payload migration can't precede or lag the dispatch change. The dispatch
-> unification, the tool migration, the guard removal, and the worker decouple are therefore **one
-> atomic change**. `input_args` *plumbing* removal is the only part that cleanly separates.
+> un-migrated `ToolNodeDef` (extra positional, no schema) fails class-definition → package won't
+> import. (2) A routeless `body=` is only *delivered* to `run` under the unified dispatch, so the
+> tool's payload migration can't precede or lag the dispatch change. The dispatch unification, the
+> tool migration, and the guard removal are therefore **one atomic change**. `input_args`
+> *plumbing* removal is the only part that cleanly separates. (The v2 `worker.py` decouple is gone
+> entirely — Stage 0 deletes mcp.)
 
-**Stage 1 — Unification + tool migration + worker decouple (one atomic, breaking commit).**
+**Stage 0 — MCP removal (PREREQUISITE; separate PR, separate session).**
+Delete `calfkit/mcp/**` + `tests/mcp/**` and strip every framework/CLI/test reference. **This
+branch rebases onto the resulting mcp-free `main` before Stage 1.** Not specced here (it's its own
+hard-break PR); listed so the sequencing is explicit. After this, the only extra-positional `run`
+nodes are `ToolNodeDef` (migrated below) and the `_TerminalNode` test node (fixed in §7).
+
+**Stage 1 — Unification + tool migration (one atomic, breaking commit; on mcp-free main).**
 - base `run` → declining `@handler('*')`; `handler()` → single `_dispatch_routed` path; fix the
   `route is None` log; **widen `_dispatch_routed`/`_routing.py` route typing to `str | None`**
   (§6.13a); delete both identity checks, the `_validate_routes` conflict guard, `_call_run`, and
@@ -566,11 +571,10 @@ several would fail `make check` / collection if missed.
 - Add `tool_dispatch.py` (`ToolCallRef`); `ToolNodeDef.run` → `@handler('*', schema=ToolCallRef)`;
   the 3 agent `Call` sites → `body=ToolCallRef(...)` (no route); **remove the body-requires-route
   guard** (both raise sites — §6.6e/§6.8d); add the callback-aware unconsumed-body log (§6.3g).
-- **Decouple `worker.py` from mcp** (§6.14 (a)+(b)) so `import calfkit.worker` stays clean.
 - Migrate **all** affected tests in §7 (the ~11 direct `run(ctx, str)` sites, `_TerminalNode`,
   the 4 named `test_routed_dispatch.py` tests, `run_args` tests, the `_run_accepts_input` test).
 - At the end of Stage 1, `input_args`/`run_args` still *exist* on `Call`/`_Call`/`CallFrame`/the
-  client but are **unused by any node**. `make check` green; `tests/mcp/**` excluded (deprecated).
+  client but are **unused by any node**. `make check` green (no `tests/mcp/**` exists post-Stage 0).
 
 **Stage 2 — Tear down the now-dead `input_args` plumbing (pure deletion).**
 Remove `*input_args`/`input_args` from `actions.py` (`_Call`/`Call`/`Delegate`) and
@@ -594,18 +598,17 @@ F401 `Sequence` cleanups; README + docs. Green because Stage 1 already removed e
 Pre-1.0; hard breaks are acceptable per project policy. Add a CHANGELOG entry enumerating the
 above.
 
-### 10.1 mcp coupling — resolved: decouple `worker.py` (§6.14)
+### 10.1 mcp coupling — resolved by deleting MCP first (Stage 0 prerequisite)
 
-The review corrected the v1 framing: `McpBridge` breaks at **class-definition / import time** (the
-moment base `run` is `@handler('*')`), *not* at the Stage-3 `input_args` teardown — and because
-`worker.py:11` imports it at module top-level, the failure takes down the core `import
-calfkit.worker`, not just the mcp tests. **Decision (yours): decouple `worker.py` from mcp** in
-Stage 1 (§6.14 (a)+(b)) — remove the `McpBridge` import + construction so the framework imports
-cleanly. `import calfkit` itself was already safe (`mcp/__init__.py` doesn't import `_bridge`).
-`calfkit/mcp/_bridge.py` and `tests/mcp/**` remain broken-but-isolated (nothing in the kept
-framework imports `_bridge`); their removal — and the full `Worker(...)` McpServer-param cleanup —
-belong to the **concurrent mcp deprecation effort**, which should land before or alongside this.
-`make check` must exclude `tests/mcp/**` until then.
+Round 2 found the worker↔mcp seam was the only non-converged area: `McpBridge.run(ctx, tool_call_id)`
+fails the pairing check at **import time**, and because `calfkit/__init__.py` → `calfkit.worker`
+→ `calfkit.mcp._bridge`, **`import calfkit` itself crashes** post-change (the v2 "`import calfkit`
+is safe" claim was *false* — corrected). A partial `worker.py` decouple also broke in-scope
+provisioning tests. **Decision (yours): delete the entire MCP subsystem in a separate hard-break
+PR** (`calfkit/mcp/**` + `tests/mcp/**` + all framework/CLI/test references), then **rebase this
+branch onto the mcp-free `main`.** That removes `McpBridge` (no pairing failure), the worker
+coupling, and the broken tests at the root — so this feature touches no mcp code at all and §6.14
+is dropped.
 
 ---
 
@@ -634,10 +637,11 @@ belong to the **concurrent mcp deprecation effort**, which should land before or
 2. **F2 — loudness lint:** **pass for now, documented as a known temporary shortcoming** (§13) to
    be addressed by the concurrent error-propagation work, not a one-off lint here. (§5 F2)
 3. **`ToolCallRef` placement:** dedicated `calfkit/models/tool_dispatch.py`. (§6.1)
-4. **mcp coupling:** decouple `worker.py` from mcp (§6.14); the bridge/test removal rides the
-   concurrent mcp deprecation. (§10.1)
-5. **Staging:** Stages 1+2 collapsed into one atomic commit (the original 3-stage plan was
-   unbuildable — §9); `input_args` plumbing teardown is the only separable stage.
+4. **mcp:** deleted wholesale in a **separate prerequisite hard-break PR**; this branch rebases
+   onto mcp-free `main`. No mcp code is touched by this feature (§10.1; §6.14 dropped). (your call)
+5. **Staging:** Stage 0 = MCP removal (prerequisite, separate PR); Stage 1 = the atomic
+   unification + tool migration (the original 3-stage plan was unbuildable — §9); Stage 2 =
+   `input_args` plumbing teardown (the only cleanly separable part).
 
 ---
 
@@ -645,9 +649,9 @@ belong to the **concurrent mcp deprecation effort**, which should land before or
 
 | Item | Status / mitigation |
 |---|---|
-| **Silent no-op on forgotten/typo'd `run`** (declining base; no-match log is `DEBUG` in fire-and-forget) | **Known temporary shortcoming (accepted).** A structural ClassVar lint would fix it (~8 lines) but is **deferred to the concurrent calfkit error-propagation work**, the right home for surfacing silent node-level no-ops uniformly. Revisit if that work slips. |
+| **Silent no-op on forgotten/typo'd `run`** (declining base; no-match log is `DEBUG` in fire-and-forget) | **Known temporary shortcoming (accepted).** A structural fix exists (a `ClassVar` marker on the framework base classes + a ~3-line validation lint, no dispatch-time identity check) but is **deferred to the concurrent calfkit error-propagation work**, the right home for surfacing silent node-level no-ops uniformly. Revisit if that work slips. |
 | **Routeless body dropped at a no-schema `'*'/run`** (F1b) | Mitigated to **callback-aware** logging (WARNING when a caller awaits) — §6.3g. Not a hard guard; the producer-side guard it replaced was itself only a weak proxy. |
 | **Routing `None`-contract depends on short-circuit ordering** in `route_matches` | Pinned by an explicit unit test (§6.13a, §7) so a reorder can't silently break all no-route + tool dispatch. |
 | **Agent loop as a stateful `'*'` reachable as a CoR fallback** — an intercepting route that mutates `ctx.state` then declines (`Next`) could feed a torn write into the loop | Already governed by the route-dispatch **"pure guards / single state author"** contract (header-route-dispatch-spec decision #4 / risk register). No *new* mitigation; documented-contract risk, unchanged by this work. |
 | **`body=ToolCallRef` model round-trip unproven by existing tests** (route-dispatch tests only used `dict` bodies) | New test asserts the `model → dict → model_validate` path over the broker (§7). |
-| **`tests/mcp/**` broken until deprecation lands** | Excluded from `make check` in the interim (§10.1). |
+| **Rebase dependency on the MCP-removal PR** | This branch must rebase onto mcp-free `main` before Stage 1; until then the line anchors in §6 are confirmed against the current tree and re-verified at rebase. |
