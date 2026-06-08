@@ -74,8 +74,20 @@ def handler(route: str, *, schema: type[BaseModel] | None = None, name: str | No
         route: The route pattern (§6 grammar), validated here. Unique per class
             hierarchy — a duplicate raises
             :class:`~calfkit.exceptions.RegistryConfigError` at class definition.
-        schema: Optional pydantic ``BaseModel`` subclass the inbound body is
-            validated against before the handler runs.
+        schema: Optional pydantic ``BaseModel`` the inbound body is validated against
+            (``model_validate``) before the handler runs; the validated instance is
+            injected as the handler's ``payload`` parameter, and a ``ValidationError``
+            makes the handler *decline* (the dispatch chain advances to the next match).
+
+            ``schema`` is a **filter, not a content discriminator** — the *route* is
+            the discriminator. Validation uses pydantic defaults, which are **lenient**:
+            types are coerced (``"5"`` → ``5``) and unknown fields are *ignored*
+            (``extra='ignore'``). So a permissive schema (an empty model, or all
+            ``Optional``/``Any`` fields) validates **any** dict body and effectively
+            matches everything; a missing body (``None``) always fails. For a schema
+            that genuinely discriminates, give it required fields plus
+            ``model_config = ConfigDict(extra='forbid')`` (optionally a ``Literal``
+            "kind" field) so a non-matching body is rejected and the chain advances.
         name: Optional human/debug identifier; defaults to the method's name.
 
     Raises:

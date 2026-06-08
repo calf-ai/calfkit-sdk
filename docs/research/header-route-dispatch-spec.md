@@ -100,7 +100,12 @@ route header, runs `run()` exactly as today.
    decoration time (today `HandlerInfo.schema` is `Any`/opaque; this narrows it).
 7. **Body validation failure → log + skip to the next matching handler** (treated as an
    implicit `Next`, not a hard error). `schema` thus acts as a *secondary filter* beyond the
-   route pattern.
+   route pattern — **not** a content discriminator (the *route* is the discriminator).
+   Validation uses pydantic defaults, which are **lenient**: types coerce (`"5"`→`5`) and
+   unknown fields are ignored (`extra='ignore'`), so a permissive schema (empty / all-optional
+   / `Any`) validates *any* dict body and matches everything; a missing body (`None`) always
+   fails. A genuinely-discriminating schema needs required fields + `ConfigDict(extra='forbid')`
+   (optionally a `Literal` "kind"). Documented on `@handler`'s `schema=`.
 8. **Route header is ingress-only, never auto-propagated.** Set only by (a) client ingress
    and (b) an explicit peer `Call(..., route=...)`. `ReturnCall`/`TailCall`/implicit
    publishes carry no route, so returns dispatch via the `*`/`run()` fallback. This prevents
