@@ -1,18 +1,22 @@
 import inspect
 import logging
 from abc import abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
+from pydantic import ValidationError
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, NodeKind, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin
+from calfkit._routing import match_chain
+from calfkit.exceptions import RegistryConfigError
 from calfkit.models import (
     Call,
+    Next,
     NodeResult,
     ReturnCall,
     Silent,
@@ -64,6 +68,36 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         # Unbound method signature includes self, so self + ctx = 2 params.
         # If > 2, the subclass declared an input parameter (any name).
         cls._run_accepts_input = len(sig.parameters) > 2
+        cls._validate_routes()
+
+    @classmethod
+    def _validate_routes(cls) -> None:
+        """Class-definition checks for ``@handler`` routes (run after collection).
+
+        - An overridden ``run()`` is the implicit ``*`` fallback, so an explicit
+          ``@handler('*')`` alongside it is an ambiguous catch-all.
+        - The signature/``schema`` pairing must agree (§5.1): a ``(self, ctx, payload)``
+          handler requires ``schema=``; a ``(self, ctx)`` handler must not have it.
+        """
+        run_overridden = cls.run is not BaseNodeDef.run
+        if "*" in cls._handlers and run_overridden:
+            raise RegistryConfigError(
+                f"{cls.__qualname__}: @handler('*') conflicts with the node's run() catch-all "
+                "(run() is already the implicit '*' fallback); use a more specific route, or override run() instead."
+            )
+        for route, info in cls._handler_info.items():
+            handler_fn = getattr(cls, cls._handlers[route])
+            accepts_payload = len(inspect.signature(handler_fn).parameters) > 2
+            if accepts_payload and info.schema is None:
+                raise RegistryConfigError(
+                    f"{cls.__qualname__}: route {route!r} handler {info.name!r} takes a payload parameter "
+                    "but has no schema=; add schema= or drop the parameter."
+                )
+            if not accepts_payload and info.schema is not None:
+                raise RegistryConfigError(
+                    f"{cls.__qualname__}: route {route!r} handler {info.name!r} has schema= but takes no payload "
+                    "parameter; add a payload parameter or drop schema=."
+                )
 
     def __init__(
         self,
@@ -286,6 +320,59 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             publish_envelope = envelope
 
         return publish_envelope
+
+    async def _call_run(self, ctx: SessionRunContext, input_args: Sequence[Any] | None) -> NodeResult[State]:
+        """Invoke ``run``, passing the per-message input args when its signature accepts them."""
+        if self._run_accepts_input and input_args is not None:
+            return await self.run(ctx, *input_args)
+        return await self.run(ctx)
+
+    async def _dispatch_routed(
+        self,
+        ctx: SessionRunContext,
+        route: str,
+        payload: Any,
+        input_args: Sequence[Any] | None,
+        *,
+        awaiting_reply: bool,
+        correlation_id: str,
+    ) -> NodeResult[State] | None:
+        """Dispatch ``route`` to matched handlers as a Chain of Responsibility.
+
+        Runs matched handlers most-specific → most-general (§6.3). A handler that
+        returns :class:`~calfkit.models.Next` declines and the chain advances; the
+        first non-``Next`` result is terminal and short-circuits. A handler with a
+        ``schema`` whose body fails validation is skipped (logged, callback-aware
+        level). If no handler handles the route, the node's overridden ``run()`` is
+        the implicit ``*`` fallback; absent that, returns ``None`` (no match).
+        """
+        cls = type(self)
+        for r in match_chain(route, cls._handlers):
+            info = cls._handler_info[r]
+            method = self.get_handler(r)
+            if info.schema is not None:
+                try:
+                    validated = info.schema.model_validate(payload)
+                except ValidationError:
+                    level = logging.WARNING if awaiting_reply else logging.DEBUG
+                    logger.log(
+                        level,
+                        "[%s] route=%s handler=%s body failed %s validation; skipping to next handler",
+                        correlation_id[:8],
+                        route,
+                        info.name,
+                        info.schema.__name__,
+                    )
+                    continue
+                result: NodeResult[State] | Next = await method(ctx, validated)
+            else:
+                result = await method(ctx)
+            if isinstance(result, Next):
+                continue
+            return result
+        if cls.run is not BaseNodeDef.run:
+            return await self._call_run(ctx, input_args)
+        return None
 
     async def handler(
         self,
