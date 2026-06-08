@@ -6,7 +6,7 @@ These exercise ``calfkit/worker/worker.py``'s new lifecycle machinery:
 - single-start guard,
 - the engine methods ``_make_ctx`` / ``_owner_cms`` / ``_enter_into`` against
   fake owners (Kafka-free where possible),
-- the four FastStream hooks wired around the existing MCP open/close logic.
+- the four FastStream hooks wired around the resource/serving brackets.
 
 Where a broker is needed we use the repo's ``TestKafkaBroker`` in-memory
 simulation, mirroring the patterns in ``tests/test_gates.py`` etc.
@@ -417,7 +417,7 @@ async def test_after_startup_failure_tears_down_resources_when_broker_stop_raise
 
 
 # ---------------------------------------------------------------------------
-# broker.start() failure tears down resources + MCP across all run surfaces
+# broker.start() failure tears down resources across all run surfaces
 # ---------------------------------------------------------------------------
 
 

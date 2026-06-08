@@ -71,7 +71,7 @@ def _print_banner(nodes: list[Any], server_urls: str | list[str] | None, provisi
     typer.echo(f"   broker: {broker}")
     typer.echo(f"   topic provisioning: {'on' if provision else 'off'}")
     for node in nodes:
-        node_id = getattr(node, "node_id", None) or getattr(node, "raw_name", repr(node))
+        node_id = getattr(node, "node_id", None) or repr(node)
         kind = getattr(node, "_node_kind", "node")
         line = f"   • {node_id} [{kind}]"
         subscribe = getattr(node, "subscribe_topics", None)
