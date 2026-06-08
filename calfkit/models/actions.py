@@ -4,6 +4,7 @@ from typing import Any, Generic
 
 from typing_extensions import TypeAliasType, TypeVar
 
+from calfkit._routing import is_concrete_route_key
 from calfkit._types import StateT
 
 
@@ -82,6 +83,13 @@ class Call(Generic[StateT], _Call[StateT]):
     body: Any | None = None
 
     def __init__(self, target_topic: str, state: StateT, *input_args: Any, route: str | None = None, body: Any | None = None) -> None:
+        if route is not None and not is_concrete_route_key(route):
+            raise ValueError(
+                f"Call route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
+                "segments, no wildcard. ('*' is a route pattern for @handler, not a producer route key.)"
+            )
+        if body is not None and route is None:
+            raise ValueError("Call body= requires route=; a body with no route reaches no @handler schema downstream (it would land unread in CallFrame.payload).")
         super().__init__(target_topic, state, *input_args)
         self.route = route
         self.body = body

@@ -272,8 +272,8 @@ the lone universal `*`. Rejected at decoration (`ValueError`; re-checked at coll
 
 Rank by **number of fixed (non-`*`) segments**, descending; at equal fixed-count an exact
 pattern precedes a prefix pattern. For any key the matching trailing-prefix patterns are
-nested prefixes of the key → a total order with **no ties** (the dispatcher still asserts no
-equal-rank collision defensively).
+nested prefixes of the key → a total order with **no ties by construction** (so the matcher
+sorts by the specificity key without needing a tie-break).
 
 ```
 order.created.line   (exact,  fixed=3)   ← 1st

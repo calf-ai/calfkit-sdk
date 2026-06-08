@@ -80,6 +80,19 @@ def test_tailcall_does_not_accept_route_or_body() -> None:
         TailCall("topic", object(), route="x")  # type: ignore[call-arg]
 
 
+def test_call_rejects_malformed_route_at_construction() -> None:
+    # Peer Call validation is symmetric with the client path.
+    with pytest.raises(ValueError):
+        Call("downstream", object(), route="order.")
+    with pytest.raises(ValueError):
+        Call("downstream", object(), route="order.*")
+
+
+def test_call_rejects_body_without_route_at_construction() -> None:
+    with pytest.raises(ValueError):
+        Call("downstream", object(), body={"x": 1})
+
+
 # ---------------------------------------------------------------------------
 # Chain-of-Responsibility dispatch (_dispatch_routed)
 # ---------------------------------------------------------------------------
@@ -636,3 +649,91 @@ async def test_no_match_log_level_keys_on_callback_presence(callback_topic: str 
         await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "payment.x"}, broker=cast(Any, None))
     matched = [r for r in caplog.records if "no handler matched" in r.message]
     assert matched and matched[0].levelno == expected
+
+
+# ---------------------------------------------------------------------------
+# Round-2 coverage: pin the precise round-1-fix interactions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_key", ["order.", ""])
+async def test_malformed_key_still_reaches_lone_star_handler(bad_key: str) -> None:
+    class N(NodeDef[Any]):
+        @handler("*")
+        async def star(self, ctx: SessionRunContext) -> Any:
+            return Call("star", ctx.state)
+
+    out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), bad_key)
+    assert isinstance(out, Call) and out.target_topic == "star"
+
+
+async def test_all_matched_handlers_decline_with_no_run_returns_none() -> None:
+    class N(NodeDef[Any]):
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            return None  # decline, and there is no run() fallback
+
+    out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
+    assert out is None
+
+
+@pytest.mark.parametrize("awaiting,expected", [(True, logging.WARNING), (False, logging.DEBUG)])
+async def test_schema_skip_log_level_keys_on_awaiting_reply(awaiting: bool, expected: int, caplog: pytest.LogCaptureFixture) -> None:
+    class Body(BaseModel):
+        amount: int
+
+    class N(NodeDef[Any]):
+        @handler("order.created", schema=Body)
+        async def typed(self, ctx: SessionRunContext, payload: Body) -> Any:
+            return Silent()
+
+        @handler("order.*")
+        async def general(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    node = N(node_id="n", subscribe_topics=["t"])
+    with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
+        await node._dispatch_routed(_ctx(), "order.created", {"bad": True}, None, awaiting_reply=awaiting, correlation_id=_CORR)
+    recs = [r for r in caplog.records if "validation" in r.message]
+    assert recs and recs[0].levelno == expected
+
+
+@pytest.mark.parametrize("awaiting,expected", [(True, logging.WARNING), (False, logging.DEBUG)])
+async def test_malformed_route_log_level_keys_on_awaiting_reply(awaiting: bool, expected: int, caplog: pytest.LogCaptureFixture) -> None:
+    class N(NodeDef[Any]):
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    node = N(node_id="n", subscribe_topics=["t"])
+    with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
+        await node._dispatch_routed(_ctx(), "order.", None, None, awaiting_reply=awaiting, correlation_id=_CORR)
+    recs = [r for r in caplog.records if "malformed inbound route" in r.message]
+    assert recs and recs[0].levelno == expected
+
+
+async def test_execute_node_forwards_route_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    from calfkit.client.client import Client
+    from calfkit.client.reply_dispatcher import _ReplyDispatcher
+
+    client = Client(cast(Any, _StubConn()), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
+    captured: dict[str, Any] = {}
+
+    class _FakeHandle:
+        async def result(self, timeout: float | None = None) -> str:
+            return "ok"
+
+    async def _fake_invoke(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _FakeHandle()
+
+    monkeypatch.setattr(client, "invoke_node", _fake_invoke)
+    await client.execute_node("hello", "orders", route="order.created", body={"n": 1})
+    assert captured.get("route") == "order.created"
+    assert captured.get("body") == {"n": 1}

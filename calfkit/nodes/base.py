@@ -40,6 +40,12 @@ def _accepts_extra_param(fn: Callable[..., Any]) -> bool:
     return len(inspect.signature(fn).parameters) > 2
 
 
+def _stuck_level(awaiting_reply: bool) -> int:
+    """``WARNING`` when a caller is awaiting a reply (an unmatched/malformed/declined
+    route stalls that workflow), else ``DEBUG`` (a fire-and-forget no-op)."""
+    return logging.WARNING if awaiting_reply else logging.DEBUG
+
+
 GateFunction = Callable[[SessionRunContext], bool | Awaitable[bool]]
 """A predicate evaluated in ``handler()`` before ``run()``. Sync or async; must return ``bool``.
 
@@ -361,7 +367,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if not is_concrete_route_key(route):
             # Malformed inbound key (empty segment / trailing dot / wildcard): never
             # partial-matches a specific handler — only the "*"/run() fallback can catch it.
-            level = logging.WARNING if awaiting_reply else logging.DEBUG
+            level = _stuck_level(awaiting_reply)
             logger.log(
                 level,
                 "[%s] malformed inbound route=%r on node=%s; only a catch-all/run fallback can handle it",
@@ -376,7 +382,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 try:
                     validated = info.schema.model_validate(payload)
                 except ValidationError:
-                    level = logging.WARNING if awaiting_reply else logging.DEBUG
+                    level = _stuck_level(awaiting_reply)
                     logger.log(
                         level,
                         "[%s] route=%s handler=%s body failed %s validation; skipping to next handler",
@@ -435,7 +441,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 if output is None:
                     # No matching handler (and no run() fallback): a stuck workflow
                     # if a caller is awaiting a return, else a fire-and-forget no-op.
-                    level = logging.WARNING if frame.callback_topic is not None else logging.DEBUG
+                    level = _stuck_level(frame.callback_topic is not None)
                     logger.log(
                         level,
                         "[%s] no handler matched route=%s on node=%s; registered=%s",
