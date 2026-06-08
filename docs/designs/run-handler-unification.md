@@ -1,7 +1,7 @@
 # Run/Handler Unification — Design & Implementation Spec (ADR)
 
-**Status:** Proposed — v3 (review-converged on the core; gated on the MCP-removal prerequisite)
-**Date:** 2026-06-08
+**Status:** Proposed — v3 (review-converged; **MCP-removal gate CLEARED**, rebased onto `main` 0.7.0 — ready for Stage 1 TDD)
+**Date:** 2026-06-08 (re-verified against `main` after PRs #197/#198 removed MCP)
 **Branch:** `feat/run-handler-unification` (worktree off `main`)
 **Builds on:** `calfkit/_registry.py` (`RegistryMixin` / `@handler`) and the shipped
 header-route-dispatch feature (PR #195).
@@ -343,16 +343,16 @@ Three `Call[State](topic, state, tool_call_id)` sites move the id from a positio
 (no route — F1b). (The agent's own `run` keeps its inherited `'*'` — no change to the loop.)
 
 - **(a) Import:** `from calfkit.models.tool_dispatch import ToolCallRef`.
-- **(b) Sequential resume** (≈298–302):
+- **(b) Sequential resume** (`agent.py:272–276` post-rebase):
   ```python
   # BEFORE: Call[State](tool_topic, ctx.state, target_tool_call.tool_call_id)
   # AFTER:
   Call[State](tool_topic, ctx.state, body=ToolCallRef(tool_call_id=target_tool_call.tool_call_id))
   ```
-- **(c) New single/sequential dispatch** (≈469–473): same transform.
-- **(d) Parallel fan-out** (≈477–481): same transform inside the comprehension; the `list[Call]`
-  publish branch in `base.py` already forwards `payload=call.body`, so per-invocation bodies
-  arrive correctly with no `_publish_action` change.
+- **(c) New single/sequential dispatch** (`agent.py:443–447`): same transform.
+- **(d) Parallel fan-out** (`agent.py:451–455`): same transform inside the comprehension; the
+  `list[Call]` publish branch in `base.py` already forwards `payload=call.body`, so per-invocation
+  bodies arrive correctly with no `_publish_action` change.
 
 > The agent constructs `ToolCallRef` from a value it already holds (`tc.tool_call_id`), so body
 > validation can never fail in practice (the schema is internal, not LLM-shaped).
