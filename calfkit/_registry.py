@@ -78,6 +78,8 @@ def handler(route: str, *, schema: type[BaseModel] | None = None, name: str | No
             (``model_validate``) before the handler runs; the validated instance is
             injected as the handler's ``payload`` parameter, and a ``ValidationError``
             makes the handler *decline* (the dispatch chain advances to the next match).
+            Only a ``ValidationError`` declines — any other exception from a custom
+            validator propagates and aborts the message (it is not swallowed).
 
             ``schema`` is a **filter, not a content discriminator** — the *route* is
             the discriminator. Validation uses pydantic defaults, which are **lenient**:
