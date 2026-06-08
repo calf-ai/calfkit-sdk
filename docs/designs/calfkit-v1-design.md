@@ -5,7 +5,7 @@
 | Status      | Draft proposal — pre-implementation |
 | Author      | event-driven-architect agent |
 | Last updated| 2026-05-18 |
-| Supersedes  | `docs/hooks-design.md` (the two-layer middleware proposal); the `BaseNodeDef`/`BaseAgentNodeDef`/`NodeResult` shape in `calfkit/nodes/` |
+| Supersedes  | `docs/designs/hooks-design.md` (the two-layer middleware proposal); the `BaseNodeDef`/`BaseAgentNodeDef`/`NodeResult` shape in `calfkit/nodes/` |
 | Audience    | A senior engineer deciding whether to greenlight a 1.0 rewrite and what to build |
 
 ## Executive summary
@@ -17,7 +17,7 @@ Calfkit 1.0 is a clean break from the 0.x series. **It is a two-layer SDK.**
 
 The unique value of calfkit is the *combination*: you author your agent at the Pydantic-AI tier of ergonomics, and the SDK deploys it as a distributed, Kafka-native, multi-language-tool-capable, durable, replayable service — with no wiring code from the user. **Both orchestration and choreography are first-class.** Agents may be invoked directly (request/reply over Kafka), wired into hierarchies (handoff, sub-agents, parallel fan-out — see §11.A), *and* subscribed to event streams from other agents or arbitrary Kafka topics (linear pipelines, pub/sub fan-out, schema-typed event reactions — see §11.B). **Choreography wiring lives on the Worker, not on the Agent**: an `Agent(...)` declaration is portable across deployments, and the deployment-time `worker.wire(source=..., target=..., payload=...)` is the canonical place that topology lives. If a developer can get the same result by stuffing Pydantic AI inside a Temporal activity, calfkit has no reason to exist. The Agent SDK is the answer to that question. See §4 for the two-layer surface and a head-to-head ergonomics comparison against "Temporal + Pydantic AI."
 
-The runtime layer ships an Action algebra as the single side-effect channel for all Kafka traffic. Durability comes from Kafka alone: an at-least-once log plus two compacted topics (runs-state, fan-out aggregator) replace the in-process `_pending_batches` dict (§9.1) — the canonical bug class this version is designed to eliminate. Tools become first-class Kafka topics (cross-language by construction), the agent loop stops being a `BaseAgentNodeDef.run()` god-method, and the FastStream coupling is replaced by direct `aiokafka` so the runtime can own rebalance, header typing, and the fan-out aggregator. Extensions get exactly three primitives (`around_invoke`, `around_publish`, `on_event`) — the named-sugar hierarchy proposed in `docs/hooks-design.md` is rejected because it lies about cross-process boundaries.
+The runtime layer ships an Action algebra as the single side-effect channel for all Kafka traffic. Durability comes from Kafka alone: an at-least-once log plus two compacted topics (runs-state, fan-out aggregator) replace the in-process `_pending_batches` dict (§9.1) — the canonical bug class this version is designed to eliminate. Tools become first-class Kafka topics (cross-language by construction), the agent loop stops being a `BaseAgentNodeDef.run()` god-method, and the FastStream coupling is replaced by direct `aiokafka` so the runtime can own rebalance, header typing, and the fan-out aggregator. Extensions get exactly three primitives (`around_invoke`, `around_publish`, `on_event`) — the named-sugar hierarchy proposed in `docs/designs/hooks-design.md` is rejected because it lies about cross-process boundaries.
 
 **One distinguishing constraint, stated up front.** Calfkit ships no `agent.run(input)` in-process invocation. Pydantic AI and OpenAI Agents put `.run()` on the agent because they *are* in-process libraries — the agent IS the runtime. Calfkit's agent is a declaration that gets executed by a Worker over a transport. Local development, REPL exploration, and unit tests use `InMemoryWorker` — a transport variant whose backing is an in-process queue rather than a Kafka broker. Same runtime code, same Action interpreter, same Extension chain; different transport. This is the Starlette / FastAPI / httpx test-client pattern. See §4.2 hello-world and §17 testing for the idiom. The cost is one extra line of test setup; the win is that local-dev behavior is a real subset of production behavior — no parallel "in-process path" to drift.
 
@@ -63,7 +63,7 @@ The 0.x branch has shipped real value — `@agent_tool`, the Kafka-backed agent 
 
 2. **Durability is half-Kafka, half-Python-dict.** Parallel tool fan-out state lives in an in-process dict lost on restart and rebalance (§9.1 has the failure mode). Any non-trivial production deployment will eventually hit this.
 
-3. **Extension is structurally impossible.** Today's only extension points are `gates` and overriding `run()`. The `docs/hooks-design.md` middleware proposal introduces named-sugar methods (`before_agent_run`/`after_agent_run`) that fire in *different Kafka handler invocations* — different Python processes — without that fact being visible in the API. That design lies about distributed reality.
+3. **Extension is structurally impossible.** Today's only extension points are `gates` and overriding `run()`. The `docs/designs/hooks-design.md` middleware proposal introduces named-sugar methods (`before_agent_run`/`after_agent_run`) that fire in *different Kafka handler invocations* — different Python processes — without that fact being visible in the API. That design lies about distributed reality.
 
 A refactor that fixes (1) breaks public surface. A refactor that fixes (2) requires a new wire field, a new compacted topic, and runtime-owned aggregator code none of which the current `BaseNodeDef` knows about. A refactor that fixes (3) introduces a competing middleware API that conflicts with `gates`. Three concurrent breaking refactors is a 1.0 rewrite.
 
@@ -651,7 +651,7 @@ if __name__ == "__main__":
 
 The classifier does not import `enricher`, never names its topic, and is unchanged whether 0, 1, or N consumers subscribe to its events. The enricher is unchanged whether the classifier exists yet or not. This is choreography. Critically, both `classifier` and `enricher` are pure declarations — they can live in a shared library and be reused across deployments with different wiring.
 
-> **Topics do not auto-create by default.** The decoupling above is about *declarations*, not topic existence. Whether the underlying Kafka topic exists is a separate, deployment-time concern: it is created either by your broker's `auto.create.topics.enable` (a broker property calfkit can't assume), by an ops-governed pipeline, or by calfkit's EXPERIMENTAL opt-in `ProvisioningConfig` (off by default — see [docs/topic-provisioning.md](topic-provisioning.md) and open question #11).
+> **Topics do not auto-create by default.** The decoupling above is about *declarations*, not topic existence. Whether the underlying Kafka topic exists is a separate, deployment-time concern: it is created either by your broker's `auto.create.topics.enable` (a broker property calfkit can't assume), by an ops-governed pipeline, or by calfkit's EXPERIMENTAL opt-in `ProvisioningConfig` (off by default — see [docs/topic-provisioning.md](../topic-provisioning.md) and open question #11).
 
 **Pub/sub fan-out (one producer, N independent consumers).** A news-watcher emits `NewsArticle` events; three independent agents react in parallel.
 
@@ -2199,11 +2199,11 @@ This is the realistic mixed shape calfkit is designed for. Pure orchestration is
 
 ## 12. Extension / hook system
 
-This section supersedes `docs/hooks-design.md`.
+This section supersedes `docs/designs/hooks-design.md`.
 
 ### 12.1 Why three primitives, not a hierarchy
 
-The previous proposal in `docs/hooks-design.md` (sections 5.2 and below) introduced `NodeMiddleware` + `AgentMiddleware` with named-sugar methods (`before_handler`/`after_handler`/`before_agent_run`/`after_agent_run`/etc.). Three structural problems:
+The previous proposal in `docs/designs/hooks-design.md` (sections 5.2 and below) introduced `NodeMiddleware` + `AgentMiddleware` with named-sugar methods (`before_handler`/`after_handler`/`before_agent_run`/`after_agent_run`/etc.). Three structural problems:
 
 1. **It lies about cross-process boundaries.** `before_agent_run` and `after_agent_run` fire in *different Handler invocations* — different Kafka messages, possibly different Worker processes, definitely different Python interpreter instances. A user writing one class with both methods naturally assumes Python state survives between them (`self.start_time = time.time()` in `before_agent_run`, `elapsed = time.time() - self.start_time` in `after_agent_run`), but the *second invocation* is a fresh instance in a fresh process. The API doesn't make this visible.
 
@@ -3080,7 +3080,7 @@ A precise list. Each entry includes the file:line and the v1 replacement.
 | `Worker(client, nodes=[...])` requiring a Client | `worker/worker.py:13` | `Worker(bootstrap_servers=...)` standalone |
 | FastStream coupling | `worker/worker.py:5` | Direct aiokafka (§20) |
 | `_protocol.py` `HDR_EMITTER`/`HDR_EMITTER_KIND` only | `_protocol.py:21-24` | Expanded reserved header set (§6.2) |
-| Two-layer middleware proposal (`NodeMiddleware`/`AgentMiddleware`) | `docs/hooks-design.md` | Three-primitive `Extension` (§12) |
+| Two-layer middleware proposal (`NodeMiddleware`/`AgentMiddleware`) | `docs/designs/hooks-design.md` | Three-primitive `Extension` (§12) |
 | `gates` as separate concept | `nodes/base.py:85` | `around_invoke` short-circuit (gates become a one-line Extension recipe) |
 | `decode_header_str` | `_protocol.py:28` | Internal helper inside header codec module (still needed; the algorithm survives) |
 | `_emitter_headers()` returning fixed dict | `nodes/base.py:161` | Comprehensive header set emitted by runtime |
@@ -3321,7 +3321,7 @@ I list each with my current lean. None are blocking the start of implementation,
     *Lean:* full state on `Interrupt` (we need it for resume); just metadata on `RunStarted`/`Completed` (we don't need to checkpoint mid-run by default).
 
 11. **Should tool topics be auto-created or must they pre-exist?**
-    *Resolved (EXPERIMENTAL, opt-in, OFF by default):* not auto-created by default — topics must pre-exist (via the broker's `auto.create.topics.enable` or an ops-governed pipeline). Calfkit ships an opt-in `ProvisioningConfig` that best-effort creates them; it is passed to the **client**, not the worker — `Client.connect(provisioning=ProvisioningConfig(enabled=True))` — because provisioning needs the broker URL + credentials that already live on the client, and the client's own reply topic needs the same switch. The earlier `Worker(auto_create_topics=True)` shape is **rejected** for that reason. When enabled, the worker provisions every topic its registered nodes reference at startup (before consumption), the client provisions its reply topic once, and `calfkit topics provision --nodes module:attr` covers the static/CI path. `replication_factor=1` and no ACLs make this a dev convenience, not a production provisioning story. See [docs/topic-provisioning.md](topic-provisioning.md).
+    *Resolved (EXPERIMENTAL, opt-in, OFF by default):* not auto-created by default — topics must pre-exist (via the broker's `auto.create.topics.enable` or an ops-governed pipeline). Calfkit ships an opt-in `ProvisioningConfig` that best-effort creates them; it is passed to the **client**, not the worker — `Client.connect(provisioning=ProvisioningConfig(enabled=True))` — because provisioning needs the broker URL + credentials that already live on the client, and the client's own reply topic needs the same switch. The earlier `Worker(auto_create_topics=True)` shape is **rejected** for that reason. When enabled, the worker provisions every topic its registered nodes reference at startup (before consumption), the client provisions its reply topic once, and `calfkit topics provision --nodes module:attr` covers the static/CI path. `replication_factor=1` and no ACLs make this a dev convenience, not a production provisioning story. See [docs/topic-provisioning.md](../topic-provisioning.md).
 
 12. **Envelope `schema_version` bumps mid-deploy?**
     *Lean:* Workers ship a one-version-back decoder; unknown future versions DLQ. Schema bumps are coordinated cluster-wide.
@@ -3390,7 +3390,7 @@ I list each with my current lean. None are blocking the start of implementation,
 - **Temporal**: workflow + activity model, durable execution. We borrow the lifecycle-event idea; we reject the deterministic-workflow constraint.
 - **Restate**: durable invocation. We share the "every state change is durable" property.
 - **Inngest / Trigger.dev**: function-step durable execution. Their `step.run` is closest to our `ctx.once`.
-- **LangGraph v1 middleware**: their `before_*`/`after_*`/`wrap_*` is what `docs/hooks-design.md` was modeled on. We reject their hierarchy and adopt three orthogonal primitives.
+- **LangGraph v1 middleware**: their `before_*`/`after_*`/`wrap_*` is what `docs/designs/hooks-design.md` was modeled on. We reject their hierarchy and adopt three orthogonal primitives.
 - **OpenAI Agents SDK**: handoffs as a first-class concept. We collapse handoffs into `Call`.
 - **Pydantic AI**: `RunContext[Deps]`, tool schema synthesis from Python type hints. We adopt the type-driven schema synthesis; we drop the in-process loop.
 - **AutoGen / CrewAI**: multi-agent patterns. We support all their patterns as recipes over `Call`/`Reply`/`Fan`.
@@ -3434,7 +3434,7 @@ For grounding of the discard list (§21):
 | `calfkit/client/node_result.py` | 11-40 | `NodeResult` | `RunResult` (different name, similar shape) |
 | `calfkit/worker/worker.py` | 12-61 | `Worker(client, nodes=[...])` | `Worker(bootstrap_servers=..., handlers=[...])` standalone |
 | `calfkit/worker/worker_config.py` | 7-15 | `WorkerConfig` | Survives, expanded |
-| `docs/hooks-design.md` | — | Two-layer middleware proposal | Superseded by §12 (this doc) |
+| `docs/designs/hooks-design.md` | — | Two-layer middleware proposal | Superseded by §12 (this doc) |
 
 ---
 

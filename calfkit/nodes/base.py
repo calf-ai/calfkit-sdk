@@ -1,17 +1,22 @@
 import inspect
 import logging
 from abc import abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
+from pydantic import ValidationError
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, NodeKind, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE, NodeKind, decode_header_str
+from calfkit._registry import RegistryMixin
+from calfkit._routing import is_concrete_route_key, match_chain
+from calfkit.exceptions import RegistryConfigError
 from calfkit.models import (
     Call,
+    Next,
     NodeResult,
     ReturnCall,
     Silent,
@@ -29,6 +34,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _accepts_extra_param(fn: Callable[..., Any]) -> bool:
+    """True if ``fn`` declares a parameter beyond ``(self, ctx)`` — i.e. it takes a
+    run input-arg / route payload. (Unbound signature: ``self`` + ``ctx`` = 2.)"""
+    return len(inspect.signature(fn).parameters) > 2
+
+
+def _stuck_level(awaiting_reply: bool) -> int:
+    """``WARNING`` when a caller is awaiting a reply (an unmatched/malformed/declined
+    route stalls that workflow), else ``DEBUG`` (a fire-and-forget no-op)."""
+    return logging.WARNING if awaiting_reply else logging.DEBUG
+
+
 GateFunction = Callable[[SessionRunContext], bool | Awaitable[bool]]
 """A predicate evaluated in ``handler()`` before ``run()``. Sync or async; must return ``bool``.
 
@@ -43,7 +60,7 @@ on the first rejection.
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
+class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
     _run_accepts_input: bool
     _worker: "Worker | None" = None
     """Back-reference to the owning worker, set by ``Worker._add_node``. ``None``
@@ -59,10 +76,37 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        sig = inspect.signature(cls.run)
-        # Unbound method signature includes self, so self + ctx = 2 params.
-        # If > 2, the subclass declared an input parameter (any name).
-        cls._run_accepts_input = len(sig.parameters) > 2
+        cls._run_accepts_input = _accepts_extra_param(cls.run)
+        cls._validate_routes()
+
+    @classmethod
+    def _validate_routes(cls) -> None:
+        """Class-definition checks for ``@handler`` routes (run after collection).
+
+        - An overridden ``run()`` is the implicit ``*`` fallback, so an explicit
+          ``@handler('*')`` alongside it is an ambiguous catch-all.
+        - The signature/``schema`` pairing must agree (§5.1): a ``(self, ctx, payload)``
+          handler requires ``schema=``; a ``(self, ctx)`` handler must not have it.
+        """
+        run_overridden = cls.run is not BaseNodeDef.run
+        if "*" in cls._handlers and run_overridden:
+            raise RegistryConfigError(
+                f"{cls.__qualname__}: @handler('*') conflicts with the node's run() catch-all "
+                "(run() is already the implicit '*' fallback); use a more specific route, or override run() instead."
+            )
+        for route, info in cls._handler_info.items():
+            handler_fn = getattr(cls, cls._handlers[route])
+            accepts_payload = _accepts_extra_param(handler_fn)
+            if accepts_payload and info.schema is None:
+                raise RegistryConfigError(
+                    f"{cls.__qualname__}: route {route!r} handler {info.name!r} takes a payload parameter "
+                    "but has no schema=; add schema= or drop the parameter."
+                )
+            if not accepts_payload and info.schema is not None:
+                raise RegistryConfigError(
+                    f"{cls.__qualname__}: route {route!r} handler {info.name!r} has schema= but takes no payload "
+                    "parameter; add a payload parameter or drop schema=."
+                )
 
     def __init__(
         self,
@@ -196,6 +240,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
     def _emitter_headers(self) -> dict[str, str]:
         return {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind}
 
+    def _headers_for_call(self, call: Call[Any]) -> dict[str, str]:
+        """Emitter headers, plus the ``x-calf-route`` header when a ``Call`` addresses
+        a sub-route of a downstream routed node (ingress-only, ``Call`` only)."""
+        if call.route is None:
+            return self._emitter_headers()
+        return {**self._emitter_headers(), HDR_ROUTE: call.route}
+
     async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
         publish_envelope: Envelope
 
@@ -203,7 +254,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
             # Parallel fan-out: publish each Call with independent workflow_state
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
-                wf_copy.invoke_frame(call, self._return_topic)
+                wf_copy.invoke_frame(call, self._return_topic, payload=call.body)
                 publish_envelope = Envelope(
                     context=SessionRunContext(state=call.state, deps=envelope.context.deps),
                     internal_workflow_state=wf_copy,
@@ -213,13 +264,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
                     topic=wf_copy.current_frame.target_topic,
                     correlation_id=correlation_id,
                     key=correlation_id.encode(),
-                    headers=self._emitter_headers(),
+                    headers=self._headers_for_call(call),
                 )
             return envelope
 
         elif isinstance(output, Call):
             # push to callstack and call the target topic
-            envelope.internal_workflow_state.invoke_frame(output, self._return_topic)
+            envelope.internal_workflow_state.invoke_frame(output, self._return_topic, payload=output.body)
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
@@ -231,7 +282,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
                 topic=target_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
-                headers=self._emitter_headers(),
+                headers=self._headers_for_call(output),
             )
         elif isinstance(output, ReturnCall):
             # unwind current frame and return to previous topic
@@ -286,6 +337,72 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
 
         return publish_envelope
 
+    async def _call_run(self, ctx: SessionRunContext, input_args: Sequence[Any] | None) -> NodeResult[State]:
+        """Invoke ``run``, passing the per-message input args when its signature accepts them."""
+        if self._run_accepts_input and input_args is not None:
+            return await self.run(ctx, *input_args)
+        return await self.run(ctx)
+
+    async def _dispatch_routed(
+        self,
+        ctx: SessionRunContext,
+        route: str,
+        payload: Any,
+        input_args: Sequence[Any] | None,
+        *,
+        awaiting_reply: bool,
+        correlation_id: str,
+    ) -> NodeResult[State] | None:
+        """Dispatch ``route`` to matched handlers as a Chain of Responsibility.
+
+        Runs matched handlers most-specific → most-general (§6.3). A handler that
+        returns :class:`~calfkit.models.Next` (or ``None`` — e.g. a missing return)
+        declines and the chain advances; the first other result is terminal and
+        short-circuits. A handler with a
+        ``schema`` whose body fails validation is skipped (logged, callback-aware
+        level). If no handler handles the route, the node's overridden ``run()`` is
+        the implicit ``*`` fallback; absent that, returns ``None`` (no match).
+        """
+        cls = type(self)
+        if not is_concrete_route_key(route):
+            # Malformed inbound key (empty segment / trailing dot / wildcard): never
+            # partial-matches a specific handler — only the "*"/run() fallback can catch it.
+            level = _stuck_level(awaiting_reply)
+            logger.log(
+                level,
+                "[%s] malformed inbound route=%r on node=%s; only a catch-all/run fallback can handle it",
+                correlation_id[:8],
+                route,
+                self.node_id,
+            )
+        for r in match_chain(route, cls._handlers):
+            info = cls._handler_info[r]
+            method = self.get_handler(r)
+            if info.schema is not None:
+                try:
+                    validated = info.schema.model_validate(payload)
+                except ValidationError:
+                    level = _stuck_level(awaiting_reply)
+                    logger.log(
+                        level,
+                        "[%s] route=%s handler=%s body failed %s validation; skipping to next handler",
+                        correlation_id[:8],
+                        route,
+                        info.name,
+                        info.schema.__name__,
+                    )
+                    continue
+                result: NodeResult[State] | Next | None = await method(ctx, validated)
+            else:
+                result = await method(ctx)
+            if result is None or isinstance(result, Next):
+                # Decline (Next, or a handler that simply returned nothing) → advance.
+                continue
+            return result
+        if cls.run is not BaseNodeDef.run:
+            return await self._call_run(ctx, input_args)
+        return None
+
     async def handler(
         self,
         envelope: Envelope,
@@ -310,11 +427,33 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin):
         if not await self._evaluate_gates(ctx, correlation_id):
             body: Envelope = envelope
         else:
-            if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
-                output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
+            frame = envelope.internal_workflow_state.current_frame
+            route = decode_header_str(headers.get(HDR_ROUTE))
+            if route is not None and type(self)._handlers:
+                output = await self._dispatch_routed(
+                    ctx,
+                    route,
+                    frame.payload,
+                    frame.input_args,
+                    awaiting_reply=frame.callback_topic is not None,
+                    correlation_id=correlation_id,
+                )
+                if output is None:
+                    # No matching handler (and no run() fallback): a stuck workflow
+                    # if a caller is awaiting a return, else a fire-and-forget no-op.
+                    level = _stuck_level(frame.callback_topic is not None)
+                    logger.log(
+                        level,
+                        "[%s] no handler matched route=%s on node=%s; registered=%s",
+                        correlation_id[:8],
+                        route,
+                        self.node_id,
+                        tuple(type(self)._handlers),
+                    )
+                    return Response(envelope, headers=self._emitter_headers())
             else:
-                output = await self.run(ctx)
-            logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
+                output = await self._call_run(ctx, frame.input_args)
+            logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
             body = await self._publish_action(output, envelope, correlation_id, broker)
 
         return Response(body, headers=self._emitter_headers())

@@ -4,6 +4,7 @@ from typing import Any, Generic
 
 from typing_extensions import TypeAliasType, TypeVar
 
+from calfkit._routing import is_concrete_route_key
 from calfkit._types import StateT
 
 
@@ -66,9 +67,34 @@ class _Call(Generic[StateT]):
         self.input_args = input_args or None
 
 
+@dataclass(init=False)
 class Call(Generic[StateT], _Call[StateT]):
     """Call another node, and provide a mutable state and arguments.
-    The target will callback the caller (w/ State) when complete."""
+    The target will callback the caller (w/ State) when complete.
+
+    Optionally carries header-route-dispatch metadata: ``route`` (a concrete route
+    key, stamped as the ``x-calf-route`` header on the publish) and ``body`` (an
+    optional payload validated against the target handler's ``schema``). These live
+    on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a route. ``init=False``
+    keeps the custom ``*input_args`` constructor while letting ``route``/``body``
+    participate in ``__eq__``/``__repr__``."""
+
+    route: str | None = None
+    body: Any | None = None
+
+    def __init__(self, target_topic: str, state: StateT, *input_args: Any, route: str | None = None, body: Any | None = None) -> None:
+        if route is not None and not is_concrete_route_key(route):
+            raise ValueError(
+                f"Call route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
+                "segments, no wildcard. ('*' is a route pattern for @handler, not a producer route key.)"
+            )
+        if body is not None and route is None:
+            raise ValueError(
+                "Call body= requires route=; a body with no route reaches no @handler schema downstream (it would land unread in CallFrame.payload)."
+            )
+        super().__init__(target_topic, state, *input_args)
+        self.route = route
+        self.body = body
 
 
 class TailCall(Generic[StateT], _Call[StateT]):
@@ -110,6 +136,15 @@ class Parallel(Generic[StateT]):
 @dataclass
 class Silent:
     """Silent end of node execution, no explicit publish. End of event stream."""
+
+
+@dataclass
+class Next:
+    """Routing control returned by a route handler that *declines* to handle the
+    message: advance the Chain of Responsibility to the next, more-general matching
+    handler. By contract it makes no state change and no publish. It is **not** a
+    publish action — the dispatcher consumes it, so it is intentionally absent from
+    the :data:`NodeResult` union and never reaches ``_publish_action``."""
 
 
 _T = TypeVar("_T")

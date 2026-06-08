@@ -40,6 +40,10 @@ class CallFrame:
     input_args: Sequence[Any] | None = field(default=None)
     frame_id: str = field(default_factory=lambda: uuid_utils.uuid7().hex)
     overrides: OverridesState | None = field(default=None)
+    payload: Any = field(default=None)
+    """Optional producer-supplied body validated against a routed handler's
+    ``schema`` (header route dispatch). Distinct from ``input_args`` (run-args).
+    ``None`` when the producer sent no body."""
 
 
 CallFrameStack = Stack[CallFrame]
@@ -62,13 +66,14 @@ class WorkflowState(BaseModel):
     def unwind_frame(self) -> CallFrame:
         return self.call_stack.pop()
 
-    def invoke_frame(self, call: _Call, callback_topic: str | None) -> None:
+    def invoke_frame(self, call: _Call, callback_topic: str | None, payload: Any = None) -> None:
         if call.target_topic is None:
             raise Exception("")
         frame = CallFrame(
             target_topic=call.target_topic,
             callback_topic=callback_topic,
             input_args=call.input_args,
+            payload=payload,
         )
         return self.call_stack.push(frame)
 

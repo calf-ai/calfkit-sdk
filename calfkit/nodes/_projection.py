@@ -1,6 +1,6 @@
 """Agent-POV message-history projection and final-output surface helpers.
 
-See ``docs/agent-pov-projection.md`` §5/§7 for the authoritative design.
+See ``docs/designs/agent-pov-projection.md`` §5/§7 for the authoritative design.
 
 ``project(history, viewer)`` is a **pure** function: it returns a new
 ``list[ModelMessage]``, constructs new message/part objects (never mutating the

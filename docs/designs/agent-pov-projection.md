@@ -4,7 +4,7 @@
 **Document version:** 4.2
 **Last updated:** 2026-06-05
 **Closes:** [#154](https://github.com/calf-ai/calfkit-sdk/issues/154)
-**Related to:** [`docs/calfkit-v1-design.md`](./calfkit-v1-design.md) §7.2 (state ownership), §11 (multi-agent patterns)
+**Related to:** [`docs/designs/calfkit-v1-design.md`](./calfkit-v1-design.md) §7.2 (state ownership), §11 (multi-agent patterns)
 
 > **Evolution.** v1 invented a parallel `SharedTranscript` threaded through `deps` (wrong — duplicated `message_history`; `deps` round-trips `ModelMessage` to dicts). v2 collapsed it onto `message_history`. v3 proposed an opt-in flag + a model wrapper for stamping. v4 finalized the design: **always-on** behavior with **no flag** (projection auto-detects multi-participant histories), `name`-stamping via a single `State` helper (covers streaming), `name` stripped from all model input, and text+structured output surfaced together. **v4.1** applied the §7 fix (preamble reads the last `ModelResponse`, not `new_messages()[-1]`, using the vendored `TextPart`), pinned the surface separator / empty-surface check / custom-output-tool-name limitation, switched self-view to `replace()`, and corrected citations. **v4.2** (this version) closes the final review round: the deferred-results re-entry invariant is made explicit + tested (§6.2), structured args are rendered canonically via `args_as_dict()` to avoid provider-dependent whitespace (§5.5), and the cross-feed/handoff footgun (§5.1), `correlation_id`-per-post caveat (§9), and `name`-in-public-history note (§11) are documented. Three independent opus reviews verified v4.1/v4.2 against source (the §7 fix reproduced empirically) and returned **converged — implementation-ready**. Every claim is grounded in source citations.
 
