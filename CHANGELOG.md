@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.6.0...v0.6.1) (2026-06-08)
+
+
+### Features
+
+* header-based route dispatch for nodes ([#195](https://github.com/calf-ai/calfkit-sdk/issues/195)) ([4a510e6](https://github.com/calf-ai/calfkit-sdk/commit/4a510e62371c05427d8e28e77ea22e98f1d67daf))
+
+
+### Documentation
+
+* make CLI command blocks read as terminal; shell-safe [cli] hint ([#190](https://github.com/calf-ai/calfkit-sdk/issues/190)) ([365f807](https://github.com/calf-ai/calfkit-sdk/commit/365f807a0347114f7dfe13294dce287c78b0d32a))
+
 ## [0.6.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.5.4...v0.6.0) (2026-06-06)
 
 
