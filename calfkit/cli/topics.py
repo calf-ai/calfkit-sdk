@@ -34,7 +34,6 @@ Exit codes:
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 try:
     import typer
@@ -56,30 +55,6 @@ def _topics_callback() -> None:
     invocation pattern even when provision is currently the only subcommand.
     Future subcommands will land alongside it.
     """
-
-
-def _partition_nodes(objs: list[Any]) -> list[Any]:
-    """Drop ``McpServer`` entries with a clear note, returning the rest.
-
-    MCP topics are derived from a *live* MCP session (tools are only knowable
-    after ``initialize``), so they are provisioned at worker startup — not by
-    this static command. Skipping them here, loudly, avoids a confusing crash
-    on ``McpServer.subscribe_topics`` (which it does not expose).
-    """
-    from calfkit.mcp._server import McpServer
-
-    nodes: list[Any] = []
-    for obj in objs:
-        if isinstance(obj, McpServer):
-            typer.echo(
-                f"Note: skipping MCP server {obj.raw_name!r}. MCP topics are "
-                "provisioned at worker startup (from the live MCP session), "
-                "not by 'topics provision'.",
-                err=True,
-            )
-            continue
-        nodes.append(obj)
-    return nodes
 
 
 @app.command()
@@ -122,8 +97,7 @@ def provision(
 
     Resolves ``--nodes module:attr`` specs, computes the full topic set
     (subscribe inboxes, framework return inboxes, publish topics, and agent
-    tool inputs), then best-effort creates them. ``McpServer`` entries are
-    skipped with a note — their topics are provisioned at worker startup.
+    tool inputs), then best-effort creates them.
 
     This is a **development convenience** (no ACLs; ``--replication-factor 1``
     is the default and is not durable). In production, topics are typically
@@ -137,7 +111,7 @@ def provision(
     )
 
     resolved = resolve_specs(nodes, source_label="--nodes")
-    node_list = _partition_nodes(resolved)
+    node_list = resolved
     validate_nodes(node_list, source_label="--nodes")
 
     topics = topics_for_nodes(node_list)

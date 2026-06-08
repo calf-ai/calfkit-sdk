@@ -173,9 +173,8 @@ whether the call blocks the caller.
 
 What **start** does, in order, on every surface:
 
-1. register each node's FastStream subscribers + publishers (and expand MCP
-   servers into per-tool bridge subscribers);
-2. open `@resource` / `on_startup` brackets and MCP sessions;
+1. register each node's FastStream subscribers + publishers;
+2. open `@resource` / `on_startup` brackets;
 3. start the broker — consumers subscribe and join their consumer groups;
 4. run `after_startup` hooks (the broker/producer is live here).
 
@@ -212,7 +211,7 @@ signal handlers and does **not** block, so the worker's consumers run as one
 managed component **alongside another long-running service** in the same event
 loop — your application owns the foreground and signals.
 
-`stop()` drains in-flight consumers and closes resources/MCP sessions. It is a
+`stop()` drains in-flight consumers and closes resources. It is a
 no-op if the worker was never started, so a defensive `try/finally` is always
 safe.
 
@@ -246,7 +245,7 @@ async def main():
     worker = Worker(client, nodes=[reply_consumer])
 
     # 1) Bring the worker fully up: handlers registered, consumer groups joined,
-    #    resources/MCP opened.
+    #    resources opened.
     await worker.start()
     try:
         # 2) Only now begin accepting external events — the consumers are already
@@ -311,14 +310,14 @@ async with TestKafkaBroker(worker._client.broker):
 - **`stop()` is always safe.** It is a no-op if the worker never started, so
   `try/finally: await worker.stop()` never raises on the "not started" path.
 - **A failed boot never leaks.** If `start()` fails partway (for example the
-  broker can't reach Kafka), it tears down anything it already opened — resource
-  brackets and MCP sessions — before re-raising. This holds for `start()`,
+  broker can't reach Kafka), it tears down anything it already opened — the
+  resource brackets — before re-raising. This holds for `start()`,
   `run()`, and `async with` (which recovers even though Python skips `__aexit__`
   when `__aenter__` raises). A failure *during* that cleanup is logged, never
   raised, so it can't mask the original boot error.
 - **Resilient shutdown.** `stop()` releases the resource brackets in a `finally`,
-  so a flaky/cancelled broker disconnect can't strand pools, clients, or MCP
-  sessions. Resource teardown still runs *after* the drain attempt, preserving
+  so a flaky/cancelled broker disconnect can't strand pools or clients. Resource
+  teardown still runs *after* the drain attempt, preserving
   "drain before close" order. `CancelledError` still propagates after the
   best-effort teardown.
 - **Signals are opt-in.** Only `run()` installs SIGINT/SIGTERM handlers. The

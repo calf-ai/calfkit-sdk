@@ -15,7 +15,6 @@ Commands:
 | Command | Purpose |
 | --- | --- |
 | [`calfkit run`](#calfkit-run) | Run node(s) as a worker for local development (no `Worker` boilerplate). |
-| [`calfkit mcp`](#calfkit-mcp) | Generate MCP tool schemas / emit the `mcp.json` reference schema. |
 | [`calfkit topics`](#calfkit-topics) | Best-effort create the Kafka topics a set of nodes reference. |
 
 ---
@@ -41,8 +40,6 @@ Each `TARGET` is a dotted **`module:attr`** import path (like `uvicorn main:app`
 
 - `attr` may be a **single node** or an **iterable of nodes** — iterables are
   expanded, so `mypkg.workers:all_nodes` (a list) works.
-- An [`McpServer`](mcp-overview.md) instance is a valid `attr` too; it is run
-  whole (the worker expands it into per-tool bridges at startup).
 - Pass **multiple targets** to run them in one worker:
   `calfkit run app.agents:planner app.tools:search`.
 - Targets de-duplicate by `node_id`, so listing the same node twice is harmless.
@@ -163,30 +160,6 @@ $ python serve_tool.py
 
 ---
 
-## `calfkit mcp`
-
-Tooling for the [MCP adaptor](mcp-overview.md) — expose Model Context Protocol
-servers as native calfkit tools.
-
-```text
-calfkit mcp codegen NAME (--command "<stdio cmd>" | --url "<http url>") [--token TOKEN] [--output PATH] [--check]
-calfkit mcp schema [--output PATH] [--check]
-```
-
-- **`codegen`** — start an MCP server (stdio via `--command`, or streamable HTTP
-  via `--url`/`--token`), run `initialize` + `tools/list`, and write a generated
-  Python module of `McpToolDef` constants you import and commit. `--check` exits
-  non-zero on drift without writing (CI mode).
-- **`schema`** — emit the reference JSON Schema for `mcp.json` (no MCP server
-  needed). `--check` compares against the existing file without writing.
-
-Exit codes: `0` success / no drift · `1` drift (`--check`) · `2` error.
-
-See **[docs/mcp-overview.md](mcp-overview.md)** for the full workflow, deployment
-topologies, and `mcp.json` interop.
-
----
-
 ## `calfkit topics`
 
 ```text
@@ -209,6 +182,5 @@ them — a development convenience for shaping a local/CI broker.
 Exit codes: `0` success / dry-run · `2` error.
 
 > **Experimental / opt-in.** This is a dev convenience (`rf=1`, no ACLs), **not**
-> a production provisioning story. `McpServer` entries are skipped with a note —
-> their topics are provisioned at worker startup from the live MCP session. See
+> a production provisioning story. See
 > **[docs/topic-provisioning.md](topic-provisioning.md)**.

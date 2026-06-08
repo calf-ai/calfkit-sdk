@@ -41,17 +41,6 @@ def test_resolve_specs_multiple_specs_concatenate_in_order() -> None:
     assert [o.node_id for o in objs] == ["tool_echo", "tool_alpha", "tool_beta"]
 
 
-def test_resolve_specs_preserves_directly_resolved_mcp_server() -> None:
-    """A directly-resolved McpServer is returned as-is, not splatted into its
-    tool defs (McpServer is iterable, so a naive expand would break it)."""
-    from calfkit.cli._loader import resolve_specs
-    from calfkit.mcp._server import McpServer
-
-    objs = resolve_specs([f"{_FIXTURE}:solo_mcp"])
-    assert len(objs) == 1
-    assert isinstance(objs[0], McpServer)
-
-
 def test_resolve_specs_bad_spec_exits_2() -> None:
     """A spec without a ':' raises typer.Exit(2) mentioning the required form."""
     from calfkit.cli._loader import resolve_specs
@@ -102,16 +91,8 @@ def test_resolve_specs_app_dir_enables_nested_dotted_import(tmp_path: object, mo
     assert objs[0].node_id == "tool_my_tool"
 
 
-def test_validate_nodes_accepts_nodes_and_mcp_servers() -> None:
-    """A mix of real nodes and McpServer instances passes validation."""
-    from calfkit.cli._loader import resolve_specs, validate_nodes
-
-    objs = resolve_specs([f"{_FIXTURE}:mixed"])
-    validate_nodes(objs)  # must not raise
-
-
 def test_validate_nodes_rejects_non_node_exits_2() -> None:
-    """An object that is neither a node nor an McpServer is rejected (exit 2)."""
+    """An object that is not a node is rejected (exit 2)."""
     from calfkit.cli._loader import resolve_specs, validate_nodes
 
     objs = resolve_specs([f"{_FIXTURE}:not_a_node"])
@@ -127,19 +108,6 @@ def test_dedupe_by_node_id_drops_repeats_preserving_order() -> None:
     objs = resolve_specs([f"{_FIXTURE}:single", f"{_FIXTURE}:single", f"{_FIXTURE}:nodes"])
     deduped = dedupe_by_node_id(objs)
     assert [o.node_id for o in deduped] == ["tool_echo", "tool_alpha", "tool_beta"]
-
-
-def test_dedupe_keeps_distinct_mcp_servers() -> None:
-    """McpServer instances have no node_id, so dedupe keys them by identity and
-    always retains them (it must not collapse all node_id-less objects to one)."""
-    from calfkit.cli._loader import dedupe_by_node_id, resolve_specs
-    from calfkit.mcp._server import McpServer
-
-    # solo_mcp + the McpServer inside `mixed` are two distinct instances.
-    objs = resolve_specs([f"{_FIXTURE}:solo_mcp", f"{_FIXTURE}:mixed"])
-    deduped = dedupe_by_node_id(objs)
-    mcp_servers = [o for o in deduped if isinstance(o, McpServer)]
-    assert len(mcp_servers) == 2
 
 
 def test_resolve_specs_later_bad_spec_exits_2() -> None:

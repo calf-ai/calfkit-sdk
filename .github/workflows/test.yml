@@ -40,15 +40,11 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
-        # tests/mcp/e2e runs in its own dedicated lane (.github/workflows/mcp-e2e.yml)
-        # which sets up Node.js + pre-fetches the MCP server. Excluding here so the
-        # main suite isn't subject to anyio teardown races when the e2e tests are
-        # interleaved with the rest.
         run: |
           if [ "${{ matrix.python-version }}" = "3.10" ]; then
-            uv run pytest tests/ --ignore=tests/mcp/e2e -v --tb=short --cov=calfkit --cov-report=term-missing --cov-report=xml
+            uv run pytest tests/ -v --tb=short --cov=calfkit --cov-report=term-missing --cov-report=xml
           else
-            uv run pytest tests/ --ignore=tests/mcp/e2e -v --tb=short
+            uv run pytest tests/ -v --tb=short
           fi
         env:
           OPENAI_API_KEY: ${{

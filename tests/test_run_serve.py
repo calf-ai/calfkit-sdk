@@ -127,16 +127,6 @@ def test_serve_prints_banner_with_node_details(captured: dict, capsys: pytest.Ca
     assert "localhost" in out  # effective broker fallback
 
 
-def test_serve_banner_shows_mcp_server(captured: dict, capsys: pytest.CaptureFixture[str]) -> None:
-    """A directly-served McpServer renders in the banner with the [mcp] kind."""
-    from calfkit.cli._run import serve
-
-    serve([f"{_FIXTURE}:solo_mcp"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
-    out = capsys.readouterr().out
-    assert "solo_mcp" in out
-    assert "[mcp]" in out
-
-
 def test_serve_banner_shows_env_host_when_no_flag(captured: dict, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     """With no --host, the banner reflects CALF_HOST_URL (the effective broker)."""
     from calfkit.cli._run import serve

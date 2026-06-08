@@ -7,7 +7,7 @@ name: Kafka Integration Tests
 # `skip_if_no_kafka` gate opens. The rest of the suite skips these by default
 # (the env var is only set here), so no broker is needed elsewhere.
 #
-# Templated on mcp-e2e.yml. Uses no untrusted-input context vars in run: steps;
+# Uses no untrusted-input context vars in run: steps;
 # only safe meta vars (workflow, ref) for concurrency grouping.
 
 on:

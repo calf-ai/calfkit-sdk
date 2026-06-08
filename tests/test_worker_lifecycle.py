@@ -316,11 +316,11 @@ async def test_after_startup_failure_unwinds_both_stacks_and_stops_broker() -> N
 
 
 # ---------------------------------------------------------------------------
-# _hook_on_startup partial failure rolls back resource stack + MCP (§3.4 / §4)
+# _hook_on_startup partial failure rolls back the resource stack (§3.4 / §4)
 # ---------------------------------------------------------------------------
 
 
-async def test_on_startup_failure_rolls_back_resource_stack_and_mcp() -> None:
+async def test_on_startup_failure_rolls_back_resource_stack() -> None:
     from faststream.kafka import TestKafkaBroker
 
     worker = _make_worker()
@@ -341,27 +341,14 @@ async def test_on_startup_failure_rolls_back_resource_stack_and_mcp() -> None:
         raise RuntimeError("resource setup boom")
         yield  # pragma: no cover
 
-    # Spy that MCP close runs during rollback even though there are no MCP
-    # servers — the rollback unconditionally calls _on_shutdown.
-    mcp_closed: list[bool] = []
-    original_on_shutdown = worker._on_shutdown
-
-    async def tracking_on_shutdown() -> None:
-        mcp_closed.append(True)
-        await original_on_shutdown()
-
-    worker._on_shutdown = tracking_on_shutdown  # type: ignore[method-assign]
-
     broker = worker._client.broker
     async with TestKafkaBroker(broker):
         with pytest.raises(RuntimeError, match="resource setup boom"):
             await worker._hook_on_startup()
 
-    # The healthy "ok" resource was torn down; resource stack cleared; MCP
-    # cleanup invoked.
+    # The healthy "ok" resource was torn down (LIFO); resource stack cleared.
     assert torn_down == ["ok"]
     assert worker._resource_stack is None
-    assert mcp_closed == [True]
 
 
 async def test_normal_stop_tears_down_resources_when_broker_stop_raises() -> None:

@@ -2,7 +2,6 @@ from importlib.metadata import version
 
 from calfkit.client import Client, InvocationHandle, NodeResult
 from calfkit.exceptions import DeserializationError, LifecycleConfigError, ToolExecutionError
-from calfkit.mcp import mcp
 from calfkit.models import ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNodeDef, GateFunction, NodeDef, ToolNodeDef, agent_tool, consumer
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
@@ -16,8 +15,6 @@ __all__ = [
     "Client",
     "InvocationHandle",
     "NodeResult",
-    # mcp (factory; full surface at calfkit.mcp)
-    "mcp",
     # models
     "ToolContext",
     # nodes

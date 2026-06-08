@@ -98,32 +98,6 @@ def test_dry_run_resolves_single_node(monkeypatch) -> None:  # noqa: ANN001
     assert "echo.out" in out
 
 
-def test_mcp_server_is_skipped_with_note(monkeypatch) -> None:  # noqa: ANN001
-    """McpServer entries are warned-and-skipped; their note explains why."""
-    from typer.testing import CliRunner
-
-    from calfkit.cli.topics import app
-    from calfkit.provisioning import provisioner as provisioner_mod
-
-    monkeypatch.setattr(
-        provisioner_mod,
-        "_make_admin_client",
-        lambda **kw: (_ for _ in ()).throw(AssertionError("no admin in dry-run")),
-    )
-
-    result = CliRunner().invoke(
-        app,
-        ["provision", "--nodes", "tests.provisioning_cli_nodes:mixed", "--dry-run"],
-    )
-    assert result.exit_code == 0, result.stdout
-    combined = _plain(result.stdout) + _plain(result.stderr)
-    # The native node's topics are still resolved.
-    assert "gamma.in" in combined
-    # The MCP server is skipped with a worker-startup explanation.
-    assert "some_mcp" in combined
-    assert "worker startup" in combined
-
-
 # ---------------------------------------------------------------------------
 # Live provisioning path (fake admin via the _make_admin_client seam)
 # ---------------------------------------------------------------------------
