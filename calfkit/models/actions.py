@@ -89,7 +89,9 @@ class Call(Generic[StateT], _Call[StateT]):
                 "segments, no wildcard. ('*' is a route pattern for @handler, not a producer route key.)"
             )
         if body is not None and route is None:
-            raise ValueError("Call body= requires route=; a body with no route reaches no @handler schema downstream (it would land unread in CallFrame.payload).")
+            raise ValueError(
+                "Call body= requires route=; a body with no route reaches no @handler schema downstream (it would land unread in CallFrame.payload)."
+            )
         super().__init__(target_topic, state, *input_args)
         self.route = route
         self.body = body

@@ -501,12 +501,12 @@ async def test_silent_from_handler_is_terminal_and_does_not_advance() -> None:
 async def test_handler_exception_propagates_and_aborts_chain() -> None:
     seen: list[str] = []
 
-    class Boom(Exception): ...
+    class BoomError(Exception): ...
 
     class N(NodeDef[Any]):
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
-            raise Boom()
+            raise BoomError()
 
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
@@ -516,7 +516,7 @@ async def test_handler_exception_propagates_and_aborts_chain() -> None:
         async def run(self, ctx: SessionRunContext) -> Any:
             return Silent()
 
-    with pytest.raises(Boom):
+    with pytest.raises(BoomError):
         await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
     assert seen == []  # chain aborted; more-general handler never ran
 
