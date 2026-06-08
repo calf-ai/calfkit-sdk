@@ -24,6 +24,13 @@ HDR_EMITTER = "x-calf-emitter"
 HDR_EMITTER_KIND = "x-calf-emitter-kind"
 """Kafka header carrying the emitting node's :data:`NodeKind`."""
 
+HDR_ROUTE = "x-calf-route"
+"""Kafka header carrying the concrete route key used for header route dispatch.
+
+Ingress-only: set by a client invocation or an explicit peer ``Call(route=...)``;
+never auto-propagated across control-flow republishes. A node with registered
+``@handler`` routes dispatches on this header (see ``BaseNodeDef.handler``)."""
+
 
 def decode_header_str(value: Any) -> str | None:
     """Coerce an inbound Kafka header value to ``str | None``.

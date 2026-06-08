@@ -68,7 +68,20 @@ class _Call(Generic[StateT]):
 
 class Call(Generic[StateT], _Call[StateT]):
     """Call another node, and provide a mutable state and arguments.
-    The target will callback the caller (w/ State) when complete."""
+    The target will callback the caller (w/ State) when complete.
+
+    Optionally carries header-route-dispatch metadata: ``route`` (a concrete route
+    key, stamped as the ``x-calf-route`` header on the publish) and ``body`` (an
+    optional payload validated against the target handler's ``schema``). These live
+    on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a route."""
+
+    route: str | None
+    body: Any | None
+
+    def __init__(self, target_topic: str, state: StateT, *input_args: Any, route: str | None = None, body: Any | None = None) -> None:
+        super().__init__(target_topic, state, *input_args)
+        self.route = route
+        self.body = body
 
 
 class TailCall(Generic[StateT], _Call[StateT]):
@@ -110,6 +123,15 @@ class Parallel(Generic[StateT]):
 @dataclass
 class Silent:
     """Silent end of node execution, no explicit publish. End of event stream."""
+
+
+@dataclass
+class Next:
+    """Routing control returned by a route handler that *declines* to handle the
+    message: advance the Chain of Responsibility to the next, more-general matching
+    handler. By contract it makes no state change and no publish. It is **not** a
+    publish action — the dispatcher consumes it, so it is intentionally absent from
+    the :data:`NodeResult` union and never reaches ``_publish_action``."""
 
 
 _T = TypeVar("_T")
