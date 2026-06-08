@@ -1,0 +1,50 @@
+name: PR Title
+
+# Lints the pull-request title against Conventional Commits using
+# amannn/action-semantic-pull-request. This repo squash-merges with
+# "Default to PR title for squash merge commits", so the PR title becomes the
+# squash commit subject that release-please parses — an unparseable title
+# silently skips a release (e.g. parentheses in the subject break
+# release-please's strict v17 parser). This check is the guard against that.
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate-title:
+    name: Validate PR title (Conventional Commits)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Conventional Commit types release-please recognizes.
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            revert
+          # Disallow parentheses in the subject. release-please's strict v17
+          # commit parser rejects them (e.g. "feat!: x (a, b)"), parsing zero
+          # commits and silently skipping the release. A "(scope)" after the
+          # type is still allowed — it is matched before the subject.
+          subjectPattern: ^[^()]+$
+          subjectPatternError: >-
+            The PR title subject must not contain parentheses — release-please's
+            commit parser rejects them and the release is silently skipped. Put
+            any structure in a "(scope)" after the type, e.g. "feat(cli): ...".
