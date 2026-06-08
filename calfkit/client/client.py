@@ -97,6 +97,8 @@ class Client(BaseClient):
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
+        route: str | None = ...,
+        body: Any | None = ...,
     ) -> InvocationHandle[OutputT]: ...
 
     @overload
@@ -114,6 +116,8 @@ class Client(BaseClient):
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
+        route: str | None = ...,
+        body: Any | None = ...,
     ) -> InvocationHandle[Any]: ...
 
     async def invoke_node(
@@ -131,6 +135,8 @@ class Client(BaseClient):
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         model_settings: ModelSettings | dict[str, Any] | None = None,
+        route: str | None = None,
+        body: Any | None = None,
     ) -> InvocationHandle[Any]:
         """Invoke an agent node asynchronously and return a handle for the reply.
 
@@ -192,6 +198,8 @@ class Client(BaseClient):
             state=state,
             overrides=overrides,
             deps=deps,
+            route=route,
+            body=body,
             output_type=output_type,
         )
 
@@ -208,6 +216,8 @@ class Client(BaseClient):
         deps: dict[str, Any] | None = None,
         model_settings: ModelSettings | dict[str, Any] | None = None,
         author: str | None = None,
+        route: str | None = None,
+        body: Any | None = None,
     ) -> str:
         """Emit a true one-way (fire-and-forget) invocation to an agent node.
 
@@ -269,6 +279,8 @@ class Client(BaseClient):
             state=state,
             overrides=overrides,
             deps=deps,
+            route=route,
+            body=body,
         )
 
     @overload
@@ -287,6 +299,8 @@ class Client(BaseClient):
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
+        route: str | None = ...,
+        body: Any | None = ...,
         timeout: float | None = ...,
     ) -> NodeResult[OutputT]: ...
 
@@ -305,6 +319,8 @@ class Client(BaseClient):
         run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
+        route: str | None = ...,
+        body: Any | None = ...,
         timeout: float | None = ...,
     ) -> NodeResult[Any]: ...
 
@@ -323,6 +339,8 @@ class Client(BaseClient):
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         model_settings: ModelSettings | dict[str, Any] | None = None,
+        route: str | None = None,
+        body: Any | None = None,
         timeout: float | None = None,
     ) -> NodeResult[Any]:
         """Invoke an agent node and await the reply in a single call.
@@ -386,5 +404,7 @@ class Client(BaseClient):
             run_args=run_args,
             deps=deps,
             model_settings=model_settings,
+            route=route,
+            body=body,
         )
         return await handle.result(timeout=timeout)

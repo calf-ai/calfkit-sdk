@@ -296,3 +296,75 @@ async def test_call_with_route_stamps_header_and_frame_payload() -> None:
     assert topic == "downstream"
     assert headers[HDR_ROUTE] == "order.created"
     assert env.internal_workflow_state.current_frame.payload == {"amount": 7}
+
+
+# ---------------------------------------------------------------------------
+# Client ingress: route/body stamped at _publish_call; wildcard route rejected
+# ---------------------------------------------------------------------------
+
+
+class _StubConn:
+    _connection = True  # truthy -> skip start()
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, dict[str, str], Any]] = []
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, headers: dict[str, str]) -> None:
+        self.published.append((topic, headers, envelope))
+
+
+def _client(conn: Any) -> Any:
+    from calfkit.client.base import BaseClient
+    from calfkit.client.reply_dispatcher import _ReplyDispatcher
+
+    return BaseClient(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
+
+
+async def test_client_publish_call_stamps_route_and_body() -> None:
+    conn = _StubConn()
+    await _client(conn)._publish_call(
+        topic="orders",
+        correlation_id=_CORR,
+        callback_topic="reply.topic",
+        state=State(),
+        overrides=None,
+        run_args=None,
+        deps=None,
+        route="order.created",
+        body={"amount": 9},
+    )
+    assert len(conn.published) == 1
+    topic, headers, env = conn.published[0]
+    assert topic == "orders"
+    assert headers[HDR_ROUTE] == "order.created"
+    assert env.internal_workflow_state.current_frame.payload == {"amount": 9}
+
+
+async def test_client_rejects_wildcard_producer_route() -> None:
+    conn = _StubConn()
+    with pytest.raises(ValueError):
+        await _client(conn)._publish_call(
+            topic="orders",
+            correlation_id=_CORR,
+            callback_topic=None,
+            state=State(),
+            overrides=None,
+            run_args=None,
+            deps=None,
+            route="order.*",
+            body=None,
+        )
+
+
+async def test_emit_to_node_threads_route_and_body_to_the_wire() -> None:
+    from calfkit.client.client import Client
+    from calfkit.client.reply_dispatcher import _ReplyDispatcher
+
+    conn = _StubConn()
+    client = Client(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
+    await client.emit_to_node("hello", "orders", route="order.created", body={"amount": 3})
+
+    assert len(conn.published) == 1
+    _topic, headers, env = conn.published[0]
+    assert headers[HDR_ROUTE] == "order.created"
+    assert env.internal_workflow_state.current_frame.payload == {"amount": 3}

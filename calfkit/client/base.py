@@ -7,7 +7,7 @@ import uuid_utils
 from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
-from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE
 from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
@@ -215,6 +215,8 @@ class BaseClient:
         overrides: OverridesState | None = None,
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
+        route: str | None = None,
+        body: Any | None = None,
         output_type: type[Any] = _UNSET,
     ) -> InvocationHandle:
         """Invoke the node asynchronously.
@@ -240,6 +242,8 @@ class BaseClient:
             overrides=overrides,
             run_args=run_args,
             deps=deps,
+            route=route,
+            body=body,
         )
         return InvocationHandle(
             correlation_id=correlation_id,
@@ -259,6 +263,8 @@ class BaseClient:
         overrides: OverridesState | None,
         run_args: Sequence[Any] | None,
         deps: dict[str, Any] | None,
+        route: str | None = None,
+        body: Any | None = None,
     ) -> None:
         """Build and publish one client-originated call envelope.
 
@@ -269,6 +275,8 @@ class BaseClient:
         emitter headers. Callers own dispatcher registration — ``_invoke`` calls
         ``expect()`` *before* this so a reply can never race an unregistered future.
         """
+        if route is not None and "*" in route:
+            raise ValueError(f"producer route {route!r} must be a concrete key; '*' is a route pattern for @handler, not a producer route key")
         if not self._connection._connection:
             # First publish before an explicit start(): bring the broker up. The
             # broker's pre-start hook (the startup ensurer) provisions the reply
@@ -282,17 +290,21 @@ class BaseClient:
                 callback_topic=callback_topic,
                 input_args=run_args,
                 overrides=overrides,
+                payload=body,
             )
         )
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),
         )
+        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND}
+        if route is not None:
+            headers[HDR_ROUTE] = route
         await self._connection.publish(
             envelope,
             topic=topic,
             correlation_id=correlation_id,
-            headers={HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND},
+            headers=headers,
         )
 
     async def _emit(
@@ -303,6 +315,8 @@ class BaseClient:
         overrides: OverridesState | None = None,
         run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
+        route: str | None = None,
+        body: Any | None = None,
     ) -> str:
         """Emit a true one-way (fire-and-forget) invocation to a node.
 
@@ -333,6 +347,8 @@ class BaseClient:
             overrides=overrides,
             run_args=run_args,
             deps=deps,
+            route=route,
+            body=body,
         )
         return correlation_id
 
