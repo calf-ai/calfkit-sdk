@@ -1,6 +1,7 @@
 """§8.2 — header route dispatch: the Next sentinel, wire-model carriers, and the
 Chain-of-Responsibility dispatch in BaseNodeDef.handler()."""
 
+import logging
 from typing import Any, cast
 
 import pytest
@@ -432,3 +433,206 @@ async def test_emit_to_node_threads_route_and_body_to_the_wire() -> None:
     _topic, headers, env = conn.published[0]
     assert headers[HDR_ROUTE] == "order.created"
     assert env.internal_workflow_state.current_frame.payload == {"amount": 3}
+
+
+# ---------------------------------------------------------------------------
+# Deep-review coverage additions (round 1)
+# ---------------------------------------------------------------------------
+
+
+class _CaptureBroker:
+    """Node-side broker stub: records (topic, headers, envelope) per publish."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, dict[str, str], Any]] = []
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        self.published.append((topic, headers, envelope))
+
+
+async def test_explicit_star_handler_on_agent_raises() -> None:
+    # An Agent's run() IS the LLM loop = the implicit "*" fallback, so an explicit
+    # @handler("*") on an Agent subclass is the ambiguous-catch-all error.
+    from calfkit.nodes.agent import BaseAgentNodeDef
+
+    with pytest.raises(RegistryConfigError):
+
+        class MyAgent(BaseAgentNodeDef):  # type: ignore[misc]
+            @handler("*")
+            async def catch_all(self, ctx: SessionRunContext) -> Any:
+                return Silent()
+
+
+async def test_silent_from_handler_is_terminal_and_does_not_advance() -> None:
+    seen: list[str] = []
+
+    class N(NodeDef[Any]):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            seen.append("created")
+            return Silent()
+
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            seen.append("any")
+            return Call("nope", ctx.state)
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
+    assert isinstance(out, Silent)
+    assert seen == ["created"]  # Silent short-circuited; on_any never ran
+
+
+async def test_handler_exception_propagates_and_aborts_chain() -> None:
+    seen: list[str] = []
+
+    class Boom(Exception): ...
+
+    class N(NodeDef[Any]):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            raise Boom()
+
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            seen.append("any")
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    with pytest.raises(Boom):
+        await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
+    assert seen == []  # chain aborted; more-general handler never ran
+
+
+async def test_subclass_specific_route_intercepts_before_inherited_general() -> None:
+    order: list[str] = []
+
+    class Base(NodeDef[Any]):
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            order.append("base.general")
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    class Child(Base):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            order.append("child.specific")
+            return Next()  # decline → fall to inherited general
+
+    await _dispatch(Child(node_id="n", subscribe_topics=["t"]), "order.created")
+    assert order == ["child.specific", "base.general"]
+
+
+async def test_schema_handler_with_no_body_skips_to_next() -> None:
+    seen: list[str] = []
+
+    class Body(BaseModel):
+        amount: int
+
+    class N(NodeDef[Any]):
+        @handler("order.created", schema=Body)
+        async def on_created(self, ctx: SessionRunContext, payload: Body) -> Any:
+            seen.append("schema")
+            return Silent()
+
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            seen.append("general")
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created", payload=None)
+    assert seen == ["general"]  # None body fails schema → skip to general
+
+
+def test_valid_schema_pairings_do_not_raise() -> None:
+    class Body(BaseModel):
+        x: int
+
+    class N(NodeDef[Any]):
+        @handler("order.created", schema=Body)
+        async def typed(self, ctx: SessionRunContext, payload: Body) -> Any:
+            return Silent()
+
+        @handler("order.*")
+        async def plain(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    assert set(N.routes()) == {"order.created", "order.*"}
+
+
+async def test_parallel_fanout_stamps_per_call_route_and_body() -> None:
+    class N(NodeDef[Any]):
+        @handler("trigger")
+        async def go(self, ctx: SessionRunContext) -> Any:
+            return [
+                Call("a", ctx.state, route="order.created", body={"i": 0}),
+                Call("b", ctx.state),  # no route
+            ]
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    broker = _CaptureBroker()
+    await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
+
+    by_topic = {topic: (headers, env) for topic, headers, env in broker.published}
+    assert by_topic["a"][0][HDR_ROUTE] == "order.created"
+    assert by_topic["a"][1].internal_workflow_state.current_frame.payload == {"i": 0}
+    assert HDR_ROUTE not in by_topic["b"][0]  # plain Call carries no route
+
+
+async def test_tailcall_publish_carries_no_route_header() -> None:
+    class N(NodeDef[Any]):
+        @handler("trigger")
+        async def go(self, ctx: SessionRunContext) -> Any:
+            return TailCall("downstream", ctx.state)
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    broker = _CaptureBroker()
+    await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
+    assert len(broker.published) == 1
+    _topic, headers, _env = broker.published[0]
+    assert HDR_ROUTE not in headers
+
+
+async def test_invoke_node_threads_route_and_body_to_the_wire() -> None:
+    from calfkit.client.client import Client
+    from calfkit.client.reply_dispatcher import _ReplyDispatcher
+
+    conn = _StubConn()
+    client = Client(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
+    await client.invoke_node("hello", "orders", route="order.created", body={"n": 1})
+
+    assert len(conn.published) == 1
+    _topic, headers, env = conn.published[0]
+    assert headers[HDR_ROUTE] == "order.created"
+    assert env.internal_workflow_state.current_frame.payload == {"n": 1}
+
+
+@pytest.mark.parametrize("callback_topic,expected", [("reply.topic", logging.WARNING), (None, logging.DEBUG)])
+async def test_no_match_log_level_keys_on_callback_presence(callback_topic: str | None, expected: int, caplog: pytest.LogCaptureFixture) -> None:
+    class N(NodeDef[Any]):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    env = _envelope(callback_topic=callback_topic)
+    with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
+        await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "payment.x"}, broker=cast(Any, None))
+    matched = [r for r in caplog.records if "no handler matched" in r.message]
+    assert matched and matched[0].levelno == expected
