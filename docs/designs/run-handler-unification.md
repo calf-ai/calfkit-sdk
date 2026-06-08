@@ -1,14 +1,27 @@
 # Run/Handler Unification — Design & Implementation Spec (ADR)
 
-**Status:** Proposed (design converged; ready for TDD)
+**Status:** Proposed — v2 (revised after a 3-agent adversarial review; ready for TDD)
 **Date:** 2026-06-08
 **Branch:** `feat/run-handler-unification` (worktree off `main`)
 **Builds on:** `calfkit/_registry.py` (`RegistryMixin` / `@handler`) and the shipped
 header-route-dispatch feature (PR #195).
 **Amends:** `docs/designs/header-route-dispatch-spec.md` decisions **#10** (run() fallback
 detected by identity) and **#11** + §3/§5.4/§7.1 (the `input_args` vs `payload` split).
-**Out of scope:** `calfkit/mcp/**` — that path is being deprecated; it is **not** touched by
-this work (see §10.1 for the lockstep dependency note).
+**mcp scope:** `calfkit/mcp/**` is being deprecated and is not refactored here — but the review
+found `worker.py` imports `McpBridge` at module top-level, so the framework import *is* coupled to
+it. We therefore **decouple `worker.py` from mcp** (§6.14) as part of this work; the
+`mcp/_bridge.py` + `tests/mcp/**` removal rides the concurrent deprecation effort (§10.1).
+
+> **v2 changelog (post-review):** **Critical fix** — the original 3-stage rollout was unbuildable
+> (decorating base `run` as `@handler('*')` makes the un-migrated `ToolNodeDef`/`McpBridge` fail
+> the pairing check at *import*, and a routeless body is only *delivered* under the unified
+> dispatch); **Stages 1+2 are collapsed into one atomic stage** (§9). Added: `_routing.py`/
+> `_dispatch_routed` `str | None` typing widening (§6.13a) — `make check` blocker the v1 spec
+> missed; full test-migration list incl. ~11 direct `run(ctx, str)` sites + 4 named tests (§7);
+> `worker.py` mcp decouple (§6.14); ruff F401 `Sequence` cleanups (§7). Decisions: **F2 = pass**,
+> recorded as a **known temporary shortcoming** to be fixed by the concurrent error-propagation
+> work (§5 F2, §13); **F1b unconsumed-body log made callback-aware** (WARNING when a caller
+> awaits) instead of flat DEBUG (§6.3g).
 
 ---
 
@@ -125,13 +138,19 @@ key), so a header-less message dispatches straight to `run`.
   that justification is void, so we **remove** the guard (both raise sites). No synthetic route
   key; no `TOOL_INVOKE_ROUTE` constant. Residual: a body sent to a node whose `'*'/run` has **no**
   schema is silently ignored — the guard only ever *weakly* prevented this (a routed body to a
-  no-schema handler is unread too); see §6.3(g) for an optional consumer-side DEBUG.
-- **F2 — loudness on a do-nothing node (DECIDED: pass).** No class-definition lint. A correct one
-  needs base-class exemption (the user-facing `NodeDef` base legitimately has no `run` override
-  and only `'*'`), so it is more than 1–2 lines. Observability is already covered: a do-nothing
-  node invoked with a waiting caller hits the existing no-match path and logs a
-  `callback_topic`-aware `WARNING`. Accepted trade-off: a typo'd `run` method name silently
-  no-ops (caught at runtime by that WARNING, not at import).
+  no-schema handler is unread too). To keep this observable, §6.3(g) adds a **callback-aware**
+  consumer-side log (WARNING when a caller awaits, DEBUG otherwise) when a non-None `payload` goes
+  unconsumed — not a flat DEBUG (review fix).
+- **F2 — loudness on a do-nothing node (DECIDED: pass, documented as a temporary shortcoming).**
+  No class-definition lint in this work. **Known trade-off accepted for now:** with the declining
+  base `run`, a forgotten/typo'd `run` (or a node with neither a `run` override nor an `@handler`)
+  silently *no-ops* instead of erroring; in a fire-and-forget / choreography flow the safety-net
+  no-match log is `DEBUG`-level (effectively invisible). The adversarial design review flagged
+  this as the main DX hazard, and a clean structural fix exists (a `ClassVar` marker on the
+  framework base classes + a ~3-line validation lint, no dispatch-time identity check). It is
+  **deferred deliberately**: the **concurrent calfkit error-propagation work** is the right home
+  for surfacing silent node-level no-ops loudly and consistently, so we avoid a one-off lint here.
+  Tracked in §13. Revisit if that work slips.
 
 ---
 
@@ -232,12 +251,21 @@ when schema). No splat helper needed.
 
 **(f) `_dispatch_routed` (≈346).**
 - Remove the `input_args` parameter from the signature and from its caller (§6.3.g).
+- **Widen the `route` parameter type to `str | None`** (currently `route: str` at ≈349). Under the
+  unified path `handler()` passes `decode_header_str(...)` (a `str | None`) straight in, and a
+  `None` route is now the *normal* no-header case (routed to `'*'`). Without this, `make check`
+  (mypy strict) fails. See §6.13a for the matching `_routing.py` widening — the review found the v1
+  claim "no change to `_routing.py`" to be wrong.
 - Fix the malformed-route log so an **absent** route (`None`, the normal no-header case) is not
   flagged; only a *present-but-malformed* key is.
   ```python
   # BEFORE:  if not is_concrete_route_key(route):
   # AFTER:   if route is not None and not is_concrete_route_key(route):
   ```
+  > Note: `match_chain(None, {'*': 'run'})` correctly returns `['*']` only because
+  > `route_matches` checks `pattern == "*"` *before* `is_concrete_route_key(key)`. That ordering is
+  > load-bearing; §6.13a adds an explicit `None`-key test so a future reorder can't silently break
+  > all no-route + tool dispatch.
 - Delete the identity fallback tail:
   ```python
   # BEFORE (≈400–402)
@@ -252,39 +280,48 @@ when schema). No splat helper needed.
 
 **(g) `handler()` (≈406): collapse to one path.**
 
-B/A:
+B/A (the **gate short-circuit is preserved** — only the inner post-gate dispatch collapses; the
+review flagged that the v1 sketch dropped it):
 ```python
-# BEFORE
-route = decode_header_str(headers.get(HDR_ROUTE))
-if route is not None and type(self)._handlers:
-    output = await self._dispatch_routed(ctx, route, frame.payload, frame.input_args,
-                                         awaiting_reply=frame.callback_topic is not None,
-                                         correlation_id=correlation_id)
-    if output is None:
-        ...no-match log...; return Response(envelope, headers=self._emitter_headers())
+# BEFORE (post-gate block)
+if not await self._evaluate_gates(ctx, correlation_id):
+    body = envelope                                  # gate-rejected: unchanged, no dispatch
 else:
-    output = await self._call_run(ctx, frame.input_args)
-logger.debug(...)
-body = await self._publish_action(output, envelope, correlation_id, broker)
+    frame = envelope.internal_workflow_state.current_frame
+    route = decode_header_str(headers.get(HDR_ROUTE))
+    if route is not None and type(self)._handlers:
+        output = await self._dispatch_routed(ctx, route, frame.payload, frame.input_args, ...)
+        if output is None:
+            ...no-match log...; return Response(envelope, headers=self._emitter_headers())
+    else:
+        output = await self._call_run(ctx, frame.input_args)
+    body = await self._publish_action(output, envelope, correlation_id, broker)
+return Response(body, headers=self._emitter_headers())
 
 # AFTER
-route = decode_header_str(headers.get(HDR_ROUTE))
-output = await self._dispatch_routed(ctx, route, frame.payload,
-                                     awaiting_reply=frame.callback_topic is not None,
-                                     correlation_id=correlation_id)
-if output is None:                                   # all handlers declined (incl. base run's Next)
-    level = _stuck_level(frame.callback_topic is not None)
-    logger.log(level, "[%s] no handler matched route=%s on node=%s; registered=%s",
-               correlation_id[:8], route, self.node_id, tuple(type(self)._handlers))
-    return Response(envelope, headers=self._emitter_headers())
-logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
-body = await self._publish_action(output, envelope, correlation_id, broker)
+if not await self._evaluate_gates(ctx, correlation_id):
+    body = envelope                                  # gate branch UNCHANGED — preserved
+else:
+    frame = envelope.internal_workflow_state.current_frame
+    route = decode_header_str(headers.get(HDR_ROUTE))
+    output = await self._dispatch_routed(ctx, route, frame.payload,   # single path; no input_args
+                                         awaiting_reply=frame.callback_topic is not None,
+                                         correlation_id=correlation_id)
+    if output is None:                               # all handlers declined (incl. base run's Next)
+        level = _stuck_level(frame.callback_topic is not None)
+        logger.log(level, "[%s] no handler matched route=%s on node=%s; registered=%s",
+                   correlation_id[:8], route, self.node_id, tuple(type(self)._handlers))
+        # F1b residual — callback-aware unconsumed-body signal (not flat DEBUG):
+        if frame.payload is not None:
+            logger.log(level, "[%s] ...and a non-None body was dropped (no schema handler consumed it)",
+                       correlation_id[:8])
+        return Response(envelope, headers=self._emitter_headers())
+    body = await self._publish_action(output, envelope, correlation_id, broker)
+return Response(body, headers=self._emitter_headers())
 ```
 `type(self)._handlers` is now always non-empty (`'*'` always present), so the old guard is moot.
-
-*(Optional, F1b residual):* in the no-match branch, when `frame.payload is not None`, also log a
-`DEBUG` ("received a body no handler consumed") so a body sent to a no-schema `'*'/run` isn't
-entirely invisible. Cheap; omit if you prefer zero additions.
+The unconsumed-body log reuses `_stuck_level(awaiting_reply)` so a dropped body on a *waiting*
+workflow is a `WARNING`, not an invisible `DEBUG` (F1b observability, per the design review).
 
 ### 6.4 `calfkit/nodes/agent.py` — tool Call construction
 
@@ -404,19 +441,65 @@ The collision check keys on **attribute**, so base `@handler('*')` + a subclass 
 registered by both `'run'` and `'<their>'`"). **No change required**; optionally tailor the
 collision message to mention `run`.
 
+### 6.13a `calfkit/_routing.py` — widen route-key typing to `str | None` (review fix)
+
+The v1 spec claimed "no change to `_routing.py`" — **wrong**; `make check` (mypy strict) fails
+without this. Under the unified dispatch a `None` route key flows into these helpers:
+
+- `is_concrete_route_key(key: str)` (≈33) → `key: str | None`. (Runtime already safe: `bool(None)`
+  short-circuits to `False`.)
+- `route_matches(pattern: str, key: str)` (≈41) → `key: str | None`. (Runtime already safe:
+  `pattern == "*"` returns `True` before any `is_concrete_route_key(key)` call.)
+- `match_chain(key: str, patterns)` (≈70) → `key: str | None`.
+
+The runtime behavior is correct **only because** `route_matches` tests `"*"` before touching the
+key — keep that ordering; add a focused unit test for `route_matches('*', None) is True` and
+`match_chain(None, {...}) == ['*']` (§7) so a refactor can't regress it silently.
+
+### 6.14 `calfkit/worker/worker.py` — decouple from mcp (DECIDED)
+
+Required: once base `run` is `@handler('*')`, `McpBridge.run(self, ctx, tool_call_id)` fails the
+pairing check at **class-definition time**, and `worker.py:11` imports `McpBridge` at module
+top-level — so `import calfkit.worker` (a core framework import) crashes. `import calfkit` itself
+is **safe** (`calfkit/mcp/__init__.py` imports `_config`/`_factory`/`_server`/`_tool_def`, **not**
+`_bridge`). The minimal, sufficient decouple:
+
+- **(a)** Remove `from calfkit.mcp._bridge import McpBridge` (≈11). (Keep `McpServer` /
+  `IdempotencyCache` imports — they are not nodes and don't fail the pairing check.)
+- **(b)** Remove `self._mcp_bridges` (≈125) and the bridge-construction + registration block in
+  `_on_startup` (≈263–283): the `for server in self._mcp_servers: ... McpBridge(...)` loop, the
+  `bridge._worker = self` loop, and `self._nodes.extend(self._mcp_bridges)`.
+
+This is the floor that unblocks import. **Full decouple (optional, recommended to ride the mcp
+deprecation PR, not this one):** also remove the `nodes: list[BaseNodeDef | McpServer]` /
+`idempotency_cache` constructor params, `add_nodes`/`_add_node` McpServer segregation,
+`_mcp_servers`, session open/close in `_on_startup`/`_on_shutdown`, and the mcp counts in logging
+(≈491/549/583) — that changes the public `Worker(...)` signature, so it belongs with deprecation.
+With only the minimal (a)+(b), a passed `McpServer` is **accepted but never expanded** (a dormant
+path) until the deprecation lands; note that explicitly so it isn't mistaken for working MCP
+support. `calfkit/mcp/_bridge.py` and `tests/mcp/**` stay broken-but-isolated (nothing in the kept
+framework imports `_bridge`); their removal is the deprecation's job (§10.1).
+
 ---
 
 ## 7. Test touch points
 
-Migrate (per the blast-radius inventory). `tests/mcp/**` is **out of scope** (deprecated path).
+Migrate (per the blast-radius inventory + the completeness review). `tests/mcp/**` is **out of
+scope** (deprecated path). The v1 list was incomplete; the **bold** rows are review additions and
+several would fail `make check` / collection if missed.
 
 | File | Change |
 |---|---|
-| `tests/test_node_registry_wiring.py` (≈16) | Delete/replace the `_run_accepts_input is False` assertion (concept removed). Replace with: a no-route node registers `{'*': 'run'}`; a routed node registers its routes + `'*'`. |
-| `tests/test_tool_errors.py` (≈665–720) | The dispatched-`Call` assertions move from `call.input_args[0] == tool_call_id` to `call.body == ToolCallRef(tool_call_id=...)` (and `call.route is None`). |
-| any test asserting `Call(body=..., route=None)` / client emit raises | Delete/invert — a routeless body is now valid (F1b). |
+| `tests/test_node_registry_wiring.py` (≈16,28) | Delete/replace the `_run_accepts_input is False` assertion (concept removed). Replace with: a no-route node registers `{'*': 'run'}`; a routed node registers its routes + `'*'`. |
+| **`tests/test_tool_errors.py` — ~11 direct `tool_node.run(ctx, "<str>")` calls** (≈112,144,174,525,818,948,979,1185,1376,1419 + the 665–720 dispatch-assert band) | **Every direct call must become `run(ctx, ToolCallRef(tool_call_id=...))`** (the migrated `run` does `payload.tool_call_id`; a bare str → `AttributeError` + mypy error). Dispatch-`Call` asserts move from `call.input_args[0]` to `call.body == ToolCallRef(...)` / `call.route is None`. |
+| **`tests/test_lifecycle_resource_injection.py` (≈140)** | `await tool_node.run(ctx, tool_call_id)` → `run(ctx, ToolCallRef(tool_call_id=...))`. |
+| **`tests/test_routed_dispatch.py` (≈91, ≈404)** | `test_call_rejects_body_without_route_at_construction` and `test_client_rejects_body_without_route` — **delete/invert**: a routeless body is now valid (§6.6e/§6.8d removed the guards). |
+| **`tests/test_routed_dispatch.py` (≈266, ≈466)** | `test_explicit_star_handler_with_overridden_run_raises` / `..._on_agent_raises` — these relied on the **deleted** conflict guard; they still raise but now via the **registry collision check** (`'*'` owned by both `run` and the user method). Keep them, but update intent/comments (now exercise the collision path, not the run-vs-`*` guard). |
+| **`tests/test_routed_dispatch.py` (≈392,413,430)** | `run_args=None` calls to `_publish_call` → remove (param deleted, else `TypeError`). |
+| **`tests/test_fire_and_forget.py` (≈56)** | `_TerminalNode.run(self, ctx, *args, **kwargs)` now fails the pairing check at import (extra params, no schema). Drop the `*args, **kwargs` → `run(self, ctx)`. |
+| `tests/test_fire_and_forget.py` (≈249–266) | Remove the `run_args=("a", 1)` pass-through test (param removed). |
 | `tests/conftest.py` (≈268–296) | Remove `make_input_args_factory` and the `CallFrame(input_args=...)` fixture wiring (`CallFrame` no longer has `input_args`). Re-point any round-trip fixtures to `payload=`. |
-| `tests/test_fire_and_forget.py` (≈249–266) | Remove the `run_args=("a", 1)` pass-through test (param removed), or rewrite against `body=`/`route=`. |
+| **ruff F401 cleanups** (`make fix` handles, but expect them): orphaned `Sequence` import in `nodes/base.py`, `models/actions.py`, `models/session_context.py`, `client/base.py`, `client/client.py`, `tests/conftest.py` once `input_args`/`run_args` are gone. |
 | **NEW** `tests/test_run_unification.py` | See below. |
 
 **New coverage (TDD targets):**
@@ -438,6 +521,12 @@ Migrate (per the blast-radius inventory). `tests/mcp/**` is **out of scope** (de
   `(self, ctx)` run raises.
 - Consumer inertness: `ConsumerNodeDef.run` is never invoked (handler path owns dispatch).
 - Agent loop as `'*'`: a routed handler on an Agent intercepts, then falls through to the loop.
+- Routing `None`-key contract (§6.13a): `route_matches('*', None) is True`,
+  `is_concrete_route_key(None) is False`, `match_chain(None, {'*': 'run', 'order.*': ...}) == ['*']`
+  — guards the short-circuit ordering against a silent regression.
+- `body=ToolCallRef(...)` survives a real broker round-trip: assert the receiving handler validates
+  `frame.payload` (a `dict` post-deserialization) into a `ToolCallRef` — existing route-dispatch
+  tests only ever used `dict` bodies, so the model→dict→`model_validate` path is currently unproven.
 
 `make fix && make check` (ruff, ruff-format, mypy strict) green before PR. Use
 `/test-driven-development` and `/pytest-coverage`.
@@ -451,33 +540,43 @@ Migrate (per the blast-radius inventory). `tests/mcp/**` is **out of scope** (de
   `@handler('*')` and that `input_args` is removed (the `call_run`/fallback-synthesis described in
   §7.1 no longer exists).
 - **`docs/designs/fire-and-forget-emit.md`** (≈102) — drop the `run_args` reference.
-- **`docs/designs/hooks-design.md`** — `input_args` references; already superseded, but note the
-  removal so a future reader isn't misled.
+- **`docs/designs/hooks-design.md`** — `input_args` references **and** now-false "abstract `run()`"
+  / `run(ctx, *input_args)` claims (≈46, 96, 1060); already a superseded doc, but note the removal
+  so a future reader isn't misled.
+- **`CHANGELOG.md`** — entry enumerating the breaking changes in §10.
 - **This file** — the authoritative spec.
 
 ---
 
 ## 9. Staged rollout (each stage stays green)
 
-**Stage 1 — Dispatch unification (behavior-preserving; no API break).**
-Decorate base `run` as declining `@handler('*')`; collapse `handler()` to one `_dispatch_routed`
-path; fix the `route is None` log; delete both identity checks and the `_validate_routes`
-conflict guard. **Temporarily keep `input_args`**: the `'*'` entry threads it by leaving
-`_call_run` as the `'*'` invoke for now. All existing tests — including tool `input_args` — stay
-green. *This stage alone removes the special-casing you objected to.*
+> **Why not 3 independently-green stages (v1's plan):** the review proved it's unbuildable.
+> (1) The pairing check runs at **import time**, so the moment base `run` is `@handler('*')` an
+> un-migrated `ToolNodeDef`/`McpBridge` (extra positional, no schema) fails class-definition →
+> package won't import. (2) A routeless `body=` is only *delivered* to `run` under the unified
+> dispatch, so the tool's payload migration can't precede or lag the dispatch change. The dispatch
+> unification, the tool migration, the guard removal, and the worker decouple are therefore **one
+> atomic change**. `input_args` *plumbing* removal is the only part that cleanly separates.
 
-**Stage 2 — Swap the tool channel to `payload`.**
-Add `tool_dispatch.py`; **remove the body-requires-route guard** (both raise sites) so a routeless
-`body=` is legal (F1b); change the 3 agent `Call` sites to `body=ToolCallRef(...)` (no route);
-change `ToolNodeDef.run` to the `@handler('*', schema=ToolCallRef)` payload form; migrate
-`test_tool_errors.py` and any test asserting body-without-route raises. Tool no longer needs
-`input_args`.
+**Stage 1 — Unification + tool migration + worker decouple (one atomic, breaking commit).**
+- base `run` → declining `@handler('*')`; `handler()` → single `_dispatch_routed` path; fix the
+  `route is None` log; **widen `_dispatch_routed`/`_routing.py` route typing to `str | None`**
+  (§6.13a); delete both identity checks, the `_validate_routes` conflict guard, `_call_run`, and
+  `_run_accepts_input` (keep `_accepts_extra_param`).
+- Add `tool_dispatch.py` (`ToolCallRef`); `ToolNodeDef.run` → `@handler('*', schema=ToolCallRef)`;
+  the 3 agent `Call` sites → `body=ToolCallRef(...)` (no route); **remove the body-requires-route
+  guard** (both raise sites — §6.6e/§6.8d); add the callback-aware unconsumed-body log (§6.3g).
+- **Decouple `worker.py` from mcp** (§6.14 (a)+(b)) so `import calfkit.worker` stays clean.
+- Migrate **all** affected tests in §7 (the ~11 direct `run(ctx, str)` sites, `_TerminalNode`,
+  the 4 named `test_routed_dispatch.py` tests, `run_args` tests, the `_run_accepts_input` test).
+- At the end of Stage 1, `input_args`/`run_args` still *exist* on `Call`/`_Call`/`CallFrame`/the
+  client but are **unused by any node**. `make check` green; `tests/mcp/**` excluded (deprecated).
 
-**Stage 3 — Tear down `input_args`.**
-Remove `*input_args`/`input_args` from `actions.py`, `session_context.py`; remove `_call_run`,
-`_run_accepts_input`, and the `input_args` param on `_dispatch_routed` (the `'*'` invoke is now
-the standard `method(ctx)` / `method(ctx, payload)`); remove client `run_args`; migrate
-`conftest.py`, `test_fire_and_forget.py`, `test_node_registry_wiring.py`, README, and docs.
+**Stage 2 — Tear down the now-dead `input_args` plumbing (pure deletion).**
+Remove `*input_args`/`input_args` from `actions.py` (`_Call`/`Call`/`Delegate`) and
+`session_context.py` (`CallFrame` + `invoke_frame`); remove the client `run_args` param
+(`client/base.py`, `client/client.py`); remove `make_input_args_factory` (`conftest.py`); the ruff
+F401 `Sequence` cleanups; README + docs. Green because Stage 1 already removed every reader.
 
 ---
 
@@ -489,20 +588,24 @@ the standard `method(ctx)` / `method(ctx, payload)`); remove client `run_args`; 
 | Client `run_args=` | forwarded to `run()` | removed | use `route=`/`body=` (already public) |
 | Custom node `run(self, ctx, x)` via run-args | worked via `input_args` | raises at class def (payload param ⇒ needs `schema=`) | declare `@handler('*', schema=Model)` and accept `payload: Model` |
 | `CallFrame.input_args` | wire field | removed | internal; use `payload` |
-| Node with no `run`/routes | runtime `NotImplementedError` | silent skip (no-match `WARNING` when a caller awaits) | give it a `run` or a route |
+| Node with no `run`/routes | runtime `NotImplementedError` | silent skip (no-match `WARNING` when a caller awaits, `DEBUG` otherwise) — **known temp shortcoming, §13** | give it a `run` or a route |
 | `Call(body=..., route=None)` | `ValueError` (body requires route) | allowed — read by the `'*'` handler | none (relaxation, not a break) |
 
 Pre-1.0; hard breaks are acceptable per project policy. Add a CHANGELOG entry enumerating the
 above.
 
-### 10.1 Lockstep dependency — `calfkit/mcp/_bridge.py` (out of scope, but flagged)
+### 10.1 mcp coupling — resolved: decouple `worker.py` (§6.14)
 
-`McpBridge.run(self, ctx, tool_call_id)` currently consumes `input_args` via the same mechanism.
-Removing `input_args` in Stage 3 would break it. Per direction, `mcp/` is being **deprecated** and
-is excluded from this work — but **if `mcp/` still ships when Stage 3 lands**, the bridge must be
-removed or migrated to `@handler('*', schema=ToolCallRef)` **in the same PR**, or Stage 3 will
-break it. This is a sequencing constraint to confirm before merge, not an implementation task
-here.
+The review corrected the v1 framing: `McpBridge` breaks at **class-definition / import time** (the
+moment base `run` is `@handler('*')`), *not* at the Stage-3 `input_args` teardown — and because
+`worker.py:11` imports it at module top-level, the failure takes down the core `import
+calfkit.worker`, not just the mcp tests. **Decision (yours): decouple `worker.py` from mcp** in
+Stage 1 (§6.14 (a)+(b)) — remove the `McpBridge` import + construction so the framework imports
+cleanly. `import calfkit` itself was already safe (`mcp/__init__.py` doesn't import `_bridge`).
+`calfkit/mcp/_bridge.py` and `tests/mcp/**` remain broken-but-isolated (nothing in the kept
+framework imports `_bridge`); their removal — and the full `Worker(...)` McpServer-param cleanup —
+belong to the **concurrent mcp deprecation effort**, which should land before or alongside this.
+`make check` must exclude `tests/mcp/**` until then.
 
 ---
 
@@ -527,11 +630,24 @@ here.
 ## 12. Resolved decisions
 
 1. **F1 — routeless body to the catch-all:** relax the body-requires-route guard; tool `Call`s
-   carry `body=ToolCallRef(...)` with no route (the `'*'` handler reads it). No
-   `TOOL_INVOKE_ROUTE` constant, no route key. (§5 F1)
-2. **F2 — loudness lint:** pass (not worth the base-class-exemption complexity; the existing
-   no-match `WARNING` covers observability). (§5 F2)
+   carry `body=ToolCallRef(...)` with no route (the `'*'` handler reads it). No route key. (§5 F1)
+2. **F2 — loudness lint:** **pass for now, documented as a known temporary shortcoming** (§13) to
+   be addressed by the concurrent error-propagation work, not a one-off lint here. (§5 F2)
 3. **`ToolCallRef` placement:** dedicated `calfkit/models/tool_dispatch.py`. (§6.1)
+4. **mcp coupling:** decouple `worker.py` from mcp (§6.14); the bridge/test removal rides the
+   concurrent mcp deprecation. (§10.1)
+5. **Staging:** Stages 1+2 collapsed into one atomic commit (the original 3-stage plan was
+   unbuildable — §9); `input_args` plumbing teardown is the only separable stage.
 
-The one remaining cross-team confirmation is the §10.1 `mcp/` sequencing: the bridge must be
-removed or migrated before Stage 3 lands.
+---
+
+## 13. Risk register & known temporary shortcomings
+
+| Item | Status / mitigation |
+|---|---|
+| **Silent no-op on forgotten/typo'd `run`** (declining base; no-match log is `DEBUG` in fire-and-forget) | **Known temporary shortcoming (accepted).** A structural ClassVar lint would fix it (~8 lines) but is **deferred to the concurrent calfkit error-propagation work**, the right home for surfacing silent node-level no-ops uniformly. Revisit if that work slips. |
+| **Routeless body dropped at a no-schema `'*'/run`** (F1b) | Mitigated to **callback-aware** logging (WARNING when a caller awaits) — §6.3g. Not a hard guard; the producer-side guard it replaced was itself only a weak proxy. |
+| **Routing `None`-contract depends on short-circuit ordering** in `route_matches` | Pinned by an explicit unit test (§6.13a, §7) so a reorder can't silently break all no-route + tool dispatch. |
+| **Agent loop as a stateful `'*'` reachable as a CoR fallback** — an intercepting route that mutates `ctx.state` then declines (`Next`) could feed a torn write into the loop | Already governed by the route-dispatch **"pure guards / single state author"** contract (header-route-dispatch-spec decision #4 / risk register). No *new* mitigation; documented-contract risk, unchanged by this work. |
+| **`body=ToolCallRef` model round-trip unproven by existing tests** (route-dispatch tests only used `dict` bodies) | New test asserts the `model → dict → model_validate` path over the broker (§7). |
+| **`tests/mcp/**` broken until deprecation lands** | Excluded from `make check` in the interim (§10.1). |
