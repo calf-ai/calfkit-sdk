@@ -218,7 +218,7 @@ if __name__ == "__main__":
 $ python serve_tool.py
 ```
 
-See the **[CLI reference](docs/cli.md)** for every `calfkit run` flag (`--host`, `--provision`, `--reload`, `--app-dir`, …) and the other `calfkit` commands (`mcp`, `topics`).
+See the **[CLI reference](docs/cli.md)** for every `calfkit run` flag (`--host`, `--provision`, `--reload`, `--app-dir`, …) and the `calfkit topics` command.
 
 <br>
 
@@ -426,20 +426,11 @@ async def save_final(result: NodeResult) -> None:
 
 <br>
 
-### MCP Adaptor (Optional)
-
-Expose any [Model Context Protocol](https://modelcontextprotocol.io/) server's tools (Gmail, GitHub, Postgres, filesystems, browsers, and hundreds of others) as native calfkit tools that any `Agent` can call over standard Kafka envelopes — no per-tool glue code.
-
-See [`docs/mcp-overview.md`](docs/mcp-overview.md) for the quickstart, deployment topologies, `mcp.json` interop, multi-tenancy, observability, and CI drift detection.
-
-<br>
-
 ## Documentation
 
 Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit. Deeper guides live in [`docs/`](docs/):
 
-- [CLI reference](docs/cli.md) — `calfkit run`, `mcp`, and `topics` commands
-- [MCP adaptor](docs/mcp-overview.md) — expose MCP servers as calfkit tools
+- [CLI reference](docs/cli.md) — `calfkit run` and `topics` commands
 - [Topic provisioning](docs/topic-provisioning.md) — experimental dev topic auto-creation
 
 Deep-dive guides:

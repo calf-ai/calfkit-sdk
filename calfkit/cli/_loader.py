@@ -5,9 +5,7 @@ Resolves ``module:attr`` specs into a flat list of node objects. Used by both
 (positional ``module:attr`` targets).
 
 Each ``attr`` may resolve to a single node or an iterable of nodes; iterables
-are expanded. ``McpServer`` instances are treated as scalars even though they
-are iterable (their ``__iter__`` yields tool defs) so a directly-resolved MCP
-server is preserved rather than splatted.
+are expanded.
 
 Requires the ``cli`` optional extra (typer). If typer is not installed, the
 import raises with a clear remediation message rather than silently failing.
@@ -31,8 +29,8 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label:
     """Resolve ``module:attr`` specs into a flat list of resolved objects.
 
     Each ``attr`` may be a single object or an iterable of objects; iterables
-    (other than ``str``/``bytes`` and ``McpServer``) are expanded. Results are
-    concatenated in the order the specs were supplied.
+    (other than ``str``/``bytes``) are expanded. Results are concatenated in
+    the order the specs were supplied.
 
     Args:
         specs: ``module:attr`` strings.
@@ -48,8 +46,6 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label:
         typer.Exit: (code 2) on a malformed spec, an import failure, or a
             missing attribute.
     """
-    from calfkit.mcp._server import McpServer
-
     if app_dir is not None:
         abs_dir = os.path.abspath(app_dir)
         if abs_dir not in sys.path:
@@ -84,10 +80,9 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label:
             raise typer.Exit(2) from e
 
         # A single node has ``subscribe_topics`` but is not itself a plain
-        # iterable of nodes. Strings/bytes are iterable too; an McpServer is
-        # iterable (its ``__iter__`` yields tool defs) but must be kept whole.
-        # Treat all three as scalars; expand everything else iterable.
-        if isinstance(obj, (str, bytes, McpServer)) or not isinstance(obj, Iterable):
+        # iterable of nodes. Strings/bytes are iterable too but must be kept
+        # whole. Treat them as scalars; expand everything else iterable.
+        if isinstance(obj, (str, bytes)) or not isinstance(obj, Iterable):
             resolved.append(obj)
         else:
             resolved.extend(obj)
@@ -95,31 +90,25 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label:
 
 
 def validate_nodes(objs: list[Any], *, source_label: str = "target") -> None:
-    """Ensure every object is a node or an ``McpServer``.
+    """Ensure every object is a node.
 
     A node is duck-typed by the attributes the worker wiring relies on
-    (``subscribe_topics`` and ``_return_topic``). ``McpServer`` instances are
-    allowed through unconditionally — the worker expands them into per-tool
-    bridges at startup.
+    (``subscribe_topics`` and ``_return_topic``).
 
     Args:
         objs: Resolved objects to validate.
         source_label: How to name the spec source in error messages.
 
     Raises:
-        typer.Exit: (code 2) if any object is neither a node nor an McpServer.
+        typer.Exit: (code 2) if any object is not a node.
     """
-    from calfkit.mcp._server import McpServer
-
     for obj in objs:
-        if isinstance(obj, McpServer):
-            continue
         missing = [attr for attr in ("subscribe_topics", "_return_topic") if not hasattr(obj, attr)]
         if missing:
             typer.echo(
                 f"Error: resolved object {obj!r} is not a node "
                 f"(missing {', '.join(missing)}). {source_label} must point at a "
-                "BaseNodeDef or McpServer (or an iterable of them).",
+                "BaseNodeDef (or an iterable of them).",
                 err=True,
             )
             raise typer.Exit(2)
@@ -149,8 +138,8 @@ def load_nodes(targets: list[str], *, app_dir: str | None = None, source_label: 
 def dedupe_by_node_id(objs: list[Any]) -> list[Any]:
     """Drop duplicate nodes by ``node_id``, preserving first-seen order.
 
-    Objects without a ``node_id`` (e.g. ``McpServer``) are keyed by identity so
-    they are always retained.
+    Objects without a ``node_id`` are keyed by identity so they are always
+    retained.
     """
     seen: set[Any] = set()
     out: list[Any] = []

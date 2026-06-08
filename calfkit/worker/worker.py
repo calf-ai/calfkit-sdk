@@ -8,9 +8,6 @@ from faststream import FastStream
 from typing_extensions import Self
 
 from calfkit.client import Client
-from calfkit.mcp._bridge import McpBridge
-from calfkit.mcp._dedup import IdempotencyCache
-from calfkit.mcp._server import McpServer
 from calfkit.nodes import BaseNodeDef
 from calfkit.provisioning import topics_for_nodes
 from calfkit.worker.lifecycle import (
@@ -51,18 +48,17 @@ class Worker(LifecycleHookMixin):
 
     On a failed boot (e.g. the broker can't reach Kafka), ``start()``, ``run()``,
     and ``async with`` all run teardown automatically before re-raising, so a
-    failed start never leaks resources or MCP sessions.
+    failed start never leaks resources.
     """
 
     def __init__(
         self,
         client: Client,
-        nodes: list[BaseNodeDef | McpServer] | None = None,
+        nodes: list[BaseNodeDef] | None = None,
         max_workers: int = 1,
         group_id: str | None = None,
         extra_publish_kwargs: dict[str, Any] = {},
         extra_subscribe_kwargs: dict[str, Any] = {},
-        idempotency_cache: IdempotencyCache | None = None,
         id: str | None = None,
         name: str | None = None,
     ):
@@ -70,19 +66,12 @@ class Worker(LifecycleHookMixin):
 
         Args:
             client: The calfkit Client (Kafka connection).
-            nodes: Mixed list of ``BaseNodeDef`` instances and ``McpServer``
-                instances. McpServers are segregated and expanded into
-                ``McpBridge`` per-tool subscribers at ``_on_startup`` time.
+            nodes: List of ``BaseNodeDef`` instances to host.
             max_workers: FastStream subscriber concurrency cap.
             group_id: Optional Kafka consumer group override (defaults to
                 each node's name).
             extra_publish_kwargs: Forwarded to ``broker.publisher(...)``.
             extra_subscribe_kwargs: Forwarded to ``broker.subscriber(...)``.
-            idempotency_cache: Optional shared ``IdempotencyCache`` for
-                MCP-bridge dedup. If not provided, a fresh cache is
-                constructed with default parameters (1hr TTL, 10k entries).
-                One cache is shared across all MCP bridges in this worker
-                so multi-tool redeliveries dedup correctly.
             id: Stable wire identity for this worker (e.g. for fleet presence).
                 Validated non-empty; a uuid7 hex is generated when ``None``.
                 Read-only after construction — mirrors ``BaseClient.emitter_id``.
@@ -115,18 +104,9 @@ class Worker(LifecycleHookMixin):
         # Recorded once on the first (effective) call and used as the single
         # source of truth for ``_declare_startup_topics`` — it survives the
         # idempotent second call (which is a no-op once ``_prepared`` is set), so
-        # the topic set reflects exactly what was registered (including MCP
-        # bridges appended just before registration in ``_on_startup``).
+        # the topic set reflects exactly what was registered.
         self._registered_nodes: list[BaseNodeDef] = []
 
-        # MCP-specific state. Segregating at construction time means the
-        # ``add_nodes`` API path also routes McpServer instances correctly.
-        self._mcp_servers: list[McpServer] = []
-        self._mcp_bridges: list[McpBridge] = []
-        self._dedup_cache: IdempotencyCache = idempotency_cache if idempotency_cache is not None else IdempotencyCache()
-
-        # Regular (non-MCP) nodes. The list type is widened to allow McpServer
-        # in the kwarg signature for ergonomics, but storage is split.
         self._nodes: list[BaseNodeDef] = []
         for node in nodes or []:
             self._add_node(node)
@@ -141,32 +121,23 @@ class Worker(LifecycleHookMixin):
         """Display-only label (read-only; defaults to ``id``). Never on the wire."""
         return self._name
 
-    def add_nodes(self, *nodes: BaseNodeDef | McpServer) -> None:
-        """Add nodes after construction.
-
-        Segregates ``McpServer`` instances into the MCP-specific state list
-        so they get expanded into ``McpBridge`` subscribers at startup,
-        rather than being treated as raw nodes (which would fail because
-        McpServer doesn't implement the BaseNodeDef handler contract).
-        """
+    def add_nodes(self, *nodes: BaseNodeDef) -> None:
+        """Add nodes after construction."""
         for node in nodes:
             self._add_node(node)
 
-    def _add_node(self, node: BaseNodeDef | McpServer) -> None:
-        """Internal: route a node to the right bucket based on type."""
-        if isinstance(node, McpServer):
-            self._mcp_servers.append(node)
-        else:
-            # Back-reference so the node's per-message handler can merge this
-            # worker's lifecycle resources under its own (see
-            # BaseNodeDef._effective_resources / prepare_context). Last writer
-            # wins: re-using one node-def instance across workers (a common test
-            # pattern) points it at whichever worker is currently hosting it.
-            # Hosting the SAME instance in two *concurrently live* workers is
-            # unsupported (one shared resource bag, double subscriber
-            # registration) — use a separate instance per live worker.
-            node._worker = self
-            self._nodes.append(node)
+    def _add_node(self, node: BaseNodeDef) -> None:
+        """Internal: register a node for hosting."""
+        # Back-reference so the node's per-message handler can merge this
+        # worker's lifecycle resources under its own (see
+        # BaseNodeDef._effective_resources / prepare_context). Last writer
+        # wins: re-using one node-def instance across workers (a common test
+        # pattern) points it at whichever worker is currently hosting it.
+        # Hosting the SAME instance in two *concurrently live* workers is
+        # unsupported (one shared resource bag, double subscriber
+        # registration) — use a separate instance per live worker.
+        node._worker = self
+        self._nodes.append(node)
 
     def register_handlers(self) -> None:
         """Register FastStream subscribers + publishers for every node.
@@ -174,10 +145,6 @@ class Worker(LifecycleHookMixin):
         Idempotent: a second call logs at debug and returns. This lets the
         Worker.run() lifecycle hook call it safely even if a test driver
         called it manually first (the existing ``tests/providers.py`` pattern).
-
-        Note: McpBridges constructed in ``_on_startup`` are also registered
-        via this method — they're appended to ``_nodes`` immediately before
-        the registration loop runs.
         """
         if self._prepared:
             logger.debug("register_handlers() called again; skipping (already prepared)")
@@ -231,9 +198,8 @@ class Worker(LifecycleHookMixin):
         nodes recorded by :meth:`register_handlers` (the single source of truth):
         each node's ``subscribe_topics``, its framework-private ``_return_topic``,
         its ``publish_topic``, and — for agent nodes — each tool's input
-        ``subscribe_topics``. MCP bridges appended in :meth:`_on_startup` are
-        included because registration runs before this call. Every node's
-        ``_return_topic`` is declared ``framework=True`` so user ``topic_configs``
+        ``subscribe_topics``. Every node's ``_return_topic`` is declared
+        ``framework=True`` so user ``topic_configs``
         (retention / compaction) are never applied to those correlation-keyed
         return inboxes.
         """
@@ -242,85 +208,17 @@ class Worker(LifecycleHookMixin):
         ensurer.declare({node._return_topic for node in self._registered_nodes}, framework=True)
 
     async def _on_startup(self) -> None:
-        """Open MCP sessions and register handlers, before the broker starts.
+        """Register handlers + declare topics, before the broker starts.
 
         Invoked by :meth:`_hook_on_startup` (the wired FastStream ``on_startup``
-        hook) and by the rollback paths. Runs before any Kafka subscriber
-        begins consuming, so we use this window to:
-
-        1. Open each McpServer's MCP session (subprocess spawn or HTTP
-           connect + ``initialize`` + drift-detection sanity check).
-        2. Construct one ``McpBridge`` per declared tool, sharing the
-           per-worker idempotency cache.
-        3. Append bridges to ``_nodes`` so the existing handler-registration
-           loop picks them up.
-        4. Register all subscribers + publishers via ``register_handlers``.
-
-        Cancellation safety: catches ``BaseException`` (not just
-        ``Exception``) so SIGTERM during boot still closes any MCP
-        subprocesses we successfully spawned before the cancellation.
+        hook). Runs before any Kafka subscriber begins consuming: wire up all
+        subscribers + publishers, then declare the registered nodes' topics into
+        the client's startup ensurer (which provisions them — when provisioning
+        is enabled — at ``broker.start()``, before any subscriber consumes,
+        alongside the client's reply topic).
         """
-        spawned: list[McpServer] = []
-        try:
-            for server in self._mcp_servers:
-                await server._open_bridge_session()
-                spawned.append(server)
-                for tool_def in server._apply_filters(server._tools):
-                    self._mcp_bridges.append(
-                        McpBridge(
-                            server=server,
-                            tool_def=tool_def,
-                            dedup_cache=self._dedup_cache,
-                        )
-                    )
-            # Bridges go through the same handler-registration path as
-            # native nodes so subscribers are wired identically; give them the
-            # same worker back-reference as _add_node so worker-scoped resources
-            # merge into bridge handlers too.
-            for bridge in self._mcp_bridges:
-                bridge._worker = self
-            self._nodes.extend(self._mcp_bridges)
-            self.register_handlers()
-            # Declare the registered nodes' topics into the client's startup
-            # ensurer. Runs AFTER register_handlers so the MCP bridges just
-            # appended are part of the registered set. The ensurer (the broker's
-            # pre-start hook) provisions them — when provisioning is enabled —
-            # at broker.start(), before any subscriber consumes, alongside the
-            # client's reply topic. A provisioning failure there surfaces through
-            # the start()/run() teardown, which closes these MCP sessions.
-            self._declare_startup_topics()
-        except BaseException:
-            # Cancellation, OSError, any other failure — close every
-            # session we successfully opened so subprocesses don't outlive
-            # the worker process. Re-raise to let FastStream surface the
-            # original failure to the caller.
-            logger.exception("Worker._on_startup failed; cleaning up %d open MCP session(s)", len(spawned))
-            for s in spawned:
-                try:
-                    await s._close_bridge_session()
-                except Exception:
-                    logger.exception("failed to close MCP session for %r during startup cleanup", s.raw_name)
-            raise
-
-    async def _on_shutdown(self) -> None:
-        """Close MCP sessions cleanly.
-
-        Invoked by :meth:`_hook_on_shutdown` (the wired FastStream
-        ``on_shutdown`` hook) and by the startup / after-startup rollback paths,
-        always while the broker is still up so in-flight bridge handlers can
-        still complete.
-
-        Errors in individual session teardown are logged and swallowed so
-        a slow / hung MCP server doesn't prevent the other sessions from
-        being closed.
-        """
-        for server in self._mcp_servers:
-            if server.session is None:
-                continue
-            try:
-                await server._close_bridge_session()
-            except Exception:
-                logger.exception("failed to close MCP session for %r during shutdown", server.raw_name)
+        self.register_handlers()
+        self._declare_startup_topics()
 
     # ------------------------------------------------------------------
     # Lifecycle engine: build per-owner brackets and enter them into a phase
@@ -330,11 +228,9 @@ class Worker(LifecycleHookMixin):
     def _owners(self) -> list[SupportsLifecycleHooks]:
         """Owners that participate in the lifecycle, worker first then nodes.
 
-        ``McpServer`` instances are *not* owners here — they're managed by the
-        existing MCP open/close logic, not the generic bracket engine. The
-        return type also exercises ``SupportsLifecycleHooks`` conformance: this
-        line fails to type-check if ``Worker``/``BaseNodeDef`` ever drift from
-        the structural surface the CM builders rely on.
+        The return type also exercises ``SupportsLifecycleHooks`` conformance:
+        this line fails to type-check if ``Worker``/``BaseNodeDef`` ever drift
+        from the structural surface the CM builders rely on.
         """
         return [self, *self._nodes]
 
@@ -395,20 +291,16 @@ class Worker(LifecycleHookMixin):
             await stack.aclose()
 
     # ------------------------------------------------------------------
-    # Four FastStream hooks. MCP open/close is preserved as-is
-    # (``_on_startup`` / ``_on_shutdown``); the resource/serving brackets are
-    # layered on top.
+    # Four FastStream hooks. ``_on_startup`` registers handlers + declares
+    # topics; the resource/serving brackets are layered on top.
     # ------------------------------------------------------------------
 
     async def _hook_on_startup(self) -> None:
-        """``on_startup``: open MCP + register handlers, then enter resource brackets.
+        """``on_startup``: register handlers + declare topics, then enter resource brackets.
 
         If entering the resource stack fails (or is cancelled), roll back the
-        resource stack *and* the MCP sessions opened by ``_on_startup`` before
-        re-raising the original error so boot fails cleanly.
+        resource stack before re-raising the original error so boot fails cleanly.
         """
-        # Existing MCP open + register_handlers; this method does its own MCP
-        # cleanup if it fails, so a failure here needs no extra MCP teardown.
         await self._on_startup()
         self._resource_stack = AsyncExitStack()
         try:
@@ -416,26 +308,24 @@ class Worker(LifecycleHookMixin):
         except BaseException:
             await self._safe_aclose(self._resource_stack)
             self._resource_stack = None
-            await self._on_shutdown()  # close MCP sessions opened above
             raise
 
     async def _hook_after_startup(self) -> None:
         """``after_startup``: enter serving brackets while the broker consumes.
 
         FastStream skips shutdown hooks when ``after_startup`` raises, so a
-        failure here must unwind both stacks, close MCP, and stop the broker
-        itself before re-raising.
+        failure here must unwind both stacks and stop the broker itself before
+        re-raising.
         """
         self._serving_stack = AsyncExitStack()
         try:
             await self._enter_into(self._serving_stack, "serving")
         except BaseException:
             # Mirror the normal shutdown order so an in-flight handler never
-            # reads a torn-down resource: serving teardown + MCP close while the
-            # broker is up, then drain (broker.stop), then resource teardown.
+            # reads a torn-down resource: serving teardown while the broker is
+            # up, then drain (broker.stop), then resource teardown.
             await self._safe_aclose(self._serving_stack)
             self._serving_stack = None
-            await self._on_shutdown()  # close MCP sessions (broker still up)
             try:
                 await self._client.broker.stop()  # drain in-flight handlers
             except Exception:
@@ -445,13 +335,12 @@ class Worker(LifecycleHookMixin):
             raise
 
     async def _hook_on_shutdown(self) -> None:
-        """``on_shutdown``: tear down serving brackets, then close MCP sessions.
+        """``on_shutdown``: tear down serving brackets.
 
         Runs before ``broker.stop()`` so in-flight handlers can still complete.
         """
         await self._safe_aclose(self._serving_stack)
         self._serving_stack = None
-        await self._on_shutdown()
 
     async def _hook_after_shutdown(self) -> None:
         """``after_shutdown``: tear down resource brackets (post-drain)."""
@@ -485,10 +374,9 @@ class Worker(LifecycleHookMixin):
         """
         self._mark_started()
         logger.info(
-            "worker %s starting with %d regular node(s), %d MCP server(s)",
+            "worker %s starting with %d node(s)",
             self.id,
             len(self._nodes),
-            len(self._mcp_servers),
         )
         self._app = self._build_app()
         try:
@@ -496,12 +384,12 @@ class Worker(LifecycleHookMixin):
         except BaseException:
             # FastStream runs no shutdown hooks if startup fails *after*
             # on_startup (e.g. broker.start() can't reach Kafka), which would
-            # orphan the resource brackets + MCP sessions opened in
-            # _hook_on_startup. Python also skips __aexit__ when __aenter__
-            # raises, so `async with worker:` couldn't recover either. Run our
-            # own teardown (idempotent) before re-raising so a failed boot
-            # never leaks. A failure *in* teardown is logged, not raised, so it
-            # never masks the original boot error.
+            # orphan the resource brackets opened in _hook_on_startup. Python
+            # also skips __aexit__ when __aenter__ raises, so `async with
+            # worker:` couldn't recover either. Run our own teardown
+            # (idempotent) before re-raising so a failed boot never leaks. A
+            # failure *in* teardown is logged, not raised, so it never masks the
+            # original boot error.
             await self._cleanup_after_failed_start()
             raise
 
@@ -516,7 +404,7 @@ class Worker(LifecycleHookMixin):
         raises (flaky disconnect) or shutdown is cancelled, it skips
         ``after_shutdown`` — where the resource brackets are torn down. We
         therefore release the resource stack in a ``finally`` regardless, so a
-        failed/cancelled drain never strands pools, clients, or MCP sessions.
+        failed/cancelled drain never strands pools or clients.
         Resource teardown still happens *after* the drain attempt, preserving
         the "drain before close" order. ``CancelledError`` still propagates
         after the best-effort teardown attempt.
@@ -536,9 +424,9 @@ class Worker(LifecycleHookMixin):
         """Best-effort teardown after a failed ``start()``/``run()``.
 
         Runs the shutdown hooks (via ``stop()``) to release any resource
-        brackets / MCP sessions opened before the failure. A failure *here* is
-        logged, never raised, so it cannot mask the original boot error that the
-        caller is about to re-raise. ``CancelledError`` still propagates.
+        brackets opened before the failure. A failure *here* is logged, never
+        raised, so it cannot mask the original boot error that the caller is
+        about to re-raise. ``CancelledError`` still propagates.
         """
         try:
             await self.stop()
@@ -546,13 +434,10 @@ class Worker(LifecycleHookMixin):
             # Name what may still be open so an operator knows a manual
             # cleanup / restart is warranted rather than assuming graceful release.
             leaked_resources = self._resource_stack is not None
-            open_mcp = sum(1 for s in self._mcp_servers if s.session is not None)
             logger.exception(
-                "worker %s teardown after failed start failed; original boot error will be raised "
-                "(resource brackets still open=%s, MCP sessions still open=%d)",
+                "worker %s teardown after failed start failed; original boot error will be raised (resource brackets still open=%s)",
                 self.id,
                 leaked_resources,
-                open_mcp,
             )
 
     async def __aenter__(self) -> Self:
@@ -577,10 +462,9 @@ class Worker(LifecycleHookMixin):
         """
         self._mark_started()
         logger.info(
-            "worker %s starting with %d regular node(s), %d MCP server(s)",
+            "worker %s starting with %d node(s)",
             self.id,
             len(self._nodes),
-            len(self._mcp_servers),
         )
         self._app = self._build_app()
         try:
@@ -588,7 +472,7 @@ class Worker(LifecycleHookMixin):
         except BaseException:
             # FastStream's run() never reaches its own _shutdown() when startup
             # raises inside the task group, so (as in start()) run our teardown
-            # to release resources + MCP. stop() is idempotent, so this is safe
-            # even when run() already shut down cleanly before failing.
+            # to release resources. stop() is idempotent, so this is safe even
+            # when run() already shut down cleanly before failing.
             await self._cleanup_after_failed_start()
             raise

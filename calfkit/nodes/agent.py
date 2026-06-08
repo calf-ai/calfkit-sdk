@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any, ClassVar, Generic, cast
 
 from pydantic import ValidationError
@@ -14,7 +14,6 @@ from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.exceptions import ToolExecutionError
-from calfkit.mcp._server import McpServer
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
 from calfkit.models.node_schema import BaseToolNodeSchema
@@ -25,31 +24,6 @@ from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
-
-# Public alias for ``Agent(tools=[...])`` entries. Includes
-# ``BaseToolNodeSchema`` (covers ``ToolNodeDef`` via inheritance and any
-# user-defined schema-only subclass) and ``McpServer`` (flattened by
-# ``_flatten_tools`` at construction).
-ToolLike = BaseToolNodeSchema | McpServer
-
-
-def _flatten_tools(entries: Iterable[ToolLike] | None) -> list[BaseToolNodeSchema]:
-    """Expand ``McpServer`` entries into ``BaseToolNodeSchema`` via ``__iter__``.
-
-    Validates entry types up front so nested-list / typo'd inputs fail at
-    construction with a clear ``TypeError`` instead of crashing at the
-    first model turn with a less actionable ``AttributeError``.
-    """
-    flattened: list[BaseToolNodeSchema] = []
-    for entry in entries or ():
-        if isinstance(entry, McpServer):
-            flattened.extend(entry)
-        elif isinstance(entry, BaseToolNodeSchema):
-            flattened.append(entry)
-        else:
-            raise TypeError(f"Agent(tools=...) entry must be a ToolNodeDef, BaseToolNodeSchema, or McpServer; got {type(entry).__name__}: {entry!r}")
-    return flattened
-
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +42,7 @@ class BaseAgentNodeDef(
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
         gates: list[GateFunction] | None = None,
-        tools: list[ToolLike] | None = None,
+        tools: list[BaseToolNodeSchema] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
@@ -76,7 +50,7 @@ class BaseAgentNodeDef(
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
-        self.tools: list[BaseToolNodeSchema] = _flatten_tools(tools)
+        self.tools: list[BaseToolNodeSchema] = list(tools) if tools else []
         self.sequential_only_mode = sequential_only_mode
         self._pending_batches: dict[str, PendingToolBatch] = dict()
 
@@ -511,8 +485,8 @@ class BaseAgentNodeDef(
                 ctx.state.final_output_parts = parts
             return ReturnCall[State](state=ctx.state)
 
-    def add_tools(self, *tools: ToolLike) -> None:
-        self.tools.extend(_flatten_tools(tools))
+    def add_tools(self, *tools: BaseToolNodeSchema) -> None:
+        self.tools.extend(tools)
 
     def instructions(self, func: Callable[..., str | None]) -> Callable[..., str | None]:
         """Decorator to define dynamic instruction functions that can build instructions at runtime."""

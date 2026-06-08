@@ -1,26 +1,21 @@
-"""Baseline test for the MCP adaptor's load-bearing claim.
+"""Schema-only tool dispatch via the ``Agent(tools=[...])`` kwarg path.
 
-The MCP adaptor relies on the agent loop already supporting schema-only
-tools registered as ``BaseToolNodeSchema`` instances via the
-``Agent(tools=[...])`` path, with two specific properties:
+Pins two load-bearing properties of the agent loop for tools registered as
+bare ``BaseToolNodeSchema`` instances (no ``BaseToolNodeDef`` validator) passed
+through the ``Agent(tools=[...])`` kwarg:
 
   1. The agent dispatches the tool call without attempting client-side
-     argument validation. The ``isinstance(tool_node, BaseToolNodeDef)``
-     gate at ``calfkit/nodes/agent.py:374`` — a bare ``BaseToolNodeSchema``
-     fails the check, so the validation block is skipped entirely.
+     argument validation. The ``isinstance(tool_node, BaseToolNodeDef)`` gate
+     in ``calfkit/nodes/agent.py`` fails for a bare ``BaseToolNodeSchema``, so
+     the validation block is skipped entirely.
 
-  2. Malformed JSON args from the LLM still become a ``RetryPromptPart``
-     (not a hard ``FailedToolCall``), via the ``args_as_dict()`` try/except
-     at ``calfkit/nodes/agent.py:350-369`` which runs on *all* dispatch
-     paths regardless of the validation gate.
+  2. Malformed JSON args from the LLM still become a ``RetryPromptPart`` (not a
+     hard ``FailedToolCall``), via the ``args_as_dict()`` try/except which runs
+     on *all* dispatch paths regardless of the validation gate.
 
-The existing override-mode tests at ``test_tool_errors.py:687-723`` and
-``:1118-1157`` cover the same two properties but only via the
-``state.overrides.override_agent_tools`` path (``agent.py:165`` branch).
-The MCP adaptor uses the ``Agent(tools=[...])`` path instead (``agent.py:167``
-branch), so this test exercises that exact branch — if it fails, the v1
-plan's "zero agent code changes" claim does not hold and Phase 1 must
-not start.
+The override-mode tests in ``test_tool_errors.py`` cover the same two
+properties via the ``state.overrides.override_agent_tools`` path; this test
+exercises the ``Agent(tools=[...])`` kwarg branch instead.
 """
 
 from __future__ import annotations
@@ -42,22 +37,23 @@ from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls
 
 def _make_schema_only_tool(
     *,
-    tool_name: str = "mcp_search",
-    topic_base: str = "mcp.everything.search",
+    tool_name: str = "search",
+    topic_base: str = "tools.search",
 ) -> BaseToolNodeSchema:
-    """Construct a ``BaseToolNodeSchema`` mirroring what ``McpToolDef`` will
-    yield in Phase 1. Carries a real ``ToolDefinition`` (so the LLM sees a
-    valid schema) but no ``_tool``/validator attribute (which is what makes
-    it "schema-only" — the agent's ``isinstance(tool_node, BaseToolNodeDef)``
-    gate fails, skipping validation).
+    """Construct a bare ``BaseToolNodeSchema`` (a schema-only tool).
+
+    Carries a real ``ToolDefinition`` (so the LLM sees a valid schema) but no
+    ``_tool``/validator attribute — which is what makes it "schema-only": the
+    agent's ``isinstance(tool_node, BaseToolNodeDef)`` gate fails, skipping
+    validation.
     """
     return BaseToolNodeSchema(
-        node_id=f"mcp_{tool_name}",
+        node_id=f"tool_{tool_name}",
         subscribe_topics=[f"{topic_base}.input"],
         publish_topic=f"{topic_base}.output",
         tool_schema=ToolDefinition(
             name=tool_name,
-            description="Synthetic MCP-style tool with one required string arg.",
+            description="Synthetic tool with one required string arg.",
             parameters_json_schema={
                 "type": "object",
                 "properties": {"q": {"type": "string"}},
@@ -73,19 +69,18 @@ async def test_schema_only_tool_via_tools_kwarg_dispatches_without_validation() 
 
     No ``BaseToolNodeDef`` validator runs (there is none on a bare
     ``BaseToolNodeSchema``), and the result is a ``Call`` to the tool's
-    subscribe topic. This is the path Phase 1's ``McpToolDef``-derived
-    ``BaseToolNodeSchema`` instances will rely on.
+    subscribe topic.
     """
     schema_only = _make_schema_only_tool()
 
-    tool_call_id = "tc-mcp-baseline-01"
-    call = ToolCallPart(tool_name="mcp_search", args={"q": "hello"}, tool_call_id=tool_call_id)
+    tool_call_id = "tc-schema-only-01"
+    call = ToolCallPart(tool_name="search", args={"q": "hello"}, tool_call_id=tool_call_id)
 
     agent = Agent(
-        "agent_mcp_baseline",
+        "agent_schema_only",
         system_prompt="x",
-        subscribe_topics="agent_mcp_baseline.input",
-        publish_topic="agent_mcp_baseline.output",
+        subscribe_topics="agent_schema_only.input",
+        publish_topic="agent_schema_only.output",
         model_client=_model_emits_tool_calls([call]),
         tools=[schema_only],  # NB: tools= kwarg path, not OverridesState
     )
@@ -98,31 +93,31 @@ async def test_schema_only_tool_via_tools_kwarg_dispatches_without_validation() 
     assert tool_call_id not in ctx.state.tool_results, f"unexpected tool_result stored: {ctx.state.tool_results.get(tool_call_id)!r}"
     assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
     assert result.input_args is not None and result.input_args[0] == tool_call_id
-    assert result.target_topic == "mcp.everything.search.input"
+    assert result.target_topic == "tools.search.input"
 
 
 async def test_schema_only_tool_malformed_args_become_retry_prompt() -> None:
     """Property 2: malformed JSON args still become ``RetryPromptPart`` on the
     schema-only path.
 
-    This is the safety net that lets the MCP adaptor skip client-side
+    This is the safety net that lets a schema-only tool skip client-side
     validation without crashing the agent on every off-spec model emission.
-    Mirrors ``test_tool_errors.py:1118-1157`` (the override-mode equivalent)
-    but routes through the ``tools=`` kwarg instead of ``OverridesState``.
+    Mirrors ``test_tool_errors.py`` (the override-mode equivalent) but routes
+    through the ``tools=`` kwarg instead of ``OverridesState``.
     """
     schema_only = _make_schema_only_tool()
 
     bad_call = ToolCallPart(
-        tool_name="mcp_search",
+        tool_name="search",
         args="not-valid-json",  # str, not dict — args_as_dict() will raise
-        tool_call_id="tc-mcp-baseline-malformed",
+        tool_call_id="tc-schema-only-malformed",
     )
 
     agent = Agent(
-        "agent_mcp_baseline_malformed",
+        "agent_schema_only_malformed",
         system_prompt="x",
-        subscribe_topics="agent_mcp_baseline_malformed.input",
-        publish_topic="agent_mcp_baseline_malformed.output",
+        subscribe_topics="agent_schema_only_malformed.input",
+        publish_topic="agent_schema_only_malformed.output",
         model_client=_model_emits_tool_calls([bad_call]),
         tools=[schema_only],
     )
@@ -134,7 +129,7 @@ async def test_schema_only_tool_malformed_args_become_retry_prompt() -> None:
     # the LLM another turn with the retry prompt visible in tool_results.
     assert isinstance(result, TailCall), f"expected TailCall, got {type(result).__name__}"
 
-    stored = ctx.state.tool_results.get("tc-mcp-baseline-malformed")
+    stored = ctx.state.tool_results.get("tc-schema-only-malformed")
     assert isinstance(stored, RetryPromptPart), f"expected RetryPromptPart, got {type(stored).__name__}: {stored!r}"
     assert "Malformed tool arguments" in str(stored.content)
 
@@ -158,14 +153,14 @@ async def test_schema_only_tool_handles_various_bad_arg_shapes(args: str) -> Non
     """
     schema_only = _make_schema_only_tool()
 
-    tcid = f"tc-mcp-baseline-bad-{abs(hash(args))}"
-    bad_call = ToolCallPart(tool_name="mcp_search", args=args, tool_call_id=tcid)
+    tcid = f"tc-schema-only-bad-{abs(hash(args))}"
+    bad_call = ToolCallPart(tool_name="search", args=args, tool_call_id=tcid)
 
     agent = Agent(
-        "agent_mcp_baseline_param",
+        "agent_schema_only_param",
         system_prompt="x",
-        subscribe_topics="agent_mcp_baseline_param.input",
-        publish_topic="agent_mcp_baseline_param.output",
+        subscribe_topics="agent_schema_only_param.input",
+        publish_topic="agent_schema_only_param.output",
         model_client=_model_emits_tool_calls([bad_call]),
         tools=[schema_only],
     )

@@ -9,7 +9,6 @@ broker to assert the declared topic set:
 
 * each registered node's ``subscribe_topics``, framework ``_return_topic``,
   ``publish_topic``, and (for agents) each tool's input ``subscribe_topics``,
-* MCP bridge topics (declared after the bridges are built in ``_on_startup``),
 * user ``topic_configs`` on data topics only, never on framework return inboxes,
 * default-off is a pure no-op (the ensurer never provisions).
 """
@@ -17,11 +16,7 @@ broker to assert the declared topic set:
 import asyncio
 from typing import Any
 
-from mcp.types import CallToolResult, TextContent
-
 from calfkit.client import Client
-from calfkit.mcp._testing import FakeMcpServer
-from calfkit.mcp._tool_def import McpToolDef
 from calfkit.nodes.agent import Agent
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -89,14 +84,6 @@ def _tool_node(name: str, sub: str, pub: str) -> ToolNodeDef:
     return ToolNodeDef.create_tool_node(func=_fn, subscribe_topics=sub, publish_topic=pub)
 
 
-def _td(name: str = "t") -> McpToolDef:
-    return McpToolDef(name=name, input_schema={"type": "object"})
-
-
-def _ok_result(text: str = "ok") -> CallToolResult:
-    return CallToolResult(content=[TextContent(type="text", text=text)], isError=False)
-
-
 def _make_client(provisioning: ProvisioningConfig | None = None) -> Client:
     return Client.connect("localhost:9092", provisioning=provisioning)
 
@@ -158,23 +145,6 @@ def test_enabled_declares_agent_tool_input_topics() -> None:
     assert "weather_lookup.in" in names  # tool input topic (not subscribed by the agent)
 
 
-def test_enabled_declares_mcp_bridge_topics() -> None:
-    """MCP bridges are constructed inside ``_on_startup`` and appended to the
-    registered set; their derived input/output topics must be declared too."""
-    client = _make_client(ProvisioningConfig(enabled=True))
-    fake = FakeMcpServer(name="gmail", tools=[_td("search"), _td("send")], invoker=lambda n, a, m: _ok_result())
-    worker = Worker(client, nodes=[fake])
-
-    asyncio.run(worker._on_startup())
-    names = _names(_run_ensurer(client))
-    asyncio.run(worker._on_shutdown())  # close the opened MCP session
-
-    assert "mcp.gmail.search.input" in names
-    assert "mcp.gmail.search.output" in names
-    assert "mcp.gmail.send.input" in names
-    assert "mcp.gmail.send.output" in names
-
-
 def test_return_inbox_does_not_receive_user_topic_configs() -> None:
     cfg = ProvisioningConfig(enabled=True, topic_configs={"retention.ms": "604800000"})
     client = _make_client(cfg)
@@ -202,48 +172,3 @@ def test_declares_only_registered_nodes_not_later_additions() -> None:
     assert "echo.in" in names
     assert "late.in" not in names
     assert "late.out" not in names
-
-
-# ---------------------------------------------------------------------------
-# Provisioning failure at broker.start() -> the worker's failed-start teardown
-# still closes MCP sessions (provisioning moved out of _on_startup into the
-# broker pre-start hook; the central promise of the unification).
-# ---------------------------------------------------------------------------
-
-
-class _DenyAdmin:
-    """Admin that denies every create (code 29 unauthorized), so the ensurer
-    finds the declared topics uncreated and raises MissingTopicsError."""
-
-    async def create_topics(self, new_topics, *args: Any, **kwargs: Any):  # noqa: ANN001
-        return FakeResponse([(nt.name, 29) for nt in new_topics])
-
-    async def close(self) -> None:
-        return None
-
-
-def test_provisioning_failure_at_broker_start_closes_mcp_sessions(monkeypatch) -> None:
-    import pytest
-
-    from calfkit.exceptions import MissingTopicsError
-    from calfkit.provisioning import ensurer as ensurer_mod
-
-    client = _make_client(ProvisioningConfig(enabled=True))
-    server = FakeMcpServer(name="gmail", tools=[_td("search")], invoker=lambda n, a, m: _ok_result())
-    worker = Worker(client, nodes=[server])
-
-    # connect() succeeds offline; the (reused) admin denies every create, so the
-    # real ensurer raises MissingTopicsError at broker.start() — AFTER _on_startup
-    # opened the MCP session.
-    async def _fake_connect() -> None:
-        return None
-
-    monkeypatch.setattr(client.broker, "connect", _fake_connect)
-    monkeypatch.setattr(ensurer_mod, "_admin_client_or_none", lambda b: _DenyAdmin())  # noqa: ARG005
-
-    with pytest.raises(MissingTopicsError):
-        asyncio.run(worker.start())
-
-    # The failed-start teardown closed the MCP session and released resources.
-    assert server.session is None
-    assert worker._resource_stack is None

@@ -140,12 +140,10 @@ await worker.run()
 ```
 
 When enabled, the worker's FastStream `on_startup` hook runs `provision_topics()`
-**after** `register_handlers()` (so MCP bridges appended at startup are included)
-and **before** `broker.start()` (so every subscriber's inbox exists before
-consumption begins). The topic set is `topics_for_nodes()` over exactly the nodes
+**after** `register_handlers()` and **before** `broker.start()` (so every
+subscriber's inbox exists before consumption begins). The topic set is `topics_for_nodes()` over exactly the nodes
 that were registered; each node's `_return_topic` is passed as a framework topic
-so `topic_configs` is never applied to it. A provisioning failure aborts startup
-(and triggers the existing MCP-session cleanup).
+so `topic_configs` is never applied to it. A provisioning failure aborts startup.
 
 `Worker.provision_topics()` is also a public, idempotent method for the manual
 `register_handlers()`-without-`run()` path; it is a no-op when the client's
@@ -189,15 +187,10 @@ calfkit topics provision --nodes myapp.workers:all_nodes --dry-run
 - `--bootstrap-servers` (default `localhost`), `--partitions` (default `1`),
   `--replication-factor` (default `1`, **not durable**), `--timeout-ms`
   (default `30000`), `--dry-run`.
-- `McpServer` entries are **skipped with a note** — MCP topics are only knowable
-  from a *live* MCP session (after `initialize`), so they are provisioned at
-  worker startup, not by this static command.
 - Exit codes: `0` success / dry-run; `2` error (node resolution failed, or a
   topic could not be provisioned).
 
 The CLI requires the `cli` optional extra (typer): `pip install calfkit[cli]`.
-The legacy `mcp-codegen` extra remains as a backwards-compatible alias resolving
-to the same typer dependency.
 
 ## 5. Behavior details
 

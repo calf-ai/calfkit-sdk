@@ -2,8 +2,8 @@
 
 This is NOT an integration test: it verifies the marker exists and is driven
 SYNCHRONOUSLY by the ``CALF_TEST_KAFKA`` env var (an instant ``shutil.which``-
-style check, like ``skip_if_no_npx``), with NO live TCP probe at collection
-time. It's a normal unit test that always runs.
+style check), with NO live TCP probe at collection time. It's a normal unit
+test that always runs.
 """
 
 import importlib
