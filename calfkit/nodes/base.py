@@ -231,6 +231,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
     def _emitter_headers(self) -> dict[str, str]:
         return {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind}
 
+    def _headers_for_call(self, call: Call[Any]) -> dict[str, str]:
+        """Emitter headers, plus the ``x-calf-route`` header when a ``Call`` addresses
+        a sub-route of a downstream routed node (ingress-only, ``Call`` only)."""
+        if call.route is None:
+            return self._emitter_headers()
+        return {**self._emitter_headers(), HDR_ROUTE: call.route}
+
     async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
         publish_envelope: Envelope
 
@@ -238,7 +245,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             # Parallel fan-out: publish each Call with independent workflow_state
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
-                wf_copy.invoke_frame(call, self._return_topic)
+                wf_copy.invoke_frame(call, self._return_topic, payload=call.body)
                 publish_envelope = Envelope(
                     context=SessionRunContext(state=call.state, deps=envelope.context.deps),
                     internal_workflow_state=wf_copy,
@@ -248,13 +255,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                     topic=wf_copy.current_frame.target_topic,
                     correlation_id=correlation_id,
                     key=correlation_id.encode(),
-                    headers=self._emitter_headers(),
+                    headers=self._headers_for_call(call),
                 )
             return envelope
 
         elif isinstance(output, Call):
             # push to callstack and call the target topic
-            envelope.internal_workflow_state.invoke_frame(output, self._return_topic)
+            envelope.internal_workflow_state.invoke_frame(output, self._return_topic, payload=output.body)
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
@@ -266,7 +273,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 topic=target_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
-                headers=self._emitter_headers(),
+                headers=self._headers_for_call(output),
             )
         elif isinstance(output, ReturnCall):
             # unwind current frame and return to previous topic
@@ -398,11 +405,33 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if not await self._evaluate_gates(ctx, correlation_id):
             body: Envelope = envelope
         else:
-            if self._run_accepts_input and envelope.internal_workflow_state.current_frame.input_args is not None:
-                output = await self.run(ctx, *envelope.internal_workflow_state.current_frame.input_args)
+            frame = envelope.internal_workflow_state.current_frame
+            route = decode_header_str(headers.get(HDR_ROUTE))
+            if route is not None and type(self)._handlers:
+                output = await self._dispatch_routed(
+                    ctx,
+                    route,
+                    frame.payload,
+                    frame.input_args,
+                    awaiting_reply=frame.callback_topic is not None,
+                    correlation_id=correlation_id,
+                )
+                if output is None:
+                    # No matching handler (and no run() fallback): a stuck workflow
+                    # if a caller is awaiting a return, else a fire-and-forget no-op.
+                    level = logging.WARNING if frame.callback_topic is not None else logging.DEBUG
+                    logger.log(
+                        level,
+                        "[%s] no handler matched route=%s on node=%s; registered=%s",
+                        correlation_id[:8],
+                        route,
+                        self.node_id,
+                        tuple(type(self)._handlers),
+                    )
+                    return Response(envelope, headers=self._emitter_headers())
             else:
-                output = await self.run(ctx)
-            logger.debug("[%s] run() returned action=%s node=%s", correlation_id[:8], type(output).__name__, self.node_id)
+                output = await self._call_run(ctx, frame.input_args)
+            logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
             body = await self._publish_action(output, envelope, correlation_id, broker)
 
         return Response(body, headers=self._emitter_headers())

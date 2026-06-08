@@ -1,7 +1,7 @@
 """§8.2 — header route dispatch: the Next sentinel, wire-model carriers, and the
 Chain-of-Responsibility dispatch in BaseNodeDef.handler()."""
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from calfkit._protocol import HDR_ROUTE
 from calfkit._registry import handler
 from calfkit.exceptions import RegistryConfigError
-from calfkit.models import Call, CallFrame, CallFrameStack, Next, ReturnCall, SessionRunContext, Silent, State, TailCall, WorkflowState
+from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, ReturnCall, SessionRunContext, Silent, State, TailCall, WorkflowState
 from calfkit.nodes.node import NodeDef
 
 _CORR = "corr1234"
@@ -21,6 +21,16 @@ def _ctx() -> SessionRunContext:
 
 async def _dispatch(node: Any, route: str, payload: Any = None) -> Any:
     return await node._dispatch_routed(_ctx(), route, payload, None, awaiting_reply=False, correlation_id=_CORR)
+
+
+def _envelope(*, callback_topic: str | None = "reply.topic", payload: Any = None) -> Envelope:
+    stack = CallFrameStack()
+    stack.push(CallFrame(target_topic="t", callback_topic=callback_topic, payload=payload))
+    return Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
+
+
+async def _handle(node: Any, headers: dict[str, Any], envelope: Envelope | None = None) -> Any:
+    return await node.handler(envelope or _envelope(), correlation_id=_CORR, headers=headers, broker=cast(Any, None))
 
 
 def test_next_is_a_distinct_sentinel_from_silent() -> None:
@@ -202,3 +212,87 @@ def test_explicit_star_handler_with_overridden_run_raises() -> None:
 
             async def run(self, ctx: SessionRunContext) -> Any:
                 return Silent()
+
+
+# ---------------------------------------------------------------------------
+# handler() integration: route header drives dispatch; no header -> legacy run()
+# ---------------------------------------------------------------------------
+
+
+async def test_handler_dispatches_by_route_header() -> None:
+    seen: list[str] = []
+
+    class N(NodeDef[Any]):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            seen.append("created")
+            return Silent()
+
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            seen.append("any")
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            seen.append("run")
+            return Silent()
+
+    await _handle(N(node_id="n", subscribe_topics=["t"]), {HDR_ROUTE: "order.created"})
+    assert seen == ["created"]  # specific handler only (short-circuit), not run()
+
+
+async def test_handler_without_route_header_runs_legacy_run() -> None:
+    seen: list[str] = []
+
+    class N(NodeDef[Any]):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            seen.append("created")
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            seen.append("run")
+            return Silent()
+
+    await _handle(N(node_id="n", subscribe_topics=["t"]), {})
+    assert seen == ["run"]
+
+
+async def test_handler_no_match_runs_nothing_and_returns_envelope_unchanged() -> None:
+    seen: list[str] = []
+
+    class N(NodeDef[Any]):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            seen.append("created")
+            return Silent()
+
+    env = _envelope(callback_topic=None)
+    resp = await _handle(N(node_id="n", subscribe_topics=["t"]), {HDR_ROUTE: "payment.x"}, env)
+    assert seen == []
+    assert resp.body is env  # envelope returned unchanged, nothing published
+
+
+async def test_call_with_route_stamps_header_and_frame_payload() -> None:
+    published: list[tuple[str, dict[str, str], Any]] = []
+
+    class StubBroker:
+        async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+            published.append((topic, headers, envelope))
+
+    class N(NodeDef[Any]):
+        @handler("trigger")
+        async def go(self, ctx: SessionRunContext) -> Any:
+            return Call("downstream", ctx.state, route="order.created", body={"amount": 7})
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    node = N(node_id="n", subscribe_topics=["t"])
+    await node.handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, StubBroker()))
+
+    assert len(published) == 1
+    topic, headers, env = published[0]
+    assert topic == "downstream"
+    assert headers[HDR_ROUTE] == "order.created"
+    assert env.internal_workflow_state.current_frame.payload == {"amount": 7}
