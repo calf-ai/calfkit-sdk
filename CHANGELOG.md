@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.6.1...v0.7.0) (2026-06-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* The MCP adaptor is removed (landed in #197). `from calfkit import mcp`, `Agent(tools=[McpServer(...)])`, `Worker(idempotency_cache=...)`, the `calfkit mcp` CLI subcommand, and the `mcp` dependency are gone. There is no replacement in this release; pin `calfkit <0.7` if you depend on the MCP adaptor.
+
+### Features
+
+* remove MCP adaptor ([#198](https://github.com/calf-ai/calfkit-sdk/issues/198)) ([d6d497f](https://github.com/calf-ai/calfkit-sdk/commit/d6d497f0cb7ffa93c049d9fd85e3cba7c770a4a7))
+
 ## [0.6.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.6.0...v0.6.1) (2026-06-08)
 
 
