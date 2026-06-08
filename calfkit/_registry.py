@@ -160,8 +160,12 @@ class RegistryMixin:
         return method
 
     @classmethod
-    def handler_names(cls) -> tuple[str, ...]:
-        """The route patterns registered on this class, in registration order."""
+    def routes(cls) -> tuple[str, ...]:
+        """The route patterns registered on this class, in registration order.
+
+        See :meth:`route_table` for the per-route metadata (human name + schema)
+        and :meth:`handlers` for the bound methods on an instance.
+        """
         return tuple(cls._handlers)
 
     @classmethod

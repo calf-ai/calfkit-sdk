@@ -378,13 +378,13 @@ via cooperative `super().__init_subclass__(**kwargs)`. Verify MRO/dataclass inte
   `accepts_payload` (via `inspect.signature`). `schema` narrowed to `type[BaseModel] | None`,
   validated at decoration.
 - **`_handlers` keys on `route`** (was `name`): `_handlers: dict[route -> attr]`, collision/
-  uniqueness key on `route`. Introspection accessors are split so each stays honest:
-  `routes() -> tuple[str, ...]` returns the route patterns (the `_handlers` keys, replacing the
-  old name-returning behaviour); `route_table()` returns the rich `route -> RouteEntry` view;
-  and the existing `handler_names()` is **kept returning the human `name`s** (`HandlerInfo.name`,
-  which defaults to `func.__name__`) so its name doesn't become a lie. `name` resolution moves
-  **inside** `_decorate` (where `func` is available); the current early `if not name: raise`
-  guard is repurposed to validate the `route` positional.
+  uniqueness key on `route`. Introspection is two honest accessors: `routes() -> tuple[str, ...]`
+  returns the route patterns (the `_handlers` keys — this **renames** the old `handler_names()`,
+  which had become a misnomer once the key was a route), and `route_table() -> dict[route, HandlerInfo]`
+  returns the rich view (the human `name` — defaulting to the method name — and `schema` live
+  here). No separate `handler_names()`. `name` resolution moves **inside** `_decorate` (where
+  `func` is available); the current early `if not name: raise` guard is repurposed to validate
+  the `route` positional.
 - Grammar validation (§6.1) at decoration + collection.
 - Add `routes_for(key) -> list[RouteEntry]` (§7.1) and `route_table()` introspection.
 - `schema` narrowed to `type[BaseModel] | None` and validated at decoration (today it is `Any`

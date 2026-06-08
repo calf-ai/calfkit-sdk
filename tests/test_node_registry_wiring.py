@@ -23,6 +23,6 @@ def test_node_subclass_collects_handlers_and_still_sets_run_accepts_input() -> N
             return Silent()
 
     # RegistryMixin.__init_subclass__ ran on the node → handler collected.
-    assert "greet" in GreeterNode.handler_names()
+    assert "greet" in GreeterNode.routes()
     # BaseNodeDef.__init_subclass__ still ran (cooperative super()) → introspection set.
     assert GreeterNode._run_accepts_input is False

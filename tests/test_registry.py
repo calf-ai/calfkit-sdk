@@ -399,7 +399,7 @@ def test_handler_order_follows_definition_then_mro() -> None:
     assert list(Child().handlers()) == ["z", "a", "m"]
 
 
-def test_handler_names_accessor() -> None:
+def test_routes_accessor() -> None:
     class Node(RegistryMixin):
         @handler("first")
         def f(self) -> None: ...
@@ -407,8 +407,8 @@ def test_handler_names_accessor() -> None:
         @handler("second")
         def s(self) -> None: ...
 
-    assert Node.handler_names() == ("first", "second")
-    assert RegistryMixin.handler_names() == ()
+    assert Node.routes() == ("first", "second")
+    assert RegistryMixin.routes() == ()
 
 
 def test_handlerinfo_is_slotted_value_equal_and_rejects_empty_route_or_name() -> None:
