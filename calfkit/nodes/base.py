@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin
-from calfkit._routing import match_chain
+from calfkit._routing import is_concrete_route_key, match_chain
 from calfkit.exceptions import RegistryConfigError
 from calfkit.models import (
     Call,
@@ -32,6 +32,12 @@ if TYPE_CHECKING:
     from calfkit.worker.worker import Worker
 
 logger = logging.getLogger(__name__)
+
+
+def _accepts_extra_param(fn: Callable[..., Any]) -> bool:
+    """True if ``fn`` declares a parameter beyond ``(self, ctx)`` — i.e. it takes a
+    run input-arg / route payload. (Unbound signature: ``self`` + ``ctx`` = 2.)"""
+    return len(inspect.signature(fn).parameters) > 2
 
 
 GateFunction = Callable[[SessionRunContext], bool | Awaitable[bool]]
@@ -64,10 +70,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        sig = inspect.signature(cls.run)
-        # Unbound method signature includes self, so self + ctx = 2 params.
-        # If > 2, the subclass declared an input parameter (any name).
-        cls._run_accepts_input = len(sig.parameters) > 2
+        cls._run_accepts_input = _accepts_extra_param(cls.run)
         cls._validate_routes()
 
     @classmethod
@@ -87,7 +90,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             )
         for route, info in cls._handler_info.items():
             handler_fn = getattr(cls, cls._handlers[route])
-            accepts_payload = len(inspect.signature(handler_fn).parameters) > 2
+            accepts_payload = _accepts_extra_param(handler_fn)
             if accepts_payload and info.schema is None:
                 raise RegistryConfigError(
                     f"{cls.__qualname__}: route {route!r} handler {info.name!r} takes a payload parameter "
@@ -347,13 +350,25 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         """Dispatch ``route`` to matched handlers as a Chain of Responsibility.
 
         Runs matched handlers most-specific → most-general (§6.3). A handler that
-        returns :class:`~calfkit.models.Next` declines and the chain advances; the
-        first non-``Next`` result is terminal and short-circuits. A handler with a
+        returns :class:`~calfkit.models.Next` (or ``None`` — e.g. a missing return)
+        declines and the chain advances; the first other result is terminal and
+        short-circuits. A handler with a
         ``schema`` whose body fails validation is skipped (logged, callback-aware
         level). If no handler handles the route, the node's overridden ``run()`` is
         the implicit ``*`` fallback; absent that, returns ``None`` (no match).
         """
         cls = type(self)
+        if not is_concrete_route_key(route):
+            # Malformed inbound key (empty segment / trailing dot / wildcard): never
+            # partial-matches a specific handler — only the "*"/run() fallback can catch it.
+            level = logging.WARNING if awaiting_reply else logging.DEBUG
+            logger.log(
+                level,
+                "[%s] malformed inbound route=%r on node=%s; only a catch-all/run fallback can handle it",
+                correlation_id[:8],
+                route,
+                self.node_id,
+            )
         for r in match_chain(route, cls._handlers):
             info = cls._handler_info[r]
             method = self.get_handler(r)
@@ -371,10 +386,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                         info.schema.__name__,
                     )
                     continue
-                result: NodeResult[State] | Next = await method(ctx, validated)
+                result: NodeResult[State] | Next | None = await method(ctx, validated)
             else:
                 result = await method(ctx)
-            if isinstance(result, Next):
+            if result is None or isinstance(result, Next):
+                # Decline (Next, or a handler that simply returned nothing) → advance.
                 continue
             return result
         if cls.run is not BaseNodeDef.run:

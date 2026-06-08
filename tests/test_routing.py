@@ -2,7 +2,17 @@
 
 import pytest
 
-from calfkit._routing import match_chain, route_matches, validate_route_pattern
+from calfkit._routing import is_concrete_route_key, match_chain, route_matches, validate_route_pattern
+
+
+@pytest.mark.parametrize("key", ["order", "order.created", "order.created.line", "a.b.c"])
+def test_concrete_route_keys_accepted(key: str) -> None:
+    assert is_concrete_route_key(key) is True
+
+
+@pytest.mark.parametrize("key", ["", "order.", ".order", "order..created", "order.*", "*", "a.b.*"])
+def test_non_concrete_route_keys_rejected(key: str) -> None:
+    assert is_concrete_route_key(key) is False
 
 
 @pytest.mark.parametrize(

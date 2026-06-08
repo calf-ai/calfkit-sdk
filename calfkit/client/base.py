@@ -8,6 +8,7 @@ from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
 from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE
+from calfkit._routing import is_concrete_route_key
 from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
@@ -275,8 +276,13 @@ class BaseClient:
         emitter headers. Callers own dispatcher registration — ``_invoke`` calls
         ``expect()`` *before* this so a reply can never race an unregistered future.
         """
-        if route is not None and "*" in route:
-            raise ValueError(f"producer route {route!r} must be a concrete key; '*' is a route pattern for @handler, not a producer route key")
+        if route is not None and not is_concrete_route_key(route):
+            raise ValueError(
+                f"producer route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
+                "segments, no wildcard. ('*' is a route pattern for @handler, not a producer route key.)"
+            )
+        if body is not None and route is None:
+            raise ValueError("body= requires route=; a body with no route reaches no @handler schema (it would land unread in CallFrame.payload).")
         if not self._connection._connection:
             # First publish before an explicit start(): bring the broker up. The
             # broker's pre-start hook (the startup ensurer) provisions the reply

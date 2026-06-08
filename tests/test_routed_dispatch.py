@@ -65,6 +65,15 @@ def test_call_carries_optional_route_and_body() -> None:
     assert plain.route is None and plain.body is None
 
 
+def test_call_eq_and_repr_include_route_and_body() -> None:
+    a = Call("t", 1, route="r1", body={"x": 1})
+    b = Call("t", 1, route="r2", body={"x": 2})
+    c = Call("t", 1, route="r1", body={"x": 1})
+    assert a != b  # route/body distinguish otherwise-identical Calls
+    assert a == c
+    assert "r1" in repr(a)  # repr surfaces the route
+
+
 def test_tailcall_does_not_accept_route_or_body() -> None:
     with pytest.raises(TypeError):
         TailCall("topic", object(), route="x")  # type: ignore[call-arg]
@@ -90,6 +99,25 @@ async def test_specific_handler_short_circuits() -> None:
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
     assert isinstance(out, Call) and out.target_topic == "specific"
+
+
+async def test_none_return_advances_chain_like_next() -> None:
+    # A handler that returns None (e.g. forgot to return) declines and advances,
+    # same as Next() — it does not terminate the chain.
+    class N(NodeDef[Any]):
+        @handler("order.created")
+        async def on_created(self, ctx: SessionRunContext) -> Any:
+            return None  # forgot to return / explicit decline
+
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            return Call("general", ctx.state)
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Silent()
+
+    out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
+    assert isinstance(out, Call) and out.target_topic == "general"
 
 
 async def test_next_advances_to_more_general_handler() -> None:
@@ -130,6 +158,25 @@ async def test_no_match_and_no_run_fallback_returns_none() -> None:
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "payment.created")
     assert out is None
+
+
+async def test_malformed_inbound_route_does_not_partial_match_and_falls_to_fallback() -> None:
+    # A malformed inbound key (trailing dot) must NOT partial-match `order.*`;
+    # it routes to the run() fallback only (mature "normalize-or-404" behavior).
+    seen: list[str] = []
+
+    class N(NodeDef[Any]):
+        @handler("order.*")
+        async def on_any(self, ctx: SessionRunContext) -> Any:
+            seen.append("on_any")
+            return Silent()
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            seen.append("run")
+            return Silent()
+
+    await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.")
+    assert seen == ["run"]
 
 
 async def test_valid_payload_is_validated_and_injected() -> None:
@@ -340,7 +387,7 @@ async def test_client_publish_call_stamps_route_and_body() -> None:
     assert env.internal_workflow_state.current_frame.payload == {"amount": 9}
 
 
-async def test_client_rejects_wildcard_producer_route() -> None:
+async def test_client_rejects_body_without_route() -> None:
     conn = _StubConn()
     with pytest.raises(ValueError):
         await _client(conn)._publish_call(
@@ -351,7 +398,24 @@ async def test_client_rejects_wildcard_producer_route() -> None:
             overrides=None,
             run_args=None,
             deps=None,
-            route="order.*",
+            route=None,
+            body={"x": 1},
+        )
+
+
+@pytest.mark.parametrize("bad_route", ["order.*", "order.", "a..b", ".order"])
+async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> None:
+    conn = _StubConn()
+    with pytest.raises(ValueError):
+        await _client(conn)._publish_call(
+            topic="orders",
+            correlation_id=_CORR,
+            callback_topic=None,
+            state=State(),
+            overrides=None,
+            run_args=None,
+            deps=None,
+            route=bad_route,
             body=None,
         )
 

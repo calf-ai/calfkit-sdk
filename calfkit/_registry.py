@@ -30,6 +30,15 @@ _HANDLER_ATTR = "__calf_handler__"
 _MethodT = TypeVar("_MethodT", bound=Callable[..., Any])
 
 
+def _unwrap(method: Callable[..., Any]) -> Callable[..., Any]:
+    """The underlying function of a static/class/bound method (else ``method`` itself).
+
+    The marker lands on — and is read from — this underlying function, so it
+    survives static/classmethod wrapping and bound-method access.
+    """
+    return getattr(method, "__func__", method)
+
+
 @dataclass(frozen=True, slots=True)
 class HandlerInfo:
     """Metadata stamped on a method by :func:`handler`.
@@ -78,9 +87,7 @@ def handler(route: str, *, schema: type[BaseModel] | None = None, name: str | No
         raise ValueError(f"handler() schema must be a pydantic BaseModel subclass, got {schema!r}")
 
     def _decorate(method: _MethodT) -> _MethodT:
-        # Unwrap static/classmethod so the marker lands on the underlying function,
-        # where handler_info can find it from a bound method.
-        target = getattr(method, "__func__", method)
+        target = _unwrap(method)
         resolved_name = name if name is not None else getattr(target, "__name__", route)
         setattr(target, _HANDLER_ATTR, HandlerInfo(route=route, name=resolved_name, schema=schema))
         return method
@@ -94,8 +101,7 @@ def handler_info(method: Callable[..., Any]) -> HandlerInfo | None:
     Accepts a plain function or a bound/unbound method (it unwraps ``__func__``),
     so it works on the values returned by :meth:`RegistryMixin.handlers`.
     """
-    func = getattr(method, "__func__", method)
-    info: HandlerInfo | None = getattr(func, _HANDLER_ATTR, None)
+    info: HandlerInfo | None = getattr(_unwrap(method), _HANDLER_ATTR, None)
     return info
 
 

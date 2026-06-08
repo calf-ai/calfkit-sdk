@@ -30,6 +30,14 @@ def validate_route_pattern(pattern: str) -> None:
             raise ValueError(f"route pattern {pattern!r}: '*' is only valid as the entire final segment")
 
 
+def is_concrete_route_key(key: str) -> bool:
+    """Whether ``key`` is a valid *concrete* route key — a producer-set value or an
+    inbound header (not a pattern): non-empty, no ``*``, ``.``-delimited with
+    non-empty segments. Malformed keys (``order.``, ``a..b``) are rejected so they
+    can never partial-match a prefix pattern (§6 / §10)."""
+    return bool(key) and "*" not in key and all(key.split("."))
+
+
 def route_matches(pattern: str, key: str) -> bool:
     """Whether a (validated) route ``pattern`` matches a concrete route ``key`` (§6.2).
 
@@ -40,6 +48,10 @@ def route_matches(pattern: str, key: str) -> bool:
     """
     if pattern == "*":
         return True
+    if not is_concrete_route_key(key):
+        # A malformed inbound key never partial-matches a specific pattern; only
+        # the universal "*" (handled above) can catch it.
+        return False
     if pattern.endswith(".*"):
         prefix = pattern[:-2].split(".")
         segs = key.split(".")

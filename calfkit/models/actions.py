@@ -66,6 +66,7 @@ class _Call(Generic[StateT]):
         self.input_args = input_args or None
 
 
+@dataclass(init=False)
 class Call(Generic[StateT], _Call[StateT]):
     """Call another node, and provide a mutable state and arguments.
     The target will callback the caller (w/ State) when complete.
@@ -73,10 +74,12 @@ class Call(Generic[StateT], _Call[StateT]):
     Optionally carries header-route-dispatch metadata: ``route`` (a concrete route
     key, stamped as the ``x-calf-route`` header on the publish) and ``body`` (an
     optional payload validated against the target handler's ``schema``). These live
-    on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a route."""
+    on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a route. ``init=False``
+    keeps the custom ``*input_args`` constructor while letting ``route``/``body``
+    participate in ``__eq__``/``__repr__``."""
 
-    route: str | None
-    body: Any | None
+    route: str | None = None
+    body: Any | None = None
 
     def __init__(self, target_topic: str, state: StateT, *input_args: Any, route: str | None = None, body: Any | None = None) -> None:
         super().__init__(target_topic, state, *input_args)
