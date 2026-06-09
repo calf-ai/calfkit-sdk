@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.7.0...v0.8.0) (2026-06-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* unify `run` into the `@handler` registry; remove input_args ([#200](https://github.com/calf-ai/calfkit-sdk/issues/200))
+
+### Features
+
+* unify `run` into the `[@handler](https://github.com/handler)` registry; remove input_args ([#200](https://github.com/calf-ai/calfkit-sdk/issues/200)) ([bb4b8c4](https://github.com/calf-ai/calfkit-sdk/commit/bb4b8c43d9157ea100f7b772a240f920d46214b6))
+
 ## [0.7.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.6.1...v0.7.0) (2026-06-08)
 
 
