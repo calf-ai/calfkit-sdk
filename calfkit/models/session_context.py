@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Generic
@@ -37,13 +37,13 @@ class Stack(Generic[StackItemT]):
 class CallFrame:
     target_topic: str
     callback_topic: str | None  # return address; ``None`` = fire-and-forget, no requester to return to
-    input_args: Sequence[Any] | None = field(default=None)
     frame_id: str = field(default_factory=lambda: uuid_utils.uuid7().hex)
     overrides: OverridesState | None = field(default=None)
     payload: Any = field(default=None)
-    """Optional producer-supplied body validated against a routed handler's
-    ``schema`` (header route dispatch). Distinct from ``input_args`` (run-args).
-    ``None`` when the producer sent no body."""
+    """Optional producer-supplied body validated against a handler's ``schema``.
+    Read by a routed ``@handler`` (via the ``x-calf-route`` header) or, for a
+    routeless body, by the target's inherited ``@handler('*')`` ``run`` (e.g. a tool
+    node validating a ``ToolCallRef``). ``None`` when the producer sent no body."""
 
 
 CallFrameStack = Stack[CallFrame]
@@ -72,7 +72,6 @@ class WorkflowState(BaseModel):
         frame = CallFrame(
             target_topic=call.target_topic,
             callback_topic=callback_topic,
-            input_args=call.input_args,
             payload=payload,
         )
         return self.call_stack.push(frame)

@@ -53,7 +53,7 @@ REPLY_DISPATCHER_LOGGER = "calfkit.client.reply_dispatcher"
 class _TerminalNode(BaseNodeDef):
     """Minimal concrete node so ``_publish_action`` can be exercised in isolation."""
 
-    async def run(self, ctx: SessionRunContext, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - unused
+    async def run(self, ctx: SessionRunContext) -> Any:
         return ReturnCall(state=ctx.state)
 
 
@@ -246,9 +246,9 @@ async def test_emit_to_node_autogenerates_correlation_id_when_none(container):
     assert client._emit.await_args.kwargs["correlation_id"] == returned
 
 
-async def test_emit_to_node_builds_overrides_and_forwards_deps_and_run_args(container):
+async def test_emit_to_node_builds_overrides_and_forwards_deps(container):
     """``model_settings`` builds an ``OverridesState`` carried to ``_emit``; ``deps``
-    and ``run_args`` pass through; a ``State`` is constructed for the prompt."""
+    pass through; a ``State`` is constructed for the prompt."""
     client = container.get(Client)
     client._emit = AsyncMock(return_value="cid")
 
@@ -258,12 +258,10 @@ async def test_emit_to_node_builds_overrides_and_forwards_deps_and_run_args(cont
         "agent.input",
         deps=deps,
         model_settings={"temperature": 0.0},
-        run_args=("a", 1),
     )
 
     kwargs = client._emit.await_args.kwargs
     assert kwargs["deps"] == deps
-    assert kwargs["run_args"] == ("a", 1)
     assert kwargs["overrides"] is not None
     assert kwargs["overrides"].model_settings == {"temperature": 0.0}
     assert isinstance(kwargs["state"], State)

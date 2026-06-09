@@ -19,7 +19,7 @@ from typing import Any
 from faststream.kafka import KafkaBroker
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND
-from calfkit.models import ToolContext
+from calfkit.models import ToolCallRef, ToolContext
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
     CallFrame,
@@ -137,7 +137,7 @@ async def test_tool_run_injects_node_resources_into_tool_context() -> None:
     ctx = SessionRunContext(state=state, deps={})
     ctx._correlation_id = "cid"
 
-    await tool_node.run(ctx, tool_call_id)
+    await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     assert seen["db"] is sentinel
 

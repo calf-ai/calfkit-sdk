@@ -28,7 +28,7 @@ from calfkit._vendor.pydantic_ai.messages import (
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.exceptions import ToolExecutionError
-from calfkit.models import SessionRunContext, ToolContext
+from calfkit.models import SessionRunContext, ToolCallRef, ToolContext
 from calfkit.models.actions import Call, ReturnCall, Silent, TailCall
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import (
@@ -109,7 +109,7 @@ async def test_tool_raises_arbitrary_exception_stores_error_marker():
     _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, tool_call_id)
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     # The reply path must still publish so the agent gets unblocked.
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
@@ -141,7 +141,7 @@ async def test_tool_raises_model_retry_stores_retry_prompt():
     _register_tool_call(state, tool_name="please_retry", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, tool_call_id)
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
 
@@ -171,7 +171,7 @@ async def test_tool_success_unchanged():
     _register_tool_call(state, tool_name="happy", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, tool_call_id)
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
 
@@ -522,7 +522,7 @@ async def test_tool_base_exceptions_propagate(exc_factory):
     ctx = _make_ctx(state)
 
     with pytest.raises(type(raised)):
-        await tool_node.run(ctx, tool_call_id)
+        await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     # No marker should be stored — the exception must not be silently captured.
     assert tool_call_id not in ctx.state.tool_results
@@ -663,12 +663,12 @@ async def test_agent_partial_validation_failure_dispatches_valid_calls():
     # Only one valid pending call remains, so the agent takes the sequential
     # dispatch branch (len(pending_tool_calls) == 1 → single Call, not list).
     if isinstance(result, list):
-        target_ids = [call.input_args[0] for call in result if isinstance(call, Call)]
-        assert valid_id in target_ids, f"expected Call targeting {valid_id}, got input_args {target_ids}"
+        target_ids = [call.body.tool_call_id for call in result if isinstance(call, Call)]
+        assert valid_id in target_ids, f"expected Call targeting {valid_id}, got bodies {target_ids}"
     else:
         assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
-        assert result.input_args is not None and result.input_args[0] == valid_id, (
-            f"expected Call targeting {valid_id}, got input_args {result.input_args!r}"
+        assert isinstance(result.body, ToolCallRef) and result.body.tool_call_id == valid_id, (
+            f"expected Call targeting {valid_id}, got body {result.body!r}"
         )
 
 
@@ -717,7 +717,7 @@ async def test_agent_skips_validation_for_schema_only_override_tools():
     # No RetryPromptPart — validation was skipped, so the call dispatches.
     assert tool_call_id not in ctx.state.tool_results
     assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
-    assert result.input_args is not None and result.input_args[0] == tool_call_id
+    assert isinstance(result.body, ToolCallRef) and result.body.tool_call_id == tool_call_id
 
 
 async def test_agent_handles_malformed_json_args_as_retry_prompt():
@@ -815,7 +815,7 @@ async def test_tool_long_exception_message_is_clamped_not_rejected():
     _register_tool_call(state, tool_name="boom_with_long_msg", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, tool_call_id)
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall (no hang), got {type(result).__name__}"
 
@@ -945,7 +945,7 @@ async def test_tool_exception_with_broken_str_still_produces_failed_tool_call():
     _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, tool_call_id)
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
 
@@ -976,7 +976,7 @@ async def test_tool_worker_logs_exception_with_traceback(caplog):
     ctx = _make_ctx(state)
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.tool"):
-        await tool_node.run(ctx, tool_call_id)
+        await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
 
     # Find the worker's exception log record.
     err_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -1182,7 +1182,7 @@ async def test_tool_failed_marker_construction_falls_back_to_sentinel():
     state.message_history.append(ModelResponse(parts=[part]))
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, "")
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=""))
 
     # Reply still publishes — no silent hang.
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
@@ -1373,7 +1373,7 @@ async def test_fallback_marker_preserves_real_tool_name_and_id_when_valid(monkey
     _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, tool_call_id)
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
     assert isinstance(result, ReturnCall)
 
     stored = ctx.state.tool_results.get(tool_call_id)
@@ -1416,7 +1416,7 @@ async def test_tool_unserializable_return_value_becomes_failed_tool_call():
     _register_tool_call(state, tool_name="returns_unserializable", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, tool_call_id)
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
     assert isinstance(result, ReturnCall), f"expected ReturnCall (no hang), got {type(result).__name__}"
 
     stored = ctx.state.tool_results.get(tool_call_id)

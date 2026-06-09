@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from typing import Any, overload
 
 import uuid_utils
@@ -94,7 +93,6 @@ class Client(BaseClient):
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
-        run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
         route: str | None = ...,
@@ -113,7 +111,6 @@ class Client(BaseClient):
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
-        run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
         route: str | None = ...,
@@ -132,7 +129,6 @@ class Client(BaseClient):
         correlation_id: str | None = None,
         temp_instructions: str | None = None,
         message_history: list[ModelMessage] | None = None,
-        run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         model_settings: ModelSettings | dict[str, Any] | None = None,
         route: str | None = None,
@@ -166,8 +162,6 @@ class Client(BaseClient):
                 the user prompt as a temporary prompt addition.
             message_history: Prior conversation messages to include for
                 multi-turn context. Defaults to an empty history.
-            run_args: Positional arguments forwarded to the node's ``run()``
-                method.
             deps: A mapping of dependency keys to values, made available to
                 the node's tools at runtime via the session context.
             model_settings: Per-call model settings (e.g. ``{"temperature": 0.0}``)
@@ -194,7 +188,6 @@ class Client(BaseClient):
             topic=topic,
             reply_topic=reply_topic,
             correlation_id=correlation_id,
-            run_args=run_args,
             state=state,
             overrides=overrides,
             deps=deps,
@@ -212,7 +205,6 @@ class Client(BaseClient):
         correlation_id: str | None = None,
         temp_instructions: str | None = None,
         message_history: list[ModelMessage] | None = None,
-        run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         model_settings: ModelSettings | dict[str, Any] | None = None,
         author: str | None = None,
@@ -244,8 +236,6 @@ class Client(BaseClient):
                 the user prompt as a temporary prompt addition.
             message_history: Prior conversation messages to include for
                 multi-turn context. Defaults to an empty history.
-            run_args: Positional arguments forwarded to the node's ``run()``
-                method.
             deps: A mapping of dependency keys to values, made available to
                 the node's tools at runtime via the session context.
             model_settings: Per-call model settings (e.g. ``{"temperature": 0.0}``)
@@ -275,7 +265,6 @@ class Client(BaseClient):
         return await self._emit(
             topic=topic,
             correlation_id=correlation_id,
-            run_args=run_args,
             state=state,
             overrides=overrides,
             deps=deps,
@@ -296,7 +285,6 @@ class Client(BaseClient):
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
-        run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
         route: str | None = ...,
@@ -316,7 +304,6 @@ class Client(BaseClient):
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
-        run_args: Sequence[Any] | None = ...,
         deps: dict[str, Any] | None = ...,
         model_settings: ModelSettings | dict[str, Any] | None = ...,
         route: str | None = ...,
@@ -336,7 +323,6 @@ class Client(BaseClient):
         correlation_id: str | None = None,
         temp_instructions: str | None = None,
         message_history: list[ModelMessage] | None = None,
-        run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         model_settings: ModelSettings | dict[str, Any] | None = None,
         route: str | None = None,
@@ -368,8 +354,6 @@ class Client(BaseClient):
                 the user prompt as a temporary prompt addition.
             message_history: Prior conversation messages to include for
                 multi-turn context. Defaults to an empty history.
-            run_args: Positional arguments forwarded to the node's ``run()``
-                method.
             deps: A mapping of dependency keys to values, made available to
                 the node's tools at runtime via the session context.
             model_settings: Per-call model settings (e.g. ``{"temperature": 0.0}``)
@@ -401,7 +385,6 @@ class Client(BaseClient):
             correlation_id=correlation_id,
             temp_instructions=temp_instructions,
             message_history=message_history,
-            run_args=run_args,
             deps=deps,
             model_settings=model_settings,
             route=route,

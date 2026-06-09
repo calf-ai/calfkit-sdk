@@ -1,6 +1,6 @@
 import logging
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import Any
 
 import uuid_utils
@@ -214,7 +214,6 @@ class BaseClient:
         correlation_id: str,
         state: State,
         overrides: OverridesState | None = None,
-        run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         route: str | None = None,
         body: Any | None = None,
@@ -227,7 +226,6 @@ class BaseClient:
             reply_topic: Topic the node should reply to.
             correlation_id: Correlation ID for this request.
             state: The session state.
-            run_args: The args to send to the node's run() method.
             deps: Provided dependencies.
 
         Returns:
@@ -241,7 +239,6 @@ class BaseClient:
             callback_topic=reply_topic,
             state=state,
             overrides=overrides,
-            run_args=run_args,
             deps=deps,
             route=route,
             body=body,
@@ -262,7 +259,6 @@ class BaseClient:
         callback_topic: str | None,
         state: State,
         overrides: OverridesState | None,
-        run_args: Sequence[Any] | None,
         deps: dict[str, Any] | None,
         route: str | None = None,
         body: Any | None = None,
@@ -281,8 +277,8 @@ class BaseClient:
                 f"producer route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
                 "segments, no wildcard. ('*' is a route pattern for @handler, not a producer route key.)"
             )
-        if body is not None and route is None:
-            raise ValueError("body= requires route=; a body with no route reaches no @handler schema (it would land unread in CallFrame.payload).")
+        # A routeless ``body`` is allowed — it rides ``CallFrame.payload`` and is read by
+        # the target node's inherited ``@handler('*')`` ``run`` when that ``run`` declares a schema.
         if not self._connection._connection:
             # First publish before an explicit start(): bring the broker up. The
             # broker's pre-start hook (the startup ensurer) provisions the reply
@@ -294,7 +290,6 @@ class BaseClient:
             CallFrame(
                 target_topic=topic,
                 callback_topic=callback_topic,
-                input_args=run_args,
                 overrides=overrides,
                 payload=body,
             )
@@ -319,7 +314,6 @@ class BaseClient:
         correlation_id: str,
         state: State,
         overrides: OverridesState | None = None,
-        run_args: Sequence[Any] | None = None,
         deps: dict[str, Any] | None = None,
         route: str | None = None,
         body: Any | None = None,
@@ -338,7 +332,6 @@ class BaseClient:
             correlation_id: Correlation ID for this request, returned for tracing.
             state: The session state.
             overrides: Runtime overrides (agent tools, model settings).
-            run_args: The args to send to the node's run() method.
             deps: Provided dependencies.
 
         Returns:
@@ -351,7 +344,6 @@ class BaseClient:
             callback_topic=None,
             state=state,
             overrides=overrides,
-            run_args=run_args,
             deps=deps,
             route=route,
             body=body,

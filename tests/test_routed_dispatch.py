@@ -20,8 +20,8 @@ def _ctx() -> SessionRunContext:
     return SessionRunContext(state=State(), deps={})
 
 
-async def _dispatch(node: Any, route: str, payload: Any = None) -> Any:
-    return await node._dispatch_routed(_ctx(), route, payload, None, awaiting_reply=False, correlation_id=_CORR)
+async def _dispatch(node: Any, route: str | None, payload: Any = None) -> Any:
+    return await node._dispatch_routed(_ctx(), route, payload, awaiting_reply=False, correlation_id=_CORR)
 
 
 def _envelope(*, callback_topic: str | None = "reply.topic", payload: Any = None) -> Envelope:
@@ -88,9 +88,11 @@ def test_call_rejects_malformed_route_at_construction() -> None:
         Call("downstream", object(), route="order.*")
 
 
-def test_call_rejects_body_without_route_at_construction() -> None:
-    with pytest.raises(ValueError):
-        Call("downstream", object(), body={"x": 1})
+def test_call_allows_body_without_route_at_construction() -> None:
+    # F1b: a routeless body is valid — it rides CallFrame.payload to the inherited
+    # '*' run handler (e.g. a tool node validating a ToolCallRef).
+    call = Call("downstream", object(), body={"x": 1})
+    assert call.body == {"x": 1} and call.route is None
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +391,6 @@ async def test_client_publish_call_stamps_route_and_body() -> None:
         callback_topic="reply.topic",
         state=State(),
         overrides=None,
-        run_args=None,
         deps=None,
         route="order.created",
         body={"amount": 9},
@@ -401,20 +402,23 @@ async def test_client_publish_call_stamps_route_and_body() -> None:
     assert env.internal_workflow_state.current_frame.payload == {"amount": 9}
 
 
-async def test_client_rejects_body_without_route() -> None:
+async def test_client_allows_body_without_route() -> None:
+    # F1b: a routeless body is published (lands in CallFrame.payload), no longer rejected.
     conn = _StubConn()
-    with pytest.raises(ValueError):
-        await _client(conn)._publish_call(
-            topic="orders",
-            correlation_id=_CORR,
-            callback_topic=None,
-            state=State(),
-            overrides=None,
-            run_args=None,
-            deps=None,
-            route=None,
-            body={"x": 1},
-        )
+    await _client(conn)._publish_call(
+        topic="orders",
+        correlation_id=_CORR,
+        callback_topic=None,
+        state=State(),
+        overrides=None,
+        deps=None,
+        route=None,
+        body={"x": 1},
+    )
+    assert len(conn.published) == 1
+    _topic, headers, env = conn.published[0]
+    assert HDR_ROUTE not in headers
+    assert env.internal_workflow_state.current_frame.payload == {"x": 1}
 
 
 @pytest.mark.parametrize("bad_route", ["order.*", "order.", "a..b", ".order"])
@@ -427,7 +431,6 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
             callback_topic=None,
             state=State(),
             overrides=None,
-            run_args=None,
             deps=None,
             route=bad_route,
             body=None,
@@ -583,7 +586,7 @@ def test_valid_schema_pairings_do_not_raise() -> None:
         async def run(self, ctx: SessionRunContext) -> Any:
             return Silent()
 
-    assert set(N.routes()) == {"order.created", "order.*"}
+    assert set(N.routes()) == {"order.created", "order.*", "*"}  # '*' is the inherited run()
 
 
 async def test_parallel_fanout_stamps_per_call_route_and_body() -> None:
@@ -647,7 +650,7 @@ async def test_no_match_log_level_keys_on_callback_presence(callback_topic: str 
     env = _envelope(callback_topic=callback_topic)
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
         await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "payment.x"}, broker=cast(Any, None))
-    matched = [r for r in caplog.records if "no handler matched" in r.message]
+    matched = [r for r in caplog.records if "no handler produced a result" in r.message]
     assert matched and matched[0].levelno == expected
 
 
@@ -657,10 +660,10 @@ async def test_no_match_log_level_keys_on_callback_presence(callback_topic: str 
 
 
 @pytest.mark.parametrize("bad_key", ["order.", ""])
-async def test_malformed_key_still_reaches_lone_star_handler(bad_key: str) -> None:
+async def test_malformed_key_still_reaches_star_run_handler(bad_key: str) -> None:
+    # The '*' catch-all is now run() itself; a malformed inbound key still reaches it.
     class N(NodeDef[Any]):
-        @handler("*")
-        async def star(self, ctx: SessionRunContext) -> Any:
+        async def run(self, ctx: SessionRunContext) -> Any:
             return Call("star", ctx.state)
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), bad_key)
@@ -696,7 +699,7 @@ async def test_schema_skip_log_level_keys_on_awaiting_reply(awaiting: bool, expe
 
     node = N(node_id="n", subscribe_topics=["t"])
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        await node._dispatch_routed(_ctx(), "order.created", {"bad": True}, None, awaiting_reply=awaiting, correlation_id=_CORR)
+        await node._dispatch_routed(_ctx(), "order.created", {"bad": True}, awaiting_reply=awaiting, correlation_id=_CORR)
     recs = [r for r in caplog.records if "validation" in r.message]
     assert recs and recs[0].levelno == expected
 
@@ -713,7 +716,7 @@ async def test_malformed_route_log_level_keys_on_awaiting_reply(awaiting: bool, 
 
     node = N(node_id="n", subscribe_topics=["t"])
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        await node._dispatch_routed(_ctx(), "order.", None, None, awaiting_reply=awaiting, correlation_id=_CORR)
+        await node._dispatch_routed(_ctx(), "order.", None, awaiting_reply=awaiting, correlation_id=_CORR)
     recs = [r for r in caplog.records if "malformed inbound route" in r.message]
     assert recs and recs[0].levelno == expected
 

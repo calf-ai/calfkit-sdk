@@ -27,6 +27,7 @@ from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.models.actions import Call, TailCall
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import State
+from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes import Agent
 
 # Reuse the proven helpers from the override-mode tests rather than
@@ -89,10 +90,10 @@ async def test_schema_only_tool_via_tools_kwarg_dispatches_without_validation() 
     result = await agent.run(ctx)
 
     # Dispatch happened — no RetryPromptPart stored, result is a Call to
-    # the tool's subscribe topic with the tool_call_id as the input arg.
+    # the tool's subscribe topic with the tool_call_id carried as a ToolCallRef body.
     assert tool_call_id not in ctx.state.tool_results, f"unexpected tool_result stored: {ctx.state.tool_results.get(tool_call_id)!r}"
     assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
-    assert result.input_args is not None and result.input_args[0] == tool_call_id
+    assert isinstance(result.body, ToolCallRef) and result.body.tool_call_id == tool_call_id
     assert result.target_topic == "tools.search.input"
 
 

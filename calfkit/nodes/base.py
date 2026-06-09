@@ -1,7 +1,6 @@
 import inspect
 import logging
-from abc import abstractmethod
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from faststream import Context, Response
@@ -11,7 +10,7 @@ from faststream.kafka.annotations import (
 from pydantic import ValidationError
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE, NodeKind, decode_header_str
-from calfkit._registry import RegistryMixin
+from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
 from calfkit.exceptions import RegistryConfigError
 from calfkit.models import (
@@ -36,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def _accepts_extra_param(fn: Callable[..., Any]) -> bool:
     """True if ``fn`` declares a parameter beyond ``(self, ctx)`` — i.e. it takes a
-    run input-arg / route payload. (Unbound signature: ``self`` + ``ctx`` = 2.)"""
+    route payload (which then requires a ``schema=``). (Unbound signature: ``self`` + ``ctx`` = 2.)"""
     return len(inspect.signature(fn).parameters) > 2
 
 
@@ -61,7 +60,6 @@ on the first rejection.
 
 
 class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
-    _run_accepts_input: bool
     _worker: "Worker | None" = None
     """Back-reference to the owning worker, set by ``Worker._add_node``. ``None``
     for a node not attached to a worker. Used by :meth:`_effective_resources` to
@@ -76,24 +74,19 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        cls._run_accepts_input = _accepts_extra_param(cls.run)
         cls._validate_routes()
 
     @classmethod
     def _validate_routes(cls) -> None:
         """Class-definition checks for ``@handler`` routes (run after collection).
 
-        - An overridden ``run()`` is the implicit ``*`` fallback, so an explicit
-          ``@handler('*')`` alongside it is an ambiguous catch-all.
-        - The signature/``schema`` pairing must agree (§5.1): a ``(self, ctx, payload)``
-          handler requires ``schema=``; a ``(self, ctx)`` handler must not have it.
+        The signature/``schema`` pairing must agree: a ``(self, ctx, payload)``
+        handler requires ``schema=``; a ``(self, ctx)`` handler must not have it.
+        ``run()`` is the inherited ``@handler('*')`` catch-all and is validated by
+        the same rule — so an override that takes a payload (e.g. a tool node) must
+        re-decorate ``@handler('*', schema=...)``. A user-defined second ``@handler('*')``
+        collides with ``run`` and is rejected by the registry's uniqueness check.
         """
-        run_overridden = cls.run is not BaseNodeDef.run
-        if "*" in cls._handlers and run_overridden:
-            raise RegistryConfigError(
-                f"{cls.__qualname__}: @handler('*') conflicts with the node's run() catch-all "
-                "(run() is already the implicit '*' fallback); use a more specific route, or override run() instead."
-            )
         for route, info in cls._handler_info.items():
             handler_fn = getattr(cls, cls._handlers[route])
             accepts_payload = _accepts_extra_param(handler_fn)
@@ -185,29 +178,27 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 return False
         return True
 
-    # TODO: consider multiple abstract methods per node based on the incoming communication pattern,
-    # like a delgation or emit. So the communication-specific handler can properly handle it
-    @abstractmethod
-    async def run(self, ctx: SessionRunContext, *args: Any, **kwargs: Any) -> NodeResult[State]:
-        """Runs the node's logic using provided context.
+    @handler("*")
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Next:
+        """The node's default catch-all handler — registered at route ``'*'`` (the
+        least-specific pattern, dispatched last in the Chain of Responsibility).
 
-        Subclasses that need per-invocation input can add an optional parameter
-        (any name). The framework inspects the signature at class definition time
-        and will pass ``current_frame.input_args`` automatically if the parameter is declared.
+        The base implementation **declines** (returns :class:`~calfkit.models.Next`)
+        so a node that defines only specific ``@handler`` routes skips an unmatched
+        message instead of erroring. Override to give the node default behavior; an
+        override resolves as the ``'*'`` handler with no need to re-apply ``@handler``.
+        A node that needs a per-invocation typed body re-decorates
+        ``@handler('*', schema=...)`` and takes a ``payload`` parameter (e.g. a tool node).
 
         Args:
             ctx: Session context containing mutable state and the user-provided
                 dependencies dict (treat ``ctx.deps`` as read-only).
 
-        Raises:
-            NotImplementedError: If node subclass does not implement the run() method.
-
         Returns:
-            NodeResult[State]: Execution results persisted via modified state wrapped
-            in the NodeResult type. Different NodeResult types define how results
-            should be communicated.
+            A :class:`~calfkit.models.NodeResult` (a control-flow action), or
+            :class:`~calfkit.models.Next` to decline and end the chain (the default).
         """
-        raise NotImplementedError()
+        return Next()
 
     async def prepare_context(
         self,
@@ -337,36 +328,31 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
         return publish_envelope
 
-    async def _call_run(self, ctx: SessionRunContext, input_args: Sequence[Any] | None) -> NodeResult[State]:
-        """Invoke ``run``, passing the per-message input args when its signature accepts them."""
-        if self._run_accepts_input and input_args is not None:
-            return await self.run(ctx, *input_args)
-        return await self.run(ctx)
-
     async def _dispatch_routed(
         self,
         ctx: SessionRunContext,
-        route: str,
+        route: str | None,
         payload: Any,
-        input_args: Sequence[Any] | None,
         *,
         awaiting_reply: bool,
         correlation_id: str,
     ) -> NodeResult[State] | None:
         """Dispatch ``route`` to matched handlers as a Chain of Responsibility.
 
-        Runs matched handlers most-specific → most-general (§6.3). A handler that
-        returns :class:`~calfkit.models.Next` (or ``None`` — e.g. a missing return)
-        declines and the chain advances; the first other result is terminal and
-        short-circuits. A handler with a
-        ``schema`` whose body fails validation is skipped (logged, callback-aware
-        level). If no handler handles the route, the node's overridden ``run()`` is
-        the implicit ``*`` fallback; absent that, returns ``None`` (no match).
+        Runs matched handlers most-specific → most-general. A handler that returns
+        :class:`~calfkit.models.Next` (or ``None`` — e.g. a missing return) declines
+        and the chain advances; the first other result is terminal and short-circuits.
+        A handler with a ``schema`` whose body fails validation is skipped (logged,
+        callback-aware level). ``run()`` is the inherited ``'*'`` handler dispatched
+        last; the base ``run()`` declines (returns ``Next``), so a node with no real
+        match returns ``None``. ``route`` is ``None`` for a header-less message — only
+        the ``'*'`` handler matches it.
         """
         cls = type(self)
-        if not is_concrete_route_key(route):
-            # Malformed inbound key (empty segment / trailing dot / wildcard): never
-            # partial-matches a specific handler — only the "*"/run() fallback can catch it.
+        if route is not None and not is_concrete_route_key(route):
+            # Present-but-malformed inbound key (empty segment / trailing dot / wildcard):
+            # never partial-matches a specific handler — only the "*"/run fallback catches it.
+            # (A None route is the normal header-less case, not malformed.)
             level = _stuck_level(awaiting_reply)
             logger.log(
                 level,
@@ -382,6 +368,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 try:
                     validated = info.schema.model_validate(payload)
                 except ValidationError:
+                    # TODO(#201): "skip to next handler" is correct for an optional specific
+                    # route, but for a reply-owing tool node whose only handler is the '*'
+                    # catch-all this declines without publishing a ReturnCall — the agent then
+                    # relies on its reply-TTL. Make a reply-owing catch-all schema rejection
+                    # produce a FailedToolCall reply (error-propagation work).
                     level = _stuck_level(awaiting_reply)
                     logger.log(
                         level,
@@ -399,8 +390,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 # Decline (Next, or a handler that simply returned nothing) → advance.
                 continue
             return result
-        if cls.run is not BaseNodeDef.run:
-            return await self._call_run(ctx, input_args)
         return None
 
     async def handler(
@@ -429,30 +418,33 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         else:
             frame = envelope.internal_workflow_state.current_frame
             route = decode_header_str(headers.get(HDR_ROUTE))
-            if route is not None and type(self)._handlers:
-                output = await self._dispatch_routed(
-                    ctx,
+            output = await self._dispatch_routed(
+                ctx,
+                route,
+                frame.payload,
+                awaiting_reply=frame.callback_topic is not None,
+                correlation_id=correlation_id,
+            )
+            if output is None:
+                # No matched handler produced a terminal result: every match declined
+                # (returned Next/None). The '*' handler (run) is always in the chain — the
+                # base run() always declines; an overridden run() may also decline, or a
+                # schema'd '*' run may have REJECTED the body (logged above). Stuck workflow
+                # if a caller awaits a return, else a fire-and-forget no-op. The body_note
+                # surfaces a present-but-unconsumed payload (e.g. a malformed tool ToolCallRef)
+                # so a dropped body is observable, not silent — callback-aware via `level`.
+                level = _stuck_level(frame.callback_topic is not None)
+                body_note = " — a body was not consumed (rejected by a schema handler, or unmatched)" if frame.payload is not None else ""
+                logger.log(
+                    level,
+                    "[%s] no handler produced a result for route=%s on node=%s; registered=%s%s",
+                    correlation_id[:8],
                     route,
-                    frame.payload,
-                    frame.input_args,
-                    awaiting_reply=frame.callback_topic is not None,
-                    correlation_id=correlation_id,
+                    self.node_id,
+                    tuple(type(self)._handlers),
+                    body_note,
                 )
-                if output is None:
-                    # No matching handler (and no run() fallback): a stuck workflow
-                    # if a caller is awaiting a return, else a fire-and-forget no-op.
-                    level = _stuck_level(frame.callback_topic is not None)
-                    logger.log(
-                        level,
-                        "[%s] no handler matched route=%s on node=%s; registered=%s",
-                        correlation_id[:8],
-                        route,
-                        self.node_id,
-                        tuple(type(self)._handlers),
-                    )
-                    return Response(envelope, headers=self._emitter_headers())
-            else:
-                output = await self._call_run(ctx, frame.input_args)
+                return Response(envelope, headers=self._emitter_headers())
             logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
             body = await self._publish_action(output, envelope, correlation_id, broker)
 
