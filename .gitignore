@@ -47,3 +47,6 @@ uv.lock
 notes/
 docs/internal/
 docs/adr/
+
+# Local scratch / experiments
+scratch/
