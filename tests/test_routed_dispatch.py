@@ -650,7 +650,7 @@ async def test_no_match_log_level_keys_on_callback_presence(callback_topic: str 
     env = _envelope(callback_topic=callback_topic)
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
         await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "payment.x"}, broker=cast(Any, None))
-    matched = [r for r in caplog.records if "no handler matched" in r.message]
+    matched = [r for r in caplog.records if "no handler produced a result" in r.message]
     assert matched and matched[0].levelno == expected
 
 

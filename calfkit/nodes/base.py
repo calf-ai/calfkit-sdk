@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def _accepts_extra_param(fn: Callable[..., Any]) -> bool:
     """True if ``fn`` declares a parameter beyond ``(self, ctx)`` — i.e. it takes a
-    run input-arg / route payload. (Unbound signature: ``self`` + ``ctx`` = 2.)"""
+    route payload (which then requires a ``schema=``). (Unbound signature: ``self`` + ``ctx`` = 2.)"""
     return len(inspect.signature(fn).parameters) > 2
 
 
@@ -421,26 +421,24 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 correlation_id=correlation_id,
             )
             if output is None:
-                # Every matched handler declined (the base run() '*' fallback always
-                # declines). Stuck workflow if a caller awaits a return, else a no-op.
+                # No matched handler produced a terminal result: every match declined
+                # (returned Next/None). The '*' handler (run) is always in the chain — the
+                # base run() always declines; an overridden run() may also decline, or a
+                # schema'd '*' run may have REJECTED the body (logged above). Stuck workflow
+                # if a caller awaits a return, else a fire-and-forget no-op. The body_note
+                # surfaces a present-but-unconsumed payload (e.g. a malformed tool ToolCallRef)
+                # so a dropped body is observable, not silent — callback-aware via `level`.
                 level = _stuck_level(frame.callback_topic is not None)
+                body_note = " — a body was not consumed (rejected by a schema handler, or unmatched)" if frame.payload is not None else ""
                 logger.log(
                     level,
-                    "[%s] no handler matched route=%s on node=%s; registered=%s",
+                    "[%s] no handler produced a result for route=%s on node=%s; registered=%s%s",
                     correlation_id[:8],
                     route,
                     self.node_id,
                     tuple(type(self)._handlers),
+                    body_note,
                 )
-                if frame.payload is not None:
-                    # A producer attached a body that no schema handler consumed — surface
-                    # it (callback-aware level) so a silently-dropped payload is observable.
-                    logger.log(
-                        level,
-                        "[%s] inbound body was not consumed by any handler on node=%s (no '*' schema handler matched)",
-                        correlation_id[:8],
-                        self.node_id,
-                    )
                 return Response(envelope, headers=self._emitter_headers())
             logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
             body = await self._publish_action(output, envelope, correlation_id, broker)

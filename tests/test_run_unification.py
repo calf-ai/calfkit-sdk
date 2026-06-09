@@ -17,11 +17,13 @@ from pydantic import BaseModel, ValidationError
 
 from calfkit._protocol import HDR_ROUTE
 from calfkit._registry import handler
+from calfkit._routing import is_concrete_route_key, match_chain, route_matches
 from calfkit.exceptions import RegistryConfigError
-from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Silent, State, WorkflowState
+from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Silent, State, ToolContext, WorkflowState
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.node import NodeDef
+from calfkit.nodes.tool import ToolNodeDef
 
 _CORR = "corr-run-unif-0"
 
@@ -133,6 +135,43 @@ def test_call_allows_body_without_route() -> None:
     c = Call("t", State(), body={"x": 1})
     assert c.body == {"x": 1}
     assert c.route is None
+
+
+def test_routing_none_key_matches_only_star() -> None:
+    # Load-bearing: `route_matches` checks `pattern == "*"` BEFORE touching the key,
+    # so a header-less (None) route matches ONLY '*'. A reorder would silently break
+    # every header-less + tool-dispatch message — pin it here.
+    assert route_matches("*", None) is True
+    assert route_matches("order.*", None) is False
+    assert route_matches("order.created", None) is False
+    assert is_concrete_route_key(None) is False
+    assert match_chain(None, {"order.*": "x", "*": "run"}) == ["*"]
+
+
+async def test_malformed_toolcallref_body_to_tool_declines_and_logs_loud(caplog: pytest.LogCaptureFixture) -> None:
+    # Known limitation (ADR risk register): a tool dispatch whose body fails ToolCallRef
+    # validation is declined at the dispatcher — run() is never entered, so NO ReturnCall
+    # is published and an awaiting agent relies on its reply-TTL. Not reachable via the
+    # agent (which always sends a valid ToolCallRef); pinned here to assert the decline is
+    # LOUD (callback-aware WARNING), not silent, so a hung workflow is diagnosable.
+    def _ok(ctx: ToolContext) -> str:
+        return "ok"  # never invoked — validation fails first
+
+    tool = ToolNodeDef.create_tool_node(func=_ok, subscribe_topics="t.in", publish_topic="t.out")
+    published: list[Any] = []
+
+    class _Broker:
+        async def publish(self, *a: Any, **k: Any) -> None:
+            published.append((a, k))
+
+    env = _envelope(callback_topic="agent.return", payload={"surprise": "nope"})  # not a valid ToolCallRef
+    with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
+        resp = await tool.handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, _Broker()))
+
+    assert published == []  # no ReturnCall — the documented gap
+    assert resp.body is env
+    validation_logs = [r for r in caplog.records if "validation" in r.message]
+    assert validation_logs and validation_logs[0].levelno == logging.WARNING
 
 
 async def test_unconsumed_routeless_body_is_logged_callback_aware(caplog: pytest.LogCaptureFixture) -> None:

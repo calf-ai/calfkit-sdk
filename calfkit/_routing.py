@@ -46,17 +46,14 @@ def route_matches(pattern: str, key: str | None) -> bool:
     pattern matches an equal key; a trailing ``prefix.*`` matches keys strictly
     *below* ``prefix`` (segment-aware), so ``order.*`` matches ``order.created`` but
     not bare ``order`` nor ``orders.created``.
-
-    NOTE: the ``pattern == "*"`` check must stay first — it is the only branch that
-    accepts a ``None``/malformed key. Reordering it would silently break every
-    header-less and tool-dispatch message (run/handler unification relies on this).
     """
+    if key is None or not is_concrete_route_key(key):
+        # A None (header-less) or malformed inbound key never partial-matches a
+        # specific pattern; only the universal "*" can catch it. (Handling this
+        # first keeps the function order-independent and narrows ``key`` to ``str``.)
+        return pattern == "*"
     if pattern == "*":
         return True
-    if key is None or not is_concrete_route_key(key):
-        # A None/malformed inbound key never partial-matches a specific pattern; only
-        # the universal "*" (handled above) can catch it.
-        return False
     if pattern.endswith(".*"):
         prefix = pattern[:-2].split(".")
         segs = key.split(".")

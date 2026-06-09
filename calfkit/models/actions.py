@@ -24,40 +24,26 @@ class Delegate(Generic[StateT]):
     value: StateT | None = None
 
 
-@dataclass(init=False)
+@dataclass
 class _Call(Generic[StateT]):
-    """Call another node, and provide a mutable state and arguments.
-    The target will callback the caller (w/ State) when complete."""
+    """Call another node, providing mutable state.
 
-    # callback occurs within the current correlation id / flow
+    The callee callbacks the caller (w/ ``state``) when it completes, within the
+    current correlation id / flow; for a fire-and-forget terminal the callstack
+    pops to the previous caller instead.
+
+    Args:
+        target_topic: The topic of the target node to call.
+        state: Mutable state returned back to the caller on callback.
+    """
 
     target_topic: str
     state: StateT
 
-    def __init__(
-        self,
-        target_topic: str,
-        state: StateT,
-    ):
-        """Create a call object to another node. Used to call another node.
-
-        Args:
-            target_topic (str): The topic of the target node to call.
-            state (StateT): Mutable state returned back to the caller when the callee
-                completes, within the current correlation id / flow. (If the callee is
-                a fire-and-forget terminal, the callstack pops to the previous caller.)
-
-        Returns:
-            Call: The call object
-        """
-
-        self.target_topic = target_topic
-        self.state = state
-
 
 @dataclass(init=False)
 class Call(Generic[StateT], _Call[StateT]):
-    """Call another node, and provide a mutable state and arguments.
+    """Call another node, providing mutable state.
     The target will callback the caller (w/ State) when complete.
 
     Optionally carries header-route-dispatch metadata: ``route`` (a concrete route
