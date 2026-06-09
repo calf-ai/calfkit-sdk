@@ -12,3 +12,5 @@ pydantic-ai-slim==1.47.0  https://github.com/pydantic/pydantic-ai
 #   - _function_schema.py: _is_call_ctx() recognizes RunContext subclasses
 #   - messages.py: Added `retry_prompt` classmethod to ModelRequest
 #   - models/anthropic.py: UserLocation -> BetaUserLocationParam (anthropic SDK 0.80.0 rename)
+#   - models/google.py: ReDoS fix for _FILE_SEARCH_QUERY_PATTERN, backported from
+#     pydantic-ai#5106 (included upstream since v1.83.0; drop when re-vendoring >=1.83.0)
