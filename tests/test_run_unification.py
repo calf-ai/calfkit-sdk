@@ -120,8 +120,10 @@ async def test_routes_only_node_skips_unmatched_via_declining_base_run() -> None
 
 def test_extra_positional_run_without_schema_raises_at_class_def() -> None:
     with pytest.raises(RegistryConfigError):
-
-        class N(NodeDef[Any]):
+        # The class name is never used — defining the class is what raises (its
+        # __init_subclass__ runs _validate_routes). The leading underscore marks the
+        # name intentionally-unused (CodeQL) while staying CapWords-valid (ruff N801).
+        class _N(NodeDef[Any]):
             async def run(self, ctx: SessionRunContext, extra: Any) -> Any:  # type: ignore[override]
                 return Silent()
 
