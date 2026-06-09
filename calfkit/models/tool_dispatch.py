@@ -1,12 +1,8 @@
-"""Payload carried on a tool ``Call`` so a tool node knows which tool call to service.
-
-Replaces the former positional ``input_args=(tool_call_id,)`` channel. The agent
-dispatches a tool with ``Call(tool_topic, state, body=ToolCallRef(tool_call_id=...))``
-(no route); the tool node's ``@handler('*', schema=ToolCallRef)`` ``run`` validates
-``current_frame.payload`` into a :class:`ToolCallRef` before it is entered.
-"""
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+
+from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 
 
 class ToolCallRef(BaseModel):
@@ -28,3 +24,9 @@ class ToolCallRef(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     tool_call_id: str
+    args: dict[str, Any]
+    name: str
+
+    @classmethod
+    def from_tool_call_part(cls, tool_call_part: ToolCallPart):
+        return cls(tool_call_id=tool_call_part.tool_call_id, args=tool_call_part.args_as_dict(), name=tool_call_part.tool_name)

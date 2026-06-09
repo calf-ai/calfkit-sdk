@@ -273,7 +273,7 @@ class BaseAgentNodeDef(
                     return Call[State](
                         tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                         ctx.state,
-                        body=ToolCallRef(tool_call_id=target_tool_call.tool_call_id),
+                        body=ToolCallRef.from_tool_call_part(target_tool_call),
                     )
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
@@ -444,7 +444,7 @@ class BaseAgentNodeDef(
                 return Call[State](
                     tools_registry[target_tool_call.tool_name].subscribe_topics[0],
                     ctx.state,
-                    body=ToolCallRef(tool_call_id=target_tool_call.tool_call_id),
+                    body=ToolCallRef.from_tool_call_part(target_tool_call),
                 )
             else:
                 launch_tool_call_ids = [tc.tool_call_id for tc in pending_tool_calls]
@@ -452,7 +452,7 @@ class BaseAgentNodeDef(
                     Call[State](
                         tools_registry[tc.tool_name].subscribe_topics[0],
                         ctx.state.model_copy(deep=True),
-                        body=ToolCallRef(tool_call_id=tc.tool_call_id),
+                        body=ToolCallRef.from_tool_call_part(tc),
                     )
                     for tc in pending_tool_calls
                 ]
