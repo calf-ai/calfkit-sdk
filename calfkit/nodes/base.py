@@ -368,6 +368,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 try:
                     validated = info.schema.model_validate(payload)
                 except ValidationError:
+                    # TODO(#201): "skip to next handler" is correct for an optional specific
+                    # route, but for a reply-owing tool node whose only handler is the '*'
+                    # catch-all this declines without publishing a ReturnCall — the agent then
+                    # relies on its reply-TTL. Make a reply-owing catch-all schema rejection
+                    # produce a FailedToolCall reply (error-propagation work).
                     level = _stuck_level(awaiting_reply)
                     logger.log(
                         level,
