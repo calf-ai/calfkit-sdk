@@ -99,7 +99,7 @@ affected.
 headers as `_invoke`, and **returns the `correlation_id`** (a `str`) for tracing/correlation.
 
 `Client.emit_to_node(...)` takes the same input-shaping arguments as `invoke_node`
-(`tool_overrides`, `temp_instructions`, `message_history`, `run_args`, `deps`,
+(`tool_overrides`, `temp_instructions`, `message_history`, `route`, `body`, `deps`,
 `model_settings`, `correlation_id`) **minus** `reply_topic` and `output_type` — both are
 meaningless when there is no reply to route or deserialize. It reuses `invoke_node`'s
 `model_settings` JSON-serializability guard, `State` construction, and `OverridesState` build,

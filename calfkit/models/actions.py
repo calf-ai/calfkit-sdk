@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Generic
 
@@ -23,7 +22,6 @@ class Delegate(Generic[StateT]):
 
     topic: str
     value: StateT | None = None
-    input_args: Sequence[Any] | None = None
 
 
 @dataclass(init=False)
@@ -35,36 +33,26 @@ class _Call(Generic[StateT]):
 
     target_topic: str
     state: StateT
-    input_args: Sequence[Any] | None
 
     def __init__(
         self,
         target_topic: str,
         state: StateT,
-        *input_args: Any,
     ):
         """Create a call object to another node. Used to call another node.
 
         Args:
-
             target_topic (str): The topic of the target node to call.
-
-            request_callback (bool): Whether to request a callback from the target node.
-            The callback will return the processed state back to the caller.
-            The callback occurs within the current correlation id / flow.
-            If no callback is requested, at the end of this node's execution, the callstack pops and the previous caller gets its callback.
-
-            state (StateT | None, optional): Mutable state which will be returned back if callback is requested. Defaults to None.
-
-            *input_args (Any, optional): Pass in any arguments the node's run() method accepts.
+            state (StateT): Mutable state returned back to the caller when the callee
+                completes, within the current correlation id / flow. (If the callee is
+                a fire-and-forget terminal, the callstack pops to the previous caller.)
 
         Returns:
             Call: The call object
-        """  # noqa: E501
+        """
 
         self.target_topic = target_topic
         self.state = state
-        self.input_args = input_args or None
 
 
 @dataclass(init=False)
@@ -76,13 +64,13 @@ class Call(Generic[StateT], _Call[StateT]):
     key, stamped as the ``x-calf-route`` header on the publish) and ``body`` (an
     optional payload validated against the target handler's ``schema``). These live
     on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a route. ``init=False``
-    keeps the custom ``*input_args`` constructor while letting ``route``/``body``
+    keeps the custom keyword-only ``route``/``body`` constructor while letting them
     participate in ``__eq__``/``__repr__``."""
 
     route: str | None = None
     body: Any | None = None
 
-    def __init__(self, target_topic: str, state: StateT, *input_args: Any, route: str | None = None, body: Any | None = None) -> None:
+    def __init__(self, target_topic: str, state: StateT, *, route: str | None = None, body: Any | None = None) -> None:
         if route is not None and not is_concrete_route_key(route):
             raise ValueError(
                 f"Call route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
@@ -91,7 +79,7 @@ class Call(Generic[StateT], _Call[StateT]):
         # A routeless ``body`` is intentionally allowed: it lands in ``CallFrame.payload``
         # and is read by the target node's inherited ``@handler('*')`` ``run`` when that
         # ``run`` declares a ``schema`` (e.g. a tool node validating a ``ToolCallRef``).
-        super().__init__(target_topic, state, *input_args)
+        super().__init__(target_topic, state)
         self.route = route
         self.body = body
 

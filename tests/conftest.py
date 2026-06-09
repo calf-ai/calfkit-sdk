@@ -1,6 +1,6 @@
 import os
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -265,21 +265,8 @@ def make_overrides_state_factory(request, container) -> Callable[..., OverridesS
     raise ValueError(f"Unknown mode={mode}")
 
 
-@pytest.fixture(params=["input-args", None])
-def make_input_args_factory(request) -> Callable[..., Sequence[Any] | None]:
-    mode = request.param
-
-    if mode is None:
-        return lambda: None
-
-    elif mode == "input-args":
-        return lambda: fake.pylist(allowed_types=[str, int, float, bool])
-
-    raise ValueError(f"Unknown mode={mode}")
-
-
 @pytest.fixture(params=["empty-stack", "stack"])
-def make_internal_workflow_state(request, make_overrides_state_factory, make_input_args_factory) -> WorkflowState:
+def make_internal_workflow_state(request, make_overrides_state_factory) -> WorkflowState:
     mode = request.param
     stack = CallFrameStack()
     if mode == "empty-stack":
@@ -292,7 +279,6 @@ def make_internal_workflow_state(request, make_overrides_state_factory, make_inp
                     target_topic=fake.pystr(min_chars=2),
                     callback_topic=fake.pystr(min_chars=2),
                     overrides=make_overrides_state_factory(),
-                    input_args=make_input_args_factory(),
                 )
             )
     return WorkflowState(call_stack=stack)
