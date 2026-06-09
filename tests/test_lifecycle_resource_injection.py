@@ -160,7 +160,7 @@ async def test_consumer_handler_injects_node_resources_into_context() -> None:
         node_id="sink",
         subscribe_topics="sink.in",
         consume_fn=sink,
-        output_type=str,
+        agent_output_type=str,
     )
     sentinel = object()
     node.resources["db"] = sentinel
@@ -203,7 +203,7 @@ async def test_consumer_context_resources_is_shallow_copy_of_node_bag() -> None:
         node_id="sink_iso",
         subscribe_topics="sink_iso.in",
         consume_fn=sink,
-        output_type=str,
+        agent_output_type=str,
     )
     node.resources["db"] = object()
 
