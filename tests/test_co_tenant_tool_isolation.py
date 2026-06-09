@@ -35,7 +35,8 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
-from calfkit.client import Client, NodeResult
+from calfkit.client import Client
+from calfkit.models import ConsumerContext
 from calfkit.models.actions import TailCall
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
@@ -45,7 +46,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import State
-from calfkit.nodes import Agent, ConsumerNodeDef, ToolNodeDef, agent_tool, consumer
+from calfkit.nodes import Agent, ConsumerNode, ToolNodeDef, agent_tool, consumer
 from calfkit.worker import Worker
 from tests.providers import get_users_name, prepare_worker
 from tests.utils import wait_for_condition
@@ -116,24 +117,24 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
         tools=[shared_tool],
     )
 
-    alpha_finals: list[NodeResult] = []
-    bravo_finals: list[NodeResult] = []
+    alpha_finals: list[ConsumerContext] = []
+    bravo_finals: list[ConsumerContext] = []
 
     @consumer(
         subscribe_topics="alpha_agent.out",
         gates=[lambda ctx: bool(ctx.state.final_output_parts)],
         node_id="alpha_final_sink",
     )
-    def alpha_sink(result: NodeResult) -> None:
-        alpha_finals.append(result)
+    def alpha_sink(ctx: ConsumerContext) -> None:
+        alpha_finals.append(ctx)
 
     @consumer(
         subscribe_topics="bravo_agent.out",
         gates=[lambda ctx: bool(ctx.state.final_output_parts)],
         node_id="bravo_final_sink",
     )
-    def bravo_sink(result: NodeResult) -> None:
-        bravo_finals.append(result)
+    def bravo_sink(ctx: ConsumerContext) -> None:
+        bravo_finals.append(ctx)
 
     # ``shared_tool`` is added to the worker once even though both agents
     # reference it in their ``tools=`` lists — agents' tool registries are
@@ -425,12 +426,12 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
             id="Agent",
         ),
         pytest.param(
-            lambda: ConsumerNodeDef(
+            lambda: ConsumerNode(
                 node_id="empty_consumer",
                 subscribe_topics=[],
                 consume_fn=lambda r: None,
             ),
-            id="ConsumerNodeDef",
+            id="ConsumerNode",
         ),
         pytest.param(
             lambda: ToolNodeDef(
@@ -447,7 +448,7 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
 def test_empty_subscribe_topics_raises_value_error(node_factory):
     """The ``BaseNodeSchema.__post_init__`` guard must reject empty
     ``subscribe_topics`` for every node kind. ``Agent`` and
-    ``ConsumerNodeDef`` reach the guard via ``BaseNodeDef.__init__``'s
+    ``ConsumerNode`` reach the guard via ``BaseNodeDef.__init__``'s
     ``super().__init__(...)`` chain; ``ToolNodeDef`` reaches it via the
     dataclass-auto-generated ``__init__`` (which bypasses
     ``BaseNodeDef.__init__`` entirely). A regression that moved the guard

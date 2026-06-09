@@ -31,7 +31,8 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
-from calfkit.client import Client, NodeResult
+from calfkit.client import Client
+from calfkit.models import ConsumerContext
 from calfkit.models.actions import ReturnCall
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart
@@ -164,11 +165,11 @@ async def test_emit_to_node_traceable_via_publish_topic_but_no_reply(container, 
     """The terminal result still rides the broadcast ``publish_topic`` channel (a
     ``@consumer`` observes it with populated output), while the client reply inbox
     receives nothing — no reply future, and no "no pending future" warning."""
-    received: list[NodeResult] = []
+    received: list[ConsumerContext] = []
 
     @consumer(subscribe_topics="emit_trace_agent.output")
-    def sink(result: NodeResult) -> None:
-        received.append(result)
+    def sink(ctx: ConsumerContext) -> None:
+        received.append(ctx)
 
     worker = container.get(Worker)
     agent = Agent(
@@ -189,10 +190,10 @@ async def test_emit_to_node_traceable_via_publish_topic_but_no_reply(container, 
             cid = await client.emit_to_node("hi", agent.subscribe_topics[0])
 
     # The terminal result reached the broadcast publish_topic channel.
-    final = [r for r in received if any(isinstance(p, TextPart) for p in r.output_parts)]
+    final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
     assert final, f"consumer never saw a terminal envelope; saw={received}"
     assert final[-1].output == "done"
-    assert isinstance(final[-1], NodeResult)
+    assert isinstance(final[-1], ConsumerContext)
     assert final[-1].correlation_id == cid
 
     # The client reply inbox received nothing: no pending future was registered,
@@ -338,11 +339,11 @@ async def test_emit_to_node_multi_hop_tool_call_still_terminates_traceably(conta
     terminal still reaches publish_topic. If None ever leaked into the tool
     frame's callback the tool round-trip would break and no terminal would
     arrive — so a passing terminal proves the invariant."""
-    received: list[NodeResult] = []
+    received: list[ConsumerContext] = []
 
     @consumer(subscribe_topics="emit_tool_agent.output")
-    def sink(result: NodeResult) -> None:
-        received.append(result)
+    def sink(ctx: ConsumerContext) -> None:
+        received.append(ctx)
 
     worker = container.get(Worker)
     agent = Agent(

@@ -27,8 +27,6 @@ class NodeResult(Generic[OutputT]):
 
     * :meth:`Client.execute_node` / :meth:`InvocationHandle.result` — the
       final reply from an agent invocation.
-    * The user function of a :class:`ConsumerNodeDef` — one per envelope on
-      every subscribed topic, including intermediate hops.
 
     The ``state`` field is the full session :class:`~calfkit.models.State` at
     the moment this envelope was published, exposing message history, in-flight
