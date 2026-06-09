@@ -258,7 +258,7 @@ async def test_consumer_sees_upstream_emitter_identity(container):
 async def test_consumer_deserializes_output_type_dataclass(container):
     received: list[ConsumerContext[Report]] = []
 
-    @consumer(subscribe_topics="structured_agent.output", output_type=Report)
+    @consumer(subscribe_topics="structured_agent.output", agent_output_type=Report)
     def sink(ctx: ConsumerContext[Report]) -> None:
         received.append(ctx)
 
@@ -332,7 +332,7 @@ async def test_intermediate_hop_passes_to_fn_with_output_none(caplog):
 async def test_validation_error_on_present_parts_logs_and_skips(caplog):
     """Parts present but don't match output_type → skip + ERROR with context."""
     invocations: list[str] = []
-    node = ConsumerNode(node_id="val_sink", subscribe_topics="t", consume_fn=lambda ctx: invocations.append("ran"), output_type=Report)
+    node = ConsumerNode(node_id="val_sink", subscribe_topics="t", consume_fn=lambda ctx: invocations.append("ran"), agent_output_type=Report)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_data_state({"unexpected": "shape"})))
@@ -642,7 +642,7 @@ def test_consumer_reuses_prebuilt_type_adapter(monkeypatch):
     monkeypatch.setattr(node_result_mod, "TypeAdapter", _CountingAdapter)
     monkeypatch.setattr(consumer_mod, "TypeAdapter", _CountingAdapter)
 
-    @consumer(subscribe_topics="prebuilt.topic", output_type=Report)
+    @consumer(subscribe_topics="prebuilt.topic", agent_output_type=Report)
     def sink(ctx: ConsumerContext[Report]) -> None:
         return None
 
@@ -664,7 +664,7 @@ def test_unschematizable_output_type_raises_at_construction():
         TypeAdapter(BadType)
     except Exception:
         with pytest.raises(Exception):
-            ConsumerNode(node_id="bad", subscribe_topics="t", consume_fn=lambda ctx: None, output_type=BadType)
+            ConsumerNode(node_id="bad", subscribe_topics="t", consume_fn=lambda ctx: None, agent_output_type=BadType)
     else:
         pytest.skip("TypeAdapter(BadType) succeeded on this pydantic version")
 
