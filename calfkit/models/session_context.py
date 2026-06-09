@@ -32,6 +32,9 @@ class Stack(Generic[StackItemT]):
         except Exception as e:
             raise Exception("An exception occurred when peeking from execution stack") from e
 
+    def is_empty(self) -> bool:
+        return not self._internal_list
+
 
 @dataclass(frozen=True)
 class CallFrame:
@@ -62,6 +65,18 @@ class WorkflowState(BaseModel):
     @property
     def current_frame(self) -> CallFrame:
         return self.call_stack.peek()
+
+    @property
+    def current_frame_or_none(self) -> CallFrame | None:
+        """The top call frame, or ``None`` when the stack is empty.
+
+        A frameless inbound envelope reaches a terminal-sink consumer that taps a
+        producer's ``publish_topic`` after that producer's ``ReturnCall`` unwound
+        the stack. Unlike :attr:`current_frame` (which raises on an empty stack),
+        this lets the base handler treat a missing frame as "no per-invocation
+        control-flow metadata" instead of failing.
+        """
+        return None if self.call_stack.is_empty() else self.call_stack.peek()
 
     def unwind_frame(self) -> CallFrame:
         return self.call_stack.pop()
