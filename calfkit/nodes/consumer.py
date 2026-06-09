@@ -47,18 +47,18 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
         consume_fn: ConsumerFn[OutputT],
         subscribe_topics: str | list[str],
         gates: list[GateFunction] | None = None,
-        output_type: type[OutputT] = _UNSET,
+        agent_output_type: type[OutputT] = _UNSET,
     ) -> None:
         _validate_consume_fn(consume_fn)
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
         super().__init__(node_id=node_id, subscribe_topics=list(subscribe_topics), gates=gates)
         self._func: ConsumerFn[OutputT] = consume_fn
-        self._output_type = output_type
+        self._output_type = agent_output_type
 
         self._type_adapter: TypeAdapter[Any] | None = None
-        if output_type is not _UNSET and output_type is not str:
-            self._type_adapter = TypeAdapter(output_type)
+        if agent_output_type is not _UNSET and agent_output_type is not str:
+            self._type_adapter = TypeAdapter(agent_output_type)
 
     async def run(self, ctx: SessionRunContext) -> None:
         try:
@@ -109,7 +109,7 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
 def consumer(
     *,
     subscribe_topics: str | list[str],
-    output_type: type[OutputT] = _UNSET,
+    agent_output_type: type[OutputT] = _UNSET,
     node_id: str | None = None,
     gates: list[GateFunction] | None = None,
 ) -> Callable[[ConsumerFn[OutputT]], ConsumerNode[OutputT]]:
@@ -121,7 +121,7 @@ def consumer(
 
     Example::
 
-        @consumer(subscribe_topics="weather_agent.output", output_type=WeatherReport)
+        @consumer(subscribe_topics="weather_agent.output", agent_output_type=WeatherReport)
         async def save_weather(ctx: ConsumerContext[WeatherReport]) -> None:
             if ctx.output is None:
                 return  # intermediate hop
@@ -133,7 +133,7 @@ def consumer(
             node_id=node_id or f"consumer_{fn.__name__}",
             subscribe_topics=subscribe_topics,
             consume_fn=fn,
-            output_type=output_type,
+            agent_output_type=agent_output_type,
             gates=gates,
         )
 
