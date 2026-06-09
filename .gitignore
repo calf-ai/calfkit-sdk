@@ -46,3 +46,4 @@ uv.lock
 # Internal notes
 notes/
 docs/internal/
+docs/adr/

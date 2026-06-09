@@ -10,12 +10,12 @@ from typing_extensions import Self
 from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE
 from calfkit._routing import is_concrete_route_key
 from calfkit.client._broker import _PreStartHookBroker
-from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.models import State
 from calfkit.models.envelope import Envelope
+from calfkit.models.node_result import _UNSET
 from calfkit.models.session_context import (
     CallFrame,
     CallFrameStack,

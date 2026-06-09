@@ -9,10 +9,9 @@ from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client.base import BaseClient
-from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
-from calfkit.client.node_result import NodeResult
 from calfkit.models import State
+from calfkit.models.node_result import _UNSET, NodeResult
 from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import OverridesState
 

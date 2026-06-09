@@ -179,7 +179,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         return True
 
     @handler("*")
-    async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Next:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Next | None:
         """The node's default catch-all handler — registered at route ``'*'`` (the
         least-specific pattern, dispatched last in the Chain of Responsibility).
 
@@ -208,12 +208,12 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         correlation_id: str | None = None,
     ) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
-        current_frame = envelope.internal_workflow_state.current_frame
-        if current_frame.overrides:
-            ctx.state.overrides = current_frame.overrides
+        frame = envelope.internal_workflow_state.current_frame_or_none
+        if frame is not None and frame.overrides:
+            ctx.state.overrides = frame.overrides
         ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
         ctx._resources = self._effective_resources()
-        ctx._frame_id = current_frame.frame_id
+        ctx._frame_id = frame.frame_id if frame is not None else None
         return ctx
 
     def _effective_resources(self) -> dict[str, Any]:
@@ -416,13 +416,15 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if not await self._evaluate_gates(ctx, correlation_id):
             body: Envelope = envelope
         else:
-            frame = envelope.internal_workflow_state.current_frame
+            frame = envelope.internal_workflow_state.current_frame_or_none
+            payload = frame.payload if frame is not None else None
+            awaiting_reply = frame.callback_topic is not None if frame is not None else False
             route = decode_header_str(headers.get(HDR_ROUTE))
             output = await self._dispatch_routed(
                 ctx,
                 route,
-                frame.payload,
-                awaiting_reply=frame.callback_topic is not None,
+                payload,
+                awaiting_reply=awaiting_reply,
                 correlation_id=correlation_id,
             )
             if output is None:
@@ -433,8 +435,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 # if a caller awaits a return, else a fire-and-forget no-op. The body_note
                 # surfaces a present-but-unconsumed payload (e.g. a malformed tool ToolCallRef)
                 # so a dropped body is observable, not silent — callback-aware via `level`.
-                level = _stuck_level(frame.callback_topic is not None)
-                body_note = " — a body was not consumed (rejected by a schema handler, or unmatched)" if frame.payload is not None else ""
+                level = _stuck_level(awaiting_reply)
+                body_note = " — a body was not consumed (rejected by a schema handler, or unmatched)" if payload is not None else ""
                 logger.log(
                     level,
                     "[%s] no handler produced a result for route=%s on node=%s; registered=%s%s",

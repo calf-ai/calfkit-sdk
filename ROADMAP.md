@@ -13,4 +13,5 @@ An index of potential features and changes under consideration for Calf SDK. Eac
 
 - [Calfkit 1.0](docs/designs/calfkit-v1-design.md) — 1.0 rewrite proposal covering node, agent, and result shape changes
 - [Hook System](docs/designs/hooks-design.md) — two-layer middleware proposal for pre/post-run extensibility on nodes
+- [ConsumerContext](docs/designs/consumer-context.md) — node-side context for `@consumer` sinks (moves `resources` off the client-facing `NodeResult`); includes a future-direction note on unifying Tool + Consumer contexts on a shared `NodeContext` base (breaking)
 - [Durable Fan-Out Aggregator] — replace in-process `_pending_batches` with a Kafka-backed compacted-state aggregator for parallel tool calls

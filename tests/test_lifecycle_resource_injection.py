@@ -6,7 +6,7 @@ exposes a read-only view of it to user code on the live handler/run path.
 
 * ``BaseNodeDef.prepare_context`` stamps ``ctx._resources``.
 * ``ToolNodeDef.run`` builds ``ToolContext(resources=...)``.
-* ``ConsumerNodeDef.handler`` threads ``resources`` into ``NodeResult``.
+* ``ConsumerNode`` threads ``resources`` into ``ConsumerContext``.
 
 See ``docs/research/node-worker-lifecycle-hooks-plan-v7.md`` §3.5.
 """
@@ -65,11 +65,11 @@ def test_base_node_def_inherits_lifecycle_hook_mixin() -> None:
 
 
 def test_node_subclasses_inherit_lifecycle_hook_mixin() -> None:
-    from calfkit.nodes import Agent, ConsumerNodeDef, ToolNodeDef
+    from calfkit.nodes import Agent, ConsumerNode, ToolNodeDef
 
     assert issubclass(Agent, LifecycleHookMixin)
     assert issubclass(ToolNodeDef, LifecycleHookMixin)
-    assert issubclass(ConsumerNodeDef, LifecycleHookMixin)
+    assert issubclass(ConsumerNode, LifecycleHookMixin)
 
 
 # ---------------------------------------------------------------------------
@@ -143,25 +143,24 @@ async def test_tool_run_injects_node_resources_into_tool_context() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Surface 3: ConsumerNodeDef.handler threads resources into NodeResult
+# Surface 3: ConsumerNode threads resources into ConsumerContext
 # ---------------------------------------------------------------------------
 
 
-async def test_consumer_handler_injects_node_resources_into_result() -> None:
-    from calfkit.client import NodeResult
-    from calfkit.models import TextPart
-    from calfkit.nodes import ConsumerNodeDef
+async def test_consumer_handler_injects_node_resources_into_context() -> None:
+    from calfkit.models import ConsumerContext, TextPart
+    from calfkit.nodes import ConsumerNode
 
     seen: dict[str, Any] = {}
 
-    def sink(result: NodeResult[str]) -> None:
-        seen["db"] = result.resources["db"]
+    def sink(ctx: ConsumerContext[str]) -> None:
+        seen["db"] = ctx.resources["db"]
 
-    node: ConsumerNodeDef[str] = ConsumerNodeDef(
+    node: ConsumerNode[str] = ConsumerNode(
         node_id="sink",
         subscribe_topics="sink.in",
         consume_fn=sink,
-        output_type=str,
+        agent_output_type=str,
     )
     sentinel = object()
     node.resources["db"] = sentinel
@@ -187,25 +186,24 @@ async def test_consumer_handler_injects_node_resources_into_result() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_consumer_result_resources_is_shallow_copy_of_node_bag() -> None:
-    """The consumer's ``result.resources`` is a distinct dict from the node's
+async def test_consumer_context_resources_is_shallow_copy_of_node_bag() -> None:
+    """The consumer's ``ctx.resources`` is a distinct dict from the node's
     bag, so a consumer mutating it cannot corrupt the shared resources."""
-    from calfkit.client import NodeResult
-    from calfkit.models import TextPart
-    from calfkit.nodes import ConsumerNodeDef
+    from calfkit.models import ConsumerContext, TextPart
+    from calfkit.nodes import ConsumerNode
 
     seen: dict[str, Any] = {}
 
-    def sink(result: NodeResult[str]) -> None:
-        seen["resources"] = result.resources
+    def sink(ctx: ConsumerContext[str]) -> None:
+        seen["resources"] = ctx.resources
         # Mutating the handler's copy must not reach the node's bag.
-        result.resources["mutated"] = object()  # type: ignore[index]
+        ctx.resources["mutated"] = object()  # type: ignore[index]
 
-    node: ConsumerNodeDef[str] = ConsumerNodeDef(
+    node: ConsumerNode[str] = ConsumerNode(
         node_id="sink_iso",
         subscribe_topics="sink_iso.in",
         consume_fn=sink,
-        output_type=str,
+        agent_output_type=str,
     )
     node.resources["db"] = object()
 
