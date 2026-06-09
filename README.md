@@ -4,16 +4,44 @@
 [![PyPI version](https://img.shields.io/pypi/v/calfkit)](https://pypi.org/project/calfkit/)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/calfkit?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/calfkit)
 [![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
+[![CI](https://github.com/calf-ai/calfkit-sdk/actions/workflows/test.yml/badge.svg)](https://github.com/calf-ai/calfkit-sdk/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/calf-ai/calfkit-sdk/graph/badge.svg?token=ZUP383PSK7)](https://codecov.io/gh/calf-ai/calfkit-sdk)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
-The SDK to build AI agents as orchestratable, event-driven microservices.
+Build AI workflows and agents as fully-distributed and event-driven microservices.
 
-Calfkit lets you compose agents as decoupled microservices–agents, tools, workflows–that communicate asynchronously. Add agents to teams without hardcoding any orchestration logic, scale each component independently, and stream agent outputs to any downstream listener. 
+Each agent, tool, and consumer is a **node** — an independently deployable service that talks to the others asynchronously over Kafka. Compose multi-agent teams without hardcoding orchestration, scale each piece on its own, and stream agent output to any downstream listener.
 
 ```console
 $ pip install calfkit
 ```
+
+> **Status: Alpha (pre-1.0).** Calfkit is under active development and the public API can change between minor versions (recent releases removed the MCP adaptor in 0.7.0 and unified the handler registry / `run` in 0.8.0). Pin a version and check the [CHANGELOG](CHANGELOG.md) before upgrading.
+
+<br>
+
+## Table of Contents
+
+- [Why Calfkit?](#why-calfkit)
+- [Install](#install)
+  - [Prerequisites](#prerequisites)
+  - [Start a Calfkit broker](#start-a-calfkit-broker)
+  - [Provider API keys](#provider-api-keys)
+- [Usage](#usage)
+  - [1. Define and deploy the tool node](#1-define-and-deploy-the-tool-node)
+  - [2. Deploy the agent node](#2-deploy-the-agent-node)
+  - [3. Invoke the agent](#3-invoke-the-agent)
+  - [Next steps](#next-steps)
+    - [Structured outputs](#structured-outputs)
+    - [Deploying to production](#deploying-to-production)
+    - [CLI](#cli)
+- [API](#api)
+- [Documentation](#documentation)
+- [Roadmap](#roadmap)
+- [Maintainers](#maintainers)
+- [Contributing](#contributing)
+- [Contact](#contact)
+- [License](#license)
 
 <br>
 
@@ -21,62 +49,58 @@ $ pip install calfkit
 
 ### The problem
 
-Building agents like traditional web applications—tight coupling and synchronous API calls—creates the same scalability problems that plagued early microservices:
+Building agents like traditional web apps — tight coupling, synchronous API calls — recreates the same scaling problems microservices were invented to solve:
 
-- **Tight coupling:** Changing one tool or agent breaks dependent agents and tools
-- **Scaling bottlenecks:** All agents and tools live on one runtime, so everything must scale together
-- **Siloed:** Agent communication models are difficult to wire into existing upstream and downstream systems
-- **Non-streaming:** Agents do not naturally follow a livestreaming pattern, making data stream consumption difficult to manage
+- **Tight coupling:** Changing one tool or agent breaks the ones that depend on it.
+- **Scaling bottlenecks:** Everything shares one runtime, so it all has to scale together.
+- **Integration silos:** An agent's inputs and outputs are hard to wire into existing systems.
+- **No streaming:** Agents aren't built around event streams, so consuming live data is awkward.
 
 ### What Calfkit provides
 
-Calfkit is a Python SDK that builds event-stream agents out-the-box. You get the benefits of an asynchronous, distributed system without managing the infrastructure yourself.
+Calfkit is a Python SDK that gives you that architecture out of the box. There's no central controller directing your agents and tools — each node does its own work and reacts to events on a Kafka topic, while Calfkit handles the messaging and routing between them (including matching each reply back to the request that triggered it).
 
-- **Distributed to the core:** Agents aren't monoliths that just sit on top of the transportation layer. Agents are decomposed into independent services — the agent itself is a deeply distributed system.
+- **Distributed by default:** Every agent, tool, and consumer is its own service — so an agent is a distributed system you deploy and scale piece by piece, not a monolith.
 
-- **Independent scaling:** Each service can scale on its own based on demand.
+- **Stream-native:** Agents listen on event streams, so consuming live data — market feeds, IoT sensors, user activity — is the default, not a bolted-on integration. Plug into any upstream source and publish to any downstream system: CRMs, warehouses, even other agents.
 
-- **Livestream agents by default:** Agents already listen on event streams, so consuming data streams — realtime market feeds, IoT sensors, user activity event streams — is the native pattern, not a bolted-on integration.
-
-- **Compose agents without coupling:** Compose multi-agent teams and workflows by deploying agents on communication channels that are already tapped into the messaging stream. No extra wiring, and no editing existing code — agents don't even need to know about each other.
-
-- **Universal data flow:** Agents plug into any stream — integrate and consume from any upstream data sources and publish to downstream systems like CRMs, warehouses, or even other agents.
+- **Composable without coupling:** Build multi-agent teams by deploying agents onto shared topics — no extra wiring, no edits to existing code, and agents needn't know about each other.
 
 <br>
 
-## Quick Start
+## Install
 
-### Prerequisites
+```console
+$ pip install calfkit
+```
 
-- Python 3.10 or later
-- Docker installed and running (for testing with a local Calfkit broker)
-- LLM Provider API key
-
-<br>
-
-### 1. Install
+The command-line tools (`calfkit run`, `calfkit topics`) live behind an optional extra that adds `typer` and `watchfiles`:
 
 ```console
 $ pip install "calfkit[cli]"
 ```
 
-The `[cli]` extra adds the `calfkit` command used below to run nodes during development. (The library itself is just `pip install calfkit`.)
+### Prerequisites
 
-<br>
+- Python 3.10 or later
+- Docker installed and running (for testing with a local Calfkit broker)
+- An LLM provider API key
 
-### 2. Start a Calfkit Broker
+### Start a Calfkit broker
+
+Every Calfkit deployment needs a running Kafka broker.
 
 <details>
 <summary><b>Option A: Local Broker (Requires Docker)</b></summary>
 <br>
 
-Calfkit uses Kafka as the event broker. Run the following command to clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local Kafka broker container:
+Clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local Kafka broker:
 
 ```console
 $ git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
 ```
 
-Once the broker is ready, open a new terminal tab to continue with the quickstart.
+Once it's ready, open a new terminal to continue.
 
 </details>
 
@@ -84,32 +108,36 @@ Once the broker is ready, open a new terminal tab to continue with the quickstar
 <summary><b>Option B: ☁️ Calfkit Cloud (In Beta)</b></summary>
 <br>
 
-Skip the infrastructure. Calfkit Cloud is a fully-managed broker service built for Calfkit AI agents and multi-agent teams. No server infrastructure to self-host or maintain, with built-in observability and agent-event tracing. 
-
-You will be provided a Calfkit broker API to deploy your agents instead of setting up and maintaining a broker locally.
+Skip the infrastructure. Calfkit Cloud is a fully-managed broker for Calfkit agents — nothing to self-host, with built-in observability and agent-event tracing. You deploy against a hosted broker endpoint instead of running one locally.
 
 [Sign up for access →](https://forms.gle/Rk61GmHyJzequEPm8)
 
 </details>
 
+> **A note on Kafka topics.** This quickstart relies on the local calfkit-broker
+> auto-creating topics on first use. Brokers without auto-creation (most
+> managed/hardened clusters) silently stall on a missing topic — Calfkit ships an
+> experimental, opt-in provisioner for that case. See
+> [Topic provisioning](docs/topic-provisioning.md).
+
+### Provider API keys
+
+Model clients read the standard provider environment variables:
+
+```console
+$ export OPENAI_API_KEY=sk-...
+$ export ANTHROPIC_API_KEY=sk-ant-...
+```
+
 <br>
 
-> **A note on Kafka topics.** This quickstart "just works" because the local
-> calfkit-broker has broker-side topic auto-creation enabled — node inboxes are
-> created on first use. Most hardened/managed brokers have that **disabled**, in
-> which case producers and consumers silently stall on a missing topic. Calfkit
-> ships an **EXPERIMENTAL, opt-in** topic provisioner (off by default) for the
-> dev/CI case — pass `--provision` to `calfkit run` below (or
-> `Client.connect("localhost:9092", provisioning=ProvisioningConfig(enabled=True))`
-> in code). It is a development convenience (`replication_factor=1`, no ACLs) —
-> **review it before production**, where topic creation is typically ops-governed.
-> See [`docs/topic-provisioning.md`](docs/topic-provisioning.md).
+## Usage
 
-<br>
+A complete, runnable version of this walkthrough lives in [`examples/quickstart/`](examples/quickstart/).
 
-### 3. Define and Deploy the Tool Node
+### 1. Define and deploy the tool node
 
-Define and deploy a tool as an independent service. Tools are not owned by or coupled to any specific agent—once deployed, any agent in your system can discover and invoke the tool. Deploy once, use everywhere.
+A tool is an independent service, not owned by any agent. Define one with `@agent_tool`; once deployed, any agent can invoke it. Deploy once, use everywhere.
 
 ```python
 # weather_tool.py
@@ -122,17 +150,15 @@ def get_weather(location: str) -> str:
     return f"It's sunny in {location}"
 ```
 
-Deploy the tool as a service. `calfkit run` points at a `module:attr` target and starts a worker for you — no `Client`/`Worker` wiring required:
+`calfkit run` points at a `module:attr` target and starts a worker for you — no `Client`/`Worker` wiring required:
 
 ```console
 $ calfkit run weather_tool:get_weather
 ```
 
-<br>
+### 2. Deploy the agent node
 
-### 4. Deploy the Agent Node
-
-Deploy the agent as its own service. The `Agent` handles LLM chat, tool orchestration, and conversation management in a single node. Import the tool definition to register it with the agent—the tool definition is reusable and does not couple the agent to the tool's deployment.
+The `Agent` handles the LLM chat, tool orchestration, and conversation history. Register the tool by importing its definition — a reference, not a deployment dependency.
 
 ```python
 # agent_service.py
@@ -144,6 +170,7 @@ agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
     subscribe_topics="weather_agent.input",
+    publish_topic="weather_agent.output",  # Stream every state transition for consumers to tap
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
     tools=[get_weather],  # Register tool definitions with the agent
 )
@@ -155,15 +182,13 @@ Set your OpenAI API key:
 $ export OPENAI_API_KEY=sk-...
 ```
 
-Deploy the agent as its own service (run it alongside the tool service from step 3):
+Run it alongside the tool service from step 1:
 
 ```console
 $ calfkit run agent_service:agent
 ```
 
-<br>
-
-### 5. Invoke the Agent
+### 3. Invoke the agent
 
 Send a request and receive the response. The `Client` handles broker communication and request correlation automatically.
 
@@ -192,39 +217,13 @@ Run the file to invoke the agent:
 $ python invoke.py
 ```
 
-<br>
+### Next steps
 
-### Deploying to production
+You've completed the quickstart — a tool and an agent deployed as separate services and invoked over Kafka. The rest of this section covers common things to do next.
 
-`calfkit run` is a **development** convenience — it imports your module and starts a worker for you (and `--reload` restarts it on edits). For production, deploy each node with an explicit `Worker` so startup, scaling, and topic governance stay under your control:
+#### Structured outputs
 
-```python
-# serve_tool.py — deploy the tool as its own service
-import asyncio
-from calfkit.client import Client
-from calfkit.worker import Worker
-from weather_tool import get_weather
-
-async def main():
-    client = Client.connect("localhost:9092")  # Connect to Kafka broker
-    worker = Worker(client, nodes=[get_weather])  # One service per node
-    await worker.run()  # (Blocking) serve until stopped
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-```console
-$ python serve_tool.py
-```
-
-See the **[CLI reference](docs/cli.md)** for every `calfkit run` flag (`--host`, `--provision`, `--reload`, `--app-dir`, …) and the `calfkit topics` command.
-
-<br>
-
-### Structured Outputs (Optional)
-
-Agents can be deployed with a `final_output_type` to enforce structured output from the LLM. The output is type-safe and deserialized automatically on the client side.
+Set `final_output_type` to enforce structured output from the LLM — it's deserialized into your type automatically on the client side.
 
 ```python
 from dataclasses import dataclass
@@ -257,185 +256,123 @@ print(result.output.location)  # "Tokyo"
 print(result.output.summary)   # "It's sunny in Tokyo"
 ```
 
-<br>
+#### Deploying to production
 
-### Client-Side Features (Optional)
-
-The `Client` supports multi-turn conversations, runtime dependency injection, and temporary instruction overrides—all without redeploying the agent.
-
-**Multi-turn conversations** — pass the message history from a previous result to maintain context:
+`calfkit run` is a **development** convenience — it imports your module and starts a worker (with `--reload` on edits). For production, deploy each node with an explicit `Worker`, keeping startup, scaling, and topic governance under your control:
 
 ```python
-result = await client.execute_node("What's the weather in Tokyo?", "agent.input")
-
-# Continue the conversation with full context
-result = await client.execute_node(
-    "How about in Osaka?",
-    "agent.input",
-    message_history=result.message_history,
-)
-```
-
-The same `message_history` can carry turns from *multiple* agents — see [`examples/multi_agent_panel/`](examples/multi_agent_panel/) for a multi-agent discussion over one shared transcript.
-
-**Runtime dependency injection** — pass runtime data to tools via the `deps` parameter:
-
-```python
-result = await client.execute_node(
-    "What's my phone number?",
-    "agent.input",
-    deps={"user_id": "usr_123"},  # Available to tools via ctx.deps["user_id"]
-)
-```
-
-**Temporary instructions** — temporarily add system-level instructions scoped per request:
-
-```python
-result = await client.execute_node(
-    "What's the weather in Tokyo?",
-    "agent.input",
-    temp_instructions="Always respond in Japanese.",
-)
-```
-
-**Fire-and-forget** — dispatch work to a node without waiting for (or producing) a reply via `emit_to_node`:
-
-```python
-correlation_id = await client.emit_to_node(
-    "Re-index the catalog.",
-    "indexer.input",
-)
-# Returns the correlation_id immediately; no reply is produced and no
-# client-side reply future is allocated.
-```
-
-`emit_to_node` takes the same input-shaping arguments as `invoke_node` (`deps`, `temp_instructions`, `message_history`, `route`, `body`, `model_settings`, `tool_overrides`, `correlation_id`) — but no `reply_topic` or `output_type`, since there is nothing to route back or deserialize.
-
-Because there's no reply, **traceability comes from the target node's `publish_topic` broadcast stream**, not a point-to-point callback. Set a `publish_topic` on the node you emit to and tap it with a [consumer node](#consumer-nodes-optional) to observe terminals (`result.output` is populated exactly as it is for `execute_node`). A node with no `publish_topic` produces no observable record for a fire-and-forget send — there is neither a reply nor a broadcast.
-
-Use `emit_to_node` for true one-way sends, `invoke_node` for async dispatch with a handle to await later, and `execute_node` for synchronous request/reply.
-
-> **Bounding `invoke_node` memory** — each pending `invoke_node` handle holds a reply future until it resolves. If a reply is lost or a handle is abandoned, that future leaks. Pass an opt-in TTL to bound it:
->
-> ```python
-> client = Client.connect("localhost:9092", reply_ttl=30.0)
-> ```
->
-> When set, an unanswered handle is evicted after `reply_ttl` seconds and `handle.result()` raises `ReplyExpiredError`. The default (`None`) waits indefinitely. `emit_to_node` allocates no future, so the TTL does not apply to it.
-
-<br>
-
-### Lifecycle Hooks & Resources (Optional)
-
-Nodes and workers can open long-lived **resources** (database pools, HTTP clients, caches) at startup and close them on shutdown, publish **presence/departure** events, and run under `run()`, the embeddable `start()`/`stop()`, or `async with worker:`.
-
-See **[Worker Lifecycle & Embedding](docs/worker-lifecycle.md)** for the full walkthrough — the `@resource` and callback hook patterns, worker-scoped resources, `resources` vs `deps`, presence events, and the three run surfaces with their guarantees.
-
-<br>
-
-### Gating Node Invocations (Optional)
-
-When multiple agents share an input topic (each with its own consumer group), every agent receives every message published to that topic. A **gate stack** lets a node decide whether to handle an inbound event *before* `run()` runs — avoiding wasted LLM tokens on messages addressed elsewhere.
-
-Gates are predicates: `Callable[[SessionRunContext], bool | Awaitable[bool]]`. They stack with **AND semantics** in registration order and short-circuit on the first `False`, exception, or non-bool return. When any gate rejects, `run()` is skipped and the envelope is returned unchanged — the Kafka offset still commits.
-
-**Constructor form** — good for shared, cross-cutting predicates passed in as values:
-
-```python
-def is_scheduler_target(ctx) -> bool:
-    discord = ctx.deps.get("discord", {})
-    return discord.get("slash_target") == "scheduler"
-
-scheduler = Agent(
-    "scheduler",
-    subscribe_topics="discord.thread.123",
-    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
-    gates=[is_scheduler_target],
-)
-```
-
-**Decorator form** — good for node-specific gates defined inline:
-
-```python
-scheduler = Agent("scheduler", subscribe_topics="discord.thread.123", model_client=...)
-
-@scheduler.gate
-def is_scheduler_target(ctx) -> bool:
-    discord = ctx.deps.get("discord", {})
-    return discord.get("slash_target") == "scheduler"
-```
-
-Constructor and decorator forms can be combined; constructor gates run first.
-
-**Idempotency requirement**: Kafka may redeliver an event before its offset commits, so gates may run more than once for the same logical message. Keep gate functions deterministic and side-effect-free.
-
-**Failure behavior**: If a gate raises or returns a non-bool, the framework logs the failure and rejects the message (fail-safe). Place cheap fast-reject gates first to maximize short-circuit efficiency.
-
-For tool-node gating, pass `gates=[...]` to `ToolNodeDef.create_tool_node(...)` directly; the `@agent_tool` decorator doesn't expose `gates=` because tool topics are typically 1:1.
-
-<br>
-
-### Consumer Nodes (Optional)
-
-A **consumer node** is a terminal sink — it subscribes to one or more topics and runs arbitrary Python logic against every event flowing through. Consumers receive the same `NodeResult` that `Client.execute_node()` returns, including the full session state (`tool_calls`, `tool_results`, `message_history`, `metadata`) and the inbound producer `deps` via `result.deps["key"]` — the same data tools read as `ctx.deps["key"]`.
-
-Deploy a consumer as its own service. Wire it to an agent's `publish_topic` (or any topic carrying calfkit envelopes) to observe outputs from agents, tools, and intermediate hops:
-
-```python
-# weather_sink.py
+# serve_tool.py — deploy the tool as its own service
 import asyncio
-from calfkit.client import Client, NodeResult
-from calfkit.nodes import consumer
+from calfkit.client import Client
 from calfkit.worker import Worker
-
-@consumer(subscribe_topics="weather_agent.output")
-async def log_weather(result: NodeResult) -> None:
-    if result.output is None:
-        return  # intermediate hop — no final output yet
-    print(f"[{result.correlation_id[:8]}] {result.output}")
+from weather_tool import get_weather
 
 async def main():
-    client = Client.connect("localhost:9092")
-    worker = Worker(client, nodes=[log_weather])  # Deploy the consumer node
-    await worker.run()
+    client = Client.connect("localhost:9092")  # Connect to Kafka broker
+    worker = Worker(client, nodes=[get_weather])  # One service per node
+    await worker.run()  # (Blocking) serve until stopped
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Run alongside the agent service:
+```console
+$ python serve_tool.py
+```
+
+#### CLI
+
+With the `[cli]` extra installed, run nodes locally without `Worker` boilerplate — point `calfkit run` at a `module:attr` target, like `uvicorn main:app`:
 
 ```console
-$ python weather_sink.py
+$ calfkit run weather_tool:get_weather
+$ calfkit run agent_service:agent --host localhost:9092 --reload
 ```
 
-An agent's `publish_topic` emits on **every** state transition — intermediate hops, tool completions, and terminals — so `result.output` is `None` on hops without final output parts. Filter via a gate if you only want agent terminals:
+See the **[CLI reference](docs/cli.md)** for every `calfkit run` flag (`--host`, `--provision`, `--reload`, `--app-dir`, …) and the `calfkit topics` provisioning command.
+
+<br>
+
+## API
+
+The full public surface is re-exported from the top-level `calfkit` package:
 
 ```python
-@consumer(
-    subscribe_topics="weather_agent.output",
-    gates=[lambda ctx: bool(ctx.state.final_output_parts)],
+from calfkit import (
+    Client, InvocationHandle, NodeResult,        # client
+    Agent, agent_tool, consumer,                 # node authoring
+    NodeDef, ToolNodeDef, ConsumerNodeDef, BaseNodeDef,  # node types
+    ConsumerFn, GateFunction,                    # node typing helpers
+    ToolContext,                                 # tool-side context
+    OpenAIModelClient, OpenAIResponsesModelClient, AnthropicModelClient,  # providers
+    Worker, LifecycleContext, ServingContext, ResourceSetupContext,       # worker + lifecycle
+    ProvisioningConfig,                          # provisioning (config only)
+    DeserializationError, LifecycleConfigError, ToolExecutionError,       # exceptions
 )
-async def save_final(result: NodeResult) -> None:
-    await db.save(result.output)  # always populated here
 ```
 
-**Upstream requirement**: the upstream agent or tool must have a `publish_topic` set for consumers to tap (e.g. add `publish_topic="weather_agent.output"` to the agent in step 4).
+Key entry points:
 
-**Error policy**: exceptions from the consumer function are logged and swallowed by default so a single bad event can't poison-pill the Kafka offset. Pass `re_raise=True` to fail loud during development.
+| Symbol | Purpose |
+| --- | --- |
+| `Client.connect(server_urls=None, reply_topic=None, reply_ttl=None, *, provisioning=None, ...)` | Connect to the broker. Defaults to `$CALF_HOST_URL` → `localhost`. |
+| `Client.execute_node(prompt, topic, *, output_type=..., deps=..., message_history=..., timeout=None, ...)` | Request/reply: publish and await the `NodeResult`. |
+| `Client.invoke_node(...)` / `Client.emit_to_node(...)` | Async-handle and fire-and-forget variants. |
+| `Agent(node_id, *, system_prompt=..., subscribe_topics, publish_topic=None, model_client, tools=None, gates=None, final_output_type=str, model_settings=None, ...)` | An agent node. |
+| `@agent_tool` / `@consumer(...)` | Decorators that turn a function into a tool node / consumer node. |
+| `Worker(client, nodes=None, ...)` → `run()` / `start()` / `stop()` | Host one or more nodes against the broker. |
+
+Full signatures and behavior live in the source docstrings and the [documentation](#documentation) below.
 
 <br>
 
 ## Documentation
 
-Full documentation is coming soon. In the meantime, this README serves as the primary reference for getting started with Calfkit. Deeper guides live in [`docs/`](docs/):
+In-repo documentation lives under [`docs/`](docs/).
 
-- [CLI reference](docs/cli.md) — `calfkit run` and `topics` commands
-- [Topic provisioning](docs/topic-provisioning.md) — experimental dev topic auto-creation
+**How-to guides** — goal-oriented walkthroughs:
 
-Deep-dive guides:
+- **[How to call nodes from a client](docs/client-features.md)** — the three invocation patterns (`execute_node` / `invoke_node` / `emit_to_node`), multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, fire-and-forget, and bounding reply memory with `reply_ttl`.
+- **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
+- **[How to gate node invocations](docs/gating.md)** — predicate gate stacks that let a node decline an inbound event before `run()` runs (e.g. when agents share an input topic).
+- **[Worker lifecycle & embedding](docs/worker-lifecycle.md)** — open long-lived resources at startup and close them on shutdown, publish presence events, and run with `run()`, the embeddable `start()`/`stop()`, or `async with worker:`.
 
-- [Worker Lifecycle & Embedding](docs/worker-lifecycle.md) — running a worker with `run()` vs the embeddable `start()`/`stop()` and `async with` surfaces, composing it with other long-running services, and the lifecycle guarantees.
+**Reference:**
+
+- **[CLI reference](docs/cli.md)** — the `calfkit run` and `calfkit topics` commands.
+- **[Topic provisioning](docs/topic-provisioning.md)** — the experimental, opt-in topic-creation helper for dev/CI.
+
+**Design & background:**
+
+- **[Design documents](docs/designs/)** — accepted and proposed designs.
+
+<br>
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for what's under consideration — listing there isn't a commitment.
+
+<br>
+
+## Maintainers
+
+**Ryan Yu** — see [Contact](#contact) below.
+
+<br>
+
+## Contributing
+
+Issues and pull requests are welcome. Please [open an issue](https://github.com/calf-ai/calfkit-sdk/issues) to discuss substantial changes before sending a PR.
+
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management. Before raising a PR, make sure the checks pass:
+
+```console
+$ make fix     # auto-fix lint + formatting
+$ make check   # lint, format, and type checks
+$ make test    # run the test suite
+```
+
+PR titles follow [Conventional Commits](https://www.conventionalcommits.org/) (enforced by CI and used to generate the changelog).
 
 <br>
 
@@ -444,15 +381,13 @@ Deep-dive guides:
 [![X](https://img.shields.io/badge/Follow-black?logo=x)](https://x.com/ryanyuhater)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-blue?logo=linkedin)](https://www.linkedin.com/company/calfkit)
 
-<br>
-
-## Support
-
 If you found this project interesting or useful, please consider:
 - ⭐ Starring the repository — it helps others discover it!
 - 🐛 [Reporting issues](https://github.com/calf-ai/calfkit-sdk/issues)
 - 🔀 Submitting PRs
 
+<br>
+
 ## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+[Apache-2.0](LICENSE) © Ryan Yu
