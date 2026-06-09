@@ -8,15 +8,15 @@
 [![codecov](https://codecov.io/gh/calf-ai/calfkit-sdk/graph/badge.svg?token=ZUP383PSK7)](https://codecov.io/gh/calf-ai/calfkit-sdk)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
-Build AI workflows and agents as fully-distributed and event-driven microservices.
+Build AI agents as decentralized, event-driven microservices.
 
-Each agent, tool, and consumer is a **node** — an independently deployable service that talks to the others asynchronously over Kafka. Compose multi-agent teams without hardcoding orchestration, scale each piece on its own, and stream agent output to any downstream listener.
+Agents, tools, and consumers are independently deployable nodes that dynamically route messages to each other and communicate asynchronously. Build and compose AI workflows as a distributed network of interconnected AI agents.
 
 ```console
 $ pip install calfkit
 ```
 
-> **Status: Alpha (pre-1.0).** Calfkit is under active development and the public API can change between minor versions (recent releases removed the MCP adaptor in 0.7.0 and unified the handler registry / `run` in 0.8.0). Pin a version and check the [CHANGELOG](CHANGELOG.md) before upgrading.
+> **Status: Alpha (pre-1.0).** Calfkit is under active development and the public API can change between versions. Pin a version and check the [CHANGELOG](CHANGELOG.md) before big version bumps.
 
 <br>
 
@@ -26,7 +26,6 @@ $ pip install calfkit
 - [Install](#install)
   - [Prerequisites](#prerequisites)
   - [Start a Calfkit broker](#start-a-calfkit-broker)
-  - [Provider API keys](#provider-api-keys)
 - [Usage](#usage)
   - [1. Define and deploy the tool node](#1-define-and-deploy-the-tool-node)
   - [2. Deploy the agent node](#2-deploy-the-agent-node)
@@ -34,11 +33,9 @@ $ pip install calfkit
   - [Next steps](#next-steps)
     - [Structured outputs](#structured-outputs)
     - [Deploying to production](#deploying-to-production)
-    - [CLI](#cli)
 - [API](#api)
 - [Documentation](#documentation)
 - [Roadmap](#roadmap)
-- [Maintainers](#maintainers)
 - [Contributing](#contributing)
 - [Contact](#contact)
 - [License](#license)
@@ -47,24 +44,13 @@ $ pip install calfkit
 
 ## Why Calfkit?
 
-### The problem
+Calfkit shifts the paradigm of agent development from orchestration (centralized control) to choreography (decoupled interactions). Building agent teams with traditional agent frameworks rely on tightly coupled, hard-coded interactions. Calfkit allows you to build agents into an interconnected mesh right out of the box.
 
-Building agents like traditional web apps — tight coupling, synchronous API calls — recreates the same scaling problems microservices were invented to solve:
+- **Distributed by default:** Every agent, tool, and consumer is its own node in a connected network — so agents and tools are a distributed system you deploy and scale piece by piece, not a monolith.
 
-- **Tight coupling:** Changing one tool or agent breaks the ones that depend on it.
-- **Scaling bottlenecks:** Everything shares one runtime, so it all has to scale together.
-- **Integration silos:** An agent's inputs and outputs are hard to wire into existing systems.
-- **No streaming:** Agents aren't built around event streams, so consuming live data is awkward.
+- **Stream-native:** Agents communicate on event streams, so consuming live data — market feeds, IoT sensors, user activity — is the default, not a bolted-on integration. Plug into any upstream source and publish to any downstream system: CRMs, warehouses, even other agents.
 
-### What Calfkit provides
-
-Calfkit is a Python SDK that gives you that architecture out of the box. There's no central controller directing your agents and tools — each node does its own work and reacts to events on a Kafka topic, while Calfkit handles the messaging and routing between them (including matching each reply back to the request that triggered it).
-
-- **Distributed by default:** Every agent, tool, and consumer is its own service — so an agent is a distributed system you deploy and scale piece by piece, not a monolith.
-
-- **Stream-native:** Agents listen on event streams, so consuming live data — market feeds, IoT sensors, user activity — is the default, not a bolted-on integration. Plug into any upstream source and publish to any downstream system: CRMs, warehouses, even other agents.
-
-- **Composable without coupling:** Build multi-agent teams by deploying agents onto shared topics — no extra wiring, no edits to existing code, and agents needn't know about each other.
+- **Composable without coupling:** Build multi-agent teams simply by dropping in agents on shared topics — no extra wiring, no edits to existing code.
 
 <br>
 
@@ -74,7 +60,7 @@ Calfkit is a Python SDK that gives you that architecture out of the box. There's
 $ pip install calfkit
 ```
 
-The command-line tools (`calfkit run`, `calfkit topics`) live behind an optional extra that adds `typer` and `watchfiles`:
+The command-line tools (`calfkit run`, `calfkit topics`) live behind an optional extra:
 
 ```console
 $ pip install "calfkit[cli]"
@@ -83,18 +69,18 @@ $ pip install "calfkit[cli]"
 ### Prerequisites
 
 - Python 3.10 or later
-- Docker installed and running (for testing with a local Calfkit broker)
+- Docker installed and running (for running with a local Calfkit broker)
 - An LLM provider API key
 
 ### Start a Calfkit broker
 
-Every Calfkit deployment needs a running Kafka broker.
+Every Calfkit deployment needs a running broker. 
 
 <details>
 <summary><b>Option A: Local Broker (Requires Docker)</b></summary>
 <br>
 
-Clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local Kafka broker:
+Clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local broker:
 
 ```console
 $ git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
@@ -113,21 +99,6 @@ Skip the infrastructure. Calfkit Cloud is a fully-managed broker for Calfkit age
 [Sign up for access →](https://forms.gle/Rk61GmHyJzequEPm8)
 
 </details>
-
-> **A note on Kafka topics.** This quickstart relies on the local calfkit-broker
-> auto-creating topics on first use. Brokers without auto-creation (most
-> managed/hardened clusters) silently stall on a missing topic — Calfkit ships an
-> experimental, opt-in provisioner for that case. See
-> [Topic provisioning](docs/topic-provisioning.md).
-
-### Provider API keys
-
-Model clients read the standard provider environment variables:
-
-```console
-$ export OPENAI_API_KEY=sk-...
-$ export ANTHROPIC_API_KEY=sk-ant-...
-```
 
 <br>
 
@@ -150,7 +121,7 @@ def get_weather(location: str) -> str:
     return f"It's sunny in {location}"
 ```
 
-`calfkit run` points at a `module:attr` target and starts a worker for you — no `Client`/`Worker` wiring required:
+`calfkit run` points at a `module:attr` target and starts the tool for you — no extra wiring required. This requires the `[cli]` extra installed.
 
 ```console
 $ calfkit run weather_tool:get_weather
@@ -158,7 +129,7 @@ $ calfkit run weather_tool:get_weather
 
 ### 2. Deploy the agent node
 
-The `Agent` handles the LLM chat, tool orchestration, and conversation history. Register the tool by importing its definition — a reference, not a deployment dependency.
+Provide the `Agent` with a reference to the tool using the same tool definition. This agent listens to the `weather_agent.input` topic.
 
 ```python
 # agent_service.py
@@ -170,7 +141,7 @@ agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
     subscribe_topics="weather_agent.input",
-    publish_topic="weather_agent.output",  # Stream every state transition for consumers to tap
+    publish_topic="weather_agent.output",  # Stream every agent output here. Other agents and consumers can listen into this stream
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
     tools=[get_weather],  # Register tool definitions with the agent
 )
@@ -182,7 +153,7 @@ Set your OpenAI API key:
 $ export OPENAI_API_KEY=sk-...
 ```
 
-Run it alongside the tool service from step 1:
+Start the agent:
 
 ```console
 $ calfkit run agent_service:agent
@@ -190,7 +161,7 @@ $ calfkit run agent_service:agent
 
 ### 3. Invoke the agent
 
-Send a request and receive the response. The `Client` handles broker communication and request correlation automatically.
+Send a message to the agent.
 
 ```python
 # invoke.py
@@ -198,12 +169,12 @@ import asyncio
 from calfkit.client import Client
 
 async def main():
-    client = Client.connect("localhost:9092")  # Connect to Kafka broker
+    client = Client.connect("localhost:9092")  # Connect to the broker
 
     # Send a request and await the response
     result = await client.execute_node(
         "What's the weather in Tokyo?",
-        "weather_agent.input",  # The topic the agent subscribes to
+        "weather_agent.input",  # The topic the agent is listening to
     )
     print(f"Assistant: {result.output}")
 
@@ -258,7 +229,7 @@ print(result.output.summary)   # "It's sunny in Tokyo"
 
 #### Deploying to production
 
-`calfkit run` is a **development** convenience — it imports your module and starts a worker (with `--reload` on edits). For production, deploy each node with an explicit `Worker`, keeping startup, scaling, and topic governance under your control:
+For production, you can deploy each node with an explicit `Worker`, keeping startup, scaling, and lifecycle management under your control:
 
 ```python
 # serve_tool.py — deploy the tool as its own service
@@ -279,17 +250,6 @@ if __name__ == "__main__":
 ```console
 $ python serve_tool.py
 ```
-
-#### CLI
-
-With the `[cli]` extra installed, run nodes locally without `Worker` boilerplate — point `calfkit run` at a `module:attr` target, like `uvicorn main:app`:
-
-```console
-$ calfkit run weather_tool:get_weather
-$ calfkit run agent_service:agent --host localhost:9092 --reload
-```
-
-See the **[CLI reference](docs/cli.md)** for every `calfkit run` flag (`--host`, `--provision`, `--reload`, `--app-dir`, …) and the `calfkit topics` provisioning command.
 
 <br>
 
@@ -354,12 +314,6 @@ See [ROADMAP.md](ROADMAP.md) for what's under consideration — listing there is
 
 <br>
 
-## Maintainers
-
-**Ryan Yu** — see [Contact](#contact) below.
-
-<br>
-
 ## Contributing
 
 Issues and pull requests are welcome. Please [open an issue](https://github.com/calf-ai/calfkit-sdk/issues) to discuss substantial changes before sending a PR.
@@ -390,4 +344,4 @@ If you found this project interesting or useful, please consider:
 
 ## License
 
-[Apache-2.0](LICENSE) © Ryan Yu
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
