@@ -813,20 +813,17 @@ def test_node_result_is_not_hashable():
 
 
 def test_strict_mode_raises_on_empty_final_output_parts():
-    from calfkit.client.deserialize import deserialize_to_node_result
     from calfkit.exceptions import DeserializationError
 
     envelope = _envelope_without_final_parts("cid-strict-empty")
     with pytest.raises(DeserializationError, match="No DataPart or TextPart"):
-        deserialize_to_node_result(envelope, correlation_id="cid-strict-empty")  # strict=True default
+        NodeResult.from_envelope(envelope, correlation_id="cid-strict-empty")  # strict=True default
 
 
 def test_lenient_mode_returns_none_on_empty_final_output_parts():
     """Companion to the strict test — pins the consumer-mode contract."""
-    from calfkit.client.deserialize import deserialize_to_node_result
-
     envelope = _envelope_without_final_parts("cid-lenient-empty")
-    result = deserialize_to_node_result(envelope, correlation_id="cid-lenient-empty", strict=False)
+    result = NodeResult.from_envelope(envelope, correlation_id="cid-lenient-empty", strict=False)
     assert result.output is None
     assert result.state is envelope.context.state
 
@@ -982,7 +979,7 @@ def test_consumer_reuses_prebuilt_type_adapter(monkeypatch):
     constructions across multiple deserialize calls."""
     import sys
 
-    import calfkit.client.deserialize as deserialize_mod
+    import calfkit.models.node_result as node_result_mod
 
     # `calfkit.nodes.consumer` as a dotted path resolves to the decorator
     # function (re-exported via __init__) — go through sys.modules to hit the
@@ -1000,7 +997,7 @@ def test_consumer_reuses_prebuilt_type_adapter(monkeypatch):
         def validate_python(self, *args, **kwargs):
             return self._adapter.validate_python(*args, **kwargs)
 
-    monkeypatch.setattr(deserialize_mod, "TypeAdapter", _CountingAdapter)
+    monkeypatch.setattr(node_result_mod, "TypeAdapter", _CountingAdapter)
     monkeypatch.setattr(consumer_mod, "TypeAdapter", _CountingAdapter)
 
     @consumer(subscribe_topics="prebuilt.topic", output_type=Report)
@@ -1035,7 +1032,7 @@ def test_consumer_reuses_prebuilt_type_adapter(monkeypatch):
 
 
 async def test_unexpected_deserialize_exception_is_logged_and_skipped(monkeypatch, caplog):
-    """Simulate an unexpected error inside `deserialize_to_node_result` (e.g.
+    """Simulate an unexpected error inside `NodeResult.from_envelope` (e.g.
     a pydantic edge case or third-party model adapter failure). The safety-
     net `except Exception` block must catch it, log, and skip — not propagate
     to FastStream and crash the consumer task."""
@@ -1045,18 +1042,20 @@ async def test_unexpected_deserialize_exception_is_logged_and_skipped(monkeypatc
     def sink(result: NodeResult) -> None:
         invocations.append("ran")
 
-    # Patch the deserializer used by the consumer module to raise an unrelated
-    # exception type that doesn't match the narrow catch tuple. Go via
+    # Patch the NodeResult projector used by the consumer module to raise an
+    # unrelated exception type that doesn't match the narrow catch tuple. Go via
     # sys.modules — the dotted-string path collides with the re-exported
     # `consumer` decorator function in calfkit.nodes.__init__.
     import sys
 
     consumer_mod = sys.modules["calfkit.nodes.consumer"]
 
-    def _boom(*args, **kwargs):
-        raise RuntimeError("simulated unforeseen deserialize bug")
+    class _BoomNodeResult:
+        @staticmethod
+        def from_envelope(*args, **kwargs):
+            raise RuntimeError("simulated unforeseen deserialize bug")
 
-    monkeypatch.setattr(consumer_mod, "deserialize_to_node_result", _boom)
+    monkeypatch.setattr(consumer_mod, "NodeResult", _BoomNodeResult)
 
     envelope = _envelope_with_text("hi", correlation_id="cid-safety-0")
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
@@ -1164,3 +1163,52 @@ async def test_function_returning_async_generator_object_detected_at_call_site()
             headers={HDR_EMITTER: b"upstream", HDR_EMITTER_KIND: b"agent"},
             broker=MagicMock(),
         )
+
+
+# ---------------------------------------------------------------------------
+# NodeResult alternative constructors — ``from_context`` is the core projector;
+# ``from_envelope`` delegates to it. (Pins the projection now living on the
+# type, sourcing identity from a stamped SessionRunContext.)
+# ---------------------------------------------------------------------------
+
+
+def _stamped_ctx(text: str = "hi", *, correlation_id: str = "cid-ctor", deps: dict | None = None) -> SessionRunContext:
+    """A SessionRunContext stamped as a handler/dispatcher would leave it."""
+    state = State()
+    state.final_output_parts = [TextPart(text=text)]
+    ctx = SessionRunContext(state=state, deps=deps or {})
+    ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id="up", emitter_node_kind="agent")
+    return ctx
+
+
+def test_from_context_projects_all_fields():
+    ctx = _stamped_ctx("done", correlation_id="cid-fc", deps={"k": "v"})
+    sentinel = object()
+    result = NodeResult.from_context(ctx, str, correlation_id="cid-fc", resources={"db": sentinel})
+
+    assert result.output == "done"
+    assert result.state is ctx.state  # no copy — same instance as the context's state
+    assert result.correlation_id == "cid-fc"
+    assert result.emitter_node_id == "up"
+    assert result.emitter_node_kind == "agent"
+    assert result.deps is ctx.deps
+    assert result.resources["db"] is sentinel
+
+
+def test_from_context_correlation_id_falls_back_to_ctx():
+    ctx = _stamped_ctx(correlation_id="cid-stamped")
+    result = NodeResult.from_context(ctx)  # correlation_id omitted → reads ctx.correlation_id
+    assert result.correlation_id == "cid-stamped"
+
+
+def test_from_envelope_delegates_to_from_context():
+    ctx = _stamped_ctx("eq", correlation_id="cid-eq", deps={"a": 1})
+    envelope = Envelope(context=ctx, internal_workflow_state=WorkflowState(call_stack=CallFrameStack()))
+
+    via_env = NodeResult.from_envelope(envelope, str, correlation_id="cid-eq")
+    via_ctx = NodeResult.from_context(envelope.context, str, correlation_id="cid-eq")
+
+    assert via_env.output == via_ctx.output == "eq"
+    assert via_env.state is via_ctx.state is envelope.context.state
+    assert via_env.emitter_node_id == via_ctx.emitter_node_id == "up"
+    assert via_env.deps is via_ctx.deps is envelope.context.deps

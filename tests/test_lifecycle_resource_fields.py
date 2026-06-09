@@ -62,7 +62,7 @@ def test_tool_context_resources_defaults_empty_and_accepts_kw_only() -> None:
 
 
 def _make_node_result(**overrides: Any) -> Any:
-    from calfkit.client.node_result import NodeResult
+    from calfkit.models.node_result import NodeResult
     from calfkit.models.state import State
 
     kwargs: dict[str, Any] = {
@@ -97,16 +97,16 @@ def _make_text_envelope(text: str = "hello") -> Any:
     )
 
 
-def test_deserialize_to_node_result_threads_resources() -> None:
-    from calfkit.client.deserialize import deserialize_to_node_result
+def test_from_envelope_threads_resources() -> None:
+    from calfkit.models.node_result import NodeResult
 
     envelope = _make_text_envelope()
 
     # Default: empty mapping when resources not supplied.
-    default_result = deserialize_to_node_result(envelope, str, correlation_id="cid")
+    default_result = NodeResult.from_envelope(envelope, str, correlation_id="cid")
     assert dict(default_result.resources) == {}
 
     # Threaded through into the built NodeResult.
     sentinel = object()
-    result = deserialize_to_node_result(envelope, str, correlation_id="cid", resources={"db": sentinel})
+    result = NodeResult.from_envelope(envelope, str, correlation_id="cid", resources={"db": sentinel})
     assert result.resources["db"] is sentinel

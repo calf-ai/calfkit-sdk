@@ -20,9 +20,9 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from calfkit.client.deserialize import _UNSET, _extract_output
 from calfkit.models import DataPart
 from calfkit.models import TextPart as PayloadTextPart
+from calfkit.models.node_result import _UNSET, _extract_output
 from calfkit.nodes._projection import project
 
 

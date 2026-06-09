@@ -12,12 +12,11 @@ from pydantic import TypeAdapter, ValidationError
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, NodeKind, decode_header_str
 from calfkit._types import OutputT
-from calfkit.client.deserialize import _UNSET, deserialize_to_node_result
-from calfkit.client.node_result import NodeResult
 from calfkit.exceptions import DeserializationError
 from calfkit.models import State
 from calfkit.models.actions import NodeResult as NodeAction
 from calfkit.models.envelope import Envelope
+from calfkit.models.node_result import _UNSET, NodeResult
 from calfkit.models.session_context import SessionRunContext
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 ConsumerFn = Callable[[NodeResult[OutputT]], None | Awaitable[None]]
 """Signature of a consumer function: receives the same client-facing
-:class:`~calfkit.client.node_result.NodeResult` that
+:class:`~calfkit.models.node_result.NodeResult` that
 :meth:`Client.execute_node` returns. Sync or async.
 
 ``result.output`` is ``None`` on intermediate hops (e.g. tool completions, or
@@ -212,7 +211,7 @@ class ConsumerNodeDef(Generic[OutputT], BaseNodeDef):
             return Response(envelope, headers=self._emitter_headers())
 
         try:
-            result: NodeResult[OutputT] = deserialize_to_node_result(
+            result: NodeResult[OutputT] = NodeResult.from_envelope(
                 envelope,
                 self._output_type,
                 correlation_id=correlation_id,

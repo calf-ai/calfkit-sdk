@@ -14,9 +14,9 @@ import pytest
 
 from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
 from calfkit.client.client import Client
-from calfkit.client.deserialize import _UNSET
 from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.models import State
+from calfkit.models.node_result import _UNSET
 
 
 class _CaptureClient(Client):
