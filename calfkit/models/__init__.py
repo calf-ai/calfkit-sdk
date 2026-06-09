@@ -1,5 +1,5 @@
 # payload must be imported first — state.py imports ContentPart from this package
-from calfkit.models.actions import (
+from calfkit.models.actions import (  # noqa: I001 — actions first (see comment above)
     Call,
     Delegate,
     Emit,
@@ -13,6 +13,7 @@ from calfkit.models.actions import (
     TailCall,
     _Call,
 )
+from calfkit.models.consumer_context import ConsumerContext
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import ContentPart, DataPart, FilePart, TextPart, ToolCallPart
 from calfkit.models.session_context import (
@@ -76,4 +77,6 @@ __all__ = [
     "ToolContext",
     # tool_dispatch
     "ToolCallRef",
+    # consumer_context
+    "ConsumerContext",
 ]

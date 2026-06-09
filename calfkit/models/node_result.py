@@ -190,10 +190,7 @@ class NodeResult(Generic[OutputT]):
                 and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
         """
         state = ctx.state
-        if not state.final_output_parts and not strict:
-            output: Any = None
-        else:
-            output = _extract_output(state.final_output_parts, output_type, type_adapter=type_adapter)
+        output = project_output(state, output_type, strict=strict, type_adapter=type_adapter)
 
         return cls(
             output=output,
@@ -247,6 +244,21 @@ class NodeResult(Generic[OutputT]):
     def metadata(self) -> Any:
         """Convenience: ``state.metadata``."""
         return self.state.metadata
+
+
+def project_output(state: State, output_type: type[Any] = _UNSET, *, strict: bool, type_adapter: TypeAdapter[Any] | None = None) -> Any:
+    """Project the deserialized output from ``state.final_output_parts``.
+
+    Shared by :meth:`NodeResult.from_context` (client, ``strict=True``) and
+    :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). With
+    ``strict=False`` an empty ``final_output_parts`` (an intermediate hop) yields
+    ``None``; otherwise the matching part is extracted/validated per
+    ``output_type`` (raising ``DeserializationError``/``ValidationError`` on a
+    present-but-mismatched part).
+    """
+    if not state.final_output_parts and not strict:
+        return None
+    return _extract_output(state.final_output_parts, output_type, type_adapter=type_adapter)
 
 
 def _extract_output(parts: list[Any], output_type: type[Any], type_adapter: TypeAdapter[Any] | None = None) -> Any:
