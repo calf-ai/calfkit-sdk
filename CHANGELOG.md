@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.9.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.8.0...v0.9.0) (2026-06-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* MCPToolbox — rename from MCPBridge + capability advertisement ([#210](https://github.com/calf-ai/calfkit-sdk/issues/210))
+* MCP bridge [WIP] + retire BaseToolNodeSchema for ToolBinding ([#207](https://github.com/calf-ai/calfkit-sdk/issues/207))
+
+### Features
+
+* agents discover MCP toolbox tools via the capability view ([#211](https://github.com/calf-ai/calfkit-sdk/issues/211)) ([88d0a96](https://github.com/calf-ai/calfkit-sdk/commit/88d0a963c5b14f228e9df053dddb42aff23adbf6))
+* ConsumerContext + NodeResult constructors + frameless base handler ([#203](https://github.com/calf-ai/calfkit-sdk/issues/203)) ([f2169b9](https://github.com/calf-ai/calfkit-sdk/commit/f2169b9081c3ae74c75b9f9b0f9885255db0849f))
+* MCP bridge [WIP] + retire BaseToolNodeSchema for ToolBinding ([#207](https://github.com/calf-ai/calfkit-sdk/issues/207)) ([d4342e4](https://github.com/calf-ai/calfkit-sdk/commit/d4342e46592a3048144a2e731d872f463bf60ea5))
+* MCP capability wire model, discovery config, and client URL retention ([#209](https://github.com/calf-ai/calfkit-sdk/issues/209)) ([20e4044](https://github.com/calf-ai/calfkit-sdk/commit/20e40445306180d16400dfa79c0a7803af89067d))
+* MCPToolbox — rename from MCPBridge + capability advertisement ([#210](https://github.com/calf-ai/calfkit-sdk/issues/210)) ([7cc065f](https://github.com/calf-ai/calfkit-sdk/commit/7cc065f226fdcb7840ef22d308a7d919cca70512))
+
+
+### Documentation
+
+* peer node pattern, explanation + Node/NodeRef reference ([#208](https://github.com/calf-ai/calfkit-sdk/issues/208)) ([8511ebd](https://github.com/calf-ai/calfkit-sdk/commit/8511ebde33d37e5b69e7ed7988473e1d12445c09))
+* refresh README and split deep-dive guides into how-to pages ([#205](https://github.com/calf-ai/calfkit-sdk/issues/205)) ([e3ac5e4](https://github.com/calf-ai/calfkit-sdk/commit/e3ac5e4dbda11a9aa8652d0862c72af95116abf2))
+
 ## [0.8.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.7.0...v0.8.0) (2026-06-09)
 
 
