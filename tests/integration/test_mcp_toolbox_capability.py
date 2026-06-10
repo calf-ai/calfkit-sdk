@@ -97,3 +97,73 @@ async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str) 
 
     with pytest.raises(StopAsyncIteration):
         await anext(writer_gen)  # close the writer bracket
+
+
+async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str) -> None:
+    """Spec §8.7: toolbox publishes -> worker view catches up -> agent turn
+    resolves bindings -> clean shutdown tombstones -> next turn degrades."""
+    from calfkit.client.client import Client
+    from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY
+    from calfkit.nodes.agent import Agent
+    from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
+    from calfkit.worker.worker import Worker
+    from calfkit.worker.worker_config import MCPDiscoveryConfig
+
+    class FakeModel(PydanticModelClient):
+        @property
+        def model_name(self) -> str:
+            return "fake"
+
+        @property
+        def system(self) -> str:
+            return "fake"
+
+        async def request(self, *args: object, **kwargs: object) -> object:
+            raise NotImplementedError
+
+    discovery = MCPDiscoveryConfig(topic=capability_topic, heartbeat_interval=5.0, bootstrap_servers=BOOTSTRAP)
+
+    # Toolbox side (as if hosted in another worker): real writer, real publish.
+    toolbox = MCPToolbox("docs_server", connection_params=StreamableHttpParameters(url="http://unused.local/mcp"), discovery=discovery)
+    writer_gen = toolbox._capability_writer(None)  # type: ignore[arg-type]
+    writer = await anext(writer_gen)
+    toolbox.resources[toolbox._writer_resource_key] = writer
+    toolbox.resources[toolbox._session_resource_key] = FakeSession()
+    toolbox_ctx = ServingContext(toolbox, toolbox.resources, broker=None)  # type: ignore[arg-type]
+    await toolbox._publish_on_startup(toolbox_ctx)
+
+    # Agent side: a separate process in production — here a Worker whose
+    # auto-registered view resource we enter for real.
+    agent = Agent(
+        "researcher",
+        subscribe_topics="researcher.in",
+        model_client=FakeModel(),
+        tools=[toolbox.select(include=["search"])],
+    )
+    client = Client.connect(BOOTSTRAP)
+    worker = Worker(client, nodes=[agent], mcp_discovery=discovery)
+    worker._maybe_register_capability_view()
+    [(name, genfn)] = [(n, g) for n, g in worker._resource_cms() if n == CAPABILITY_VIEW_RESOURCE_KEY]
+    view_gen = genfn(None)  # type: ignore[arg-type]
+    table = await anext(view_gen)
+    try:
+        # Catch-up gate already passed inside start(); the record is visible.
+        registry: dict = {}
+        agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: table, **agent._effective_resources()}, registry)
+        assert sorted(registry) == ["search"]
+        assert registry["search"].dispatch_topic == "mcp_server.docs_server"
+
+        # Clean shutdown tombstones; the next turn degrades (warns, empty).
+        await toolbox._tombstone_on_shutdown(toolbox_ctx)
+        for _ in range(200):
+            if "docs_server" not in table:
+                break
+            await asyncio.sleep(0.01)
+        registry2: dict = {}
+        agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: table}, registry2)
+        assert registry2 == {}
+    finally:
+        with pytest.raises(StopAsyncIteration):
+            await anext(view_gen)
+        with pytest.raises(StopAsyncIteration):
+            await anext(writer_gen)

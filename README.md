@@ -295,6 +295,7 @@ In-repo documentation lives under [`docs/`](docs/).
 - **[How to call nodes from a client](docs/client-features.md)** — the three invocation patterns (`execute_node` / `invoke_node` / `emit_to_node`), multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, fire-and-forget, and bounding reply memory with `reply_ttl`.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to gate node invocations](docs/gating.md)** — predicate gate stacks that let a node decline an inbound event before `run()` runs (e.g. when agents share an input topic).
+- **[How to give agents MCP tools](docs/mcp-tool-discovery.md)** — deploy an `MCPToolbox` fronting an MCP server and pass it to agents like a tool node; tools are discovered and kept fresh across processes automatically.
 - **[Worker lifecycle & embedding](docs/worker-lifecycle.md)** — open long-lived resources at startup and close them on shutdown, publish presence events, and run with `run()`, the embeddable `start()`/`stop()`, or `async with worker:`.
 
 **Reference:**
