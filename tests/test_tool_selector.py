@@ -131,7 +131,6 @@ class TestAgentResolution:
 
     def make_agent(self, *tools: Any):
         from calfkit.nodes.agent import Agent
-        from tests.test_capability_models import __name__ as _  # noqa: F401
 
         class _FakeModel:
             pass
@@ -199,3 +198,36 @@ class TestAgentResolution:
         strict = self.make_agent(make_toolbox().select(strict=True))
         with pytest.raises(MCPToolResolutionError, match="docs_server"):
             strict._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: {}}, {})
+
+
+class TestOverridesSuppressSelectors:
+    """Per-run overrides pin the exact tool surface: selectors are skipped."""
+
+    def _ctx(self, overrides=None):
+        from calfkit.models.state import OverridesState, State
+        from tests.test_tool_errors import _make_ctx
+
+        state = State()
+        if overrides is not None:
+            state.overrides = OverridesState(override_agent_tools=overrides)
+        ctx = _make_ctx(state)
+        return ctx
+
+    def test_overridden_turn_skips_selectors_even_strict(self) -> None:
+        from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+
+        agent = TestAgentResolution().make_agent(make_toolbox().select(strict=True))
+        override = ToolBinding(tool_def=ToolDefinition(name="pinned"), dispatch_topic="pinned.topic")
+        registry = {"pinned": override}
+        # No Capability View anywhere: a strict selector would raise — but the
+        # override gate must short-circuit before resolution.
+        agent._maybe_resolve_selectors(self._ctx(overrides=[override]), registry)
+        assert list(registry) == ["pinned"]
+
+    def test_non_overridden_turn_resolves(self) -> None:
+        agent = TestAgentResolution().make_agent(make_toolbox())
+        ctx = self._ctx()
+        ctx._resources = {CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}
+        registry: dict[str, ToolBinding] = {}
+        agent._maybe_resolve_selectors(ctx, registry)
+        assert sorted(registry) == ["fetch", "search"]

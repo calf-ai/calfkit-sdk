@@ -48,11 +48,13 @@ async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str) 
     toolbox = MCPToolbox(
         "docs_server",
         connection_params=StreamableHttpParameters(url="http://unused.local/mcp"),
-        discovery=MCPDiscoveryConfig(
-            topic=capability_topic,
-            heartbeat_interval=0.05,
-            bootstrap_servers=BOOTSTRAP,  # no Worker in this test: explicit override path
-        ),
+    )
+    # Config flows from the hosting worker; stub it (no Worker in this test).
+    from types import SimpleNamespace
+
+    toolbox._worker = SimpleNamespace(
+        _mcp_discovery=MCPDiscoveryConfig(topic=capability_topic, heartbeat_interval=0.05, bootstrap_servers=BOOTSTRAP),
+        _client=None,
     )
 
     # Resource phase: enter the writer bracket for real (creates the topic).
@@ -124,7 +126,10 @@ async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str) -> 
     discovery = MCPDiscoveryConfig(topic=capability_topic, heartbeat_interval=5.0, bootstrap_servers=BOOTSTRAP)
 
     # Toolbox side (as if hosted in another worker): real writer, real publish.
-    toolbox = MCPToolbox("docs_server", connection_params=StreamableHttpParameters(url="http://unused.local/mcp"), discovery=discovery)
+    from types import SimpleNamespace
+
+    toolbox = MCPToolbox("docs_server", connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
+    toolbox._worker = SimpleNamespace(_mcp_discovery=discovery, _client=None)
     writer_gen = toolbox._capability_writer(None)  # type: ignore[arg-type]
     writer = await anext(writer_gen)
     toolbox.resources[toolbox._writer_resource_key] = writer
@@ -160,7 +165,7 @@ async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str) -> 
                 break
             await asyncio.sleep(0.01)
         registry2: dict = {}
-        agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: table}, registry2)
+        agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: table, **agent._effective_resources()}, registry2)
         assert registry2 == {}
     finally:
         with pytest.raises(StopAsyncIteration):

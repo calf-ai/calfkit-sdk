@@ -56,11 +56,9 @@ class MCPToolbox(BaseNodeDef):
         self,
         server_name: str,
         connection_params: StreamableHttpParameters | StdioServerParameters,
-        discovery: MCPDiscoveryConfig | None = None,
     ):
         super().__init__(node_id=server_name, subscribe_topics=[f"mcp_server.{server_name}"])
         self._connection_params = connection_params
-        self._discovery = discovery or MCPDiscoveryConfig()
         self._session_resource_key = f"mcp_session.{server_name}"
         self._writer_resource_key = f"mcp_writer.{server_name}"
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -71,6 +69,18 @@ class MCPToolbox(BaseNodeDef):
         self.resource(name=self._writer_resource_key)(self._capability_writer)
         self.after_startup(self._publish_on_startup)
         self.on_shutdown(self._tombstone_on_shutdown)
+
+    @property
+    def _discovery(self) -> MCPDiscoveryConfig:
+        """Control-plane config, inherited from the hosting worker.
+
+        The worker is the single config surface (``Worker(...,
+        mcp_discovery=...)``); the toolbox reads it through the ``_worker``
+        back-reference — same pattern as bootstrap derivation. Defaults apply
+        when unhosted (tests, bare construction).
+        """
+        cfg = getattr(self._worker, "_mcp_discovery", None)
+        return cfg if cfg is not None else MCPDiscoveryConfig()
 
     # -- tool selection (spec §8.4) --------------------------------------------
 

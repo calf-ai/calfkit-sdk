@@ -161,6 +161,21 @@ class BaseAgentNodeDef(
                     [tc.tool_call_id for tc in completed_latest],
                 )
 
+    def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
+        """Selector resolution gate: per-run overrides pin the EXACT tool
+        surface for the turn, so MCP selectors are skipped entirely when
+        ``override_agent_tools`` is present (a strict selector must not be
+        able to fail a turn the caller scoped away from MCP)."""
+        if not self._tool_selectors:
+            return
+        if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
+            logger.debug(
+                "agent=%s per-run tool overrides active; skipping MCP selector resolution for this turn",
+                self.name,
+            )
+            return
+        self._resolve_selector_tools(ctx.resources, tools_registry)
+
     _STALE_LOG_AFTER_SECONDS = 90.0  # 3x the default heartbeat interval
 
     def _resolve_selector_tools(self, resources: Mapping[str, Any], tools_registry: dict[str, ToolBinding]) -> None:
@@ -223,8 +238,7 @@ class BaseAgentNodeDef(
         elif self.tools:
             tools_registry = {binding.name: binding for binding in self.tools}
 
-        if self._tool_selectors:
-            self._resolve_selector_tools(ctx.resources, tools_registry)
+        self._maybe_resolve_selectors(ctx, tools_registry)
 
         # ``latest_tool_calls()`` walks ``message_history`` in reverse on each call;
         # cache once for all pre-model uses. The post-model use after
@@ -529,7 +543,15 @@ class BaseAgentNodeDef(
                 ctx.state.final_output_parts = parts
             return ReturnCall[State](state=ctx.state)
 
-    def add_tools(self, *tools: ToolProvider | ToolBinding) -> None:
+    def add_tools(self, *tools: ToolProvider | ToolBinding | ToolSelector) -> None:
+        """Add tools after construction.
+
+        Note: a ToolSelector added AFTER the hosting worker's
+        ``register_handlers()`` has run will not get a Capability View
+        resource (view registration snapshots hosted nodes once, like topic
+        provisioning) — it degrades per the unresolved-selector policy.
+        Declare selectors before registering, or at construction.
+        """
         bindings, selectors = split_tool_declarations(tools)
         self.tools.extend(bindings)
         self._tool_selectors.extend(selectors)

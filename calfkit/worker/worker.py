@@ -194,10 +194,8 @@ class Worker(LifecycleHookMixin):
             ensure_topic=self._client._provisioning.enabled,
         )
         await table.start()
-        try:
-            yield table
-        finally:
-            await table.stop()
+        yield table
+        await table.stop()
 
     def register_handlers(self) -> None:
         """Register FastStream subscribers + publishers for every node.

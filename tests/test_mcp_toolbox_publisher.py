@@ -59,12 +59,18 @@ def make_tools() -> list[Tool]:
     ]
 
 
-def make_toolbox(**kwargs: Any) -> Any:
-    return MCPToolbox(
+def make_toolbox(discovery: MCPDiscoveryConfig | None = None) -> Any:
+    toolbox = MCPToolbox(
         "docs_server",
         connection_params=StreamableHttpParameters(url="http://unused.local/mcp"),
-        **kwargs,
     )
+    if discovery is not None:
+        # Config flows from the hosting worker (the single config surface);
+        # tests stand in for it with a stub.
+        from types import SimpleNamespace
+
+        toolbox._worker = SimpleNamespace(_mcp_discovery=discovery, _client=None)
+    return toolbox
 
 
 def seed(toolbox: Any, session: FakeSession | None = None, writer: FakeWriter | None = None) -> tuple[FakeSession, FakeWriter]:

@@ -84,8 +84,8 @@ wins and an error is logged.
 
 ## Tune it (optional)
 
-Every knob has a working default. `Worker(..., mcp_discovery=
-MCPDiscoveryConfig(...))` and `MCPToolbox(..., discovery=...)` accept: the
-topic name, the boot catch-up timeout, the heartbeat interval, and a
-`bootstrap_servers` override for running the capability topic on a separate
-Kafka cluster.
+Every knob has a working default, and there is one config surface:
+`Worker(..., mcp_discovery=MCPDiscoveryConfig(...))` — the topic name, the
+boot catch-up timeout, the heartbeat interval, and a `bootstrap_servers`
+override for running the capability topic on a separate Kafka cluster.
+Toolboxes inherit the config of the worker that hosts them.
