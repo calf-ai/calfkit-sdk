@@ -371,7 +371,10 @@ resolved value is stored on the client and exposed as a read-only
 
 `MCPDiscoveryConfig(topic="mcp.capabilities", catchup_timeout=30.0,
 heartbeat_interval=30.0, bootstrap_servers=None)` is therefore entirely
-optional — defaults apply when absent. `bootstrap_servers` remains the
+optional — defaults apply when absent. **The worker is the single config
+surface**: toolboxes take no discovery config of their own and inherit the
+hosting worker's via the `_worker` back-reference (defaults when unhosted) —
+one config door into the control plane, not two. `bootstrap_servers` remains the
 override for the advanced split-cluster case (control plane on a different
 Kafka cluster than the data plane).
 
@@ -426,6 +429,12 @@ filter, then merge into `tools_registry` AFTER static tools with
 **collision = log error + static wins** (a remote server must never silently
 shadow a locally-defined tool). Unresolved selector: warn + degrade;
 `strict=True` raises before the model call. Stale heartbeat (v1): log only.
+
+**Overrides pin the tool surface (decided post-review, 2026-06-10):** when a
+caller supplies per-run `override_agent_tools`, selector resolution is
+skipped entirely for that turn — an override means "exactly these tools", so
+MCP tools never inject into an overridden turn and a strict selector cannot
+fail it.
 
 ### 8.5 Toolbox-side publishing
 

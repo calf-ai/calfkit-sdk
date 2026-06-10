@@ -1,4 +1,5 @@
 import logging
+from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Any
@@ -8,6 +9,7 @@ from faststream import FastStream
 from typing_extensions import Self
 
 from calfkit.client import Client
+from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
 from calfkit.nodes import BaseNodeDef
 from calfkit.provisioning import topics_for_nodes
 from calfkit.worker.lifecycle import (
@@ -20,6 +22,7 @@ from calfkit.worker.lifecycle import (
     _resource_cm,
     _span_cm,
 )
+from calfkit.worker.worker_config import MCPDiscoveryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,7 @@ class Worker(LifecycleHookMixin):
         extra_subscribe_kwargs: dict[str, Any] = {},
         id: str | None = None,
         name: str | None = None,
+        mcp_discovery: MCPDiscoveryConfig | None = None,
     ):
         """Initialize a worker.
 
@@ -76,12 +80,17 @@ class Worker(LifecycleHookMixin):
                 Validated non-empty; a uuid7 hex is generated when ``None``.
                 Read-only after construction — mirrors ``BaseClient.emitter_id``.
             name: Display-only label; defaults to ``id``. Never put on the wire.
+            mcp_discovery: Optional tuning for MCP capability discovery
+                (topic, catch-up timeout, bootstrap override). Entirely
+                optional — the Capability View is auto-registered with
+                defaults whenever a hosted agent declares MCP tool selectors.
         """
         if id is not None and not id.strip():
             raise ValueError("id must be a non-empty string or None")
         if name is not None and not name.strip():
             raise ValueError("name must be a non-empty string or None")
         self._client = client
+        self._mcp_discovery = mcp_discovery if mcp_discovery is not None else MCPDiscoveryConfig()
         self._max_workers = max_workers
         self._group_id = group_id
         self._extra_publish_kwargs = extra_publish_kwargs
@@ -139,6 +148,55 @@ class Worker(LifecycleHookMixin):
         node._worker = self
         self._nodes.append(node)
 
+    def _maybe_register_capability_view(self) -> None:
+        """Auto-register the MCP Capability View resource (spec §8.3).
+
+        Zero user wiring: iff any hosted node declares MCP tool selectors, ONE
+        worker-level ``KafkaTable[CapabilityRecord]`` resource is registered
+        (idempotent — guarded by resource-name lookup). The table lands in the
+        worker bag and reaches every node's ``ctx.resources`` via the existing
+        worker-under-node merge.
+        """
+        if not any(getattr(node, "_tool_selectors", None) for node in self._nodes):
+            return
+        if any(name == CAPABILITY_VIEW_RESOURCE_KEY for name, _ in self._resource_cms()):
+            return
+        self.resource(name=CAPABILITY_VIEW_RESOURCE_KEY)(self._capability_view_resource)
+
+    async def _capability_view_resource(self, ctx: ResourceSetupContext["Worker"]) -> AsyncIterator[Any]:
+        """Open the Capability View for this worker's lifetime.
+
+        ``KafkaTable.start()`` IS the boot gate: it replays the capability
+        topic to its start-time end offsets bounded by ``catchup_timeout``
+        (serving degraded, loudly, on expiry) — and because resource setup
+        runs before the broker serves, agents never see a half-built view.
+        """
+        from ktables import KafkaTable  # the one ktables import outside calfkit.mcp
+
+        cfg = self._mcp_discovery
+        bootstrap = cfg.bootstrap_servers or self._client.server_urls
+        if not bootstrap:
+            kwargs = getattr(self._client.broker, "_connection_kwargs", None) or {}
+            servers = kwargs.get("bootstrap_servers")
+            bootstrap = servers if isinstance(servers, str) else ",".join(servers) if servers else None
+        if not bootstrap:
+            raise RuntimeError(
+                "cannot derive Kafka bootstrap servers for the MCP Capability View "
+                "(client built without connect()?); set MCPDiscoveryConfig(bootstrap_servers=...)."
+            )
+        table: KafkaTable[CapabilityRecord] = KafkaTable.json(
+            bootstrap_servers=bootstrap,
+            topic=cfg.topic,
+            model=CapabilityRecord,
+            catchup_timeout=cfg.catchup_timeout,
+            # Readers ensure only in dev/CI (spec §3.1); production topics are
+            # ops-governed and a missing topic fails setup loudly.
+            ensure_topic=self._client._provisioning.enabled,
+        )
+        await table.start()
+        yield table
+        await table.stop()
+
     def register_handlers(self) -> None:
         """Register FastStream subscribers + publishers for every node.
 
@@ -149,6 +207,7 @@ class Worker(LifecycleHookMixin):
         if self._prepared:
             logger.debug("register_handlers() called again; skipping (already prepared)")
             return
+        self._maybe_register_capability_view()
         # Record the nodes we are about to register as the single source of
         # truth for ``_declare_startup_topics``. Snapshot (not alias) so later
         # ``add_nodes`` calls can't retroactively widen the provisioned set

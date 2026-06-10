@@ -1,4 +1,5 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,6 +61,66 @@ class ToolProvider(Protocol):
     """
 
     def tool_bindings(self) -> Sequence[ToolBinding]: ...
+
+
+@dataclass(frozen=True)
+class SelectorResult:
+    """Outcome of resolving one MCP tool selector against the Capability View.
+
+    Carries the bindings plus structured diagnostics so the agent owns the
+    warn/strict policy in one place and tests assert on data, not log text.
+    """
+
+    toolbox_id: str
+    strict: bool = False
+    bindings: list[ToolBinding] = field(default_factory=list)
+    missing_toolbox: bool = False
+    missing_tools: tuple[str, ...] = ()
+    skipped_newer_schema: bool = False
+    invalid_record: bool = False
+    stale_seconds: float | None = None
+
+    @property
+    def unresolved(self) -> bool:
+        """True when anything the selector asked for could not be delivered."""
+        return self.missing_toolbox or bool(self.missing_tools) or self.skipped_newer_schema or self.invalid_record
+
+
+@runtime_checkable
+class ToolSelector(Protocol):
+    """Deferred tool declaration, resolved per turn against the Capability View.
+
+    Implemented by :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` (and its
+    ``select()`` results): passing the toolbox object to an agent extracts only
+    a lookup key — no session contact, no deployment. The ``view`` is a plain
+    ``Mapping`` so the agent layer needs no ktables import and tests can use
+    dicts.
+    """
+
+    def resolve_tools(self, view: Mapping[str, Any]) -> SelectorResult: ...
+
+
+def split_tool_declarations(
+    tools: Sequence["ToolProvider | ToolBinding | ToolSelector"] | None,
+) -> tuple[list[ToolBinding], list[ToolSelector]]:
+    """Partition ``tools=`` into immediate bindings and deferred selectors.
+
+    Selector-ness is checked BEFORE provider-ness so a selector type that also
+    grew a ``tool_bindings`` attribute could never be mistakenly expanded at
+    construction time.
+    """
+    bindings: list[ToolBinding] = []
+    selectors: list[ToolSelector] = []
+    for t in tools or ():
+        if isinstance(t, ToolBinding):
+            bindings.append(t)
+        elif isinstance(t, ToolSelector):
+            selectors.append(t)
+        elif isinstance(t, ToolProvider):
+            bindings.extend(t.tool_bindings())
+        else:
+            raise TypeError(f"agent tools must be ToolBinding, ToolProvider, or ToolSelector instances, got {type(t).__name__}: {t!r}")
+    return bindings, selectors
 
 
 def normalize_tool_bindings(tools: Sequence[ToolProvider | ToolBinding] | None) -> list[ToolBinding]:

@@ -14,11 +14,13 @@ policy's predicate.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+from calfkit.models.tool_dispatch import SelectorResult as SelectorResult  # re-export: resolution API lives here
 from calfkit.models.tool_dispatch import ToolBinding
 
 CAPABILITY_SCHEMA_VERSION = 1
@@ -71,3 +73,45 @@ def record_to_bindings(record: CapabilityRecord) -> list[ToolBinding]:
         )
         for tool in record.tools
     ]
+
+
+CAPABILITY_VIEW_RESOURCE_KEY = "calfkit.mcp.capability_view"
+"""Worker resource-bag key under which the Capability View (a
+``Mapping[str, CapabilityRecord]``) is published to hosted nodes."""
+
+
+def resolve_capability(
+    view: Any,
+    toolbox_id: str,
+    *,
+    include: tuple[str, ...] | None = None,
+    strict: bool = False,
+) -> SelectorResult:
+    """Resolve ``toolbox_id`` (optionally filtered) against the view.
+
+    Never raises on bad records: the tolerant reader admits shapes that fail
+    binding expansion (e.g. empty ``dispatch_topic``); those surface as
+    ``invalid_record`` so a poisoned advertisement cannot crash a turn.
+    """
+    record = view.get(toolbox_id)
+    if record is None:
+        return SelectorResult(toolbox_id=toolbox_id, strict=strict, missing_toolbox=True)
+    if is_unsupported_schema(record):
+        return SelectorResult(toolbox_id=toolbox_id, strict=strict, skipped_newer_schema=True)
+    try:
+        bindings = record_to_bindings(record)
+    except Exception:
+        return SelectorResult(toolbox_id=toolbox_id, strict=strict, invalid_record=True)
+    missing: tuple[str, ...] = ()
+    if include is not None:
+        wanted = set(include)
+        bindings = [b for b in bindings if b.name in wanted]
+        missing = tuple(name for name in include if name not in {b.name for b in bindings})
+    stale = max(0.0, (datetime.now(tz=timezone.utc) - record.published_at).total_seconds())
+    return SelectorResult(
+        toolbox_id=toolbox_id,
+        strict=strict,
+        bindings=bindings,
+        missing_tools=missing,
+        stale_seconds=stale,
+    )

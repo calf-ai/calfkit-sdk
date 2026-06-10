@@ -137,3 +137,14 @@ def _reconstruct_tool_execution_error() -> "ToolExecutionError":
     it can be located by fully-qualified name during deserialization.
     """
     return ToolExecutionError.__new__(ToolExecutionError)
+
+
+class MCPToolResolutionError(Exception):
+    """A strict MCP tool selector could not be satisfied for this turn.
+
+    Raised by the agent BEFORE the model runs when a selector declared with
+    ``strict=True`` cannot fully resolve against the Capability View (toolbox
+    missing, requested tool not advertised, malformed/newer-schema record, or
+    no view resource at all). Non-strict selectors degrade with a warning
+    instead.
+    """
