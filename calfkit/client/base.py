@@ -58,6 +58,7 @@ class BaseClient:
         *,
         provisioning: ProvisioningConfig | None = None,
         startup_ensurer: StartupTopicEnsurer | None = None,
+        server_urls: str | None = None,
     ) -> None:
         """Initialize the client with pre-configured components.
 
@@ -97,6 +98,10 @@ class BaseClient:
         # subscriber consumes. ``connect`` builds it with the reply topic already
         # declared; direct construction gets a fresh, empty one.
         self._startup_ensurer = startup_ensurer if startup_ensurer is not None else StartupTopicEnsurer(config=self._provisioning)
+        # Retained for zero-config control-plane consumers (e.g. MCP capability
+        # discovery): the one URL the user provided, normalized. None when the
+        # client was hand-built rather than created via connect().
+        self._server_urls = server_urls
 
     @classmethod
     def connect(
@@ -143,6 +148,15 @@ class BaseClient:
         """
         if server_urls is None:
             server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+        # Materialize ONCE into a list (a one-shot iterable must not be drained
+        # twice), and keep the two consumers' forms straight:
+        # - the broker gets the LIST — FastStream wraps a str into [str], and
+        #   aiokafka never comma-splits inside a list element, so a joined
+        #   string here would mangle multi-host into one bad address;
+        # - the retained property is the comma-joined STRING — correct for
+        #   consumers that hand it to aiokafka directly (which splits strings),
+        #   e.g. the ktables control plane.
+        server_list = [server_urls] if isinstance(server_urls, str) else list(server_urls)
 
         # Raw security kwargs were accepted pre-#180 (for calfkit's own admin
         # client); now all kwargs flow straight to KafkaBroker, which rejects
@@ -174,7 +188,7 @@ class BaseClient:
         ensurer.declare([reply_topic], framework=True)
 
         broker_connection = _PreStartHookBroker(
-            server_urls,
+            server_list,
             middlewares=[ContextInjectionMiddleware],
             pre_start=ensurer.run,
             **broker_kwargs,
@@ -190,12 +204,22 @@ class BaseClient:
             emitter_id=_new_client_emitter_id(client_id),
             provisioning=provisioning,
             startup_ensurer=ensurer,
+            server_urls=",".join(server_list),
         )
 
     @property
     def broker(self) -> KafkaBroker:
         """The underlying ``KafkaBroker`` connection."""
         return self._connection
+
+    @property
+    def server_urls(self) -> str | None:
+        """The bootstrap server URL(s) this client was connected with.
+
+        Normalized to a comma-joined string. ``None`` for clients built
+        directly via ``__init__`` rather than :meth:`connect`.
+        """
+        return self._server_urls
 
     @property
     def reply_topic(self) -> str:
