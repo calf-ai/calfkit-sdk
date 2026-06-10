@@ -11,6 +11,7 @@ from calfkit._registry import handler
 from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolReturn
+from calfkit.exceptions import safe_exc_message
 from calfkit.models import SessionRunContext, Silent, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
 from calfkit.models.node_schema import BaseToolNodeSchema
@@ -19,25 +20,6 @@ from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_exc_message(e: BaseException) -> str:
-    """Best-effort string of an exception, robust against broken ``__str__``.
-
-    A bare ``str(e)`` can itself raise (if the exception's ``__str__`` is
-    broken or its args don't coerce). Inside the worker's ``except Exception``
-    block that would propagate out, prevent the FailedToolCall from being
-    constructed, and re-introduce the silent-hang failure mode this module
-    exists to prevent. Mirrors stdlib ``traceback._some_str`` with a ``repr``
-    fallback.
-    """
-    try:
-        return str(e)
-    except Exception:
-        try:
-            return repr(e)
-        except Exception:
-            return f"<unprintable {type(e).__name__}>"
 
 
 @dataclass
@@ -148,43 +130,15 @@ class ToolNodeDef(BaseToolNodeDef):
                 tool_call_part.tool_call_id,
                 type(e).__name__,
             )
-            # Construct the marker defensively: a validator on FailedToolCall (e.g.,
-            # min_length on tool_call_id) could itself raise inside this except block
-            # and re-introduce the silent-hang failure mode we exist to prevent.
-            try:
-                marker: FailedToolCall = FailedToolCall(
-                    tool_name=tool_call_part.tool_name,
-                    tool_call_id=tool_call_part.tool_call_id,
-                    exc_type=type(e).__name__,
-                    exc_message=_safe_exc_message(e),
-                )
-            except Exception as construct_err:
-                logger.exception(
-                    "[%s] tool=%s tool_call_id=%s failed to construct FailedToolCall (%s); using fallback sentinel marker",
-                    ctx.correlation_id[:8],
-                    self.name,
-                    tool_call_part.tool_call_id,
-                    type(construct_err).__name__,
-                )
-                # Fallback: preserve real ``tool_name`` / ``tool_call_id`` from
-                # ``tool_call_part`` when they are valid strings (so operators
-                # don't lose the correlation key in the raised ToolExecutionError);
-                # only substitute sentinels for fields that are themselves
-                # problematic. ``isinstance(..., str)`` and truthy guards keep
-                # construction total even if the originals are the cause of the
-                # primary failure (e.g. empty ``tool_call_id``).
-                fallback_tool_name = (
-                    tool_call_part.tool_name if isinstance(tool_call_part.tool_name, str) and tool_call_part.tool_name else "<unknown>"
-                )
-                fallback_tool_call_id = (
-                    tool_call_part.tool_call_id if isinstance(tool_call_part.tool_call_id, str) and tool_call_part.tool_call_id else "<missing>"
-                )
-                marker = FailedToolCall(
-                    tool_name=fallback_tool_name,
-                    tool_call_id=fallback_tool_call_id,
-                    exc_type="FailedToolCallConstructionError",
-                    exc_message=f"Failed to construct primary marker: {_safe_exc_message(construct_err)}",
-                )
+            # ``build_safe`` never raises (it falls back to sentinel identifiers if the
+            # marker itself can't be constructed, e.g. an empty ``tool_call_id``), so the
+            # failure reply is always published and the agent never hangs on reply-TTL.
+            marker = FailedToolCall.build_safe(
+                tool_name=tool_call_part.tool_name,
+                tool_call_id=tool_call_part.tool_call_id,
+                exc_type=type(e).__name__,
+                exc_message=safe_exc_message(e),
+            )
             ctx.state.add_tool_result(tool_call_part.tool_call_id, marker)
             return ReturnCall[State](state=ctx.state)
 

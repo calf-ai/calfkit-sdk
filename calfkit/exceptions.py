@@ -1,6 +1,24 @@
 from typing import Any
 
 
+def safe_exc_message(e: BaseException) -> str:
+    """Best-effort string of an exception, robust against a broken ``__str__``.
+
+    A bare ``str(e)`` can itself raise (a broken ``__str__``, or args that don't
+    coerce). Inside a worker's ``except`` block that would propagate out and prevent
+    the failure reply (e.g. a ``FailedToolCall``) from ever being published — the
+    silent-hang failure mode the tool/bridge nodes exist to prevent. Mirrors stdlib
+    ``traceback._some_str`` with a ``repr`` fallback.
+    """
+    try:
+        return str(e)
+    except Exception:
+        try:
+            return repr(e)
+        except Exception:
+            return f"<unprintable {type(e).__name__}>"
+
+
 class DeserializationError(Exception):
     """Raised when client-side output deserialization fails."""
 

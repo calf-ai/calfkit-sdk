@@ -1,6 +1,7 @@
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+from typing_extensions import Self
 
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 
@@ -28,5 +29,5 @@ class ToolCallRef(BaseModel):
     name: str
 
     @classmethod
-    def from_tool_call_part(cls, tool_call_part: ToolCallPart):
+    def from_tool_call_part(cls, tool_call_part: ToolCallPart) -> Self:
         return cls(tool_call_id=tool_call_part.tool_call_id, args=tool_call_part.args_as_dict(), name=tool_call_part.tool_name)

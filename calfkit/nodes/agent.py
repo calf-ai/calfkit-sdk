@@ -13,7 +13,7 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.exceptions import ToolExecutionError
+from calfkit.exceptions import ToolExecutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
 from calfkit.models.node_schema import BaseToolNodeSchema
@@ -23,7 +23,7 @@ from calfkit.models.state import FailedToolCall, PendingToolBatch
 from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
-from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
+from calfkit.nodes.tool import BaseToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 logger = logging.getLogger(__name__)
@@ -358,7 +358,7 @@ class BaseAgentNodeDef(
                 try:
                     args = tool_call.args_as_dict()
                 except Exception as e:
-                    content = f"Malformed tool arguments: {type(e).__name__}: {_safe_exc_message(e)}"
+                    content = f"Malformed tool arguments: {type(e).__name__}: {safe_exc_message(e)}"
                     logger.warning(
                         "[%s] tool=%s args parse failed at dispatch: %s",
                         ctx.correlation_id[:8],
@@ -406,7 +406,7 @@ class BaseAgentNodeDef(
                         # Surface as ``RetryPromptPart`` so the LLM can retry
                         # rather than letting the exception escape ``run()`` and
                         # silently hang the caller.
-                        validator_content = f"Tool argument validator raised {type(e).__name__}: {_safe_exc_message(e)}"
+                        validator_content = f"Tool argument validator raised {type(e).__name__}: {safe_exc_message(e)}"
                         logger.warning(
                             "[%s] tool=%s arg validator raised %s; surfacing as RetryPromptPart",
                             ctx.correlation_id[:8],

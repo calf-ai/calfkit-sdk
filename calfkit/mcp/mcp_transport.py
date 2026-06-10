@@ -1,13 +1,12 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
 from typing import Any
 
 import httpx
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
+from mcp.shared._httpx_utils import MCP_DEFAULT_SSE_READ_TIMEOUT, MCP_DEFAULT_TIMEOUT, create_mcp_http_client
 from mcp.shared.message import SessionMessage
 from pydantic import BaseModel, ConfigDict
 
@@ -32,10 +31,10 @@ class StreamableHttpParameters(BaseModel):
     headers: dict[str, Any] | None = None
 
     # HTTP timeout for regular operations.
-    timeout: timedelta = timedelta(seconds=30)
+    timeout: float = MCP_DEFAULT_TIMEOUT
 
     # Timeout for SSE read operations.
-    sse_read_timeout: timedelta = timedelta(seconds=60 * 5)
+    sse_read_timeout: float = MCP_DEFAULT_SSE_READ_TIMEOUT
 
     # Close the client session when the transport closes.
     terminate_on_close: bool = True
@@ -67,8 +66,8 @@ async def http_client(server: StreamableHttpParameters) -> AsyncIterator[_Stream
     async with create_mcp_http_client(
         headers=server.headers,
         timeout=httpx.Timeout(
-            server.timeout.total_seconds(),
-            read=server.sse_read_timeout.total_seconds(),
+            server.timeout,
+            read=server.sse_read_timeout,
         ),
         auth=server.auth,
     ) as httpx_client:

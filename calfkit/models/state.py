@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar, Generic, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
-from typing_extensions import TypeVar
+from typing_extensions import Self, TypeVar
 
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.messages import (
@@ -114,6 +114,26 @@ class FailedToolCall(BaseModel):
             if limit is not None and len(v) > limit:
                 return v[:limit]
         return v
+
+    @classmethod
+    def build_safe(cls, *, tool_name: str, tool_call_id: str, exc_type: str, exc_message: str) -> Self:
+        """Construct a marker that **never raises**, for use inside a worker's error path.
+
+        The normal constructor rejects an empty ``tool_call_id`` (``min_length=1``) and
+        could raise inside an ``except`` block — re-introducing the silent agent hang
+        this marker exists to prevent (oversized strings are already clamped, not
+        rejected, so the empty id is the realistic failure). On any construction error,
+        fall back to sentinel identifiers so the failure reply is always published.
+        """
+        try:
+            return cls(tool_name=tool_name, tool_call_id=tool_call_id, exc_type=exc_type, exc_message=exc_message)
+        except Exception:
+            return cls(
+                tool_name=tool_name or "<unknown>",
+                tool_call_id=tool_call_id or "<missing>",
+                exc_type="FailedToolCallConstructionError",
+                exc_message=f"could not construct marker for original exc_type={exc_type!r}",
+            )
 
 
 def _calf_tool_result_discriminator(x: Any) -> str | None:
