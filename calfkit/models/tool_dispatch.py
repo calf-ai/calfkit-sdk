@@ -1,8 +1,6 @@
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    from calfkit.models.capability import SelectorResult
+from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
@@ -65,6 +63,29 @@ class ToolProvider(Protocol):
     def tool_bindings(self) -> Sequence[ToolBinding]: ...
 
 
+@dataclass(frozen=True)
+class SelectorResult:
+    """Outcome of resolving one MCP tool selector against the Capability View.
+
+    Carries the bindings plus structured diagnostics so the agent owns the
+    warn/strict policy in one place and tests assert on data, not log text.
+    """
+
+    toolbox_id: str
+    strict: bool = False
+    bindings: list[ToolBinding] = field(default_factory=list)
+    missing_toolbox: bool = False
+    missing_tools: tuple[str, ...] = ()
+    skipped_newer_schema: bool = False
+    invalid_record: bool = False
+    stale_seconds: float | None = None
+
+    @property
+    def unresolved(self) -> bool:
+        """True when anything the selector asked for could not be delivered."""
+        return self.missing_toolbox or bool(self.missing_tools) or self.skipped_newer_schema or self.invalid_record
+
+
 @runtime_checkable
 class ToolSelector(Protocol):
     """Deferred tool declaration, resolved per turn against the Capability View.
@@ -76,7 +97,7 @@ class ToolSelector(Protocol):
     dicts.
     """
 
-    def resolve_tools(self, view: Mapping[str, Any]) -> "SelectorResult": ...
+    def resolve_tools(self, view: Mapping[str, Any]) -> SelectorResult: ...
 
 
 def split_tool_declarations(

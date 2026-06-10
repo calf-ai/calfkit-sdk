@@ -14,13 +14,13 @@ policy's predicate.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+from calfkit.models.tool_dispatch import SelectorResult as SelectorResult  # re-export: resolution API lives here
 from calfkit.models.tool_dispatch import ToolBinding
 
 CAPABILITY_SCHEMA_VERSION = 1
@@ -78,29 +78,6 @@ def record_to_bindings(record: CapabilityRecord) -> list[ToolBinding]:
 CAPABILITY_VIEW_RESOURCE_KEY = "calfkit.mcp.capability_view"
 """Worker resource-bag key under which the Capability View (a
 ``Mapping[str, CapabilityRecord]``) is published to hosted nodes."""
-
-
-@dataclass(frozen=True)
-class SelectorResult:
-    """Outcome of resolving one MCP tool selector against the Capability View.
-
-    Carries the bindings plus structured diagnostics so the agent owns the
-    warn/strict policy in one place and tests assert on data, not log text.
-    """
-
-    toolbox_id: str
-    strict: bool = False
-    bindings: list[ToolBinding] = field(default_factory=list)
-    missing_toolbox: bool = False
-    missing_tools: tuple[str, ...] = ()
-    skipped_newer_schema: bool = False
-    invalid_record: bool = False
-    stale_seconds: float | None = None
-
-    @property
-    def unresolved(self) -> bool:
-        """True when anything the selector asked for could not be delivered."""
-        return self.missing_toolbox or bool(self.missing_tools) or self.skipped_newer_schema or self.invalid_record
 
 
 def resolve_capability(
