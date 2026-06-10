@@ -51,8 +51,18 @@ def test_connect_rejects_raw_sasl_plain_kwargs() -> None:
         Client.connect("localhost:9092", sasl_plain_username="u", sasl_plain_password="p")
 
 
-def test_client_no_longer_exposes_server_urls_or_security_kwargs() -> None:
+def test_client_never_captures_security_kwargs() -> None:
+    """Credentials flow exclusively through FastStream's ``security=`` object
+    (the #188 invariant): the client must never capture raw security kwargs.
+
+    Note: this pin originally also covered ``server_urls``. That half was
+    deliberately relaxed for MCP capability discovery — the client now retains
+    the (non-credential) bootstrap URL it was connected with, so control-plane
+    consumers are zero-config. Addressing data may be retained; security
+    material may not.
+    """
     client = Client.connect("localhost:9092")
 
-    assert not hasattr(client, "server_urls")
     assert not hasattr(client, "security_kwargs")
+    # The retained URL is addressing data only — never credentials.
+    assert client.server_urls == "localhost:9092"
