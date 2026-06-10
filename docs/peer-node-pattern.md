@@ -264,6 +264,12 @@ method that silently crosses the network.
 
 ## Where this lands for calfkit
 
+The first shipped instance of this pattern is MCP tooling: `MCPToolbox` is
+the servant (hosts the MCP session, deploys via `add_nodes`), and
+`MCPToolboxRef` is the reference (identity + optional tool scoping, zero
+deployment knowledge — a passive resolution token rather than an RPC proxy) that agents hold in `tools=[...]` — see
+[mcp-tool-discovery](mcp-tool-discovery.md).
+
 The MCP bridge node — a node that both exposes tools and calls other nodes — is a
 genuine and natural instance of this pattern. The guidance that falls out of the
 above:

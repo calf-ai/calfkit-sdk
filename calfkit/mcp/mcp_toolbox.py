@@ -87,13 +87,14 @@ class MCPToolbox(BaseNodeDef):
     def resolve_tools(self, view: Mapping[str, CapabilityRecord]) -> SelectorResult:
         """All advertised tools, resolved against the Capability View.
 
-        Implements ``ToolSelector``: passing this toolbox in ``tools=[...]``
-        defers resolution to each agent turn — no session contact, no
-        deployment coupling.
+        Implements ``ToolSelector`` by delegating to this toolbox's ref —
+        passing the toolbox in ``tools=[...]`` and passing
+        ``MCPToolboxRef(name)`` resolve identically; the ref is the canonical
+        resolution path.
         """
-        return resolve_capability(view, self.node_id)
+        return MCPToolboxRef(self.node_id).resolve_tools(view)
 
-    def select(self, *, include: Sequence[str] | None = None, strict: bool = False) -> "_ScopedSelector":
+    def select(self, *, include: Sequence[str] | None = None, strict: bool = False) -> "MCPToolboxRef":
         """A scoped/strict selector for this toolbox's tools.
 
         ``include`` pins the exact tool names the agent may see (the trust
@@ -102,7 +103,7 @@ class MCPToolbox(BaseNodeDef):
         selection cannot be fully satisfied; the default degrades with a
         warning.
         """
-        return _ScopedSelector(
+        return MCPToolboxRef(
             toolbox_id=self.node_id,
             include=tuple(include) if include is not None else None,
             strict=strict,
@@ -297,12 +298,31 @@ class MCPToolbox(BaseNodeDef):
 
 
 @dataclass(frozen=True)
-class _ScopedSelector:
-    """Frozen, internal: produced by :meth:`MCPToolbox.select`, never named by users."""
+class MCPToolboxRef:
+    """The identity-only, deployment-free handle to an MCP toolbox (#212).
+
+    The call-side counterpart to the hosting :class:`MCPToolbox` (the
+    peer-node pattern's reference/servant split): constructible anywhere with
+    just the toolbox's name — no connection params, no secrets — and resolved
+    per agent turn against the Capability View. At the MCP protocol layer the
+    toolbox is the cluster's MCP client; agents never speak MCP at all — they
+    hold one of these.
+
+    ``include`` pins the exact tool names the agent may see; ``strict=True``
+    fails the turn when the selection cannot be fully satisfied (default
+    degrades with a warning). Frozen with value semantics: equal refs compare
+    and hash equal.
+    """
 
     toolbox_id: str
-    include: tuple[str, ...] | None
-    strict: bool
+    include: tuple[str, ...] | None = None
+    strict: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.toolbox_id:
+            raise ValueError("toolbox_id must be non-empty")
+        if self.include is not None and not isinstance(self.include, tuple):
+            object.__setattr__(self, "include", tuple(self.include))
 
     def resolve_tools(self, view: Mapping[str, CapabilityRecord]) -> SelectorResult:
         return resolve_capability(view, self.toolbox_id, include=self.include, strict=self.strict)
