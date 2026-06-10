@@ -7,7 +7,7 @@ def safe_exc_message(e: BaseException) -> str:
     A bare ``str(e)`` can itself raise (a broken ``__str__``, or args that don't
     coerce). Inside a worker's ``except`` block that would propagate out and prevent
     the failure reply (e.g. a ``FailedToolCall``) from ever being published — the
-    silent-hang failure mode the tool/bridge nodes exist to prevent. Mirrors stdlib
+    silent-hang failure mode the tool/toolbox nodes exist to prevent. Mirrors stdlib
     ``traceback._some_str`` with a ``repr`` fallback.
     """
     try:

@@ -4,7 +4,7 @@ A ToolBinding carries exactly what ``BaseAgentNodeDef.run`` consumes per tool:
 the ``ToolDefinition`` advertised to the LLM, the dispatch topic for the
 ``Call``, and an optional args validator. ``ToolProvider`` is the structural
 contract for anything that contributes bindings (tool node, toolbox, MCP
-bridge) — no shared base class required.
+toolbox) — no shared base class required.
 """
 
 import pytest
