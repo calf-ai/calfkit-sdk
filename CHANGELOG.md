@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.9.0...v0.9.1) (2026-06-10)
+
+
+### Features
+
+* public MCPToolboxRef — reference a toolbox by name; closes issue [#212](https://github.com/calf-ai/calfkit-sdk/issues/212) ([#213](https://github.com/calf-ai/calfkit-sdk/issues/213)) ([ddb2d14](https://github.com/calf-ai/calfkit-sdk/commit/ddb2d14d2d2820f06a9988b9baeac25b3d77ad99))
+
 ## [0.9.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.8.0...v0.9.0) (2026-06-10)
 
 
