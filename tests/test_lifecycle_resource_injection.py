@@ -137,7 +137,7 @@ async def test_tool_run_injects_node_resources_into_tool_context() -> None:
     ctx = SessionRunContext(state=state, deps={})
     ctx._correlation_id = "cid"
 
-    await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     assert seen["db"] is sentinel
 

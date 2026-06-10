@@ -15,9 +15,9 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, Mod
 from calfkit._vendor.pydantic_ai.models.function import FunctionModel
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
 from calfkit.models.envelope import Envelope
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
 from calfkit.models.state import OverridesState, State
+from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.worker import Worker
@@ -217,17 +217,7 @@ def make_overrides_state_factory(request, container) -> Callable[..., OverridesS
 
     elif mode == "tool-override":
         tools = container.get(list[ToolNodeDef])
-        return lambda: OverridesState(
-            override_agent_tools=[
-                BaseToolNodeSchema(
-                    node_id=t.node_id,
-                    subscribe_topics=t.subscribe_topics,
-                    publish_topic=t.publish_topic,
-                    tool_schema=t.tool_schema,
-                )
-                for t in tools
-            ]
-        )
+        return lambda: OverridesState(override_agent_tools=[ToolBinding(tool_def=t.tool_schema, dispatch_topic=t.subscribe_topics[0]) for t in tools])
 
     elif mode == "tool-override-none":
         return lambda: OverridesState(override_agent_tools=None)
@@ -250,15 +240,7 @@ def make_overrides_state_factory(request, container) -> Callable[..., OverridesS
     elif mode == "both-overrides":
         tools = container.get(list[ToolNodeDef])
         return lambda: OverridesState(
-            override_agent_tools=[
-                BaseToolNodeSchema(
-                    node_id=t.node_id,
-                    subscribe_topics=t.subscribe_topics,
-                    publish_topic=t.publish_topic,
-                    tool_schema=t.tool_schema,
-                )
-                for t in tools
-            ],
+            override_agent_tools=[ToolBinding(tool_def=t.tool_schema, dispatch_topic=t.subscribe_topics[0]) for t in tools],
             model_settings={"max_tokens": 1024, "temperature": 0.2},
         )
 

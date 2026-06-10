@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, overload
 
 import uuid_utils
@@ -12,8 +13,8 @@ from calfkit.client.base import BaseClient
 from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.models import State
 from calfkit.models.node_result import _UNSET, NodeResult
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import OverridesState
+from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, normalize_tool_bindings
 
 
 class Client(BaseClient):
@@ -42,7 +43,7 @@ class Client(BaseClient):
         correlation_id: str | None,
         temp_instructions: str | None,
         message_history: list[ModelMessage] | None,
-        tool_overrides: list[BaseToolNodeSchema] | None,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None,
         model_settings: ModelSettings | dict[str, Any] | None,
         author: str | None,
     ) -> tuple[str, State, OverridesState | None]:
@@ -71,7 +72,10 @@ class Client(BaseClient):
         state.stage_message(ModelRequest.user_text_prompt(user_prompt, name=author))
         overrides = (
             OverridesState(
-                override_agent_tools=tool_overrides,
+                # Providers (e.g. tool nodes) flatten into ToolBindings, same
+                # surface as ``Agent(tools=...)``; the bindings' validators are
+                # process-local and stripped when the state serializes.
+                override_agent_tools=normalize_tool_bindings(tool_overrides) if tool_overrides is not None else None,
                 model_settings=dict(model_settings) if model_settings is not None else None,
             )
             if tool_overrides is not None or model_settings is not None
@@ -87,7 +91,7 @@ class Client(BaseClient):
         *,
         output_type: type[OutputT],
         author: str | None = ...,
-        tool_overrides: list[BaseToolNodeSchema] | None = ...,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -105,7 +109,7 @@ class Client(BaseClient):
         topic: str,
         *,
         author: str | None = ...,
-        tool_overrides: list[BaseToolNodeSchema] | None = ...,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -122,7 +126,7 @@ class Client(BaseClient):
         topic: str,
         *,
         author: str | None = None,
-        tool_overrides: list[BaseToolNodeSchema] | None = None,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
         correlation_id: str | None = None,
@@ -200,7 +204,7 @@ class Client(BaseClient):
         user_prompt: str,
         topic: str,
         *,
-        tool_overrides: list[BaseToolNodeSchema] | None = None,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None = None,
         correlation_id: str | None = None,
         temp_instructions: str | None = None,
         message_history: list[ModelMessage] | None = None,
@@ -279,7 +283,7 @@ class Client(BaseClient):
         *,
         output_type: type[OutputT],
         author: str | None = ...,
-        tool_overrides: list[BaseToolNodeSchema] | None = ...,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -298,7 +302,7 @@ class Client(BaseClient):
         topic: str,
         *,
         author: str | None = ...,
-        tool_overrides: list[BaseToolNodeSchema] | None = ...,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
         reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
@@ -316,7 +320,7 @@ class Client(BaseClient):
         topic: str,
         *,
         author: str | None = None,
-        tool_overrides: list[BaseToolNodeSchema] | None = None,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None = None,
         output_type: type[Any] = _UNSET,
         reply_topic: str | None = None,
         correlation_id: str | None = None,

@@ -14,8 +14,8 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     ToolReturn,
 )
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.payload import ContentPart
+from calfkit.models.tool_dispatch import ToolBinding
 
 
 class BaseAgentActivityState(BaseModel):
@@ -26,7 +26,7 @@ class OverridesState(BaseAgentActivityState):
     """State for storing any override objects"""
 
     model_config = ConfigDict(extra="ignore")
-    override_agent_tools: list[BaseToolNodeSchema] | None = None
+    override_agent_tools: list[ToolBinding] | None = None
     model_settings: dict[str, Any] | None = None
 
 
@@ -187,9 +187,6 @@ class InFlightToolsState(BaseAgentActivityState):
 
     def add_tool_result(self, tool_call_id: str, tool_result: CalfToolResult | Any) -> None:
         self.tool_results[tool_call_id] = tool_result
-
-    def get_tool_call(self, tool_call_id: str) -> ToolCallPart | None:
-        return self.tool_calls.get(tool_call_id)
 
     def get_tool_result(self, tool_call_id: str) -> CalfToolResult | Any | None:
         return self.tool_results.get(tool_call_id)

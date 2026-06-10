@@ -15,7 +15,7 @@ from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParam
 from calfkit.models.actions import NodeResult, ReturnCall
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, State
-from calfkit.models.tool_dispatch import ToolCallRef
+from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.worker.lifecycle import ResourceSetupContext
 
@@ -26,6 +26,17 @@ _TransportCM = AbstractAsyncContextManager[tuple[object, object]]
 
 class MCPBridge(BaseNodeDef):
     _node_kind: ClassVar[NodeKind] = "bridge"
+
+    def tool_bindings(self) -> list[ToolBinding]:
+        # MCP tools are discovered from the live session (list_tools is async,
+        # and the session exists only after resource setup), so sync collection
+        # at agent-construction time is impossible. Fail fast rather than
+        # return [] — an empty list would silently register the bridge with no
+        # tools. Async discovery / lazy-provider resolution is a pending design.
+        raise NotImplementedError(
+            f"MCPBridge {self.node_id!r} cannot provide tool bindings synchronously; "
+            "MCP tool discovery requires a live session (pending async-provider design)"
+        )
 
     async def _mcp_session(self, ctx: ResourceSetupContext) -> AsyncIterator[ClientSession]:
         params = self._connection_params

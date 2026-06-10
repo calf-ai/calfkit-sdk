@@ -1,7 +1,5 @@
 from dataclasses import KW_ONLY, dataclass
 
-from calfkit._vendor.pydantic_ai.tools import ToolDefinition
-
 
 @dataclass
 class BaseNodeSchema:
@@ -24,9 +22,3 @@ class BaseNodeSchema:
         # silent zombie consumer.
         if not self.subscribe_topics:
             raise ValueError(f"node {self.node_id!r} requires at least one subscribe_topic; got empty list")
-
-
-@dataclass
-class BaseToolNodeSchema(BaseNodeSchema):
-    _: KW_ONLY
-    tool_schema: ToolDefinition

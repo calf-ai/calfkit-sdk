@@ -43,10 +43,16 @@ async def _handle(node: Any, headers: dict[str, Any], env: Envelope | None = Non
 # ---------------------------------------------------------------------------
 
 
-def test_tool_call_ref_carries_id_and_forbids_extra() -> None:
-    assert ToolCallRef(tool_call_id="tc-1").tool_call_id == "tc-1"
+def test_tool_call_ref_carries_full_invocation_and_forbids_extra() -> None:
+    # The ref is the authoritative invocation source for tool nodes and the
+    # MCP bridge: id, args, and name are all required — a tool invocation is
+    # serviced from the payload alone, with no ToolCallPart lookup in state.
+    ref = ToolCallRef(tool_call_id="tc-1", args={"x": 1}, name="my_tool")
+    assert (ref.tool_call_id, ref.args, ref.name) == ("tc-1", {"x": 1}, "my_tool")
     with pytest.raises(ValidationError):
-        ToolCallRef(tool_call_id="x", surprise="nope")  # type: ignore[call-arg]
+        ToolCallRef(tool_call_id="x", args={}, name="t", surprise="nope")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        ToolCallRef(tool_call_id="tc-1")  # type: ignore[call-arg]  # args/name now required
     with pytest.raises(ValidationError):
         ToolCallRef()  # type: ignore[call-arg]
 
