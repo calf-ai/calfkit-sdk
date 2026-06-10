@@ -20,7 +20,7 @@ class ToolBinding(BaseModel):
     (:class:`ToolCallRef` below is the invocation-time half). It is exactly the
     surface ``BaseAgentNodeDef.run`` consumes per tool — nothing about the
     providing node (deployment topology, lifecycle, subscribe topics) leaks in,
-    so one node may contribute many bindings (toolbox, MCP bridge) or one
+    so one node may contribute many bindings (a native toolbox, an MCP toolbox) or one
     (function tool node) without any shared base class.
 
     Doubles as the wire model for per-run tool overrides
@@ -53,7 +53,7 @@ class ToolBinding(BaseModel):
 class ToolProvider(Protocol):
     """Structural contract for anything that contributes tools to an agent.
 
-    One provider may yield many bindings (toolbox, MCP bridge) or one (function
+    One provider may yield many bindings (a native toolbox, an MCP toolbox) or one (function
     tool node). ``runtime_checkable`` checks only that ``tool_bindings`` exists —
     the distinctive method name is what keeps unrelated objects from
     duck-typing in accidentally.
@@ -68,7 +68,7 @@ def normalize_tool_bindings(tools: Sequence[ToolProvider | ToolBinding] | None) 
     Raw :class:`ToolBinding` entries pass through verbatim (overrides, tests,
     hand-rolled bindings with no node object in hand); anything satisfying
     :class:`ToolProvider` contributes ``tool_bindings()``, so one provider may
-    yield many bindings (toolbox, MCP bridge). The ``isinstance`` protocol check
+    yield many bindings (a native toolbox, an MCP toolbox). The ``isinstance`` protocol check
     is structural — it only proves a ``tool_bindings`` attribute exists — which
     is why the unmatched arm is a hard ``TypeError`` rather than a skip.
 

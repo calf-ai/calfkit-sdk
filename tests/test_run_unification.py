@@ -45,7 +45,7 @@ async def _handle(node: Any, headers: dict[str, Any], env: Envelope | None = Non
 
 def test_tool_call_ref_carries_full_invocation_and_forbids_extra() -> None:
     # The ref is the authoritative invocation source for tool nodes and the
-    # MCP bridge: id, args, and name are all required — a tool invocation is
+    # MCP toolbox: id, args, and name are all required — a tool invocation is
     # serviced from the payload alone, with no ToolCallPart lookup in state.
     ref = ToolCallRef(tool_call_id="tc-1", args={"x": 1}, name="my_tool")
     assert (ref.tool_call_id, ref.args, ref.name) == ("tc-1", {"x": 1}, "my_tool")

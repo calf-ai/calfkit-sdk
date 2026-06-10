@@ -24,17 +24,17 @@ logger = logging.getLogger(__name__)
 _TransportCM = AbstractAsyncContextManager[tuple[object, object]]
 
 
-class MCPBridge(BaseNodeDef):
-    _node_kind: ClassVar[NodeKind] = "bridge"
+class MCPToolbox(BaseNodeDef):
+    _node_kind: ClassVar[NodeKind] = "toolbox"
 
     def tool_bindings(self) -> list[ToolBinding]:
         # MCP tools are discovered from the live session (list_tools is async,
         # and the session exists only after resource setup), so sync collection
         # at agent-construction time is impossible. Fail fast rather than
-        # return [] — an empty list would silently register the bridge with no
+        # return [] — an empty list would silently register the toolbox with no
         # tools. Async discovery / lazy-provider resolution is a pending design.
         raise NotImplementedError(
-            f"MCPBridge {self.node_id!r} cannot provide tool bindings synchronously; "
+            f"MCPToolbox {self.node_id!r} cannot provide tool bindings synchronously; "
             "MCP tool discovery requires a live session (pending async-provider design)"
         )
 
@@ -47,7 +47,7 @@ class MCPBridge(BaseNodeDef):
             transport = stdio_client(params)
         else:
             raise LifecycleConfigError(
-                f"MCPBridge {self.node_id!r}: unsupported connection_params type {type(params).__name__}; "
+                f"MCPToolbox {self.node_id!r}: unsupported connection_params type {type(params).__name__}; "
                 "expected StreamableHttpParameters or StdioServerParameters"
             )
         async with transport as (read_stream, write_stream):
@@ -66,7 +66,7 @@ class MCPBridge(BaseNodeDef):
 
         The agent reads the result under ``payload.tool_call_id`` and escalates any
         ``FailedToolCall`` to a ``ToolExecutionError`` (it is *not* shown to the model),
-        so this is the bridge's hard-failure channel: a dead session, a transport error,
+        so this is the toolbox's hard-failure channel: a dead session, a transport error,
         or a non-wire-safe result. Replying (rather than raising) is what keeps the
         awaiting agent from stalling on its reply-TTL.
         """
@@ -87,7 +87,7 @@ class MCPBridge(BaseNodeDef):
             # raising, which would strand the awaiting agent on its reply-TTL instead
             # of surfacing a ToolExecutionError.
             logger.error(
-                "[%s] no live MCP session for bridge=%s resource=%s tool=%s",
+                "[%s] no live MCP session for toolbox=%s resource=%s tool=%s",
                 ctx.correlation_id[:8],
                 self.node_id,
                 self._session_resource_key,
@@ -104,7 +104,7 @@ class MCPBridge(BaseNodeDef):
             pydantic_core.to_json(tool_return)
         except Exception as e:
             logger.exception(
-                "[%s] mcp tool=%s tool_call_id=%s on bridge=%s raised %s; surfacing FailedToolCall",
+                "[%s] mcp tool=%s tool_call_id=%s on toolbox=%s raised %s; surfacing FailedToolCall",
                 ctx.correlation_id[:8],
                 payload.name,
                 payload.tool_call_id,
