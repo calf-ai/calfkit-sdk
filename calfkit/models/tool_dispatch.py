@@ -1,5 +1,8 @@
-from collections.abc import Callable, Sequence
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from calfkit.models.capability import SelectorResult
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
@@ -60,6 +63,43 @@ class ToolProvider(Protocol):
     """
 
     def tool_bindings(self) -> Sequence[ToolBinding]: ...
+
+
+@runtime_checkable
+class ToolSelector(Protocol):
+    """Deferred tool declaration, resolved per turn against the Capability View.
+
+    Implemented by :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` (and its
+    ``select()`` results): passing the toolbox object to an agent extracts only
+    a lookup key — no session contact, no deployment. The ``view`` is a plain
+    ``Mapping`` so the agent layer needs no ktables import and tests can use
+    dicts.
+    """
+
+    def resolve_tools(self, view: Mapping[str, Any]) -> "SelectorResult": ...
+
+
+def split_tool_declarations(
+    tools: Sequence["ToolProvider | ToolBinding | ToolSelector"] | None,
+) -> tuple[list[ToolBinding], list[ToolSelector]]:
+    """Partition ``tools=`` into immediate bindings and deferred selectors.
+
+    Selector-ness is checked BEFORE provider-ness so a selector type that also
+    grew a ``tool_bindings`` attribute could never be mistakenly expanded at
+    construction time.
+    """
+    bindings: list[ToolBinding] = []
+    selectors: list[ToolSelector] = []
+    for t in tools or ():
+        if isinstance(t, ToolBinding):
+            bindings.append(t)
+        elif isinstance(t, ToolSelector):
+            selectors.append(t)
+        elif isinstance(t, ToolProvider):
+            bindings.extend(t.tool_bindings())
+        else:
+            raise TypeError(f"agent tools must be ToolBinding, ToolProvider, or ToolSelector instances, got {type(t).__name__}: {t!r}")
+    return bindings, selectors
 
 
 def normalize_tool_bindings(tools: Sequence[ToolProvider | ToolBinding] | None) -> list[ToolBinding]:

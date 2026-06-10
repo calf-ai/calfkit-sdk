@@ -1,8 +1,9 @@
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
@@ -18,10 +19,10 @@ from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.exceptions import LifecycleConfigError, safe_exc_message
 from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParameters, http_client, stdio_client
 from calfkit.models.actions import NodeResult, ReturnCall
-from calfkit.models.capability import CapabilityRecord, CapabilityToolDef
+from calfkit.models.capability import CapabilityRecord, CapabilityToolDef, SelectorResult, resolve_capability
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, State
-from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
+from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.worker.lifecycle import ResourceSetupContext, ServingContext
 from calfkit.worker.worker_config import MCPDiscoveryConfig
@@ -33,17 +34,6 @@ _TransportCM = AbstractAsyncContextManager[tuple[object, object]]
 
 class MCPToolbox(BaseNodeDef):
     _node_kind: ClassVar[NodeKind] = "toolbox"
-
-    def tool_bindings(self) -> list[ToolBinding]:
-        # MCP tools are discovered from the live session (list_tools is async,
-        # and the session exists only after resource setup), so sync collection
-        # at agent-construction time is impossible. Fail fast rather than
-        # return [] — an empty list would silently register the toolbox with no
-        # tools. Async discovery / lazy-provider resolution is a pending design.
-        raise NotImplementedError(
-            f"MCPToolbox {self.node_id!r} cannot provide tool bindings synchronously; "
-            "MCP tool discovery requires a live session (pending async-provider design)"
-        )
 
     async def _mcp_session(self, ctx: ResourceSetupContext) -> AsyncIterator[ClientSession]:
         params = self._connection_params
@@ -81,6 +71,32 @@ class MCPToolbox(BaseNodeDef):
         self.resource(name=self._writer_resource_key)(self._capability_writer)
         self.after_startup(self._publish_on_startup)
         self.on_shutdown(self._tombstone_on_shutdown)
+
+    # -- tool selection (spec §8.4) --------------------------------------------
+
+    def resolve_tools(self, view: Mapping[str, CapabilityRecord]) -> SelectorResult:
+        """All advertised tools, resolved against the Capability View.
+
+        Implements ``ToolSelector``: passing this toolbox in ``tools=[...]``
+        defers resolution to each agent turn — no session contact, no
+        deployment coupling.
+        """
+        return resolve_capability(view, self.node_id)
+
+    def select(self, *, include: Sequence[str] | None = None, strict: bool = False) -> "_ScopedSelector":
+        """A scoped/strict selector for this toolbox's tools.
+
+        ``include`` pins the exact tool names the agent may see (the trust
+        boundary: a server suddenly advertising new tools cannot enlarge the
+        agent's surface). ``strict=True`` fails the agent's turn when the
+        selection cannot be fully satisfied; the default degrades with a
+        warning.
+        """
+        return _ScopedSelector(
+            toolbox_id=self.node_id,
+            include=tuple(include) if include is not None else None,
+            strict=strict,
+        )
 
     # -- capability publishing (spec §3.3/§8.5) -------------------------------
 
@@ -268,3 +284,15 @@ class MCPToolbox(BaseNodeDef):
 
         ctx.state.add_tool_result(tool_call_id=payload.tool_call_id, tool_result=tool_return)
         return ReturnCall(ctx.state)
+
+
+@dataclass(frozen=True)
+class _ScopedSelector:
+    """Frozen, internal: produced by :meth:`MCPToolbox.select`, never named by users."""
+
+    toolbox_id: str
+    include: tuple[str, ...] | None
+    strict: bool
+
+    def resolve_tools(self, view: Mapping[str, CapabilityRecord]) -> SelectorResult:
+        return resolve_capability(view, self.toolbox_id, include=self.include, strict=self.strict)

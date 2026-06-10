@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Generic, cast
 
 from pydantic import ValidationError
@@ -13,13 +13,14 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.exceptions import ToolExecutionError, safe_exc_message
+from calfkit.exceptions import MCPToolResolutionError, ToolExecutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
+from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, PendingToolBatch
-from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, normalize_tool_bindings
+from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -41,7 +42,7 @@ class BaseAgentNodeDef(
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
         gates: list[GateFunction] | None = None,
-        tools: Sequence[ToolProvider | ToolBinding] | None = None,
+        tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
@@ -49,7 +50,7 @@ class BaseAgentNodeDef(
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
-        self.tools: list[ToolBinding] = normalize_tool_bindings(tools)
+        self.tools, self._tool_selectors = split_tool_declarations(tools)
         self.sequential_only_mode = sequential_only_mode
         self._pending_batches: dict[str, PendingToolBatch] = dict()
 
@@ -160,6 +161,58 @@ class BaseAgentNodeDef(
                     [tc.tool_call_id for tc in completed_latest],
                 )
 
+    _STALE_LOG_AFTER_SECONDS = 90.0  # 3x the default heartbeat interval
+
+    def _resolve_selector_tools(self, resources: Mapping[str, Any], tools_registry: dict[str, ToolBinding]) -> None:
+        """Per-turn MCP selector resolution against the Capability View (spec §8.4).
+
+        Merges AFTER static tools with collision = error-log + static wins (a
+        remote server must never silently shadow a locally defined tool).
+        Unresolved selections warn and degrade; ``strict=True`` raises before
+        the model runs. Staleness and newer-schema records are log-only (v1).
+        """
+        view = resources.get(CAPABILITY_VIEW_RESOURCE_KEY)
+        if view is None:
+            if any(getattr(sel, "strict", False) for sel in self._tool_selectors):
+                raise MCPToolResolutionError(
+                    f"agent {self.name!r} declares strict MCP tool selectors but no Capability View "
+                    f"resource ({CAPABILITY_VIEW_RESOURCE_KEY!r}) is available — is this agent hosted "
+                    "by a Worker with MCP discovery active?"
+                )
+            logger.warning(
+                "agent=%s has MCP tool selectors but no Capability View resource; running without MCP tools",
+                self.name,
+            )
+            return
+        for selector in self._tool_selectors:
+            result: SelectorResult = selector.resolve_tools(view)
+            if result.unresolved:
+                detail = (
+                    f"toolbox={result.toolbox_id!r} missing_toolbox={result.missing_toolbox} "
+                    f"missing_tools={result.missing_tools} newer_schema={result.skipped_newer_schema} "
+                    f"invalid_record={result.invalid_record}"
+                )
+                if result.strict:
+                    raise MCPToolResolutionError(f"agent {self.name!r}: strict MCP selection unresolved: {detail}")
+                logger.warning("agent=%s MCP selection partially unresolved (%s); running degraded", self.name, detail)
+            if result.stale_seconds is not None and result.stale_seconds > self._STALE_LOG_AFTER_SECONDS:
+                logger.warning(
+                    "agent=%s toolbox=%s capability record is %.0fs stale (heartbeats missing?); using last-known tools",
+                    self.name,
+                    result.toolbox_id,
+                    result.stale_seconds,
+                )
+            for binding in result.bindings:
+                if binding.name in tools_registry:
+                    logger.error(
+                        "agent=%s MCP tool %r from toolbox=%s collides with a locally configured tool; static wins",
+                        self.name,
+                        binding.name,
+                        result.toolbox_id,
+                    )
+                    continue
+                tools_registry[binding.name] = binding
+
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         tools_registry = dict[str, ToolBinding]()
         if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
@@ -169,6 +222,9 @@ class BaseAgentNodeDef(
             tools_registry = {binding.name: binding for binding in ctx.state.overrides.override_agent_tools}
         elif self.tools:
             tools_registry = {binding.name: binding for binding in self.tools}
+
+        if self._tool_selectors:
+            self._resolve_selector_tools(ctx.resources, tools_registry)
 
         # ``latest_tool_calls()`` walks ``message_history`` in reverse on each call;
         # cache once for all pre-model uses. The post-model use after
@@ -474,7 +530,9 @@ class BaseAgentNodeDef(
             return ReturnCall[State](state=ctx.state)
 
     def add_tools(self, *tools: ToolProvider | ToolBinding) -> None:
-        self.tools.extend(normalize_tool_bindings(tools))
+        bindings, selectors = split_tool_declarations(tools)
+        self.tools.extend(bindings)
+        self._tool_selectors.extend(selectors)
 
     def instructions(self, func: Callable[..., str | None]) -> Callable[..., str | None]:
         """Decorator to define dynamic instruction functions that can build instructions at runtime."""
