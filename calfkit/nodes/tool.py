@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from typing import Any, ClassVar
 
 import pydantic_core
@@ -11,40 +11,39 @@ from calfkit._registry import handler
 from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolReturn
-from calfkit.models import SessionRunContext, Silent, State, ToolContext
+from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+from calfkit.exceptions import safe_exc_message
+from calfkit.models import SessionRunContext, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import FailedToolCall
-from calfkit.models.tool_dispatch import ToolCallRef
+from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 
 logger = logging.getLogger(__name__)
 
 
-def _safe_exc_message(e: BaseException) -> str:
-    """Best-effort string of an exception, robust against broken ``__str__``.
-
-    A bare ``str(e)`` can itself raise (if the exception's ``__str__`` is
-    broken or its args don't coerce). Inside the worker's ``except Exception``
-    block that would propagate out, prevent the FailedToolCall from being
-    constructed, and re-introduce the silent-hang failure mode this module
-    exists to prevent. Mirrors stdlib ``traceback._some_str`` with a ``repr``
-    fallback.
-    """
-    try:
-        return str(e)
-    except Exception:
-        try:
-            return repr(e)
-        except Exception:
-            return f"<unprintable {type(e).__name__}>"
-
-
 @dataclass
-class BaseToolNodeDef(BaseToolNodeSchema, BaseNodeDef):
+class BaseToolNodeDef(BaseNodeDef):
     _node_kind: ClassVar[NodeKind] = "tool"
     _tool: Tool
+    _: KW_ONLY
+    tool_schema: ToolDefinition
     gates: list[GateFunction] = field(default_factory=list)
+
+    def tool_bindings(self) -> list[ToolBinding]:
+        """This node's single binding — satisfies the ``ToolProvider`` protocol.
+
+        ``dispatch_topic`` is the node's public inbox (``subscribe_topics[0]``);
+        the validator is the bound :meth:`validate_call_args`, so the agent
+        fail-fasts on malformed LLM args before the Kafka boundary.
+        """
+        return [
+            ToolBinding(
+                tool_def=self.tool_schema,
+                dispatch_topic=self.subscribe_topics[0],
+                validator=self.validate_call_args,
+            )
+        ]
 
     def validate_call_args(self, args_dict: dict[str, Any]) -> Any:
         """Validate ``args_dict`` against this tool's argument schema.
@@ -84,6 +83,11 @@ class ToolNodeDef(BaseToolNodeDef):
 
     @handler("*", schema=ToolCallRef)
     async def run(self, ctx: SessionRunContext, payload: ToolCallRef) -> NodeResult[State]:  # type: ignore[override]
+        # The ToolCallRef payload is the authoritative invocation source —
+        # name, args, and tool_call_id all come from the ref, never from a
+        # ToolCallPart lookup in ctx.state. In parallel mode each fanned-out
+        # Call carries a deep state copy holding ALL pending calls, so the
+        # payload is the only per-invocation discriminator anyway.
         tool_call_id = payload.tool_call_id
         logger.debug(
             "[%s] tool run entered tool=%s tool_call_id=%s emitter=%s",
@@ -92,19 +96,12 @@ class ToolNodeDef(BaseToolNodeDef):
             tool_call_id,
             ctx.emitter_node_id,
         )
-        tool_call_part = ctx.state.get_tool_call(tool_call_id)
-        if tool_call_part is None:
-            logger.warning(
-                "tool node reached but no matching tool call found in run state for tool_call_id=%s",
-                tool_call_id,
-            )
-            return Silent()
 
         tool_call_ctx = ToolContext(
             deps=ctx.deps,
             agent_name=ctx.emitter_node_id,
-            tool_call_id=tool_call_part.tool_call_id,
-            tool_name=tool_call_part.tool_name,
+            tool_call_id=tool_call_id,
+            tool_name=payload.name,
             messages=ctx.state.message_history,
             run_id=ctx.correlation_id,
             resources=self._effective_resources(),
@@ -114,7 +111,7 @@ class ToolNodeDef(BaseToolNodeDef):
         # ModelRetry below provides LLM-visible retry per pydantic-ai semantics
         # but is not yet rate-limited on the deferred path.
         try:
-            result = await self._tool.function_schema.call(tool_call_part.args_as_dict(), tool_call_ctx)
+            result = await self._tool.function_schema.call(payload.args, tool_call_ctx)
             # Construct the ToolReturn and eagerly verify it is wire-safe BEFORE
             # storing in state. FastStream's envelope serialization at publish
             # time would raise PydanticSerializationError on a non-serializable
@@ -122,7 +119,7 @@ class ToolNodeDef(BaseToolNodeDef):
             # publishes — the silent-hang failure mode this module exists to
             # prevent. By serializing inside the try block, any failure flows
             # through ``except Exception`` below and surfaces as a FailedToolCall.
-            tool_return = ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_part.tool_call_id})
+            tool_return = ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_id})
             pydantic_core.to_json(tool_return)
         except ModelRetry as e:
             logger.warning(
@@ -132,11 +129,11 @@ class ToolNodeDef(BaseToolNodeDef):
                 e.message,
             )
             ctx.state.add_tool_result(
-                tool_call_part.tool_call_id,
+                tool_call_id,
                 RetryPromptPart(
                     content=e.message,
-                    tool_name=tool_call_part.tool_name,
-                    tool_call_id=tool_call_part.tool_call_id,
+                    tool_name=payload.name,
+                    tool_call_id=tool_call_id,
                 ),
             )
             return ReturnCall[State](state=ctx.state)
@@ -145,52 +142,24 @@ class ToolNodeDef(BaseToolNodeDef):
                 "[%s] tool=%s tool_call_id=%s raised %s; surfacing FailedToolCall to agent",
                 ctx.correlation_id[:8],
                 self.name,
-                tool_call_part.tool_call_id,
+                tool_call_id,
                 type(e).__name__,
             )
-            # Construct the marker defensively: a validator on FailedToolCall (e.g.,
-            # min_length on tool_call_id) could itself raise inside this except block
-            # and re-introduce the silent-hang failure mode we exist to prevent.
-            try:
-                marker: FailedToolCall = FailedToolCall(
-                    tool_name=tool_call_part.tool_name,
-                    tool_call_id=tool_call_part.tool_call_id,
-                    exc_type=type(e).__name__,
-                    exc_message=_safe_exc_message(e),
-                )
-            except Exception as construct_err:
-                logger.exception(
-                    "[%s] tool=%s tool_call_id=%s failed to construct FailedToolCall (%s); using fallback sentinel marker",
-                    ctx.correlation_id[:8],
-                    self.name,
-                    tool_call_part.tool_call_id,
-                    type(construct_err).__name__,
-                )
-                # Fallback: preserve real ``tool_name`` / ``tool_call_id`` from
-                # ``tool_call_part`` when they are valid strings (so operators
-                # don't lose the correlation key in the raised ToolExecutionError);
-                # only substitute sentinels for fields that are themselves
-                # problematic. ``isinstance(..., str)`` and truthy guards keep
-                # construction total even if the originals are the cause of the
-                # primary failure (e.g. empty ``tool_call_id``).
-                fallback_tool_name = (
-                    tool_call_part.tool_name if isinstance(tool_call_part.tool_name, str) and tool_call_part.tool_name else "<unknown>"
-                )
-                fallback_tool_call_id = (
-                    tool_call_part.tool_call_id if isinstance(tool_call_part.tool_call_id, str) and tool_call_part.tool_call_id else "<missing>"
-                )
-                marker = FailedToolCall(
-                    tool_name=fallback_tool_name,
-                    tool_call_id=fallback_tool_call_id,
-                    exc_type="FailedToolCallConstructionError",
-                    exc_message=f"Failed to construct primary marker: {_safe_exc_message(construct_err)}",
-                )
-            ctx.state.add_tool_result(tool_call_part.tool_call_id, marker)
+            # ``build_safe`` never raises (it falls back to sentinel identifiers if the
+            # marker itself can't be constructed, e.g. an empty ``tool_call_id``), so the
+            # failure reply is always published and the agent never hangs on reply-TTL.
+            marker = FailedToolCall.build_safe(
+                tool_name=payload.name,
+                tool_call_id=tool_call_id,
+                exc_type=type(e).__name__,
+                exc_message=safe_exc_message(e),
+            )
+            ctx.state.add_tool_result(tool_call_id, marker)
             return ReturnCall[State](state=ctx.state)
 
         # ``tool_return`` was constructed and serialization-verified inside the
         # try block above; reuse it rather than constructing twice.
-        ctx.state.add_tool_result(tool_call_part.tool_call_id, tool_return)
+        ctx.state.add_tool_result(tool_call_id, tool_return)
 
         logger.debug("[%s] tool completed tool=%s", ctx.correlation_id[:8], self.name)
         return ReturnCall[State](state=ctx.state)

@@ -40,6 +40,7 @@ dependencies = [
     "anthropic>=0.80.0",
     "typing-extensions>=4.15.0",
     "dishka>=1.9.1",
+    "mcp>=1.27.2",
 ]
 
 [project.urls]

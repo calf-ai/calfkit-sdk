@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, ClassVar, Generic, cast
 
 from pydantic import ValidationError
@@ -13,17 +13,15 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.exceptions import ToolExecutionError
+from calfkit.exceptions import ToolExecutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.actions import Silent
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall, PendingToolBatch
-from calfkit.models.tool_dispatch import ToolCallRef
+from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, normalize_tool_bindings
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
-from calfkit.nodes.tool import BaseToolNodeDef, _safe_exc_message
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 logger = logging.getLogger(__name__)
@@ -43,7 +41,7 @@ class BaseAgentNodeDef(
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
         gates: list[GateFunction] | None = None,
-        tools: list[BaseToolNodeSchema] | None = None,
+        tools: Sequence[ToolProvider | ToolBinding] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
@@ -51,7 +49,7 @@ class BaseAgentNodeDef(
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
-        self.tools: list[BaseToolNodeSchema] = list(tools) if tools else []
+        self.tools: list[ToolBinding] = normalize_tool_bindings(tools)
         self.sequential_only_mode = sequential_only_mode
         self._pending_batches: dict[str, PendingToolBatch] = dict()
 
@@ -163,11 +161,14 @@ class BaseAgentNodeDef(
                 )
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
-        tools_registry = dict[str, BaseToolNodeSchema]()
+        tools_registry = dict[str, ToolBinding]()
         if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
-            tools_registry = {tool.tool_schema.name: tool for tool in ctx.state.overrides.override_agent_tools}
+            # Override tools arrive over the wire as ToolBindings whose
+            # validator was stripped at serialization, so they dispatch
+            # unvalidated (the documented schema-only carve-out).
+            tools_registry = {binding.name: binding for binding in ctx.state.overrides.override_agent_tools}
         elif self.tools:
-            tools_registry = {tool.tool_schema.name: tool for tool in self.tools}
+            tools_registry = {binding.name: binding for binding in self.tools}
 
         # ``latest_tool_calls()`` walks ``message_history`` in reverse on each call;
         # cache once for all pre-model uses. The post-model use after
@@ -271,9 +272,9 @@ class BaseAgentNodeDef(
                         self.name,
                     )
                     return Call[State](
-                        tools_registry[target_tool_call.tool_name].subscribe_topics[0],
+                        tools_registry[target_tool_call.tool_name].dispatch_topic,
                         ctx.state,
-                        body=ToolCallRef(tool_call_id=target_tool_call.tool_call_id),
+                        body=ToolCallRef.from_tool_call_part(target_tool_call),
                     )
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
@@ -296,7 +297,7 @@ class BaseAgentNodeDef(
         result = await self._agent_loop.run(
             message_history=project(ctx.state.message_history, viewer=self.name),
             instructions=ctx.state.temp_instructions,
-            toolsets=[ExternalToolset([tool.tool_schema for tool in tools_registry.values()])],
+            toolsets=[ExternalToolset([binding.tool_def for binding in tools_registry.values()])],
             deps=ctx.deps,
             deferred_tool_results=tool_results,
             model_settings=run_model_settings,
@@ -316,28 +317,13 @@ class BaseAgentNodeDef(
             for tool_call in result.output.calls:
                 ctx.state.add_tool_call(tool_call)
 
-                tool_node = tools_registry.get(tool_call.tool_name)
-                if tool_node is None:
+                binding = tools_registry.get(tool_call.tool_name)
+                if binding is None:
                     logger.error("tool=%s does not exist.", tool_call.tool_name)
                     ctx.state.add_tool_result(
                         tool_call.tool_call_id,
                         RetryPromptPart(
                             content=f"There is no tool named {tool_call.tool_name}, it does not exist. Please ensure you are only calling tools you are provided.",  # noqa: E501
-                            tool_name=tool_call.tool_name,
-                            tool_call_id=tool_call.tool_call_id,
-                        ),
-                    )
-                    continue
-
-                if tool_node.subscribe_topics is None:
-                    logger.error(
-                        "tool=%s is unreachable. No subscribe topics were provided for the tool node.",
-                        tool_call.tool_name,
-                    )
-                    ctx.state.add_tool_result(
-                        tool_call.tool_call_id,
-                        RetryPromptPart(
-                            content=f"This tool ({tool_call.tool_name}) is not callable and will not run. Please do not call this tool.",  # noqa: E501
                             tool_name=tool_call.tool_name,
                             tool_call_id=tool_call.tool_call_id,
                         ),
@@ -358,7 +344,7 @@ class BaseAgentNodeDef(
                 try:
                     args = tool_call.args_as_dict()
                 except Exception as e:
-                    content = f"Malformed tool arguments: {type(e).__name__}: {_safe_exc_message(e)}"
+                    content = f"Malformed tool arguments: {type(e).__name__}: {safe_exc_message(e)}"
                     logger.warning(
                         "[%s] tool=%s args parse failed at dispatch: %s",
                         ctx.correlation_id[:8],
@@ -377,11 +363,12 @@ class BaseAgentNodeDef(
                     continue
 
                 # Validate against the schema if we have a runtime validator.
-                # Override-mode schemas (BaseToolNodeSchema-only) skip this step
-                # and dispatch unvalidated; this is the documented carve-out.
-                if isinstance(tool_node, BaseToolNodeDef):
+                # Validator-less bindings (e.g. wire-deserialized overrides)
+                # skip this step and dispatch unvalidated; this is the
+                # documented carve-out.
+                if binding.validator is not None:
                     try:
-                        tool_node.validate_call_args(args)
+                        binding.validator(args)
                     except ValidationError as e:
                         validation_errors = e.errors(include_url=False, include_context=False)
                         logger.warning(
@@ -406,7 +393,7 @@ class BaseAgentNodeDef(
                         # Surface as ``RetryPromptPart`` so the LLM can retry
                         # rather than letting the exception escape ``run()`` and
                         # silently hang the caller.
-                        validator_content = f"Tool argument validator raised {type(e).__name__}: {_safe_exc_message(e)}"
+                        validator_content = f"Tool argument validator raised {type(e).__name__}: {safe_exc_message(e)}"
                         logger.warning(
                             "[%s] tool=%s arg validator raised %s; surfacing as RetryPromptPart",
                             ctx.correlation_id[:8],
@@ -442,17 +429,17 @@ class BaseAgentNodeDef(
                     self.name,
                 )
                 return Call[State](
-                    tools_registry[target_tool_call.tool_name].subscribe_topics[0],
+                    tools_registry[target_tool_call.tool_name].dispatch_topic,
                     ctx.state,
-                    body=ToolCallRef(tool_call_id=target_tool_call.tool_call_id),
+                    body=ToolCallRef.from_tool_call_part(target_tool_call),
                 )
             else:
                 launch_tool_call_ids = [tc.tool_call_id for tc in pending_tool_calls]
                 parallel_tool_calls = [
                     Call[State](
-                        tools_registry[tc.tool_name].subscribe_topics[0],
+                        tools_registry[tc.tool_name].dispatch_topic,
                         ctx.state.model_copy(deep=True),
-                        body=ToolCallRef(tool_call_id=tc.tool_call_id),
+                        body=ToolCallRef.from_tool_call_part(tc),
                     )
                     for tc in pending_tool_calls
                 ]
@@ -486,8 +473,8 @@ class BaseAgentNodeDef(
                 ctx.state.final_output_parts = parts
             return ReturnCall[State](state=ctx.state)
 
-    def add_tools(self, *tools: BaseToolNodeSchema) -> None:
-        self.tools.extend(tools)
+    def add_tools(self, *tools: ToolProvider | ToolBinding) -> None:
+        self.tools.extend(normalize_tool_bindings(tools))
 
     def instructions(self, func: Callable[..., str | None]) -> Callable[..., str | None]:
         """Decorator to define dynamic instruction functions that can build instructions at runtime."""

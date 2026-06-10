@@ -38,12 +38,12 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
       built-in TailCall inbox — issue #141), and
     * ``publish_topic`` when set.
 
-    Agent nodes additionally contribute each tool's input topic
-    (``agent.tools[*].subscribe_topics``): the agent publishes tool ``Call``
-    envelopes onto ``tools_registry[name].subscribe_topics[0]``, so those
-    topics must exist for tool dispatch to land. Agent nodes are detected
-    structurally by exposing a ``tools`` collection of tool schemas — this
-    keeps :mod:`calfkit.provisioning` decoupled from :mod:`calfkit.nodes`.
+    Agent nodes additionally contribute each tool binding's dispatch topic
+    (``agent.tools[*].dispatch_topic``): the agent publishes tool ``Call``
+    envelopes onto ``tools_registry[name].dispatch_topic``, so those topics
+    must exist for tool dispatch to land. Agent nodes are detected
+    structurally by exposing a ``tools`` collection of bindings — this keeps
+    :mod:`calfkit.provisioning` decoupled from :mod:`calfkit.nodes`.
 
     The result is de-duplicated while preserving first-seen order.
     """
@@ -61,9 +61,8 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
 
         tools = getattr(node, "tools", None)
         if tools:
-            for tool in tools:
-                for topic in tool.subscribe_topics:
-                    _add(topic)
+            for binding in tools:
+                _add(binding.dispatch_topic)
 
     return list(seen)
 

@@ -30,7 +30,6 @@ from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.exceptions import ToolExecutionError
 from calfkit.models import SessionRunContext, ToolCallRef, ToolContext
 from calfkit.models.actions import Call, ReturnCall, Silent, TailCall
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import (
     FailedToolCall,
     OverridesState,
@@ -38,6 +37,7 @@ from calfkit.models.state import (
     State,
     _calf_tool_result_discriminator,
 )
+from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,56 @@ def _model_emits_tool_calls(tool_calls: list[ToolCallPart]) -> FunctionModel:
 
 
 # ---------------------------------------------------------------------------
+# Worker-side: ToolNodeDef.run executes from the ToolCallRef payload alone
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_executes_from_payload_without_state_lookup():
+    # The ToolCallRef payload is the authoritative invocation source: name,
+    # args, and tool_call_id all come from the ref, with NO lookup of the
+    # ToolCallPart in ctx.state. An empty state must not change the outcome.
+    def echo(ctx: ToolContext, x: int) -> str:
+        return f"got {x}"
+
+    tool_node = ToolNodeDef.create_tool_node(
+        func=echo,
+        subscribe_topics="tool.echo.input",
+        publish_topic="tool.echo.output",
+    )
+
+    ctx = _make_ctx(State())  # deliberately no registered tool call
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-payload-001", args={"x": 7}, name="echo"))
+
+    assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
+    stored = ctx.state.tool_results.get("tc-payload-001")
+    assert isinstance(stored, ToolReturn), f"expected ToolReturn, got {type(stored).__name__}: {stored!r}"
+    assert stored.return_value == "got 7"
+
+
+async def test_tool_failure_metadata_comes_from_payload():
+    # On failure, the FailedToolCall marker's identifiers are sourced from the
+    # payload (not a state-side ToolCallPart) — pin name and id propagation.
+    def boom(ctx: ToolContext) -> str:
+        raise ValueError("payload-sourced")
+
+    tool_node = ToolNodeDef.create_tool_node(
+        func=boom,
+        subscribe_topics="tool.boom.input",
+        publish_topic="tool.boom.output",
+    )
+
+    ctx = _make_ctx(State())
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-payload-002", args={}, name="boom"))
+
+    assert isinstance(result, ReturnCall)
+    stored = ctx.state.tool_results.get("tc-payload-002")
+    assert isinstance(stored, FailedToolCall)
+    assert stored.tool_name == "boom"
+    assert stored.tool_call_id == "tc-payload-002"
+    assert stored.exc_message == "payload-sourced"
+
+
+# ---------------------------------------------------------------------------
 # Worker-side: ToolNodeDef.run captures exceptions into typed results
 # ---------------------------------------------------------------------------
 
@@ -106,10 +156,10 @@ async def test_tool_raises_arbitrary_exception_stores_error_marker():
 
     state = State()
     tool_call_id = "tc-arb-001"
-    _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     # The reply path must still publish so the agent gets unblocked.
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
@@ -138,10 +188,10 @@ async def test_tool_raises_model_retry_stores_retry_prompt():
 
     state = State()
     tool_call_id = "tc-retry-001"
-    _register_tool_call(state, tool_name="please_retry", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="please_retry", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
 
@@ -168,10 +218,10 @@ async def test_tool_success_unchanged():
 
     state = State()
     tool_call_id = "tc-happy-001"
-    _register_tool_call(state, tool_name="happy", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="happy", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
 
@@ -518,11 +568,11 @@ async def test_tool_base_exceptions_propagate(exc_factory):
 
     state = State()
     tool_call_id = "tc-base-001"
-    _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
     with pytest.raises(type(raised)):
-        await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+        await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     # No marker should be stored — the exception must not be silently captured.
     assert tool_call_id not in ctx.state.tool_results
@@ -673,11 +723,12 @@ async def test_agent_partial_validation_failure_dispatches_valid_calls():
 
 
 async def test_agent_skips_validation_for_schema_only_override_tools():
-    # Override carve-out: BaseToolNodeSchema (wire-only, no validator) skips
-    # the validation branch entirely. Without this carve-out, an override
-    # toolset would crash on every dispatch because there is no validator to
-    # call. Pins the documented limitation so a future refactor that adds
-    # validation for overrides updates this test deliberately.
+    # Override carve-out: a validator-less ToolBinding (the wire form — the
+    # validator never serializes) skips the validation branch entirely.
+    # Without this carve-out, an override toolset would crash on every
+    # dispatch because there is no validator to call. Pins the documented
+    # limitation so a future refactor that adds validation for overrides
+    # updates this test deliberately.
     def typed_tool(ctx: ToolContext, x: int) -> str:
         return f"got {x}"
 
@@ -687,13 +738,11 @@ async def test_agent_skips_validation_for_schema_only_override_tools():
         publish_topic="tool.typed_tool.output",
     )
 
-    # Construct a wire-only schema mirroring the real tool but lacking the
-    # _tool/validator attribute. It must take the override path in agent.run.
-    schema_only = BaseToolNodeSchema(
-        node_id="tool_typed_tool",
-        subscribe_topics=list(full_tool_node.subscribe_topics),
-        publish_topic=full_tool_node.publish_topic,
-        tool_schema=full_tool_node.tool_schema,
+    # Construct a wire-form binding mirroring the real tool but lacking the
+    # validator. It must take the override path in agent.run.
+    schema_only = ToolBinding(
+        tool_def=full_tool_node.tool_schema,
+        dispatch_topic=full_tool_node.subscribe_topics[0],
     )
 
     tool_call_id = "tc-override"
@@ -812,10 +861,10 @@ async def test_tool_long_exception_message_is_clamped_not_rejected():
 
     state = State()
     tool_call_id = "tc-long-msg-001"
-    _register_tool_call(state, tool_name="boom_with_long_msg", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="boom_with_long_msg", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall (no hang), got {type(result).__name__}"
 
@@ -942,10 +991,10 @@ async def test_tool_exception_with_broken_str_still_produces_failed_tool_call():
 
     state = State()
     tool_call_id = "tc-bad-str-001"
-    _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
 
@@ -972,11 +1021,11 @@ async def test_tool_worker_logs_exception_with_traceback(caplog):
 
     state = State()
     tool_call_id = "tc-log-001"
-    _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.tool"):
-        await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+        await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     # Find the worker's exception log record.
     err_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -1121,11 +1170,9 @@ async def test_agent_override_path_malformed_args_become_retry_prompt():
         publish_topic="tool.typed.output",
     )
 
-    schema_only_override = BaseToolNodeSchema(
-        node_id="override_typed_tool",
-        tool_schema=full_tool_node.tool_schema,
-        subscribe_topics=list(full_tool_node.subscribe_topics),
-        publish_topic=full_tool_node.publish_topic,
+    schema_only_override = ToolBinding(
+        tool_def=full_tool_node.tool_schema,
+        dispatch_topic=full_tool_node.subscribe_topics[0],
     )
 
     bad_call = ToolCallPart(
@@ -1182,7 +1229,7 @@ async def test_tool_failed_marker_construction_falls_back_to_sentinel():
     state.message_history.append(ModelResponse(parts=[part]))
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=""))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
 
     # Reply still publishes — no silent hang.
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
@@ -1198,7 +1245,10 @@ async def test_tool_failed_marker_construction_falls_back_to_sentinel():
     assert stored.tool_call_id == "<missing>"
     assert stored.tool_name == "boom"
     assert stored.exc_type == "FailedToolCallConstructionError"
-    assert "Failed to construct primary marker" in stored.exc_message
+    # The fallback message references the original exception type so the
+    # operator can still see what actually failed.
+    assert "could not construct marker" in stored.exc_message
+    assert "ValueError" in stored.exc_message
 
 
 # ---------------------------------------------------------------------------
@@ -1342,22 +1392,22 @@ async def test_agent_handles_typeerror_args_as_retry_prompt():
 async def test_fallback_marker_preserves_real_tool_name_and_id_when_valid(monkeypatch):
     # Regression: when primary FailedToolCall construction fails for any reason
     # OTHER than empty tool_call_id/tool_name (the previously-documented trigger),
-    # the fallback must still preserve real ``tool_name`` / ``tool_call_id`` so
-    # operators don't lose the correlation key in the raised ToolExecutionError.
-    import calfkit.nodes.tool as tool_module
-
-    _original_marker_cls = tool_module.FailedToolCall
+    # the ``build_safe`` fallback must still preserve real ``tool_name`` /
+    # ``tool_call_id`` so operators don't lose the correlation key. Patch
+    # ``__init__`` (not the module attribute) because the primary construction
+    # happens inside the ``build_safe`` classmethod via ``cls(...)``.
+    _original_init = FailedToolCall.__init__
     _call_count = {"n": 0}
 
-    def _make_failing_then_real(*args, **kwargs):
+    def _failing_then_real_init(self, *args, **kwargs):
         _call_count["n"] += 1
         if _call_count["n"] == 1:
             # Simulate ANY construction failure unrelated to the input fields
             # (e.g., a future schema-evolution constraint).
             raise RuntimeError("simulated primary construction failure")
-        return _original_marker_cls(*args, **kwargs)
+        _original_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(tool_module, "FailedToolCall", _make_failing_then_real)
+    monkeypatch.setattr(FailedToolCall, "__init__", _failing_then_real_init)
 
     def boom(ctx: ToolContext) -> str:
         raise ValueError("original tool failure")
@@ -1370,10 +1420,10 @@ async def test_fallback_marker_preserves_real_tool_name_and_id_when_valid(monkey
 
     state = State()
     tool_call_id = "real-correlation-id-abc123"
-    _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
     assert isinstance(result, ReturnCall)
 
     stored = ctx.state.tool_results.get(tool_call_id)
@@ -1381,9 +1431,11 @@ async def test_fallback_marker_preserves_real_tool_name_and_id_when_valid(monkey
     # Real values preserved — operators can still grep the log for the call id.
     assert stored.tool_call_id == tool_call_id, f"expected real id preserved, got {stored.tool_call_id!r}"
     assert stored.tool_name == "boom", f"expected real tool_name preserved, got {stored.tool_name!r}"
-    # exc_type marks this as a fallback marker.
+    # exc_type marks this as a fallback marker; the message references the
+    # original exception type.
     assert stored.exc_type == "FailedToolCallConstructionError"
-    assert "Failed to construct primary marker" in stored.exc_message
+    assert "could not construct marker" in stored.exc_message
+    assert "ValueError" in stored.exc_message
 
 
 # ---------------------------------------------------------------------------
@@ -1413,10 +1465,10 @@ async def test_tool_unserializable_return_value_becomes_failed_tool_call():
 
     state = State()
     tool_call_id = "tc-unserializable-001"
-    _register_tool_call(state, tool_name="returns_unserializable", tool_call_id=tool_call_id)
+    part = _register_tool_call(state, tool_name="returns_unserializable", tool_call_id=tool_call_id)
     ctx = _make_ctx(state)
 
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id=tool_call_id))
+    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
     assert isinstance(result, ReturnCall), f"expected ReturnCall (no hang), got {type(result).__name__}"
 
     stored = ctx.state.tool_results.get(tool_call_id)

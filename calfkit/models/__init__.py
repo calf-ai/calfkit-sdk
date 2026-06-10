@@ -34,7 +34,7 @@ from calfkit.models.state import (
     State,
 )
 from calfkit.models.tool_context import ToolContext
-from calfkit.models.tool_dispatch import ToolCallRef
+from calfkit.models.tool_dispatch import ArgsValidator, ToolBinding, ToolCallRef, ToolProvider
 
 __all__ = [
     # actions
@@ -76,7 +76,10 @@ __all__ = [
     # tool_context
     "ToolContext",
     # tool_dispatch
+    "ArgsValidator",
+    "ToolBinding",
     "ToolCallRef",
+    "ToolProvider",
     # consumer_context
     "ConsumerContext",
 ]

@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar, Generic, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
-from typing_extensions import TypeVar
+from typing_extensions import Self, TypeVar
 
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.messages import (
@@ -14,8 +14,8 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     ToolReturn,
 )
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.payload import ContentPart
+from calfkit.models.tool_dispatch import ToolBinding
 
 
 class BaseAgentActivityState(BaseModel):
@@ -26,7 +26,7 @@ class OverridesState(BaseAgentActivityState):
     """State for storing any override objects"""
 
     model_config = ConfigDict(extra="ignore")
-    override_agent_tools: list[BaseToolNodeSchema] | None = None
+    override_agent_tools: list[ToolBinding] | None = None
     model_settings: dict[str, Any] | None = None
 
 
@@ -115,6 +115,26 @@ class FailedToolCall(BaseModel):
                 return v[:limit]
         return v
 
+    @classmethod
+    def build_safe(cls, *, tool_name: str, tool_call_id: str, exc_type: str, exc_message: str) -> Self:
+        """Construct a marker that **never raises**, for use inside a worker's error path.
+
+        The normal constructor rejects an empty ``tool_call_id`` (``min_length=1``) and
+        could raise inside an ``except`` block — re-introducing the silent agent hang
+        this marker exists to prevent (oversized strings are already clamped, not
+        rejected, so the empty id is the realistic failure). On any construction error,
+        fall back to sentinel identifiers so the failure reply is always published.
+        """
+        try:
+            return cls(tool_name=tool_name, tool_call_id=tool_call_id, exc_type=exc_type, exc_message=exc_message)
+        except Exception:
+            return cls(
+                tool_name=tool_name or "<unknown>",
+                tool_call_id=tool_call_id or "<missing>",
+                exc_type="FailedToolCallConstructionError",
+                exc_message=f"could not construct marker for original exc_type={exc_type!r}",
+            )
+
 
 def _calf_tool_result_discriminator(x: Any) -> str | None:
     """Tag extractor for the ``CalfToolResult`` discriminated union.
@@ -167,9 +187,6 @@ class InFlightToolsState(BaseAgentActivityState):
 
     def add_tool_result(self, tool_call_id: str, tool_result: CalfToolResult | Any) -> None:
         self.tool_results[tool_call_id] = tool_result
-
-    def get_tool_call(self, tool_call_id: str) -> ToolCallPart | None:
-        return self.tool_calls.get(tool_call_id)
 
     def get_tool_result(self, tool_call_id: str) -> CalfToolResult | Any | None:
         return self.tool_results.get(tool_call_id)

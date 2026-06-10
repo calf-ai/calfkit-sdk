@@ -383,15 +383,16 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
     # The user manually listed the framework-private return topic in
     # ``subscribe_topics`` (e.g. because they wired things up before this fix
     # existed and shipped a forward-compatible workaround).
+    tool_node = agent_tool(get_users_name)
     agent = Agent(
         "dedup_agent",
         system_prompt="x",
         subscribe_topics=["dedup_agent.private.return", "dedup_chan.in"],
         publish_topic="dedup_agent.out",
         model_client=_call_one_tool_then_finalize(),
-        tools=[agent_tool(get_users_name)],
+        tools=[tool_node],
     )
-    worker.add_nodes(agent, *agent.tools)
+    worker.add_nodes(agent, tool_node)
     assert agent.subscribe_topics[0] == agent._return_topic
 
     broker = container.get(KafkaBroker)

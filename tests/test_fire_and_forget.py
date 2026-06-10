@@ -280,8 +280,10 @@ async def test_emit_to_node_no_overrides_when_unset(container):
 
 async def test_emit_to_node_tool_overrides_only_builds_overrides(container):
     """The tool_overrides-set / model_settings-None arm of the OverridesState OR:
-    overrides carry the tool list and a None model_settings."""
-    tool = agent_tool(lambda: "pong")  # a BaseToolNodeSchema (ToolNodeDef)
+    overrides carry the tool list and a None model_settings. A ToolProvider
+    (here a ToolNodeDef) is normalized into its ToolBindings, same as
+    ``Agent(tools=...)``."""
+    tool = agent_tool(lambda: "pong")  # a ToolProvider (ToolNodeDef)
     client = container.get(Client)
     client._emit = AsyncMock(return_value="cid")
 
@@ -289,8 +291,24 @@ async def test_emit_to_node_tool_overrides_only_builds_overrides(container):
 
     overrides = client._emit.await_args.kwargs["overrides"]
     assert overrides is not None
-    assert overrides.override_agent_tools == [tool]
+    assert overrides.override_agent_tools == tool.tool_bindings()
     assert overrides.model_settings is None
+
+
+async def test_emit_to_node_tool_overrides_accepts_raw_bindings(container):
+    """A raw ToolBinding passes through the override normalization verbatim."""
+    from calfkit.models.tool_dispatch import ToolBinding
+
+    tool = agent_tool(lambda: "pong")
+    binding = ToolBinding(tool_def=tool.tool_schema, dispatch_topic=tool.subscribe_topics[0])
+    client = container.get(Client)
+    client._emit = AsyncMock(return_value="cid")
+
+    await client.emit_to_node("hi", "agent.input", tool_overrides=[binding])
+
+    overrides = client._emit.await_args.kwargs["overrides"]
+    assert overrides is not None
+    assert overrides.override_agent_tools == [binding]
 
 
 async def test_emit_to_node_passes_temp_instructions_and_history_into_state(container):

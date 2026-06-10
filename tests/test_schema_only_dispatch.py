@@ -1,13 +1,13 @@
 """Schema-only tool dispatch via the ``Agent(tools=[...])`` kwarg path.
 
 Pins two load-bearing properties of the agent loop for tools registered as
-bare ``BaseToolNodeSchema`` instances (no ``BaseToolNodeDef`` validator) passed
-through the ``Agent(tools=[...])`` kwarg:
+validator-less ``ToolBinding`` instances passed through the
+``Agent(tools=[...])`` kwarg:
 
   1. The agent dispatches the tool call without attempting client-side
-     argument validation. The ``isinstance(tool_node, BaseToolNodeDef)`` gate
-     in ``calfkit/nodes/agent.py`` fails for a bare ``BaseToolNodeSchema``, so
-     the validation block is skipped entirely.
+     argument validation. The ``binding.validator is not None`` gate in
+     ``calfkit/nodes/agent.py`` is False for a validator-less binding, so the
+     validation block is skipped entirely.
 
   2. Malformed JSON args from the LLM still become a ``RetryPromptPart`` (not a
      hard ``FailedToolCall``), via the ``args_as_dict()`` try/except which runs
@@ -25,9 +25,8 @@ import pytest
 from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolCallPart
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.models.actions import Call, TailCall
-from calfkit.models.node_schema import BaseToolNodeSchema
 from calfkit.models.state import State
-from calfkit.models.tool_dispatch import ToolCallRef
+from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
 from calfkit.nodes import Agent
 
 # Reuse the proven helpers from the override-mode tests rather than
@@ -40,19 +39,16 @@ def _make_schema_only_tool(
     *,
     tool_name: str = "search",
     topic_base: str = "tools.search",
-) -> BaseToolNodeSchema:
-    """Construct a bare ``BaseToolNodeSchema`` (a schema-only tool).
+) -> ToolBinding:
+    """Construct a validator-less ``ToolBinding`` (a schema-only tool).
 
-    Carries a real ``ToolDefinition`` (so the LLM sees a valid schema) but no
-    ``_tool``/validator attribute — which is what makes it "schema-only": the
-    agent's ``isinstance(tool_node, BaseToolNodeDef)`` gate fails, skipping
-    validation.
+    Carries a real ``ToolDefinition`` (so the LLM sees a valid schema) but
+    ``validator=None`` — which is what makes it "schema-only": the agent's
+    ``binding.validator is not None`` gate is False, skipping validation.
     """
-    return BaseToolNodeSchema(
-        node_id=f"tool_{tool_name}",
-        subscribe_topics=[f"{topic_base}.input"],
-        publish_topic=f"{topic_base}.output",
-        tool_schema=ToolDefinition(
+    return ToolBinding(
+        dispatch_topic=f"{topic_base}.input",
+        tool_def=ToolDefinition(
             name=tool_name,
             description="Synthetic tool with one required string arg.",
             parameters_json_schema={
@@ -66,11 +62,10 @@ def _make_schema_only_tool(
 
 
 async def test_schema_only_tool_via_tools_kwarg_dispatches_without_validation() -> None:
-    """Property 1: ``Agent(tools=[BaseToolNodeSchema(...)])`` dispatches the call.
+    """Property 1: ``Agent(tools=[ToolBinding(...)])`` dispatches the call.
 
-    No ``BaseToolNodeDef`` validator runs (there is none on a bare
-    ``BaseToolNodeSchema``), and the result is a ``Call`` to the tool's
-    subscribe topic.
+    No validator runs (the binding carries none), and the result is a ``Call``
+    to the binding's dispatch topic.
     """
     schema_only = _make_schema_only_tool()
 
