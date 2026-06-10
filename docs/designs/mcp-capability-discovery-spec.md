@@ -395,6 +395,19 @@ Passing it never touches the MCP session: the agent extracts only the
 deferred lookup key (`node_id`) plus any `.select()` scoping. Cross-process
 works because the agent's worker imports the toolbox *definition* (shared
 codebase) without deploying it — the same way tool-node objects travel today.
+**Reference type (added for #212, adjudicated 2026-06-10):** distributed
+agent hosts reference a toolbox by name via the public frozen
+`MCPToolboxRef(toolbox_id, include=None, strict=False)` (exported beside
+`MCPToolbox`; `select()` returns it; the toolbox's own resolution delegates
+to it). A one-class union ctor (ADK-style `connection_params` accepting an
+identity arm) was considered and rejected: ADK's union arms are
+capability-invariant transports, while ours would be capability-variant
+(deployable secret-bearing servant vs inert lookup key) — the differences
+surface in PUBLIC operations (`add_nodes`, secrets, IDE), so they warrant a
+type boundary; `add_nodes(ref)` is rejected eagerly with a teaching error.
+From the union position we kept: co-located `tools=[toolbox]` stays primary,
+one docs page for both types, ADK-shaped host params, intuitive error text.
+
 The standalone `MCPTools` class is dropped; `MCPToolbox.tool_bindings()`
 (which raised `NotImplementedError`) is deleted in favor of implementing
 `ToolSelector`. `_normalize_tools` checks selector-ness BEFORE provider-ness

@@ -89,6 +89,10 @@ def resolve_capability(
 ) -> SelectorResult:
     """Resolve ``toolbox_id`` (optionally filtered) against the view.
 
+    Public API: this is the resolution kernel behind ``MCPToolboxRef`` and
+    ``MCPToolbox.resolve_tools``; custom ``ToolSelector`` implementations may
+    call it directly.
+
     Never raises on bad records: the tolerant reader admits shapes that fail
     binding expansion (e.g. empty ``dispatch_topic``); those surface as
     ``invalid_record`` so a poisoned advertisement cannot crash a turn.

@@ -50,6 +50,25 @@ agent = Agent(
 worker = Worker(client, nodes=[agent])   # capability view auto-registers
 ```
 
+If the agent host doesn't import the toolbox definition — or must not hold
+its connection config at all (secrets stay on the toolbox host) — reference
+the toolbox **by name** instead:
+
+```python
+from calfkit.mcp import MCPToolboxRef
+
+agent = Agent(
+    "researcher",
+    subscribe_topics="researcher.input",
+    model_client=model,
+    tools=[MCPToolboxRef("docs_server", include=("search",))],
+)
+```
+
+A ref is a frozen, identity-only handle: it can never carry connection
+params, and deploying one fails immediately with a pointer to the hosting
+form. (`toolbox.select(...)` returns the same type.)
+
 The agent's worker detects the declaration and maintains the local capability
 view, gated at boot so the first turn already sees it. Selections re-resolve
 at the start of every agent turn, so a toolbox that comes up later — or

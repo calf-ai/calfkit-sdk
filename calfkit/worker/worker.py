@@ -10,6 +10,7 @@ from typing_extensions import Self
 
 from calfkit.client import Client
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
+from calfkit.models.tool_dispatch import ToolSelector
 from calfkit.nodes import BaseNodeDef
 from calfkit.provisioning import topics_for_nodes
 from calfkit.worker.lifecycle import (
@@ -137,6 +138,14 @@ class Worker(LifecycleHookMixin):
 
     def _add_node(self, node: BaseNodeDef) -> None:
         """Internal: register a node for hosting."""
+        if not isinstance(node, BaseNodeDef):
+            if isinstance(node, ToolSelector):
+                raise TypeError(
+                    f"{type(node).__name__} is a name-only reference and can't host — construct the "
+                    "hosting node instead (e.g. MCPToolbox(name, connection_params=...)) to deploy. "
+                    "References belong in Agent(tools=[...])."
+                )
+            raise TypeError(f"add_nodes expects BaseNodeDef instances, got {type(node).__name__}: {node!r}")
         # Back-reference so the node's per-message handler can merge this
         # worker's lifecycle resources under its own (see
         # BaseNodeDef._effective_resources / prepare_context). Last writer
