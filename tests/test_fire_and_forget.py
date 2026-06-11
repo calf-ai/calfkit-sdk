@@ -1,5 +1,5 @@
 """Unit-scope contracts for the fire-and-forget (null-callback) terminal, plus
-end-to-end tests for the true one-way ``Client.emit_to_node`` method.
+end-to-end tests for the true one-way ``Client.send`` method.
 
 The unit tests drive ``BaseNodeDef._publish_action`` directly with a spy broker
 (mirroring ``tests/test_co_tenant_tool_isolation.py``) so the worker's terminal
@@ -13,7 +13,7 @@ envelope so the result is broadcast to the node's ``publish_topic`` (the
 traceability channel via the worker's ``@publisher`` wiring).
 
 The end-to-end tests mirror ``tests/test_headers.py`` (TestKafkaBroker +
-FunctionModel + ``prepare_worker``): they prove ``emit_to_node`` allocates zero
+FunctionModel + ``prepare_worker``): they prove ``send`` allocates zero
 per-call client state and that the broadcast ``publish_topic`` channel still
 records the terminal result even though the point-to-point callback is
 suppressed (no reply future, no "no pending future" warning).
@@ -112,7 +112,7 @@ async def test_return_call_with_non_null_callback_publishes_to_callback():
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: Client.emit_to_node — true one-way fire-and-forget.
+# End-to-end: Client.send — true one-way fire-and-forget.
 # ---------------------------------------------------------------------------
 
 
@@ -123,8 +123,8 @@ def _text_then_done() -> FunctionModel:
     return FunctionModel(_fn)
 
 
-async def test_emit_to_node_allocates_no_client_state(container):
-    """Calling ``emit_to_node`` in a loop leaves ``_dispatcher._pending`` empty
+async def test_send_allocates_no_client_state(container):
+    """Calling ``send`` in a loop leaves ``_dispatcher._pending`` empty
     (no reply future is ever registered) and returns a non-empty uuid-hex
     correlation_id per call."""
     worker = container.get(Worker)
@@ -144,7 +144,7 @@ async def test_emit_to_node_allocates_no_client_state(container):
     correlation_ids: list[str] = []
     async with TestKafkaBroker(broker):
         for _ in range(5):
-            cid = await client.emit_to_node("hi", agent.subscribe_topics[0])
+            cid = await client.send("hi", agent.subscribe_topics[0])
             correlation_ids.append(cid)
 
     # No future was ever registered: the dispatcher's pending map stays empty.
@@ -161,7 +161,7 @@ async def test_emit_to_node_allocates_no_client_state(container):
     assert len(set(correlation_ids)) == 5
 
 
-async def test_emit_to_node_traceable_via_publish_topic_but_no_reply(container, caplog):
+async def test_send_traceable_via_publish_topic_but_no_reply(container, caplog):
     """The terminal result still rides the broadcast ``publish_topic`` channel (a
     ``@consumer`` observes it with populated output), while the client reply inbox
     receives nothing — no reply future, and no "no pending future" warning."""
@@ -187,7 +187,7 @@ async def test_emit_to_node_traceable_via_publish_topic_but_no_reply(container, 
 
     with caplog.at_level(logging.WARNING, logger=REPLY_DISPATCHER_LOGGER):
         async with TestKafkaBroker(broker):
-            cid = await client.emit_to_node("hi", agent.subscribe_topics[0])
+            cid = await client.send("hi", agent.subscribe_topics[0])
 
     # The terminal result reached the broadcast publish_topic channel.
     final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
@@ -204,122 +204,122 @@ async def test_emit_to_node_traceable_via_publish_topic_but_no_reply(container, 
 
 
 # ---------------------------------------------------------------------------
-# emit_to_node input-shaping: it carries its OWN copy of invoke_node's
+# send input-shaping: it carries its OWN copy of start's
 # model_settings guard / correlation_id default / OverridesState build / deps
-# passthrough (it does not delegate to invoke_node), so those branches are
-# covered here directly by spying on ``_emit``.
+# passthrough (it does not delegate to start), so those branches are
+# covered here directly by spying on ``_send``.
 # ---------------------------------------------------------------------------
 
 
-async def test_emit_to_node_rejects_non_json_serializable_model_settings(container):
+async def test_send_rejects_non_json_serializable_model_settings(container):
     """The model_settings JSON-serializability guard rejects a non-serializable
-    payload BEFORE publishing — ``_emit`` is never reached."""
+    payload BEFORE publishing — ``_send`` is never reached."""
     client = container.get(Client)
-    client._emit = AsyncMock()  # the only publish path; must not be called
+    client._send = AsyncMock()  # the only publish path; must not be called
 
     with pytest.raises(ValueError, match="not JSON-serializable"):
-        await client.emit_to_node("hi", "agent.input", model_settings={"bad": object()})
+        await client.send("hi", "agent.input", model_settings={"bad": object()})
 
-    client._emit.assert_not_called()
+    client._send.assert_not_called()
 
 
-async def test_emit_to_node_uses_caller_supplied_correlation_id(container):
-    """A caller-supplied correlation_id is returned verbatim and forwarded to ``_emit``."""
+async def test_send_uses_caller_supplied_correlation_id(container):
+    """A caller-supplied correlation_id is returned verbatim and forwarded to ``_send``."""
     client = container.get(Client)
-    client._emit = AsyncMock(return_value="given-cid")
+    client._send = AsyncMock(return_value="given-cid")
 
-    returned = await client.emit_to_node("hi", "agent.input", correlation_id="given-cid")
+    returned = await client.send("hi", "agent.input", correlation_id="given-cid")
 
     assert returned == "given-cid"
-    assert client._emit.await_args.kwargs["correlation_id"] == "given-cid"
+    assert client._send.await_args.kwargs["correlation_id"] == "given-cid"
 
 
-async def test_emit_to_node_autogenerates_correlation_id_when_none(container):
-    """With no correlation_id, a fresh uuid7 hex is generated, forwarded to ``_emit``,
+async def test_send_autogenerates_correlation_id_when_none(container):
+    """With no correlation_id, a fresh uuid7 hex is generated, forwarded to ``_send``,
     and returned."""
     client = container.get(Client)
-    client._emit = AsyncMock(side_effect=lambda **kw: kw["correlation_id"])
+    client._send = AsyncMock(side_effect=lambda **kw: kw["correlation_id"])
 
-    returned = await client.emit_to_node("hi", "agent.input")
+    returned = await client.send("hi", "agent.input")
 
     assert isinstance(returned, str) and len(returned) == 32
     int(returned, 16)  # valid hex
-    assert client._emit.await_args.kwargs["correlation_id"] == returned
+    assert client._send.await_args.kwargs["correlation_id"] == returned
 
 
-async def test_emit_to_node_builds_overrides_and_forwards_deps(container):
-    """``model_settings`` builds an ``OverridesState`` carried to ``_emit``; ``deps``
+async def test_send_builds_overrides_and_forwards_deps(container):
+    """``model_settings`` builds an ``OverridesState`` carried to ``_send``; ``deps``
     pass through; a ``State`` is constructed for the prompt."""
     client = container.get(Client)
-    client._emit = AsyncMock(return_value="cid")
+    client._send = AsyncMock(return_value="cid")
 
     deps = {"tenant": "acme"}
-    await client.emit_to_node(
+    await client.send(
         "summarize",
         "agent.input",
         deps=deps,
         model_settings={"temperature": 0.0},
     )
 
-    kwargs = client._emit.await_args.kwargs
+    kwargs = client._send.await_args.kwargs
     assert kwargs["deps"] == deps
     assert kwargs["overrides"] is not None
     assert kwargs["overrides"].model_settings == {"temperature": 0.0}
     assert isinstance(kwargs["state"], State)
 
 
-async def test_emit_to_node_no_overrides_when_unset(container):
+async def test_send_no_overrides_when_unset(container):
     """With neither tool_overrides nor model_settings, no ``OverridesState`` is built."""
     client = container.get(Client)
-    client._emit = AsyncMock(return_value="cid")
+    client._send = AsyncMock(return_value="cid")
 
-    await client.emit_to_node("hi", "agent.input")
+    await client.send("hi", "agent.input")
 
-    assert client._emit.await_args.kwargs["overrides"] is None
+    assert client._send.await_args.kwargs["overrides"] is None
 
 
-async def test_emit_to_node_tool_overrides_only_builds_overrides(container):
+async def test_send_tool_overrides_only_builds_overrides(container):
     """The tool_overrides-set / model_settings-None arm of the OverridesState OR:
     overrides carry the tool list and a None model_settings. A ToolProvider
     (here a ToolNodeDef) is normalized into its ToolBindings, same as
     ``Agent(tools=...)``."""
     tool = agent_tool(lambda: "pong")  # a ToolProvider (ToolNodeDef)
     client = container.get(Client)
-    client._emit = AsyncMock(return_value="cid")
+    client._send = AsyncMock(return_value="cid")
 
-    await client.emit_to_node("hi", "agent.input", tool_overrides=[tool])
+    await client.send("hi", "agent.input", tool_overrides=[tool])
 
-    overrides = client._emit.await_args.kwargs["overrides"]
+    overrides = client._send.await_args.kwargs["overrides"]
     assert overrides is not None
     assert overrides.override_agent_tools == tool.tool_bindings()
     assert overrides.model_settings is None
 
 
-async def test_emit_to_node_tool_overrides_accepts_raw_bindings(container):
+async def test_send_tool_overrides_accepts_raw_bindings(container):
     """A raw ToolBinding passes through the override normalization verbatim."""
     from calfkit.models.tool_dispatch import ToolBinding
 
     tool = agent_tool(lambda: "pong")
     binding = ToolBinding(tool_def=tool.tool_schema, dispatch_topic=tool.subscribe_topics[0])
     client = container.get(Client)
-    client._emit = AsyncMock(return_value="cid")
+    client._send = AsyncMock(return_value="cid")
 
-    await client.emit_to_node("hi", "agent.input", tool_overrides=[binding])
+    await client.send("hi", "agent.input", tool_overrides=[binding])
 
-    overrides = client._emit.await_args.kwargs["overrides"]
+    overrides = client._send.await_args.kwargs["overrides"]
     assert overrides is not None
     assert overrides.override_agent_tools == [binding]
 
 
-async def test_emit_to_node_passes_temp_instructions_and_history_into_state(container):
-    """temp_instructions and message_history are carried onto the State handed to ``_emit``."""
+async def test_send_passes_temp_instructions_and_history_into_state(container):
+    """temp_instructions and message_history are carried onto the State handed to ``_send``."""
     client = container.get(Client)
-    client._emit = AsyncMock(return_value="cid")
+    client._send = AsyncMock(return_value="cid")
 
     history: list[ModelMessage] = [ModelRequest.user_text_prompt("earlier turn")]
-    await client.emit_to_node("now", "agent.input", temp_instructions="be brief", message_history=history)
+    await client.send("now", "agent.input", temp_instructions="be brief", message_history=history)
 
-    state = client._emit.await_args.kwargs["state"]
+    state = client._send.await_args.kwargs["state"]
     assert state.temp_instructions == "be brief"
     assert history[0] in state.message_history
 
@@ -350,7 +350,7 @@ def _calls_ping_then_done() -> FunctionModel:
     return FunctionModel(_fn)
 
 
-async def test_emit_to_node_multi_hop_tool_call_still_terminates_traceably(container, caplog):
+async def test_send_multi_hop_tool_call_still_terminates_traceably(container, caplog):
     """emit → agent issues a tool Call → tool ReturnCall routes back via the
     agent's _return_topic (a NON-None intermediate callback) → agent terminal
     ReturnCall hits the None bottom frame and suppresses the callback, while the
@@ -380,7 +380,7 @@ async def test_emit_to_node_multi_hop_tool_call_still_terminates_traceably(conta
 
     with caplog.at_level(logging.WARNING, logger=REPLY_DISPATCHER_LOGGER):
         async with TestKafkaBroker(broker):
-            cid = await client.emit_to_node("hi", agent.subscribe_topics[0])
+            cid = await client.send("hi", agent.subscribe_topics[0])
 
     # A terminal with real output reached publish_topic → the tool frame's
     # callback was a real topic, the tool ran, and its ReturnCall routed back.
@@ -396,5 +396,153 @@ async def test_emit_to_node_multi_hop_tool_call_still_terminates_traceably(conta
     assert tool_called, "agent never issued the ping tool call in the captured history"
 
     # The bottom (client) frame callback was suppressed: no reply future, no warning.
+    assert client._dispatcher._pending == {}
+    assert not [r for r in caplog.records if "no pending future" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# Client send API spec (docs/designs/client-send-api-spec.md):
+# ``send`` (was send) with the optional ``reply_to`` Return Address, and
+# the ``start``/``execute`` (were start/execute) own-inbox invariant.
+# ---------------------------------------------------------------------------
+
+
+def _wire_spy(client: Client) -> AsyncMock:
+    """Replace the client's broker with a spy so the published envelope can be
+    inspected without Kafka. The truthy ``_connection`` skips the lazy start."""
+    connection = MagicMock()
+    connection._connection = True
+    connection.publish = AsyncMock()
+    client._connection = connection
+    return connection.publish
+
+
+async def test_send_reply_to_sets_callback_topic_on_wire(container):
+    """``send(reply_to=...)`` rides the wire as the bottom CallFrame's
+    ``callback_topic`` — the worker will deliver the terminal there."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    cid = await client.send("hi", "agent.input", reply_to="sink.topic")
+
+    envelope = publish.await_args.args[0]
+    frame = envelope.internal_workflow_state.current_frame
+    assert frame.callback_topic == "sink.topic"
+    assert frame.target_topic == "agent.input"
+    assert publish.await_args.kwargs["correlation_id"] == cid
+
+
+async def test_send_default_keeps_null_callback_on_wire(container):
+    """Without ``reply_to``, ``send`` still publishes a ``callback_topic=None``
+    bottom frame — the pre-spec fire-and-forget wire shape, byte-for-byte."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    await client.send("hi", "agent.input")
+
+    envelope = publish.await_args.args[0]
+    assert envelope.internal_workflow_state.current_frame.callback_topic is None
+
+
+async def test_send_reply_to_registers_no_future(container):
+    """``reply_to`` does not change send's zero-state contract: no reply future
+    is registered for someone else's delivery address."""
+    client = container.get(Client)
+    _wire_spy(client)
+
+    await client.send("hi", "agent.input", reply_to="sink.topic")
+
+    assert client._dispatcher._pending == {}
+
+
+async def test_send_reply_to_rejects_blank_topic(container):
+    """A blank/whitespace ``reply_to`` would make the worker publish to an
+    invalid topic — rejected at call time, before anything is published."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    for bad in ("", "   "):
+        with pytest.raises(ValueError, match="non-empty topic name"):
+            await client.send("hi", "agent.input", reply_to=bad)
+
+    publish.assert_not_called()
+
+
+async def test_send_reply_to_rejects_own_inbox(container):
+    """``reply_to=client.reply_topic`` is provably useless: send registers no
+    future, so the client's own dispatcher would consume and drop the reply.
+    Rejected at call time, before anything is published."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    with pytest.raises(ValueError, match="own reply inbox"):
+        await client.send("hi", "agent.input", reply_to=client.reply_topic)
+
+    publish.assert_not_called()
+
+
+async def test_start_callback_is_always_client_inbox(container):
+    """``start`` always writes the client's own inbox as the wire callback — the
+    only address whose reply future can ever resolve. The per-call
+    ``reply_topic`` override (the dangling-future footgun) is gone."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    handle = await client.start("hi", "agent.input")
+
+    envelope = publish.await_args.args[0]
+    assert envelope.internal_workflow_state.current_frame.callback_topic == client.reply_topic
+    assert handle.reply_topic == client.reply_topic
+
+    with pytest.raises(TypeError):
+        await client.start("hi", "agent.input", reply_topic="elsewhere")
+    with pytest.raises(TypeError):
+        await client.execute("hi", "agent.input", reply_topic="elsewhere")
+
+
+async def test_send_reply_to_delivers_terminal_to_topic(container, caplog):
+    """End-to-end: the terminal result is delivered point-to-point to the
+    ``reply_to`` topic (a ``@consumer`` there sees it), ALSO still broadcast on
+    the agent's ``publish_topic`` (the #132 dual-channel model), and the client
+    itself stays untouched: no future, no inbox traffic, no warning."""
+    delivered: list[ConsumerContext] = []
+    broadcast: list[ConsumerContext] = []
+
+    @consumer(subscribe_topics="send_rt.results")
+    def reply_sink(ctx: ConsumerContext) -> None:
+        delivered.append(ctx)
+
+    @consumer(subscribe_topics="send_rt_agent.output")
+    def broadcast_sink(ctx: ConsumerContext) -> None:
+        broadcast.append(ctx)
+
+    worker = container.get(Worker)
+    agent = Agent(
+        "send_rt_agent",
+        system_prompt="x",
+        subscribe_topics="send_rt_agent.input",
+        publish_topic="send_rt_agent.output",
+        model_client=_text_then_done(),
+    )
+    worker.add_nodes(agent, reply_sink, broadcast_sink)
+    prepare_worker(container)
+
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    with caplog.at_level(logging.WARNING, logger=REPLY_DISPATCHER_LOGGER):
+        async with TestKafkaBroker(broker):
+            cid = await client.send("hi", agent.subscribe_topics[0], reply_to="send_rt.results")
+
+    # The terminal was delivered point-to-point to the reply_to topic.
+    terminals = [c for c in delivered if any(isinstance(p, TextPart) for p in c.output_parts)]
+    assert terminals, f"reply_to consumer never saw the terminal; saw={delivered}"
+    assert terminals[-1].output == "done"
+    assert terminals[-1].correlation_id == cid
+
+    # The broadcast channel still fired independently (dual-channel model).
+    assert any(any(isinstance(p, TextPart) for p in c.output_parts) for c in broadcast)
+
+    # The client stayed untouched: no future, no "no pending future" warning.
     assert client._dispatcher._pending == {}
     assert not [r for r in caplog.records if "no pending future" in r.getMessage()]

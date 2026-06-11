@@ -7,7 +7,7 @@ async def main():
     client = Client.connect("localhost:9092")  # Connect to Kafka broker
 
     # Send a request and await the response
-    result = await client.execute_node(
+    result = await client.execute(
         "What's the weather in Tokyo?",
         "weather_agent.input",  # The topic the agent subscribes to
     )

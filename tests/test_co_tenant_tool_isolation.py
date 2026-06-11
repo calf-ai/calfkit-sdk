@@ -148,7 +148,7 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.invoke_node("hi", SHARED_INPUT)
+        await client.start("hi", SHARED_INPUT)
         await wait_for_condition(
             lambda: len(alpha_finals) >= 1 and len(bravo_finals) >= 1,
             timeout=5.0,
@@ -200,7 +200,7 @@ async def test_single_call_writes_private_return_topic_as_callback(container):
     prepare_worker(container)
 
     async with TestKafkaBroker(broker):
-        await client.invoke_node("hi", agent.subscribe_topics[0])
+        await client.start("hi", agent.subscribe_topics[0])
         await wait_for_condition(lambda: len(captured) >= 1, timeout=5.0)
 
     assert captured, "tool input topic never received the Call envelope"
@@ -263,7 +263,7 @@ async def test_parallel_call_writes_private_return_topic_as_callback(container):
     prepare_worker(container)
 
     async with TestKafkaBroker(broker):
-        await client.invoke_node("hi", agent.subscribe_topics[0])
+        await client.start("hi", agent.subscribe_topics[0])
         await wait_for_condition(
             lambda: len(captured_a) >= 1 and len(captured_b) >= 1 and len(captured_c) >= 1,
             timeout=5.0,

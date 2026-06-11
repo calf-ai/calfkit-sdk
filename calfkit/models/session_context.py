@@ -101,7 +101,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     deps: DepsT
     """User-provided dependencies for the execution. A JSON-serializable mapping
     (it crosses the Kafka boundary). The same ``dict`` the producer passed to
-    ``Client.invoke_node(deps=...)``; tools read it as ``ctx.deps["key"]``."""
+    ``Client.start(deps=...)``; tools read it as ``ctx.deps["key"]``."""
 
     _correlation_id: str | None = PrivateAttr(default=None)
     _emitter_node_id: str | None = PrivateAttr(default=None)

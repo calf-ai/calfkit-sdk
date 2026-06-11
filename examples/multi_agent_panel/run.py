@@ -28,7 +28,7 @@ async def main() -> None:
         prompt = TOPIC if round_no == 1 else FOLLOW_UP
         print(f"\n===== Round {round_no} =====")
         for agent in PANEL:
-            result = await client.execute_node(
+            result = await client.execute(
                 prompt,
                 f"{agent.name}.input",
                 message_history=history,  # every panelist sees the same growing transcript

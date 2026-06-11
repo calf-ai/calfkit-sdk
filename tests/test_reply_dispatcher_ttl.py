@@ -128,7 +128,7 @@ async def test_normal_completion_cancels_timer():
 
 
 async def test_evicted_abandoned_future_does_not_log_never_retrieved():
-    """An abandoned ``invoke_node`` handle — a future nobody awaits — must be
+    """An abandoned ``start`` handle — a future nobody awaits — must be
     evicted *silently*.
 
     The TTL exists precisely for the abandoned-handle case, so eviction must not

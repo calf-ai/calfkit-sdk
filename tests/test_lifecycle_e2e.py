@@ -311,7 +311,7 @@ async def test_resources_reach_agent_run_and_agent_tool() -> None:
 
     async with TestKafkaBroker(broker):
         await worker.start()
-        result = await client.execute_node("hi", "res_agent.in", timeout=5)
+        result = await client.execute("hi", "res_agent.in", timeout=5)
         await worker.stop()
 
     assert result.output == "done"

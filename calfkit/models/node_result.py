@@ -25,7 +25,7 @@ class NodeResult(Generic[OutputT]):
 
     A ``NodeResult`` is what callers receive in two places:
 
-    * :meth:`Client.execute_node` / :meth:`InvocationHandle.result` — the
+    * :meth:`Client.execute` / :meth:`InvocationHandle.result` — the
       final reply from an agent invocation.
 
     The ``state`` field is the full session :class:`~calfkit.models.State` at
@@ -44,7 +44,7 @@ class NodeResult(Generic[OutputT]):
     * **Consumer path**: the consumer never republishes (no ``publish_topic``),
       so mutations have no observable downstream effect. They can still
       surprise other code holding the same ``NodeResult`` instance.
-    * **Client path** (:meth:`Client.execute_node` / :meth:`InvocationHandle.result`):
+    * **Client path** (:meth:`Client.execute` / :meth:`InvocationHandle.result`):
       the caller's lifetime owns the instance — mutations are caller-visible
       and may corrupt any other code holding a parallel reference (caches,
       retry layers, etc.).
@@ -101,7 +101,7 @@ class NodeResult(Generic[OutputT]):
 
     deps: Mapping[str, Any] = field(default_factory=dict)
     """Inbound user-provided dependencies — the same mapping the producer passed
-    to ``Client.invoke_node(deps=...)``, carried forward on every publish. Read
+    to ``Client.start(deps=...)``, carried forward on every publish. Read
     it as ``result.deps["key"]``, mirroring how tools read ``ctx.deps["key"]``.
     Empty ``{}`` when the invocation set no deps.
 

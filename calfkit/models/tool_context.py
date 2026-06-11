@@ -14,7 +14,7 @@ class ToolContext(RunContext[dict[str, Any]]):
 
     ``deps`` is inherited from ``RunContext`` and is the user-provided
     dependencies mapping — the same ``dict`` the producer passed to
-    ``Client.invoke_node(deps=...)``. Read it as ``ctx.deps["key"]``. Since the
+    ``Client.start(deps=...)``. Read it as ``ctx.deps["key"]``. Since the
     envelope is serialized as JSON over Kafka, ``deps`` values must be
     JSON-serializable.
     """
@@ -37,7 +37,7 @@ class ToolContext(RunContext[dict[str, Any]]):
         Alias of the inherited pydantic-ai ``run_id`` (calfkit always constructs
         a :class:`ToolContext` with ``run_id`` set to the correlation id), exposed
         under calfkit's own vocabulary so tool authors use the same name as the
-        rest of the SDK (``NodeResult.correlation_id``, ``Client.execute_node``).
+        rest of the SDK (``NodeResult.correlation_id``, ``Client.execute``).
         """
         if self.run_id is None:
             raise RuntimeError("ToolContext was constructed without a run_id (correlation id).")

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Implemented |
+| Status | Implemented; **superseded in part** by [client-send-api-spec.md](client-send-api-spec.md) (2026-06): `emit_to_node`→`send` + optional `reply_to` return address (the "no reply_topic on emit" reasoning in §3 no longer holds); `invoke_node`/`execute_node`→`start`/`execute`, per-call `reply_topic` param removed. |
 | Closes | #132 (`Client.invoke_node` is documented as "fire-and-forget" but always allocates per-call reply state and triggers reply traffic) |
 | Breaking | Yes — `feat!` (the wire `CallFrame.callback_topic` becomes nullable; old workers can't read a `None` terminal) |
 
@@ -114,7 +114,7 @@ reply expected") and forms a clean three-way set:
 | `invoke_node` | async, reply via handle | `InvocationHandle` | a pending `Future` until resolved/evicted |
 | `execute_node` | sync request/reply | `NodeResult` | a pending `Future` (self-cleaning only when called with an explicit `timeout`) |
 
-A runnable end-to-end example lives at [`examples/quickstart/emit.py`](../../examples/quickstart/emit.py).
+A runnable end-to-end example lives at [`examples/quickstart/send.py`](../../examples/quickstart/send.py).
 Pair it with [`examples/quickstart/weather_sink.py`](../../examples/quickstart/weather_sink.py) — a
 `@consumer` tapping the agent's `publish_topic` — to watch the fire-and-forget result arrive on the
 broadcast channel even though no point-to-point reply is returned.

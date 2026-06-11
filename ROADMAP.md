@@ -5,7 +5,7 @@ An index of potential features and changes under consideration for Calf SDK. Eac
 ## Accepted
 
 - [Deps-as-dict refactor](docs/designs/deps-as-dict-refactor.md) — `ctx.deps`/`result.deps` are plain dicts and `correlation_id` is a top-level context attribute (closes #144; breaking)
-- [Fire-and-forget emit](docs/designs/fire-and-forget-emit.md) — true one-way Client.emit_to_node; nullable callback terminal; opt-in reply TTL (closes #132)
+- [Fire-and-forget emit](docs/designs/fire-and-forget-emit.md) — true one-way Client.send; nullable callback terminal; opt-in reply TTL (closes #132)
 - [Topic Provisioning](docs/topic-provisioning.md) — EXPERIMENTAL opt-in `ProvisioningConfig` to best-effort create Kafka topics for dev/CI (off by default; review for prod)
 - [Agent-POV History Projection](docs/designs/agent-pov-projection.md) — always-on POV projection over `message_history` + `ModelResponse.name` stamping for shared-channel multi-agent; portable content-prefix attribution (PR #185; closes #154)
 

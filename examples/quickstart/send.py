@@ -9,9 +9,9 @@ async def main():
     # that would otherwise keep the client alive while the send completes.
     async with Client.connect("localhost:9092") as client:  # Connect to Kafka broker
         # Fire-and-forget: dispatch the request and return immediately. No reply
-        # is produced and no client-side reply future is allocated — emit_to_node
+        # is produced and no client-side reply future is allocated — send
         # hands back only the correlation_id, for tracing/logging.
-        correlation_id = await client.emit_to_node(
+        correlation_id = await client.send(
             "What's the weather in Tokyo?",
             "weather_agent.input",  # The topic the agent subscribes to
         )

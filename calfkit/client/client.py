@@ -24,16 +24,18 @@ class Client(BaseClient):
     natural-language prompt, construct the session state, and dispatch to a
     target node topic. Three invocation patterns are supported:
 
-    * **One-way fire-and-forget** (:meth:`emit_to_node`) — publish and return the
-      ``correlation_id`` immediately; no reply future, no reply traffic.
-    * **Async with handle** (:meth:`invoke_node`) — publish and return an
+    * **One-way send** (:meth:`send`) — publish and return the
+      ``correlation_id`` immediately; no reply future. Optionally carries a
+      ``reply_to`` return address where the worker delivers the terminal
+      result for someone else to consume.
+    * **Start with handle** (:meth:`start`) — publish and return an
       :class:`InvocationHandle` whose :meth:`~InvocationHandle.result` is awaited
-      later for the reply.
-    * **Sync request/reply** (:meth:`execute_node`) — publish and await the reply
-      in a single call.
+      later for the reply, delivered to this client's own reply inbox.
+    * **Execute** (:meth:`execute`) — publish and await the reply in a
+      single call.
 
-    See :meth:`emit_to_node` for the fire-and-forget traceability model (the
-    target node's ``publish_topic`` broadcast stream).
+    See :meth:`send` for the one-way traceability model (the ``reply_to``
+    return address and the target node's ``publish_topic`` broadcast stream).
     """
 
     def _build_state_and_overrides(
@@ -47,7 +49,7 @@ class Client(BaseClient):
         model_settings: ModelSettings | dict[str, Any] | None,
         author: str | None,
     ) -> tuple[str, State, OverridesState | None]:
-        """Shared input-shaping for :meth:`invoke_node` / :meth:`emit_to_node`.
+        """Shared input-shaping for :meth:`start` / :meth:`send`.
 
         Validates that *model_settings* is JSON-serializable (it crosses the Kafka
         boundary), defaults *correlation_id* to a fresh uuid7 hex, builds and
@@ -84,7 +86,7 @@ class Client(BaseClient):
         return correlation_id, state, overrides
 
     @overload
-    async def invoke_node(
+    async def start(
         self,
         user_prompt: str,
         topic: str,
@@ -92,7 +94,6 @@ class Client(BaseClient):
         output_type: type[OutputT],
         author: str | None = ...,
         tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
-        reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
@@ -103,14 +104,13 @@ class Client(BaseClient):
     ) -> InvocationHandle[OutputT]: ...
 
     @overload
-    async def invoke_node(
+    async def start(
         self,
         user_prompt: str,
         topic: str,
         *,
         author: str | None = ...,
         tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
-        reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
@@ -120,7 +120,7 @@ class Client(BaseClient):
         body: Any | None = ...,
     ) -> InvocationHandle[Any]: ...
 
-    async def invoke_node(
+    async def start(
         self,
         user_prompt: str,
         topic: str,
@@ -128,7 +128,6 @@ class Client(BaseClient):
         author: str | None = None,
         tool_overrides: Sequence[ToolBinding | ToolProvider] | None = None,
         output_type: type[Any] = _UNSET,
-        reply_topic: str | None = None,
         correlation_id: str | None = None,
         temp_instructions: str | None = None,
         message_history: list[ModelMessage] | None = None,
@@ -137,14 +136,16 @@ class Client(BaseClient):
         route: str | None = None,
         body: Any | None = None,
     ) -> InvocationHandle[Any]:
-        """Invoke an agent node asynchronously and return a handle for the reply.
+        """Start an agent node invocation and return a handle for the reply.
 
-        The **async-with-handle** pattern: constructs a :class:`State` from the
-        provided prompt and message history, publishes it to *topic*, and returns
-        an :class:`InvocationHandle` whose :meth:`~InvocationHandle.result` method
-        can be awaited for the reply. For a true one-way send that registers no
-        reply future, use :meth:`emit_to_node`; to publish and await in one call,
-        use :meth:`execute_node`.
+        The **start-with-handle** pattern (cf. Temporal's ``start_workflow``):
+        constructs a :class:`State` from the provided prompt and message history,
+        publishes it to *topic*, and returns an :class:`InvocationHandle` whose
+        :meth:`~InvocationHandle.result` method can be awaited for the reply. The
+        reply is always delivered to this client's own reply inbox — the only
+        address whose reply future can resolve. For a one-way send (optionally
+        with a ``reply_to`` return address for someone else to consume), use
+        :meth:`send`; to publish and await in one call, use :meth:`execute`.
 
         Args:
             user_prompt: The user message to send to the agent node.
@@ -157,8 +158,6 @@ class Client(BaseClient):
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used (``DataPart`` →
                 ``TextPart`` fallback).
-            reply_topic: Topic the node should publish its reply to.
-                Defaults to the client's auto-generated reply topic.
             correlation_id: Unique identifier to correlate this request with its
                 reply. Auto-generated (uuid7) when ``None``.
             temp_instructions: Optional system-level instructions injected into
@@ -185,11 +184,9 @@ class Client(BaseClient):
             model_settings=model_settings,
             author=author,
         )
-        if reply_topic is None:
-            reply_topic = self._reply_topic
-        return await self._invoke(
+        return await self._start(
             topic=topic,
-            reply_topic=reply_topic,
+            reply_topic=self._reply_topic,
             correlation_id=correlation_id,
             state=state,
             overrides=overrides,
@@ -199,11 +196,12 @@ class Client(BaseClient):
             output_type=output_type,
         )
 
-    async def emit_to_node(
+    async def send(
         self,
         user_prompt: str,
         topic: str,
         *,
+        reply_to: str | None = None,
         tool_overrides: Sequence[ToolBinding | ToolProvider] | None = None,
         correlation_id: str | None = None,
         temp_instructions: str | None = None,
@@ -214,24 +212,41 @@ class Client(BaseClient):
         route: str | None = None,
         body: Any | None = None,
     ) -> str:
-        """Emit a true one-way (fire-and-forget) invocation to an agent node.
+        """Send a one-way invocation to an agent node, with an optional return address.
 
-        The **one-way fire-and-forget** pattern: constructs a :class:`State` from
-        the provided prompt and message history and publishes it to *topic*,
-        returning immediately. Unlike :meth:`invoke_node`, this registers **no**
-        reply future and the worker suppresses the point-to-point callback on the
-        terminal hop, so the call allocates zero per-call client state and
-        triggers zero reply traffic.
+        The **one-way send** pattern: constructs a :class:`State` from the
+        provided prompt and message history and publishes it to *topic*,
+        returning immediately. Unlike :meth:`start`, this registers **no**
+        reply future, so the call allocates zero per-call client state.
 
-        Because no reply is collected, there is no ``reply_topic`` or
-        ``output_type``. The terminal result still rides the target node's
+        Where the terminal result goes is controlled by *reply_to*:
+
+        * ``reply_to=None`` (default) — true fire-and-forget: the worker
+          suppresses the point-to-point callback on the terminal hop entirely.
+        * ``reply_to="some.topic"`` — the Return Address pattern: the worker
+          delivers the terminal result to that topic, point-to-point, for
+          **someone else** to consume (a ``@consumer`` node, a sink service —
+          never this client, which registers no future). The consumer of that
+          topic owns deserialization and, on auto-create-off brokers, the
+          topic's existence.
+
+        Either way the terminal result also rides the target node's
         ``publish_topic`` broadcast channel for traceability — wire a
-        ``@consumer`` to that topic to observe results. A target node with no
-        ``publish_topic`` leaves no trace of the invocation.
+        ``@consumer`` to that topic to observe results. With ``reply_to=None``,
+        a target node with no ``publish_topic`` leaves no trace of the
+        invocation.
+
+        Because no reply returns to this client, there is no ``output_type`` —
+        deserialization belongs to whoever consumes the result.
 
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
+            reply_to: Optional topic the terminal result is delivered to,
+                point-to-point, for a consumer other than this client.
+                ``None`` (default) suppresses the terminal callback entirely.
+                Not a chaining mechanism — the call stack is unwound at the
+                terminal, so address consumers/sinks, not agent input topics.
             tool_overrides: Runtime agent tool overrides.
             correlation_id: Unique identifier to correlate this request with any
                 downstream traces. Auto-generated (uuid7) when ``None``.
@@ -251,10 +266,14 @@ class Client(BaseClient):
                 humans are present; otherwise human messages read as ``<user>``.
 
         Returns:
-            The ``correlation_id`` of the emitted invocation, for tracing.
+            The ``correlation_id`` of the sent invocation, for tracing.
 
         Raises:
-            ValueError: If *model_settings* is not JSON-serializable.
+            ValueError: If *model_settings* is not JSON-serializable, if
+                *reply_to* is blank, or if *reply_to* is this client's own reply
+                inbox (no future is registered, so the reply would arrive at the
+                dispatcher and be dropped — use :meth:`start` / :meth:`execute`
+                to await a reply).
         """
         correlation_id, state, overrides = self._build_state_and_overrides(
             user_prompt,
@@ -265,7 +284,7 @@ class Client(BaseClient):
             model_settings=model_settings,
             author=author,
         )
-        return await self._emit(
+        return await self._send(
             topic=topic,
             correlation_id=correlation_id,
             state=state,
@@ -273,10 +292,11 @@ class Client(BaseClient):
             deps=deps,
             route=route,
             body=body,
+            reply_to=reply_to,
         )
 
     @overload
-    async def execute_node(
+    async def execute(
         self,
         user_prompt: str,
         topic: str,
@@ -284,7 +304,6 @@ class Client(BaseClient):
         output_type: type[OutputT],
         author: str | None = ...,
         tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
-        reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
@@ -296,14 +315,13 @@ class Client(BaseClient):
     ) -> NodeResult[OutputT]: ...
 
     @overload
-    async def execute_node(
+    async def execute(
         self,
         user_prompt: str,
         topic: str,
         *,
         author: str | None = ...,
         tool_overrides: Sequence[ToolBinding | ToolProvider] | None = ...,
-        reply_topic: str | None = ...,
         correlation_id: str | None = ...,
         temp_instructions: str | None = ...,
         message_history: list[ModelMessage] | None = ...,
@@ -314,7 +332,7 @@ class Client(BaseClient):
         timeout: float | None = ...,
     ) -> NodeResult[Any]: ...
 
-    async def execute_node(
+    async def execute(
         self,
         user_prompt: str,
         topic: str,
@@ -322,7 +340,6 @@ class Client(BaseClient):
         author: str | None = None,
         tool_overrides: Sequence[ToolBinding | ToolProvider] | None = None,
         output_type: type[Any] = _UNSET,
-        reply_topic: str | None = None,
         correlation_id: str | None = None,
         temp_instructions: str | None = None,
         message_history: list[ModelMessage] | None = None,
@@ -334,23 +351,22 @@ class Client(BaseClient):
     ) -> NodeResult[Any]:
         """Invoke an agent node and await the reply in a single call.
 
-        Convenience wrapper equivalent to::
+        The **execute** pattern (cf. Temporal's ``execute_workflow``):
+        convenience wrapper equivalent to::
 
-            handle = await client.invoke_node(...)
+            handle = await client.start(...)
             result = await handle.result(timeout=timeout)
 
-        Accepts the same arguments as :meth:`invoke_node`, plus *timeout*.
+        Accepts the same arguments as :meth:`start`, plus *timeout*.
 
         Args:
             user_prompt: The user message to send to the agent node.
             topic: The Kafka topic the target node subscribes to.
             author: Optional name for the human author of *user_prompt*. See
-                :meth:`invoke_node` for details.
+                :meth:`start` for details.
             tool_overrides: Runtime agent tool overrides.
             output_type: The expected Python type for deserializing the agent's
                 output. When omitted, auto-detection is used.
-            reply_topic: Topic the node should publish its reply to.
-                Defaults to the client's auto-generated reply topic.
             correlation_id: Unique identifier to correlate this request with its
                 reply. Auto-generated (uuid7) when ``None``.
             temp_instructions: Optional system-level instructions injected into
@@ -378,13 +394,12 @@ class Client(BaseClient):
                 ``None`` (the default).
             ValueError: If *model_settings* is not JSON-serializable.
         """
-        handle = await self.invoke_node(
+        handle = await self.start(
             user_prompt,
             topic,
             author=author,
             tool_overrides=tool_overrides,
             output_type=output_type,
-            reply_topic=reply_topic,
             correlation_id=correlation_id,
             temp_instructions=temp_instructions,
             message_history=message_history,

@@ -186,7 +186,7 @@ class RunId:
 ```
 
 - **Durable across hops.** A `RunId` is minted at the originating client publish and rides on `x-calf-run-id` Kafka header on every subsequent envelope in the chain.
-- **Distinct from `correlation_id`.** In v1, `correlation_id` is the per-hop request/reply joining key (for client `execute_node`-style request/reply). `RunId` is the run-aggregate key — different concept. The current code at `calfkit/client/base.py:148` conflates them (a single uuid7 stamped on the client publish doubles as both); v1 separates them explicitly.
+- **Distinct from `correlation_id`.** In v1, `correlation_id` is the per-hop request/reply joining key (for client `execute`-style request/reply). `RunId` is the run-aggregate key — different concept. The current code at `calfkit/client/base.py:148` conflates them (a single uuid7 stamped on the client publish doubles as both); v1 separates them explicitly.
 - **Has a lifecycle.** `RunStarted` → (handler hops) → `RunCompleted` or `RunInterrupted` or `RunFailed`. Lifecycle is observable via `on_event`.
 - **Has a state checkpoint** in the runs-state compacted topic, keyed by `RunId`.
 - **Has a parent** (optional). Sub-runs (e.g. agent A invokes agent B as a sub-agent) have `parent_run_id` for telemetry rollups.
@@ -3051,7 +3051,7 @@ There is no migration story. v1 is a clean break. The 0.x code stays on 0.x for 
 - `BaseNodeDef` subclass → `@handler`
 - `agent_tool` → `@tool` (module-level), `Tool.external(...)` (cross-language), or `Tool.from_agent(...)` (sub-agent as tool)
 - `Worker(client, nodes=[...])` → `Worker(bootstrap_servers=..., handlers=[...])`
-- `Client.execute_node(...)` → `Client.execute(topic, req)`
+- `Client.execute(...)` → `Client.execute(topic, req)` (signature slims; the v0 names are already `send`/`start`/`execute` per client-send-api-spec.md)
 
 The migration is non-trivial but mechanical. There is no automatic codemod; we provide a side-by-side recipes doc.
 
@@ -3427,8 +3427,8 @@ For grounding of the discard list (§21):
 | `calfkit/_protocol.py` | 21-25 | `HDR_EMITTER`, `HDR_EMITTER_KIND` | Survives; extended (§6.2) |
 | `calfkit/_protocol.py` | 28-39 | `decode_header_str` | Survives as internal codec helper |
 | `calfkit/client/base.py` | 50-112 | `BaseClient`, `connect` | Slimmed; `Client.connect` keeps the API surface |
-| `calfkit/client/base.py` | 124-182 | `_invoke` | `Client.invoke` / `Client.execute` |
-| `calfkit/client/client.py` | 19-218 | `Client.invoke_node` / `execute_node` | `Client.invoke` / `Client.execute` with cleaner signatures (no `user_prompt` coupling) |
+| `calfkit/client/base.py` | 124-182 | `_start` | `Client.start` / `Client.execute` |
+| `calfkit/client/client.py` | 19-218 | `Client.send` / `start` / `execute` | Survive (renamed from emit_to_node/invoke_node/execute_node per client-send-api-spec.md); v1 slims signatures (no `user_prompt` coupling) |
 | `calfkit/client/reply_dispatcher.py` | 16-60 | `_ReplyDispatcher` | Survives, slimmed; same shape |
 | `calfkit/client/middleware.py` | 9-23 | `ContextInjectionMiddleware` | Removed; aiokafka context handled directly |
 | `calfkit/client/node_result.py` | 11-40 | `NodeResult` | `RunResult` (different name, similar shape) |
