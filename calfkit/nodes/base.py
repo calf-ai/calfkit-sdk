@@ -3,7 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
-from aiokafka.errors import KafkaError
+from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
