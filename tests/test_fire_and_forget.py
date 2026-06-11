@@ -415,7 +415,6 @@ def _wire_spy(client: Client) -> AsyncMock:
     inspected without Kafka. (The lazy connect-guard is skipped because every
     ``MagicMock`` attribute — including ``_connection`` — is truthy.)"""
     connection = MagicMock()
-    connection._connection = True
     connection.publish = AsyncMock()
     client._connection = connection
     return connection.publish
@@ -601,6 +600,8 @@ async def test_return_call_callback_publish_failure_still_broadcasts(caplog):
     message = errors[-1].getMessage()
     assert "missing.sink" in message, f"ERROR log must name the callback topic; got: {message}"
     assert "cid-fail" in message, f"ERROR log must carry the correlation id; got: {message}"
+    # logger.exception attaches the traceback — the part an operator needs most.
+    assert errors[-1].exc_info, "the ERROR must carry exc_info (logged via logger.exception)"
 
 
 async def test_tail_call_preserves_reply_to_callback():

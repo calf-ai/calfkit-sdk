@@ -309,7 +309,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                     # fault rail (#193 successor).
                     logger.exception(
                         "[%s] terminal result could not be delivered to callback_topic=%s node=%s; "
-                        "the result still broadcasts on publish_topic (no retry)",
+                        "the terminal envelope is still returned for the publish_topic broadcast (no retry)",
                         correlation_id,
                         frame.callback_topic,
                         self.node_id,

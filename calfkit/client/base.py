@@ -182,6 +182,14 @@ class BaseClient:
         client_id = uuid_utils.uuid7().hex
         if reply_topic is None:
             reply_topic = f"calf-client-reply-{client_id}"
+        elif not _KAFKA_TOPIC_RE.fullmatch(reply_topic) or reply_topic in (".", ".."):
+            # The reply topic is the wire callback on every start()/execute()
+            # frame and this client's own subscription — same legality rule,
+            # same loud client-side rejection as send(reply_to=...).
+            raise ValueError(
+                f"reply_topic {reply_topic!r} is not a valid Kafka topic name "
+                "(allowed: letters, digits, '.', '_', '-'; max 249 chars; not '.' or '..')"
+            )
         group_id = f"calf-client-reply-{client_id}"
 
         # The reply topic is a framework inbox: declare it (framework=True so
