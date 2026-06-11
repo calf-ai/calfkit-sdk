@@ -51,6 +51,20 @@ def test_connect_rejects_raw_sasl_plain_kwargs() -> None:
         Client.connect("localhost:9092", sasl_plain_username="u", sasl_plain_password="p")
 
 
+def test_connect_rejects_illegal_reply_topic_name() -> None:
+    # An explicit reply_topic is the wire callback on EVERY start()/execute()
+    # frame and the client's own subscription — a Kafka-illegal name would
+    # recreate exactly the cross-process metadata stall send(reply_to=...)
+    # validation exists to prevent. Same rule, same loud client-side rejection.
+    for bad in ("has space", "foo/bar", "a" * 250, ".", ".."):
+        with pytest.raises(ValueError, match="not a valid Kafka topic name"):
+            Client.connect("localhost:9092", reply_topic=bad)
+
+    # Explicit legal names still work.
+    client = Client.connect("localhost:9092", reply_topic="my-app.replies_1")
+    assert client.reply_topic == "my-app.replies_1"
+
+
 def test_client_never_captures_security_kwargs() -> None:
     """Credentials flow exclusively through FastStream's ``security=`` object
     (the #188 invariant): the client must never capture raw security kwargs.

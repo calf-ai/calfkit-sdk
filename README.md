@@ -164,7 +164,7 @@ $ calfkit run agent_service:agent
 Send a message to the agent.
 
 ```python
-# invoke.py
+# execute.py
 import asyncio
 from calfkit.client import Client
 
@@ -172,7 +172,7 @@ async def main():
     client = Client.connect("localhost:9092")  # Connect to the broker
 
     # Send a request and await the response
-    result = await client.execute_node(
+    result = await client.execute(
         "What's the weather in Tokyo?",
         "weather_agent.input",  # The topic the agent is listening to
     )
@@ -185,7 +185,7 @@ if __name__ == "__main__":
 Run the file to invoke the agent:
 
 ```console
-$ python invoke.py
+$ python execute.py
 ```
 
 ### Next steps
@@ -218,7 +218,7 @@ agent = Agent(
 When invoking, pass the matching `output_type` to deserialize the response:
 
 ```python
-result = await client.execute_node(
+result = await client.execute(
     "What's the weather in Tokyo?",
     "weather_agent.input",
     output_type=WeatherReport,
@@ -276,8 +276,8 @@ Key entry points:
 | Symbol | Purpose |
 | --- | --- |
 | `Client.connect(server_urls=None, reply_topic=None, reply_ttl=None, *, provisioning=None, ...)` | Connect to the broker. Defaults to `$CALF_HOST_URL` → `localhost`. |
-| `Client.execute_node(prompt, topic, *, output_type=..., deps=..., message_history=..., timeout=None, ...)` | Request/reply: publish and await the `NodeResult`. |
-| `Client.invoke_node(...)` / `Client.emit_to_node(...)` | Async-handle and fire-and-forget variants. |
+| `Client.execute(prompt, topic, *, output_type=..., deps=..., message_history=..., timeout=None, ...)` | Request/reply: publish and await the `NodeResult`. |
+| `Client.start(...)` / `Client.send(...)` | Async-handle variant, and one-way send (no reply future; optional `reply_to` return address). |
 | `Agent(node_id, *, system_prompt=..., subscribe_topics, publish_topic=None, model_client, tools=None, gates=None, final_output_type=str, model_settings=None, ...)` | An agent node. |
 | `@agent_tool` / `@consumer(...)` | Decorators that turn a function into a tool node / consumer node. |
 | `Worker(client, nodes=None, ...)` → `run()` / `start()` / `stop()` | Host one or more nodes against the broker. |
@@ -292,7 +292,7 @@ In-repo documentation lives under [`docs/`](docs/).
 
 **How-to guides** — goal-oriented walkthroughs:
 
-- **[How to call nodes from a client](docs/client-features.md)** — the three invocation patterns (`execute_node` / `invoke_node` / `emit_to_node`), multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, fire-and-forget, and bounding reply memory with `reply_ttl`.
+- **[How to call nodes from a client](docs/client-features.md)** — the three invocation patterns (`execute` / `start` / `send`), multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, fire-and-forget, and bounding reply memory with `reply_ttl`.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to gate node invocations](docs/gating.md)** — predicate gate stacks that let a node decline an inbound event before `run()` runs (e.g. when agents share an input topic).
 - **[How to give agents MCP tools](docs/mcp-tool-discovery.md)** — deploy an `MCPToolbox` fronting an MCP server and pass it to agents like a tool node; tools are discovered and kept fresh across processes automatically.

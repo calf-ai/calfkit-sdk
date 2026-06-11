@@ -207,7 +207,7 @@ async def test_sync_consumer_receives_context_from_agent_output(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute_node("hi", agent.subscribe_topics[0], timeout=5)
+        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
 
     final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
     assert final, f"consumer never saw a terminal envelope; saw={received}"
@@ -228,7 +228,7 @@ async def test_async_consumer_receives_context_from_agent_output(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute_node("hi", agent.subscribe_topics[0], timeout=5)
+        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
 
     final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
     assert final
@@ -247,7 +247,7 @@ async def test_consumer_sees_upstream_emitter_identity(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute_node("hi", agent.subscribe_topics[0], timeout=5)
+        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
 
     final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
     assert final
@@ -278,7 +278,7 @@ async def test_consumer_deserializes_output_type_dataclass(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute_node("hi", structured_agent.subscribe_topics[0], timeout=5)
+        await client.execute("hi", structured_agent.subscribe_topics[0], timeout=5)
 
     final = [c for c in received if any(isinstance(p, DataPart) for p in c.output_parts)]
     assert final, f"no final DataPart envelope observed; received={received}"
@@ -458,7 +458,7 @@ async def test_gate_rejection_skips_consume_fn(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", agent.subscribe_topics[0], timeout=5)
+        result = await client.execute("hi", agent.subscribe_topics[0], timeout=5)
         assert result.output == "done"
 
     assert invocations == []
@@ -481,7 +481,7 @@ async def test_gate_acceptance_runs_consume_fn(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute_node("hi", agent.subscribe_topics[0], timeout=5)
+        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
 
     assert gate_calls
     assert invocations
@@ -577,7 +577,7 @@ async def test_resources_flow_from_node_bag():
 
 
 async def test_deps_round_trip_through_agent_to_consumer(container):
-    """E2E: deps passed to execute_node surface on the consumer's ctx.deps."""
+    """E2E: deps passed to execute surface on the consumer's ctx.deps."""
     received: list[ConsumerContext] = []
 
     @consumer(subscribe_topics="consumer_test_agent.output")
@@ -589,7 +589,7 @@ async def test_deps_round_trip_through_agent_to_consumer(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", agent.subscribe_topics[0], deps={"discord": {"channel_id": 7}}, timeout=5)
+        result = await client.execute("hi", agent.subscribe_topics[0], deps={"discord": {"channel_id": 7}}, timeout=5)
 
     assert result.deps == {"discord": {"channel_id": 7}}
     assert received, "consumer saw no envelopes"
@@ -703,7 +703,7 @@ async def test_unexpected_projection_exception_is_logged_and_skipped(monkeypatch
 
 # ---------------------------------------------------------------------------
 # Client-side NodeResult contract — the consumer no longer uses NodeResult, but
-# Client.execute_node / InvocationHandle.result still return it. Kept here to
+# Client.execute / InvocationHandle.result still return it. Kept here to
 # preserve the original coverage.
 # ---------------------------------------------------------------------------
 
@@ -732,7 +732,7 @@ def test_lenient_mode_returns_none_on_empty_final_output_parts():
     assert result.state is envelope.context.state  # client path: no copy in from_envelope
 
 
-async def test_client_execute_node_result_carries_state(container):
+async def test_client_execute_result_carries_state(container):
     worker = container.get(Worker)
     agent = Agent(
         "state_vis_agent",
@@ -748,7 +748,7 @@ async def test_client_execute_node_result_carries_state(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi there", agent.subscribe_topics[0], timeout=5)
+        result = await client.execute("hi there", agent.subscribe_topics[0], timeout=5)
 
     assert result.output == "done"
     assert isinstance(result.state, State)

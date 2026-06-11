@@ -2,7 +2,7 @@
 
 A **consumer node** is a terminal sink — it subscribes to one or more topics and
 runs arbitrary Python logic against every event flowing through. Consumers
-receive the same `NodeResult` that `Client.execute_node()` returns, including the
+receive the same `NodeResult` that `Client.execute()` returns, including the
 full session state (`tool_calls`, `tool_results`, `message_history`, `metadata`)
 and the inbound producer `deps` via `result.deps["key"]` — the same data tools
 read as `ctx.deps["key"]`.

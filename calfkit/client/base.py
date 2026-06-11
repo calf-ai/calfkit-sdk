@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -27,6 +28,13 @@ from calfkit.provisioning import ProvisioningConfig, StartupTopicEnsurer
 
 logger = logging.getLogger(__name__)
 
+# Kafka's exact topic-name legality: [a-zA-Z0-9._-], 1-249 chars ("." and ".."
+# are additionally reserved). An illegal name would never get metadata at the
+# worker's terminal publish — a request_timeout stall into an argument-less
+# UnknownTopicOrPartitionError on a different process — so it is rejected
+# loudly at the client instead.
+_KAFKA_TOPIC_RE = re.compile(r"[a-zA-Z0-9._-]{1,249}")
+
 
 def _new_client_emitter_id(client_id: str | None = None) -> str:
     """Return a stable ``client.<uuid7-hex>`` emitter id used as the ``x-calf-emitter``
@@ -41,12 +49,12 @@ class BaseClient:
 
     Manages a Kafka broker connection and a shared reply dispatcher that
     correlates outgoing invocations with their asynchronous replies. Subclasses
-    should build higher-level invocation methods on top of :meth:`_invoke`.
+    should build higher-level invocation methods on top of :meth:`_start`.
 
     Supports use as an async context manager for automatic cleanup::
 
         async with Client.connect("localhost:9092") as client:
-            result = await client.execute_node(...)
+            result = await client.execute(...)
     """
 
     def __init__(
@@ -124,7 +132,7 @@ class BaseClient:
             reply_topic: Explicit reply topic name. When ``None`` (default), a
                 unique topic is generated using a uuid7 client ID.
             reply_ttl: Optional seconds after which an un-answered reply future
-                (from :meth:`invoke_node` / :meth:`execute_node`) is evicted with
+                (from :meth:`start` / :meth:`execute`) is evicted with
                 a :class:`~calfkit.exceptions.ReplyExpiredError`. ``None``
                 (default) disables eviction entirely — a deliberate
                 caller-responsibility choice, not a default safety ceiling.
@@ -174,6 +182,14 @@ class BaseClient:
         client_id = uuid_utils.uuid7().hex
         if reply_topic is None:
             reply_topic = f"calf-client-reply-{client_id}"
+        elif not _KAFKA_TOPIC_RE.fullmatch(reply_topic) or reply_topic in (".", ".."):
+            # The reply topic is the wire callback on every start()/execute()
+            # frame and this client's own subscription — same legality rule,
+            # same loud client-side rejection as send(reply_to=...).
+            raise ValueError(
+                f"reply_topic {reply_topic!r} is not a valid Kafka topic name "
+                "(allowed: letters, digits, '.', '_', '-'; max 249 chars; not '.' or '..')"
+            )
         group_id = f"calf-client-reply-{client_id}"
 
         # The reply topic is a framework inbox: declare it (framework=True so
@@ -231,10 +247,9 @@ class BaseClient:
         """The Kafka topic provisioning config (never ``None``; disabled by default)."""
         return self._provisioning
 
-    async def _invoke(
+    async def _start(
         self,
         topic: str,
-        reply_topic: str,
         correlation_id: str,
         state: State,
         overrides: OverridesState | None = None,
@@ -243,11 +258,16 @@ class BaseClient:
         body: Any | None = None,
         output_type: type[Any] = _UNSET,
     ) -> InvocationHandle:
-        """Invoke the node asynchronously.
+        """Start a node invocation asynchronously and register its reply future.
+
+        The wire callback is always ``self._reply_topic`` — the one topic the
+        dispatcher consumes, and therefore the only address whose reply future
+        can ever resolve. There is deliberately no parameter for it: a foreign
+        callback with a registered future is the dangling-future bug the
+        send/start/execute redesign removed (ADR-0005).
 
         Args:
             topic: Topic to send args to.
-            reply_topic: Topic the node should reply to.
             correlation_id: Correlation ID for this request.
             state: The session state.
             deps: Provided dependencies.
@@ -256,11 +276,11 @@ class BaseClient:
             An invocation handle with an associated future for the reply.
         """
         future = self._dispatcher.expect(correlation_id)
-        logger.debug("[%s] invoke topic=%s reply=%s", correlation_id[:8], topic, reply_topic)
+        logger.debug("[%s] start topic=%s reply=%s", correlation_id[:8], topic, self._reply_topic)
         await self._publish_call(
             topic=topic,
             correlation_id=correlation_id,
-            callback_topic=reply_topic,
+            callback_topic=self._reply_topic,
             state=state,
             overrides=overrides,
             deps=deps,
@@ -270,7 +290,7 @@ class BaseClient:
         return InvocationHandle(
             correlation_id=correlation_id,
             topic=topic,
-            reply_topic=reply_topic,
+            reply_topic=self._reply_topic,
             _future=future,
             _output_type=output_type,
         )
@@ -289,12 +309,13 @@ class BaseClient:
     ) -> None:
         """Build and publish one client-originated call envelope.
 
-        Single-sources the wire shape shared by :meth:`_invoke` (*callback_topic*
-        is the reply topic) and :meth:`_emit` (*callback_topic* is ``None``, so the
-        worker suppresses the terminal point-to-point reply): the lazy
-        connect-guard, the ``CallFrame`` push, the ``Envelope`` build, and the
-        emitter headers. Callers own dispatcher registration — ``_invoke`` calls
-        ``expect()`` *before* this so a reply can never race an unregistered future.
+        Single-sources the wire shape shared by :meth:`_start` (*callback_topic*
+        is the client's reply inbox) and :meth:`_send` (*callback_topic* is the
+        caller's ``reply_to`` or ``None``, in which case the worker suppresses the
+        terminal point-to-point reply): the lazy connect-guard, the ``CallFrame``
+        push, the ``Envelope`` build, and the emitter headers. Callers own
+        dispatcher registration — ``_start`` calls ``expect()`` *before* this so a
+        reply can never race an unregistered future.
         """
         if route is not None and not is_concrete_route_key(route):
             raise ValueError(
@@ -332,7 +353,7 @@ class BaseClient:
             headers=headers,
         )
 
-    async def _emit(
+    async def _send(
         self,
         topic: str,
         correlation_id: str,
@@ -341,15 +362,19 @@ class BaseClient:
         deps: dict[str, Any] | None = None,
         route: str | None = None,
         body: Any | None = None,
+        reply_to: str | None = None,
     ) -> str:
-        """Emit a true one-way (fire-and-forget) invocation to a node.
+        """Send a one-way invocation to a node, with an optional return address.
 
-        Mirrors :meth:`_invoke` but allocates **zero** per-call client state and
-        triggers **zero** reply traffic: it does not register a reply future with
-        the dispatcher, does not build an :class:`InvocationHandle`, and pushes a
-        :class:`CallFrame` with ``callback_topic=None`` so the worker suppresses
-        the point-to-point reply on the terminal hop. The result still rides the
-        target node's ``publish_topic`` broadcast channel for traceability.
+        Mirrors :meth:`_start` but allocates **zero** per-call client state: it
+        does not register a reply future with the dispatcher and does not build
+        an :class:`InvocationHandle`. The pushed :class:`CallFrame` carries
+        *reply_to* as its ``callback_topic``: ``None`` (the default) makes the
+        worker suppress the point-to-point reply on the terminal hop entirely; a
+        topic name makes the worker deliver the terminal result there — a return
+        address for **someone else** to consume, never this client. Either way
+        the result still rides the target node's ``publish_topic`` broadcast
+        channel for traceability.
 
         Args:
             topic: Topic to send args to.
@@ -357,15 +382,35 @@ class BaseClient:
             state: The session state.
             overrides: Runtime overrides (agent tools, model settings).
             deps: Provided dependencies.
+            reply_to: Optional topic the terminal result is delivered to,
+                point-to-point. ``None`` suppresses the terminal callback.
 
         Returns:
-            The ``correlation_id`` of the emitted invocation, for tracing.
+            The ``correlation_id`` of the sent invocation, for tracing.
+
+        Raises:
+            ValueError: If *reply_to* is blank, or is this client's own reply
+                inbox (no future is registered, so the reply would arrive at the
+                dispatcher and be dropped — use ``start``/``execute`` to await).
         """
-        logger.debug("[%s] emit topic=%s", correlation_id[:8], topic)
+        if reply_to is not None:
+            if not reply_to.strip():
+                raise ValueError("reply_to must be a non-empty topic name or None")
+            if not _KAFKA_TOPIC_RE.fullmatch(reply_to) or reply_to in (".", ".."):
+                raise ValueError(
+                    f"reply_to {reply_to!r} is not a valid Kafka topic name (allowed: letters, digits, '.', '_', '-'; max 249 chars; not '.' or '..')"
+                )
+            if reply_to == self._reply_topic:
+                raise ValueError(
+                    "reply_to is this client's own reply inbox; send() registers no future, "
+                    "so the reply would arrive and be dropped ('no pending future'). "
+                    "Use start()/execute() to await a reply."
+                )
+        logger.debug("[%s] send topic=%s reply_to=%s", correlation_id[:8], topic, reply_to)
         await self._publish_call(
             topic=topic,
             correlation_id=correlation_id,
-            callback_topic=None,
+            callback_topic=reply_to,
             state=state,
             overrides=overrides,
             deps=deps,

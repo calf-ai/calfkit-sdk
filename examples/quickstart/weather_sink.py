@@ -2,7 +2,7 @@
 
 Listens on the weather agent's ``publish_topic`` and runs arbitrary Python
 against every envelope that flows through it. The decorated function receives
-the same client-facing ``NodeResult`` returned by ``Client.execute_node()``.
+the same client-facing ``NodeResult`` returned by ``Client.execute()``.
 
 Because an agent's ``publish_topic`` carries every state transition (not just
 the final reply), ``result.output`` is ``None`` on intermediate hops — pending

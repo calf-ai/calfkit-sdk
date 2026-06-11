@@ -14,7 +14,7 @@ async def test_init_instructions_only(container, deploy_instructions_agent):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hello", "test_instructions_agent.input")
+        result = await client.execute("hello", "test_instructions_agent.input")
 
     assert result.output is not None
     assert isinstance(result.output, str)
@@ -30,7 +30,7 @@ async def test_runtime_instructions_appended(container, deploy_instructions_agen
     random_runtime_instruction = Faker().sentence(nb_words=50)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node(
+        result = await client.execute(
             "hello",
             "test_instructions_agent.input",
             temp_instructions=random_runtime_instruction,
@@ -57,7 +57,7 @@ async def test_dynamic_instructions_appended(container, deploy_instructions_agen
         return random_dynamic_instruction[-1]
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hello", "test_instructions_agent.input")
+        result = await client.execute("hello", "test_instructions_agent.input")
 
     assert result.output is not None
     assert isinstance(result.output, str)
@@ -81,7 +81,7 @@ async def test_all_three_instruction_levels(container, deploy_instructions_agent
         return random_dynamic_instruction[-1]
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node(
+        result = await client.execute(
             "hello",
             "test_instructions_agent.input",
             temp_instructions=random_runtime_instruction,
@@ -113,7 +113,7 @@ async def test_instructions_are_temporary(container, deploy_instructions_agent):
         return random_dynamic_instruction[-1]
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node(
+        result = await client.execute(
             "hello",
             "test_instructions_agent.input",
             temp_instructions=random_runtime_instruction,
@@ -124,7 +124,7 @@ async def test_instructions_are_temporary(container, deploy_instructions_agent):
     assert random_dynamic_instruction[-1] in result.output
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node(
+        result = await client.execute(
             "hello again.",
             "test_instructions_agent.input",
         )

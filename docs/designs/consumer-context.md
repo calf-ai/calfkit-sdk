@@ -13,7 +13,7 @@ same `ctx.deps` / `ctx.resources` / `ctx.correlation_id` vocabulary that tool
 authors already use via `ToolContext`.
 
 `NodeResult` returns to being a **pure projection of the wire envelope + transport**,
-used only by the client (`Client.execute_node` / `InvocationHandle.result`).
+used only by the client (`Client.execute` / `InvocationHandle.result`).
 
 ## 1. Motivation
 

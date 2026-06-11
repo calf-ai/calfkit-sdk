@@ -67,7 +67,7 @@ async def test_no_settings_anywhere(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0])
+        await client.execute("hello", agent.subscribe_topics[0])
     assert captured.settings[0] is None
 
 
@@ -77,7 +77,7 @@ async def test_tier3_only_overrides_baseline(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.7})
+        await client.execute("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.7})
     assert captured.settings[0] == {"temperature": 0.7}
 
 
@@ -87,7 +87,7 @@ async def test_tier2_only_overrides_baseline(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0])
+        await client.execute("hello", agent.subscribe_topics[0])
     assert captured.settings[0] == {"temperature": 0.3}
 
 
@@ -97,7 +97,7 @@ async def test_tier1_only_overrides_baseline(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0])
+        await client.execute("hello", agent.subscribe_topics[0])
     assert captured.settings[0] == {"temperature": 0.1}
 
 
@@ -107,7 +107,7 @@ async def test_tier2_beats_tier1_when_tier3_unset(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0])
+        await client.execute("hello", agent.subscribe_topics[0])
     assert captured.settings[0] is not None
     assert captured.settings[0]["temperature"] == 0.5
 
@@ -118,7 +118,7 @@ async def test_three_tier_precedence(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.9})
+        await client.execute("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.9})
     assert captured.settings[0] is not None
     assert captured.settings[0]["temperature"] == 0.9
 
@@ -129,7 +129,7 @@ async def test_disjoint_keys_merge(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.7})
+        await client.execute("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.7})
     assert captured.settings[0] is not None
     assert captured.settings[0]["max_tokens"] == 100
     assert captured.settings[0]["top_p"] == 0.95
@@ -142,7 +142,7 @@ async def test_fail_fast_non_serializable_model_settings(container):
     prepare_worker(container)
     client = container.get(Client)
     with pytest.raises(ValueError, match="not JSON-serializable"):
-        await client.invoke_node("hello", agent.subscribe_topics[0], model_settings={"bad": object()})
+        await client.start("hello", agent.subscribe_topics[0], model_settings={"bad": object()})
 
 
 async def test_fail_fast_rejects_nested_non_serializable(container):
@@ -151,7 +151,7 @@ async def test_fail_fast_rejects_nested_non_serializable(container):
     prepare_worker(container)
     client = container.get(Client)
     with pytest.raises(ValueError, match="not JSON-serializable"):
-        await client.invoke_node("hello", agent.subscribe_topics[0], model_settings={"extra_body": {"nested": object()}})
+        await client.start("hello", agent.subscribe_topics[0], model_settings={"extra_body": {"nested": object()}})
 
 
 async def test_fail_fast_rejects_nan_and_inf(container):
@@ -160,9 +160,9 @@ async def test_fail_fast_rejects_nan_and_inf(container):
     prepare_worker(container)
     client = container.get(Client)
     with pytest.raises(ValueError, match="not JSON-serializable"):
-        await client.invoke_node("hello", agent.subscribe_topics[0], model_settings={"temperature": float("nan")})
+        await client.start("hello", agent.subscribe_topics[0], model_settings={"temperature": float("nan")})
     with pytest.raises(ValueError, match="not JSON-serializable"):
-        await client.invoke_node("hello", agent.subscribe_topics[0], model_settings={"temperature": float("inf")})
+        await client.start("hello", agent.subscribe_topics[0], model_settings={"temperature": float("inf")})
 
 
 async def test_unchanged_baseline_when_no_settings_passed(container):
@@ -171,9 +171,9 @@ async def test_unchanged_baseline_when_no_settings_passed(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0])
+        await client.execute("hello", agent.subscribe_topics[0])
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0], model_settings=None)
+        await client.execute("hello", agent.subscribe_topics[0], model_settings=None)
     assert captured.settings[0] == captured.settings[1]
     assert captured.settings[0] is None
 
@@ -184,9 +184,9 @@ async def test_empty_dict_behaves_like_none(container):
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0], model_settings={})
+        await client.execute("hello", agent.subscribe_topics[0], model_settings={})
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0], model_settings=None)
+        await client.execute("hello", agent.subscribe_topics[0], model_settings=None)
     assert captured.settings[0] == captured.settings[1] == {"temperature": 0.1}
 
 
@@ -196,7 +196,7 @@ async def test_tools_available_with_model_settings_only(container, deploy_no_arg
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.5})
+        await client.execute("hello", agent.subscribe_topics[0], model_settings={"temperature": 0.5})
     assert captured.settings[0] == {"temperature": 0.5}
     expected = {tool.tool_schema.name for tool in deploy_no_arg_tools}
     assert set(captured.tool_names[0]) == expected
@@ -208,7 +208,7 @@ async def test_tool_overrides_and_model_settings_combined(container, deploy_no_a
     prepare_worker(container)
     client = container.get(Client)
     async with TestKafkaBroker(container.get(KafkaBroker)):
-        await client.execute_node(
+        await client.execute(
             "hello",
             agent.subscribe_topics[0],
             tool_overrides=deploy_no_arg_tools,

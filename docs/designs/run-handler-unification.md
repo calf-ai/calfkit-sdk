@@ -423,6 +423,8 @@ this is pure deletion of the `run_args` plumbing.
 `run_args` appears across overloads + impls + docstrings + pass-throughs for three methods.
 Remove all (the `route`/`body` params already present become the supported input-shaping channel).
 
+> NOTE (2026-06-11): the client method names and `client.py` line estimates below pre-date `client-send-api-spec.md` (`emit_to_node`→`send`, `invoke_node`→`start`, `execute_node`→`execute`; `reply_topic` param removed). Re-derive edit sites against HEAD when building.
+
 - **(a) `invoke_node`:** overload params (≈97, ≈116), impl param (≈135), docstring (≈169),
   pass-through `run_args=run_args` (≈197).
 - **(b) `emit_to_node`:** impl param (≈215), docstring (≈247), pass-through (≈278).

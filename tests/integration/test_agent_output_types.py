@@ -18,7 +18,7 @@ async def test_structured_output_agent_with_dataclass(container, deploy_structur
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute_node(
+        result = await client.execute(
             f"What's your name? My name is {user_name}",
             "test_agent.input",
             temp_instructions="When responding, always direct responses to the recipient's name you would like to target.",
@@ -31,7 +31,7 @@ async def test_structured_output_agent_with_dataclass(container, deploy_structur
         assert agent_name.lower() in result.output.response.lower()
         print(f"structured_output: {result.output}")
 
-        result = await client.execute_node(
+        result = await client.execute(
             f"What's your name? My name is {user_name}",
             "test_agent.input",
             temp_instructions="When responding, always direct responses to the recipient's name you would like to target.",
@@ -53,7 +53,7 @@ async def test_structured_output_agent_with_list(container, deploy_structured_ag
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute_node(
+        result = await client.execute(
             "Provide a 3 item-long list of random colors",
             "test_agent.input",
             output_type=list[str],
@@ -65,7 +65,7 @@ async def test_structured_output_agent_with_list(container, deploy_structured_ag
         assert len(result.output) == 3
         print(f"structured_output: {result.output}")
 
-        result = await client.execute_node(
+        result = await client.execute(
             "Provide a 3 item-long list of random colors",
             "test_agent.input",
             temp_instructions="Extract all colors and put them into a list",
@@ -94,7 +94,7 @@ async def test_structured_output_agent_with_basemodel(container, deploy_structur
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute_node(
+        result = await client.execute(
             "Here are the measurements (l x w x d): 3x2x5 cm",
             "test_agent.input",
             temp_instructions="Extract the box measurements.",
@@ -106,7 +106,7 @@ async def test_structured_output_agent_with_basemodel(container, deploy_structur
         assert Box(length=3, width=2, depth=5, unit="cm") == result.output
         print(f"structured_output: {result.output}")
 
-        result = await client.execute_node(
+        result = await client.execute(
             "Here are the measurements (l x w x d): 3x2x5 cm",
             "test_agent.input",
             temp_instructions="Extract the box measurements.",

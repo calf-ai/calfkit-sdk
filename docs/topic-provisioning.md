@@ -151,7 +151,7 @@ config is disabled.
 
 ### 4.2 Client reply topic (lazy, once)
 
-A `Client` provisions **its own reply topic** the first time `_invoke` runs (just
+A `Client` provisions **its own reply topic** the first time the client publishes — any of `send`/`start`/`execute` (just
 before the broker connects), and at most once for the lifetime of the client. The
 reply topic is a framework inbox, so it is passed in `framework_topics` to keep
 user `topic_configs` off it. This is gated on the same

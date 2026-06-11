@@ -3,6 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
+from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
@@ -290,13 +291,29 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 logger.debug("[%s] ReturnCall no-callback fire-and-forget terminal node=%s", correlation_id[:8], self.node_id)
             else:
                 logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self.node_id)
-                await broker.publish(
-                    publish_envelope,
-                    topic=frame.callback_topic,
-                    correlation_id=correlation_id,
-                    key=correlation_id.encode(),
-                    headers=self._emitter_headers(),
-                )
+                try:
+                    await broker.publish(
+                        publish_envelope,
+                        topic=frame.callback_topic,
+                        correlation_id=correlation_id,
+                        key=correlation_id.encode(),
+                        headers=self._emitter_headers(),
+                    )
+                except KafkaError:
+                    # Point-to-point delivery failed (e.g. a send(reply_to=...)
+                    # topic missing with auto-create off, or unauthorized).
+                    # Losing it must not also take down the publish_topic
+                    # broadcast below — the documented traceability fallback —
+                    # which only fires if this handler returns publish_envelope.
+                    # No retry/DLQ here: redelivery policy belongs to the
+                    # fault rail (#193 successor).
+                    logger.exception(
+                        "[%s] terminal result could not be delivered to callback_topic=%s node=%s; "
+                        "the terminal envelope is still returned for the publish_topic broadcast (no retry)",
+                        correlation_id,
+                        frame.callback_topic,
+                        self.node_id,
+                    )
 
         elif isinstance(output, TailCall):
             # tailcall optimization: replace current call frame with new tailcall

@@ -437,13 +437,13 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
         )
 
 
-async def test_emit_to_node_threads_route_and_body_to_the_wire() -> None:
+async def test_send_threads_route_and_body_to_the_wire() -> None:
     from calfkit.client.client import Client
     from calfkit.client.reply_dispatcher import _ReplyDispatcher
 
     conn = _StubConn()
     client = Client(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
-    await client.emit_to_node("hello", "orders", route="order.created", body={"amount": 3})
+    await client.send("hello", "orders", route="order.created", body={"amount": 3})
 
     assert len(conn.published) == 1
     _topic, headers, env = conn.published[0]
@@ -626,13 +626,13 @@ async def test_tailcall_publish_carries_no_route_header() -> None:
     assert HDR_ROUTE not in headers
 
 
-async def test_invoke_node_threads_route_and_body_to_the_wire() -> None:
+async def test_start_threads_route_and_body_to_the_wire() -> None:
     from calfkit.client.client import Client
     from calfkit.client.reply_dispatcher import _ReplyDispatcher
 
     conn = _StubConn()
     client = Client(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
-    await client.invoke_node("hello", "orders", route="order.created", body={"n": 1})
+    await client.start("hello", "orders", route="order.created", body={"n": 1})
 
     assert len(conn.published) == 1
     _topic, headers, env = conn.published[0]
@@ -721,7 +721,7 @@ async def test_malformed_route_log_level_keys_on_awaiting_reply(awaiting: bool, 
     assert recs and recs[0].levelno == expected
 
 
-async def test_execute_node_forwards_route_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_execute_forwards_route_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
     from calfkit.client.client import Client
     from calfkit.client.reply_dispatcher import _ReplyDispatcher
 
@@ -732,11 +732,11 @@ async def test_execute_node_forwards_route_and_body(monkeypatch: pytest.MonkeyPa
         async def result(self, timeout: float | None = None) -> str:
             return "ok"
 
-    async def _fake_invoke(*args: Any, **kwargs: Any) -> Any:
+    async def _fake_start(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
         return _FakeHandle()
 
-    monkeypatch.setattr(client, "invoke_node", _fake_invoke)
-    await client.execute_node("hello", "orders", route="order.created", body={"n": 1})
+    monkeypatch.setattr(client, "start", _fake_start)
+    await client.execute("hello", "orders", route="order.created", body={"n": 1})
     assert captured.get("route") == "order.created"
     assert captured.get("body") == {"n": 1}

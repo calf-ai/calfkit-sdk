@@ -79,7 +79,14 @@ class _ReplyDispatcher:
 
         entry = self._pending.get(correlation_id)
         if entry is None:
-            logger.warning("[%s] reply received but no pending future", correlation_id[:8])
+            # Reachable by another client's send(reply_to=<this inbox>) — this
+            # warning is the RECEIVER's only signal of the mis-address (the
+            # sender holds no future and is told nothing), so name the emitter.
+            logger.warning(
+                "[%s] reply received but no pending future (emitter=%s)",
+                correlation_id[:8],
+                decode_header_str(headers.get(HDR_EMITTER)),
+            )
             return
         future = entry.future
         if future.done():

@@ -54,7 +54,7 @@ class ConsumerContext(Generic[OutputT]):
 
     deps: Mapping[str, Any] = field(default_factory=dict)
     """Inbound producer dependencies — the same mapping the producer passed to
-    ``Client.invoke_node(deps=...)``. Read as ``ctx.deps["key"]``, mirroring tools."""
+    ``Client.start(deps=...)``. Read as ``ctx.deps["key"]``, mirroring tools."""
 
     resources: Mapping[str, Any] = field(default_factory=dict)
     """The consuming node's lifecycle-managed resources (read-only by type). Read as

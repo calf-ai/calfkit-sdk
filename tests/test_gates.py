@@ -1,7 +1,7 @@
 """End-to-end tests for gate stack on BaseNodeDef.
 
 Tests follow the project pattern: TestKafkaBroker for in-memory broker,
-FunctionModel for offline agent runs, client.execute_node / invoke_node for
+FunctionModel for offline agent runs, client.execute / start for
 real message dispatch. No broker mocking.
 """
 
@@ -34,7 +34,7 @@ async def test_no_gates_passes_through(container, deploy_gated_function_agent, g
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", GATED_AGENT_TOPIC, timeout=5)
+        result = await client.execute("hi", GATED_AGENT_TOPIC, timeout=5)
 
         assert result.output == NO_TOOLS_RESPONSE_TEXT
 
@@ -53,7 +53,7 @@ async def test_single_sync_gate_true_allows_run(container, deploy_gated_function
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", GATED_AGENT_TOPIC, timeout=5)
+        result = await client.execute("hi", GATED_AGENT_TOPIC, timeout=5)
 
         assert result.output == NO_TOOLS_RESPONSE_TEXT
         assert calls == ["g1"]
@@ -73,7 +73,7 @@ async def test_single_async_gate_true_allows_run(container, deploy_gated_functio
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", GATED_AGENT_TOPIC, timeout=5)
+        result = await client.execute("hi", GATED_AGENT_TOPIC, timeout=5)
 
         assert result.output == NO_TOOLS_RESPONSE_TEXT
         assert calls == ["g1"]
@@ -101,7 +101,7 @@ async def test_multiple_gates_all_true_run_in_order(container, deploy_gated_func
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", GATED_AGENT_TOPIC, timeout=5)
+        result = await client.execute("hi", GATED_AGENT_TOPIC, timeout=5)
 
         assert result.output == NO_TOOLS_RESPONSE_TEXT
         assert calls == ["g1", "g2", "g3"]
@@ -125,7 +125,7 @@ async def test_mixed_sync_and_async_gates(container, deploy_gated_function_agent
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", GATED_AGENT_TOPIC, timeout=5)
+        result = await client.execute("hi", GATED_AGENT_TOPIC, timeout=5)
 
         assert result.output == NO_TOOLS_RESPONSE_TEXT
         assert calls == ["sync", "async"]
@@ -149,7 +149,7 @@ async def test_decorator_form_registers_gate(container, deploy_gated_function_ag
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", GATED_AGENT_TOPIC, timeout=5)
+        result = await client.execute("hi", GATED_AGENT_TOPIC, timeout=5)
 
         assert result.output == NO_TOOLS_RESPONSE_TEXT
         assert calls == ["decorated"]
@@ -177,7 +177,7 @@ async def test_constructor_then_decorator_order(container, deploy_gated_function
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute_node("hi", GATED_AGENT_TOPIC, timeout=5)
+        result = await client.execute("hi", GATED_AGENT_TOPIC, timeout=5)
 
         assert result.output == NO_TOOLS_RESPONSE_TEXT
         assert calls == ["ctor", "decorator"]
@@ -203,7 +203,7 @@ async def test_gate_sees_overrides_applied_by_prepare_context(
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute_node(
+        await client.execute(
             "hi",
             GATED_AGENT_TOPIC,
             tool_overrides=[],
@@ -234,7 +234,7 @@ async def test_single_sync_gate_false_blocks_run(container, deploy_gated_functio
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        handle = await client.invoke_node("hi", GATED_AGENT_TOPIC)
+        handle = await client.start("hi", GATED_AGENT_TOPIC)
         with pytest.raises(asyncio.TimeoutError):
             await handle.result(timeout=2)
 
@@ -255,7 +255,7 @@ async def test_single_async_gate_false_blocks_run(container, deploy_gated_functi
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        handle = await client.invoke_node("hi", GATED_AGENT_TOPIC)
+        handle = await client.start("hi", GATED_AGENT_TOPIC)
         with pytest.raises(asyncio.TimeoutError):
             await handle.result(timeout=2)
 
@@ -284,7 +284,7 @@ async def test_short_circuit_stops_after_first_false(container, deploy_gated_fun
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        handle = await client.invoke_node("hi", GATED_AGENT_TOPIC)
+        handle = await client.start("hi", GATED_AGENT_TOPIC)
         with pytest.raises(asyncio.TimeoutError):
             await handle.result(timeout=2)
 
@@ -314,7 +314,7 @@ async def test_gate_raises_treated_as_reject_and_logged(
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
         async with TestKafkaBroker(broker):
-            handle = await client.invoke_node("hi", GATED_AGENT_TOPIC)
+            handle = await client.start("hi", GATED_AGENT_TOPIC)
             with pytest.raises(asyncio.TimeoutError):
                 await handle.result(timeout=2)
 
@@ -340,7 +340,7 @@ async def test_non_bool_return_rejects_and_logs(
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
         async with TestKafkaBroker(broker):
-            handle = await client.invoke_node("hi", GATED_AGENT_TOPIC)
+            handle = await client.start("hi", GATED_AGENT_TOPIC)
             with pytest.raises(asyncio.TimeoutError):
                 await handle.result(timeout=2)
 
@@ -383,7 +383,7 @@ async def test_tool_node_gating_blocks_tool_function(container, deploy_function_
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        handle = await client.invoke_node("hi", deploy_function_agent.subscribe_topics[0])
+        handle = await client.start("hi", deploy_function_agent.subscribe_topics[0])
         with pytest.raises(asyncio.TimeoutError):
             await handle.result(timeout=2)
 
