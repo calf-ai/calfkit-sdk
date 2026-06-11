@@ -27,12 +27,12 @@ class _CaptureClient(Client):
         self.captured_state: State | None = None
         self._reply_topic = "test-reply"
 
-    async def _start(self, *, topic: str, reply_topic: str, correlation_id: str, state: State, **_: Any) -> InvocationHandle:  # type: ignore[override]
+    async def _start(self, *, topic: str, correlation_id: str, state: State, **_: Any) -> InvocationHandle:  # type: ignore[override]
         self.captured_state = state
         return InvocationHandle(
             correlation_id=correlation_id,
             topic=topic,
-            reply_topic=reply_topic,
+            reply_topic=self._reply_topic,
             _future=None,  # type: ignore[arg-type]
             _output_type=_UNSET,
         )

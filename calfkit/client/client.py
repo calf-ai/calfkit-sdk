@@ -186,7 +186,6 @@ class Client(BaseClient):
         )
         return await self._start(
             topic=topic,
-            reply_topic=self._reply_topic,
             correlation_id=correlation_id,
             state=state,
             overrides=overrides,

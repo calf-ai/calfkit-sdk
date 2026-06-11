@@ -26,14 +26,17 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiokafka.errors import UnknownTopicOrPartitionError
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
+from calfkit._protocol import HDR_EMITTER
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
+from calfkit.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.models import ConsumerContext
-from calfkit.models.actions import ReturnCall
+from calfkit.models.actions import ReturnCall, TailCall
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart
 from calfkit.models.session_context import (
@@ -129,10 +132,10 @@ async def test_send_allocates_no_client_state(container):
     correlation_id per call."""
     worker = container.get(Worker)
     agent = Agent(
-        "emit_no_state_agent",
+        "send_no_state_agent",
         system_prompt="x",
-        subscribe_topics="emit_no_state_agent.input",
-        publish_topic="emit_no_state_agent.output",
+        subscribe_topics="send_no_state_agent.input",
+        publish_topic="send_no_state_agent.output",
         model_client=_text_then_done(),
     )
     worker.add_nodes(agent)
@@ -167,16 +170,16 @@ async def test_send_traceable_via_publish_topic_but_no_reply(container, caplog):
     receives nothing — no reply future, and no "no pending future" warning."""
     received: list[ConsumerContext] = []
 
-    @consumer(subscribe_topics="emit_trace_agent.output")
+    @consumer(subscribe_topics="send_trace_agent.output")
     def sink(ctx: ConsumerContext) -> None:
         received.append(ctx)
 
     worker = container.get(Worker)
     agent = Agent(
-        "emit_trace_agent",
+        "send_trace_agent",
         system_prompt="x",
-        subscribe_topics="emit_trace_agent.input",
-        publish_topic="emit_trace_agent.output",
+        subscribe_topics="send_trace_agent.input",
+        publish_topic="send_trace_agent.output",
         model_client=_text_then_done(),
     )
     worker.add_nodes(agent, sink)
@@ -204,10 +207,10 @@ async def test_send_traceable_via_publish_topic_but_no_reply(container, caplog):
 
 
 # ---------------------------------------------------------------------------
-# send input-shaping: it carries its OWN copy of start's
-# model_settings guard / correlation_id default / OverridesState build / deps
-# passthrough (it does not delegate to start), so those branches are
-# covered here directly by spying on ``_send``.
+# send input-shaping: its path (the shared ``_build_state_and_overrides`` →
+# ``_send``) never goes through ``start``, so the model_settings guard /
+# correlation_id default / OverridesState build / deps passthrough branches
+# are covered here directly by spying on ``_send``.
 # ---------------------------------------------------------------------------
 
 
@@ -351,7 +354,7 @@ def _calls_ping_then_done() -> FunctionModel:
 
 
 async def test_send_multi_hop_tool_call_still_terminates_traceably(container, caplog):
-    """emit → agent issues a tool Call → tool ReturnCall routes back via the
+    """send → agent issues a tool Call → tool ReturnCall routes back via the
     agent's _return_topic (a NON-None intermediate callback) → agent terminal
     ReturnCall hits the None bottom frame and suppresses the callback, while the
     terminal still reaches publish_topic. If None ever leaked into the tool
@@ -359,16 +362,16 @@ async def test_send_multi_hop_tool_call_still_terminates_traceably(container, ca
     arrive — so a passing terminal proves the invariant."""
     received: list[ConsumerContext] = []
 
-    @consumer(subscribe_topics="emit_tool_agent.output")
+    @consumer(subscribe_topics="send_tool_agent.output")
     def sink(ctx: ConsumerContext) -> None:
         received.append(ctx)
 
     worker = container.get(Worker)
     agent = Agent(
-        "emit_tool_agent",
+        "send_tool_agent",
         system_prompt="x",
-        subscribe_topics="emit_tool_agent.input",
-        publish_topic="emit_tool_agent.output",
+        subscribe_topics="send_tool_agent.input",
+        publish_topic="send_tool_agent.output",
         model_client=_calls_ping_then_done(),
         tools=[ping],
     )
@@ -402,14 +405,15 @@ async def test_send_multi_hop_tool_call_still_terminates_traceably(container, ca
 
 # ---------------------------------------------------------------------------
 # Client send API spec (docs/designs/client-send-api-spec.md):
-# ``send`` (was send) with the optional ``reply_to`` Return Address, and
-# the ``start``/``execute`` (were start/execute) own-inbox invariant.
+# ``send`` (was ``emit_to_node``) with the optional ``reply_to`` Return Address, and
+# the ``start``/``execute`` (were ``invoke_node``/``execute_node``) own-inbox invariant.
 # ---------------------------------------------------------------------------
 
 
 def _wire_spy(client: Client) -> AsyncMock:
     """Replace the client's broker with a spy so the published envelope can be
-    inspected without Kafka. The truthy ``_connection`` skips the lazy start."""
+    inspected without Kafka. (The lazy connect-guard is skipped because every
+    ``MagicMock`` attribute — including ``_connection`` — is truthy.)"""
     connection = MagicMock()
     connection._connection = True
     connection.publish = AsyncMock()
@@ -483,8 +487,7 @@ async def test_send_reply_to_rejects_own_inbox(container):
 
 async def test_start_callback_is_always_client_inbox(container):
     """``start`` always writes the client's own inbox as the wire callback — the
-    only address whose reply future can ever resolve. The per-call
-    ``reply_topic`` override (the dangling-future footgun) is gone."""
+    only address whose reply future can ever resolve."""
     client = container.get(Client)
     publish = _wire_spy(client)
 
@@ -493,6 +496,13 @@ async def test_start_callback_is_always_client_inbox(container):
     envelope = publish.await_args.args[0]
     assert envelope.internal_workflow_state.current_frame.callback_topic == client.reply_topic
     assert handle.reply_topic == client.reply_topic
+
+
+async def test_start_and_execute_reject_removed_reply_topic_param(container):
+    """The per-call ``reply_topic`` override (the dangling-future footgun) is
+    gone from both request/reply verbs — passing it is a ``TypeError``."""
+    client = container.get(Client)
+    _wire_spy(client)
 
     with pytest.raises(TypeError):
         await client.start("hi", "agent.input", reply_topic="elsewhere")
@@ -546,3 +556,118 @@ async def test_send_reply_to_delivers_terminal_to_topic(container, caplog):
     # The client stayed untouched: no future, no "no pending future" warning.
     assert client._dispatcher._pending == {}
     assert not [r for r in caplog.records if "no pending future" in r.getMessage()]
+
+
+async def test_send_reply_to_rejects_illegal_topic_names(container):
+    """A ``reply_to`` that is not a legal Kafka topic name would never get
+    metadata at the worker's terminal publish — a 40s stall into an
+    argument-less ``UnknownTopicOrPartitionError`` on a different process.
+    Reject it loudly at call time instead, before anything publishes."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    for bad in ("has space", "foo/bar", "a" * 250, ".", "..", " padded "):
+        with pytest.raises(ValueError, match="not a valid Kafka topic name"):
+            await client.send("hi", "agent.input", reply_to=bad)
+    publish.assert_not_called()
+
+    # The full legal alphabet still passes.
+    await client.send("hi", "agent.input", reply_to="Orders.done-v2_1")
+    assert publish.await_count == 1
+
+
+async def test_return_call_callback_publish_failure_still_broadcasts(caplog):
+    """If the terminal point-to-point publish fails (e.g. the ``reply_to``
+    topic does not exist and auto-create is off), the failure must not take
+    the ``publish_topic`` broadcast down with it: the worker logs an ERROR
+    naming the topic and correlation id, and still returns the terminal
+    envelope so the traceability channel fires."""
+    node = _make_node()
+    envelope = _make_envelope(callback_topic="missing.sink")
+
+    broker = MagicMock()
+    broker.publish = AsyncMock(side_effect=UnknownTopicOrPartitionError())
+
+    final_state = State()
+    with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+        result = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-fail", broker)
+
+    # The broadcast channel survives: the terminal envelope is still returned.
+    assert isinstance(result, Envelope)
+    assert result.context.state is final_state
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "callback publish failure must be logged at ERROR, not swallowed or escaped"
+    message = errors[-1].getMessage()
+    assert "missing.sink" in message, f"ERROR log must name the callback topic; got: {message}"
+    assert "cid-fail" in message, f"ERROR log must carry the correlation id; got: {message}"
+
+
+async def test_tail_call_preserves_reply_to_callback():
+    """Regression pin for the spec claim (nodes/base.py TailCall branch): a
+    tail chain re-pushes the popped frame's callback, so a ``reply_to``
+    address on the bottom frame survives to the eventual terminal exactly
+    like a client inbox does. (Pinned existing behavior, not a new feature.)"""
+    node = _make_node()
+    envelope = _make_envelope(callback_topic="sink.topic")
+
+    broker = MagicMock()
+    broker.publish = AsyncMock()
+
+    await node._publish_action(TailCall(target_topic="terminal_node.input", state=State()), envelope, "cid-tail", broker)
+
+    frame = envelope.internal_workflow_state.current_frame
+    assert frame.callback_topic == "sink.topic", f"TailCall dropped the reply_to callback; got {frame.callback_topic!r}"
+
+
+async def test_send_reply_to_survives_tool_hops(container, caplog):
+    """Regression pin (composition proof): send(reply_to=...) through an agent
+    that performs a tool round-trip still delivers the terminal to the
+    ``reply_to`` topic — intermediate tool frames carry the agent's
+    ``_return_topic`` and never clobber the bottom frame's return address."""
+    delivered: list[ConsumerContext] = []
+
+    @consumer(subscribe_topics="send_rt_tool.results")
+    def reply_sink(ctx: ConsumerContext) -> None:
+        delivered.append(ctx)
+
+    worker = container.get(Worker)
+    agent = Agent(
+        "send_rt_tool_agent",
+        system_prompt="x",
+        subscribe_topics="send_rt_tool_agent.input",
+        publish_topic="send_rt_tool_agent.output",
+        model_client=_calls_ping_then_done(),
+        tools=[ping],
+    )
+    worker.add_nodes(agent, ping, reply_sink)
+    prepare_worker(container)
+
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    with caplog.at_level(logging.WARNING, logger=REPLY_DISPATCHER_LOGGER):
+        async with TestKafkaBroker(broker):
+            cid = await client.send("hi", agent.subscribe_topics[0], reply_to="send_rt_tool.results")
+
+    terminals = [c for c in delivered if any(isinstance(p, TextPart) for p in c.output_parts)]
+    assert terminals, f"reply_to consumer never saw the terminal after a tool round-trip; saw={delivered}"
+    assert terminals[-1].output == "done"
+    assert terminals[-1].correlation_id == cid
+    assert client._dispatcher._pending == {}
+    assert not [r for r in caplog.records if "no pending future" in r.getMessage()]
+
+
+async def test_no_pending_future_warning_names_emitter(caplog):
+    """A reply landing on an inbox with no pending future (e.g. another
+    client's ``send(reply_to=<this inbox>)``) is the receiver's only signal of
+    the mis-address — the warning must name the emitter so it is diagnosable."""
+    dispatcher = _ReplyDispatcher()
+    envelope = _make_envelope(callback_topic=None)
+
+    with caplog.at_level(logging.WARNING, logger=REPLY_DISPATCHER_LOGGER):
+        dispatcher._on_reply(envelope, "cid-foreign", {HDR_EMITTER: b"client.someone-else"})
+
+    warnings = [r for r in caplog.records if "no pending future" in r.getMessage()]
+    assert warnings, "expected the no-pending-future warning"
+    assert "client.someone-else" in warnings[-1].getMessage(), f"warning must name the emitter; got: {warnings[-1].getMessage()}"

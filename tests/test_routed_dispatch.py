@@ -732,11 +732,11 @@ async def test_execute_forwards_route_and_body(monkeypatch: pytest.MonkeyPatch) 
         async def result(self, timeout: float | None = None) -> str:
             return "ok"
 
-    async def _fake_invoke(*args: Any, **kwargs: Any) -> Any:
+    async def _fake_start(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
         return _FakeHandle()
 
-    monkeypatch.setattr(client, "start", _fake_invoke)
+    monkeypatch.setattr(client, "start", _fake_start)
     await client.execute("hello", "orders", route="order.created", body={"n": 1})
     assert captured.get("route") == "order.created"
     assert captured.get("body") == {"n": 1}

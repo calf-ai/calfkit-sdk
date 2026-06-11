@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -26,6 +27,13 @@ from calfkit.models.state import OverridesState
 from calfkit.provisioning import ProvisioningConfig, StartupTopicEnsurer
 
 logger = logging.getLogger(__name__)
+
+# Kafka's exact topic-name legality: [a-zA-Z0-9._-], 1-249 chars ("." and ".."
+# are additionally reserved). An illegal name would never get metadata at the
+# worker's terminal publish — a request_timeout stall into an argument-less
+# UnknownTopicOrPartitionError on a different process — so it is rejected
+# loudly at the client instead.
+_KAFKA_TOPIC_RE = re.compile(r"[a-zA-Z0-9._-]{1,249}")
 
 
 def _new_client_emitter_id(client_id: str | None = None) -> str:
@@ -234,7 +242,6 @@ class BaseClient:
     async def _start(
         self,
         topic: str,
-        reply_topic: str,
         correlation_id: str,
         state: State,
         overrides: OverridesState | None = None,
@@ -245,11 +252,14 @@ class BaseClient:
     ) -> InvocationHandle:
         """Start a node invocation asynchronously and register its reply future.
 
+        The wire callback is always ``self._reply_topic`` — the one topic the
+        dispatcher consumes, and therefore the only address whose reply future
+        can ever resolve. There is deliberately no parameter for it: a foreign
+        callback with a registered future is the dangling-future bug the
+        send/start/execute redesign removed (ADR-0005).
+
         Args:
             topic: Topic to send args to.
-            reply_topic: Topic the node should reply to. Must be a topic the
-                dispatcher consumes (the client's own inbox) — a future is only
-                resolvable for replies the dispatcher actually receives.
             correlation_id: Correlation ID for this request.
             state: The session state.
             deps: Provided dependencies.
@@ -258,11 +268,11 @@ class BaseClient:
             An invocation handle with an associated future for the reply.
         """
         future = self._dispatcher.expect(correlation_id)
-        logger.debug("[%s] start topic=%s reply=%s", correlation_id[:8], topic, reply_topic)
+        logger.debug("[%s] start topic=%s reply=%s", correlation_id[:8], topic, self._reply_topic)
         await self._publish_call(
             topic=topic,
             correlation_id=correlation_id,
-            callback_topic=reply_topic,
+            callback_topic=self._reply_topic,
             state=state,
             overrides=overrides,
             deps=deps,
@@ -272,7 +282,7 @@ class BaseClient:
         return InvocationHandle(
             correlation_id=correlation_id,
             topic=topic,
-            reply_topic=reply_topic,
+            reply_topic=self._reply_topic,
             _future=future,
             _output_type=output_type,
         )
@@ -378,6 +388,10 @@ class BaseClient:
         if reply_to is not None:
             if not reply_to.strip():
                 raise ValueError("reply_to must be a non-empty topic name or None")
+            if not _KAFKA_TOPIC_RE.fullmatch(reply_to) or reply_to in (".", ".."):
+                raise ValueError(
+                    f"reply_to {reply_to!r} is not a valid Kafka topic name (allowed: letters, digits, '.', '_', '-'; max 249 chars; not '.' or '..')"
+                )
             if reply_to == self._reply_topic:
                 raise ValueError(
                     "reply_to is this client's own reply inbox; send() registers no future, "

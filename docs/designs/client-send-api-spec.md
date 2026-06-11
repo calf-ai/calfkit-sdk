@@ -112,6 +112,10 @@ async def _send(self, topic, correlation_id, state, overrides=None, deps=None,
     if reply_to is not None:
         if not reply_to.strip():
             raise ValueError("reply_to must be a non-empty topic name or None")
+        if not _KAFKA_TOPIC_RE.fullmatch(reply_to) or reply_to in (".", ".."):
+            # Kafka legality ([a-zA-Z0-9._-]{1,249}): an illegal name would never get
+            # metadata at the worker's terminal publish — reject loudly here instead.
+            raise ValueError(f"reply_to {reply_to!r} is not a valid Kafka topic name (...)")
         if reply_to == self._reply_topic:
             raise ValueError(
                 "reply_to is this client's own reply inbox; send() registers no "
@@ -133,9 +137,9 @@ lose the param:
 async def start(self, user_prompt, topic, *, ...):            # no reply_topic param
     correlation_id, state, overrides = self._build_state_and_overrides(...)
     return await self._start(
-        topic=topic,
-        reply_topic=self._reply_topic,                        # always own inbox now
-        correlation_id=correlation_id, state=state, overrides=overrides,
+        topic=topic,                                          # callback is always the own
+        correlation_id=correlation_id, state=state,           # inbox, hardwired in _start
+        overrides=overrides,
         deps=deps, route=route, body=body, output_type=output_type,
     )
 
@@ -146,13 +150,28 @@ async def execute(self, user_prompt, topic, *, ..., timeout=None):
 
 Internal seams renamed for coherence (underscore-private, pre-1.0): `_emit` → `_send`,
 `_invoke` → `_start`. `_publish_call` and `_build_state_and_overrides` keep their names —
-they describe what they do, not a public verb.
+they describe what they do, not a public verb. **Round-1 review amendment (2026-06-11):**
+`_start` lost its `reply_topic` parameter entirely — the wire callback is hardwired to
+`self._reply_topic`. A subclass passing a foreign topic through the seam would recreate the
+exact dangling-future bug this spec removes, and with one legal value the parameter was
+decorative.
 
-`calfkit/nodes/base.py` (worker) — **no change.** The `ReturnCall` branch already publishes
-the terminal envelope to any non-`None` `frame.callback_topic` (`nodes/base.py:293-299`); the
-same `publish_envelope` object is still returned for the `publish_topic` broadcast, so both
+`calfkit/nodes/base.py` (worker) — the `ReturnCall` branch already publishes the terminal
+envelope to any non-`None` `frame.callback_topic` (`nodes/base.py:293-299`); the same
+`publish_envelope` object is still returned for the `publish_topic` broadcast, so both
 channels carry byte-identical terminal envelopes. `TailCall` re-pushes the inherited callback
 (`nodes/base.py:304`), so a `reply_to` survives tail chains exactly like the client inbox does.
+**Round-1 review amendment (2026-06-11):** the terminal callback publish is wrapped in a
+narrow `except KafkaError` — a failed point-to-point delivery (e.g. a `reply_to` topic
+missing with auto-create off, or unauthorized) logs an ERROR naming the topic, correlation
+id, and node, and still returns `publish_envelope` so the `publish_topic` broadcast (the
+documented traceability fallback) survives the failure instead of dying with it. Without the
+catch, the raised exception aborted the handler before its return value reached the
+`@publisher`, so a failed `reply_to` delivery silently erased BOTH channels (and FastStream's
+default `ACK_FIRST` had already committed the offset — no redelivery). No retry/DLQ here:
+redelivery policy belongs to the fault rail (#193 successor). The same catch also enriches
+the receiver-side `no pending future` warning with the emitter id (`reply_dispatcher.py`) so
+a mis-addressed `send(reply_to=<other client's inbox>)` is diagnosable.
 
 ## Semantics
 
@@ -173,6 +192,7 @@ channels carry byte-identical terminal envelopes. `TailCall` re-pushes the inher
 | `send(reply_to=None)` (default) | callback suppressed — today's emit, byte-for-byte |
 | `send(reply_to="orders.done")` | `CallFrame.callback_topic="orders.done"`, no future |
 | `send(reply_to="")` / whitespace | `ValueError` (would publish to an invalid/empty topic at the worker) |
+| `send(reply_to=<Kafka-illegal name>)` | `ValueError` — names outside `[a-zA-Z0-9._-]{1,249}` (or `.`/`..`) would stall `request_timeout_ms` at the worker into an argument-less `UnknownTopicOrPartitionError`; rejected at call time instead (round-1 amendment) |
 | `send(reply_to=client.reply_topic)` | `ValueError` — provably useless: the own-inbox dispatcher would consume and drop it ("no pending future" warning); awaiting is what start/execute are for |
 | `start(reply_topic=...)` / `execute(reply_topic=...)` | `TypeError` (param gone) |
 | `emit_to_node` / `invoke_node` / `execute_node` | `AttributeError` (renamed, no aliases) |
@@ -193,7 +213,7 @@ Each written first, watched RED, then implemented:
 6. `test_start_callback_is_always_client_inbox` — wire capture: `start` produces
    `CallFrame.callback_topic == client.reply_topic`; `reply_topic=` kwarg raises `TypeError`.
 7. Rename sweep: mechanical update of every `emit_to_node`/`invoke_node`/`execute_node` call
-   site in tests (13 files) and examples (4 files); suite green proves behavior is untouched
+   site in tests (15 files) and examples (4 files); suite green proves behavior is untouched
    by the rename.
 8. Regression: existing send-default/start/execute behavior tests stay green with only the
    name swap (default paths byte-for-byte unchanged).

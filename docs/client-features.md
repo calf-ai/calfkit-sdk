@@ -107,11 +107,21 @@ not every hop of every invocation of the node. Two caveats:
 - `reply_to` is not a chaining mechanism: the call stack is unwound at the
   terminal, so address consumers/sinks, not agent input topics.
 - The `reply_to` topic is owned by its consumer — on brokers with auto-create
-  disabled, it must exist before the worker's terminal publish.
+  disabled, it must exist before the worker's terminal publish. If that
+  publish fails (missing or unauthorized topic), the result is **not
+  retried**: the worker logs an ERROR naming the topic and correlation id,
+  and the terminal still reaches the `publish_topic` broadcast (when one is
+  configured).
+- Addressing another *client's* reply inbox is not rejected, but is almost
+  certainly a mistake: the receiving client logs a
+  `reply received but no pending future (emitter=...)` warning and drops the
+  reply — the sender is told nothing.
 
-`send(reply_to=client.reply_topic)` raises `ValueError`: with no future
-registered the client's own dispatcher would consume and drop the reply. Use
-`start`/`execute` to await a reply.
+`send` validates `reply_to` at call time, before anything publishes:
+a blank or Kafka-illegal topic name (allowed: letters, digits, `.`, `_`, `-`;
+max 249 chars) raises `ValueError`, and so does `reply_to=client.reply_topic`
+— with no future registered the client's own dispatcher would consume and
+drop the reply. Use `start`/`execute` to await a reply.
 
 ### Traceability without a reply
 

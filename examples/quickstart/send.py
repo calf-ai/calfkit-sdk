@@ -4,9 +4,9 @@ from calfkit.client import Client
 
 
 async def main():
-    # ``async with`` shuts the client down cleanly on exit, flushing the Kafka
-    # producer. This matters for fire-and-forget: there is no reply to await
-    # that would otherwise keep the client alive while the send completes.
+    # ``async with`` shuts the client down cleanly on exit (producer/consumer
+    # teardown). Delivery does not depend on it: ``send`` awaits the broker's
+    # ack before returning, so the record is already on the topic.
     async with Client.connect("localhost:9092") as client:  # Connect to Kafka broker
         # Fire-and-forget: dispatch the request and return immediately. No reply
         # is produced and no client-side reply future is allocated — send
