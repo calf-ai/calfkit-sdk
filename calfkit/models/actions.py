@@ -8,23 +8,6 @@ from calfkit._types import StateT
 
 
 @dataclass
-class Reply(Generic[StateT]):
-    """Terminal: send value back to whoever called this node (pops reply_stack).
-    Does not require a topic address to reply to, it is handled by the framework.
-    Similar mental model to completing an async Promise or Future with a result."""
-
-    value: StateT
-
-
-@dataclass
-class Delegate(Generic[StateT]):
-    """Terminal: forward to another node, expect result back (pushes reply_stack)."""
-
-    topic: str
-    value: StateT | None = None
-
-
-@dataclass
 class _Call(Generic[StateT]):
     """Call another node, providing mutable state.
 
@@ -80,30 +63,6 @@ class ReturnCall(Generic[StateT]):
     """Finish the node's execution and callback the caller."""
 
     state: StateT
-
-
-@dataclass
-class Sequential(Generic[StateT]):
-    """Sequentially forward a shared state from node to node,
-    where the final state is returned to caller."""
-
-    topics: list[str]  # passed to topics in this list in order index 0 -> n
-    value: StateT | None = None
-
-
-@dataclass
-class Emit(Generic[StateT]):
-    """Terminal: fire-and-forget publish to a topic. No reply expected."""
-
-    value: StateT
-    topic: str
-
-
-@dataclass
-class Parallel(Generic[StateT]):
-    """Parallel fan-out of delegates and calls. Developer manages result aggregation via store."""
-
-    delegates: list[Delegate[StateT] | Call[StateT]]
 
 
 @dataclass
