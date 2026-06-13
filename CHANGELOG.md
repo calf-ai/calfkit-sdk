@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.9.1...v0.10.0) (2026-06-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* client send API — send/start/execute renames + reply_to return address ([#215](https://github.com/calf-ai/calfkit-sdk/issues/215))
+
+### Features
+
+* client send API — send/start/execute renames + reply_to return address ([#215](https://github.com/calf-ai/calfkit-sdk/issues/215)) ([e5bddac](https://github.com/calf-ai/calfkit-sdk/commit/e5bddacc54f7f51d3a657fdcba6cb9af3b250c8b))
+
 ## [0.9.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.9.0...v0.9.1) (2026-06-10)
 
 
