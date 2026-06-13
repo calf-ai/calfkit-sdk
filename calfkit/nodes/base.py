@@ -25,8 +25,8 @@ from calfkit.models import (
 )
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
-from calfkit.models.reply import ReturnMessage
 from calfkit.models.node_schema import BaseNodeSchema
+from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import SessionRunContext
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
@@ -217,6 +217,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
         ctx._resources = self._effective_resources()
         ctx._frame_id = frame.frame_id if frame is not None else None
+        # Stamp the per-delivery reply AFTER the copy and UNCONDITIONALLY: model_copy
+        # preserves private attrs, and on a fresh deserialize the inbound context's
+        # _reply is None anyway, so source it from the envelope's reply field — setting
+        # None on a call-kind delivery clears any stale value (mirrors _frame_id above).
+        ctx._reply = envelope.reply
         return ctx
 
     def _effective_resources(self) -> dict[str, Any]:

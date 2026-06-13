@@ -14,7 +14,6 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     ToolReturn,
 )
-from calfkit.models.payload import ContentPart
 from calfkit.models.tool_dispatch import ToolBinding
 
 
@@ -36,7 +35,6 @@ class CoreMessageState(BaseAgentActivityState):
     model_config = ConfigDict(extra="ignore")
     uncommitted_message: ModelMessage | None = None
     message_history: list[ModelMessage] = Field(default_factory=list, description="Append-only message history list")
-    final_output_parts: list[ContentPart] = Field(default_factory=list)
 
     temp_instructions: str | None = None
 

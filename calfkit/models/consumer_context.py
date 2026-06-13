@@ -34,9 +34,9 @@ class ConsumerContext(Generic[OutputT]):
     output: OutputT | None
     """Deserialized final output (typed via ``output_type``).
 
-    ``None`` on intermediate hops — envelopes whose ``state.final_output_parts`` is
-    empty (e.g. tool completions, mid-loop agent hops). Populated only when the
-    upstream node emitted a terminal envelope with final output parts."""
+    ``None`` on intermediate hops — call-kind deliveries with no reply slot (e.g.
+    tool completions, mid-loop agent hops). Populated only when the upstream node
+    emitted a terminal return carrying reply parts."""
 
     state: State
     """Full session state at this hop (message history, in-flight tool
@@ -45,6 +45,10 @@ class ConsumerContext(Generic[OutputT]):
 
     correlation_id: str
     """The correlation id that ties this hop to its invocation."""
+
+    output_parts: list[ContentPart] = field(default_factory=list)
+    """The raw reply parts this observation was projected from (spec §4). ``[]`` on an
+    intermediate hop. Captured from the delivery's reply slot, not ``state``."""
 
     emitter_node_id: str | None = None
     """Node id of the upstream emitter (``x-calf-emitter`` header), or ``None``."""
@@ -76,16 +80,17 @@ class ConsumerContext(Generic[OutputT]):
         """Build from the consumer's stamped ``SessionRunContext``.
 
         Uses ``strict=False`` (consumer semantics): an intermediate hop with no
-        ``final_output_parts`` yields ``output=None`` instead of raising.
-        ``resources`` is sourced from ``ctx.resources`` (stamped by the node's
-        ``prepare_context``), so the consumer needs no separate resources plumbing.
+        reply slot yields ``output=None`` instead of raising. ``resources`` is
+        sourced from ``ctx.resources`` (stamped by the node's ``prepare_context``),
+        so the consumer needs no separate resources plumbing.
 
         Raises:
-            DeserializationError / pydantic.ValidationError: only when
-            ``final_output_parts`` is present but doesn't match ``output_type``.
+            DeserializationError / pydantic.ValidationError: only when the reply
+            parts are present but don't match ``output_type``.
         """
         return cls(
-            output=project_output(ctx.state, output_type, strict=False, type_adapter=type_adapter),
+            output=project_output(ctx._reply, output_type, strict=False, type_adapter=type_adapter),
+            output_parts=ctx._reply.parts if ctx._reply is not None else [],
             state=ctx.state,
             correlation_id=ctx.correlation_id,
             emitter_node_id=ctx.emitter_node_id,
@@ -93,11 +98,6 @@ class ConsumerContext(Generic[OutputT]):
             deps=ctx.deps,
             resources=ctx.resources,
         )
-
-    @property
-    def output_parts(self) -> list[ContentPart]:
-        """Convenience: ``state.final_output_parts``."""
-        return self.state.final_output_parts
 
     @property
     def message_history(self) -> list[ModelMessage]:

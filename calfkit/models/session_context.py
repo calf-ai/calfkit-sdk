@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
+from calfkit.models.payload import ContentPart
+from calfkit.models.reply import ReturnMessage
 from calfkit.models.state import OverridesState, State
 
 _EMPTY_RESOURCES: Mapping[str, Any] = MappingProxyType({})
@@ -113,6 +115,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     _emitter_node_kind: str | None = PrivateAttr(default=None)
     _frame_id: str | None = PrivateAttr(default=None)
     _resources: Mapping[str, Any] | None = PrivateAttr(default=None)
+    _reply: ReturnMessage | None = PrivateAttr(default=None)
 
     @property
     def correlation_id(self) -> str:
@@ -195,6 +198,19 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         if self._resources is None:
             return _EMPTY_RESOURCES
         return self._resources
+
+    @property
+    def output_parts(self) -> list[ContentPart]:
+        """Content parts carried by this delivery's reply slot (spec §4).
+
+        ``[]`` on call-kind deliveries (no reply) and on a context built outside a
+        handler (unstamped) — empty, never raises. The reply-sourced replacement for
+        the retired ``state.final_output_parts`` read: a consumer gate that dropped
+        intermediate hops via ``bool(ctx.state.final_output_parts)`` now uses
+        ``bool(ctx.output_parts)``. Backed by ``_reply`` (stamped by ``prepare_context``
+        / the client reply dispatcher), so it never rides the wire.
+        """
+        return self._reply.parts if self._reply is not None else []
 
     def _stamp_transport(self, *, correlation_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None) -> None:
         """Stamp transport-sourced identity onto this context.

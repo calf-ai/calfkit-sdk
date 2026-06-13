@@ -148,7 +148,7 @@ async def test_tool_run_injects_node_resources_into_tool_context() -> None:
 
 
 async def test_consumer_handler_injects_node_resources_into_context() -> None:
-    from calfkit.models import ConsumerContext, TextPart
+    from calfkit.models import ConsumerContext
     from calfkit.nodes import ConsumerNode
 
     seen: dict[str, Any] = {}
@@ -165,7 +165,7 @@ async def test_consumer_handler_injects_node_resources_into_context() -> None:
     sentinel = object()
     node.resources["db"] = sentinel
 
-    state = State(final_output_parts=[TextPart(text="hi")])
+    state = State()
     envelope = Envelope(
         context=SessionRunContext(state=state, deps={}),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
@@ -189,7 +189,7 @@ async def test_consumer_handler_injects_node_resources_into_context() -> None:
 async def test_consumer_context_resources_is_shallow_copy_of_node_bag() -> None:
     """The consumer's ``ctx.resources`` is a distinct dict from the node's
     bag, so a consumer mutating it cannot corrupt the shared resources."""
-    from calfkit.models import ConsumerContext, TextPart
+    from calfkit.models import ConsumerContext
     from calfkit.nodes import ConsumerNode
 
     seen: dict[str, Any] = {}
@@ -207,7 +207,7 @@ async def test_consumer_context_resources_is_shallow_copy_of_node_bag() -> None:
     )
     node.resources["db"] = object()
 
-    state = State(final_output_parts=[TextPart(text="hi")])
+    state = State()
     envelope = Envelope(
         context=SessionRunContext(state=state, deps={}),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),

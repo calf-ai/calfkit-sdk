@@ -39,7 +39,7 @@ class InvocationHandle(Generic[OutputT]):
                 :meth:`Client.send`, which returns a ``correlation_id`` and
                 no handle at all.
             DeserializationError: If the expected output part type is missing
-                from ``final_output_parts``.
+                from the reply parts.
             pydantic.ValidationError: If ``output_type`` is provided and the
                 reply's ``DataPart.data`` doesn't validate against it.
             pydantic.PydanticSchemaGenerationError: If ``output_type`` cannot

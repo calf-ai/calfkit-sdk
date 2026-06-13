@@ -9,7 +9,7 @@ the final reply), ``result.output`` is ``None`` on intermediate hops — pending
 tool calls, tool returns, agent retries. Filter via a gate if you only want
 agent terminals:
 
-    gates=[lambda ctx: bool(ctx.state.final_output_parts)]
+    gates=[lambda ctx: bool(ctx.output_parts)]
 
 Run alongside the agent service:
 

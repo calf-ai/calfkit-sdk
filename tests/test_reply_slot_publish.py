@@ -174,3 +174,27 @@ class TestNoReplyMirrorClearsInboundReply:
         leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
         resp = await _run(_SilentNode(node_id="n", subscribe_topics=["t"]), _envelope(reply=leak), broker)
         assert resp.body.reply is None
+
+
+class TestReplyStamping:
+    """prepare_context stamps ctx._reply from envelope.reply (after the deep-copy,
+    unconditionally), and ctx.output_parts is the permanent reply-sourced accessor."""
+
+    async def test_stamps_reply_and_exposes_output_parts(self) -> None:
+        node = _CallNode(node_id="n", subscribe_topics=["t"])
+        reply = ReturnMessage(in_reply_to="F1", tag=None, parts=[TextPart(text="out")])
+        ctx = await node.prepare_context(_envelope(reply=reply), correlation_id=_CORR)
+        assert ctx._reply == reply
+        assert ctx.output_parts == [TextPart(text="out")]
+
+    async def test_call_kind_reply_none_yields_empty_output_parts(self) -> None:
+        # Unconditional stamp: a call-kind delivery (reply=None) clears any stale value.
+        node = _CallNode(node_id="n", subscribe_topics=["t"])
+        ctx = await node.prepare_context(_envelope(reply=None), correlation_id=_CORR)
+        assert ctx._reply is None
+        assert ctx.output_parts == []
+
+    def test_unstamped_context_output_parts_empty_not_error(self) -> None:
+        # A context built outside a handler must yield [] (loud-by-emptiness), never raise.
+        ctx = SessionRunContext(state=State(), deps={})
+        assert ctx.output_parts == []

@@ -40,6 +40,7 @@ from calfkit.exceptions import LifecycleConfigError
 from calfkit.models import Silent
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart as PayloadTextPart
+from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import (
     CallFrame,
     CallFrameStack,
@@ -76,11 +77,11 @@ def _frame_envelope(target_topic: str) -> Envelope:
 
 
 def _text_envelope(text: str) -> Envelope:
-    """A terminal envelope carrying a final TextPart (for consumer output)."""
-    state = State(final_output_parts=[PayloadTextPart(text=text)])
+    """A terminal envelope carrying a final TextPart in its reply slot (for consumer output)."""
     return Envelope(
-        context=SessionRunContext(state=state, deps={}),
+        context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+        reply=ReturnMessage(in_reply_to=None, tag=None, parts=[PayloadTextPart(text=text)]),
     )
 
 

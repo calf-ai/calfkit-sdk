@@ -14,10 +14,11 @@ from pydantic import BaseModel
 
 import calfkit._protocol as protocol
 from calfkit._protocol import HDR_KIND, MessageKind
-
+from calfkit.exceptions import DeserializationError
 from calfkit.models import (
     CallFrame,
     CallFrameStack,
+    ConsumerContext,
     DataPart,
     Envelope,
     ReturnCall,
@@ -26,6 +27,7 @@ from calfkit.models import (
     WorkflowState,
 )
 from calfkit.models._coerce import _coerce_to_parts
+from calfkit.models.node_result import NodeResult as InvocationResult
 from calfkit.models.reply import ReturnMessage, _ReplyBase
 from calfkit.models.state import State
 
@@ -141,3 +143,39 @@ class TestProtocolKind:
         # Drift cleanup: HDR_EVENT_TYPE / EventType had zero call sites.
         assert not hasattr(protocol, "HDR_EVENT_TYPE")
         assert not hasattr(protocol, "EventType")
+
+
+def _reply_env(parts: list) -> Envelope:
+    """A frameless envelope carrying a reply, with _reply stamped as a handler/
+    dispatcher would (prepare_context / _on_reply)."""
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+        reply=ReturnMessage(in_reply_to=None, tag=None, parts=parts),
+    )
+    env.context._stamp_transport(correlation_id="cid", emitter_node_id=None, emitter_node_kind=None)
+    env.context._reply = env.reply
+    return env
+
+
+class TestProjectionFromReply:
+    """Output projects from the reply slot, not State.final_output_parts (spec §4.5)."""
+
+    def test_node_result_projects_output_from_reply_parts(self) -> None:
+        result = InvocationResult.from_envelope(_reply_env([TextPart(text="from-reply")]), correlation_id="cid")
+        assert result.output == "from-reply"
+        assert result.output_parts == [TextPart(text="from-reply")]
+
+    def test_consumer_context_projects_from_ctx_reply(self) -> None:
+        cc = ConsumerContext.from_run_context(_reply_env([DataPart(data={"k": 1})]).context)
+        assert cc.output == {"k": 1}
+        assert cc.output_parts == [DataPart(data={"k": 1})]
+
+    def test_strict_empty_reply_raises(self) -> None:
+        with pytest.raises(DeserializationError):
+            InvocationResult.from_envelope(_reply_env([]), correlation_id="cid")
+
+    def test_lenient_empty_reply_returns_none(self) -> None:
+        cc = ConsumerContext.from_run_context(_reply_env([]).context)  # strict=False
+        assert cc.output is None
+        assert cc.output_parts == []
