@@ -15,6 +15,7 @@ from calfkit.models import (
     CallFrame,
     CallFrameStack,
     Envelope,
+    Next,
     ReturnCall,
     SessionRunContext,
     Silent,
@@ -175,6 +176,30 @@ class TestNoReplyMirrorClearsInboundReply:
         resp = await _run(_SilentNode(node_id="n", subscribe_topics=["t"]), _envelope(reply=leak), broker)
         assert resp.body.reply is None
 
+    async def test_gate_reject_mirror_clears_inbound_reply(self) -> None:
+        # The handler-level gate-reject path mirrors kind=call with reply cleared.
+        class _GatedNode(NodeDef[Any]):
+            async def run(self, ctx: SessionRunContext) -> Any:
+                return Silent()
+
+        node = _GatedNode(node_id="n", subscribe_topics=["t"], gates=[lambda ctx: False])
+        leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
+        resp = await _run(node, _envelope(reply=leak), _CaptureBroker())
+        assert resp.body.reply is None
+        assert resp.headers[HDR_KIND] == "call"
+
+    async def test_no_result_mirror_clears_inbound_reply(self) -> None:
+        # The handler-level no-result/all-declined path mirrors kind=call, reply cleared.
+        class _DeclineNode(NodeDef[Any]):
+            async def run(self, ctx: SessionRunContext) -> Any:
+                return Next()  # decline → no handler produced a result
+
+        node = _DeclineNode(node_id="n", subscribe_topics=["t"])
+        leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
+        resp = await _run(node, _envelope(reply=leak), _CaptureBroker())
+        assert resp.body.reply is None
+        assert resp.headers[HDR_KIND] == "call"
+
 
 class TestReplyStamping:
     """prepare_context stamps ctx._reply from envelope.reply (after the deep-copy,
@@ -191,6 +216,17 @@ class TestReplyStamping:
         # Unconditional stamp: a call-kind delivery (reply=None) clears any stale value.
         node = _CallNode(node_id="n", subscribe_topics=["t"])
         ctx = await node.prepare_context(_envelope(reply=None), correlation_id=_CORR)
+        assert ctx._reply is None
+        assert ctx.output_parts == []
+
+    async def test_stamp_clears_stale_inbound_reply_on_call_kind(self) -> None:
+        # THE pin for the unconditional stamp: a stale _reply on the inbound context
+        # (in-process reuse) survives model_copy(deep=True), so prepare_context MUST
+        # overwrite it with envelope.reply (None here) — the guarded form would leak it.
+        node = _CallNode(node_id="n", subscribe_topics=["t"])
+        env = _envelope(reply=None)  # call-kind delivery
+        env.context._reply = ReturnMessage(in_reply_to="stale", tag=None, parts=[TextPart(text="STALE")])
+        ctx = await node.prepare_context(env, correlation_id=_CORR)
         assert ctx._reply is None
         assert ctx.output_parts == []
 

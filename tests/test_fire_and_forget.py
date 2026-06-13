@@ -29,7 +29,7 @@ import pytest
 from aiokafka.errors import UnknownTopicOrPartitionError
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
-from calfkit._protocol import HDR_EMITTER
+from calfkit._protocol import HDR_EMITTER, HDR_KIND
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -433,6 +433,17 @@ async def test_send_reply_to_sets_callback_topic_on_wire(container):
     assert frame.callback_topic == "sink.topic"
     assert frame.target_topic == "agent.input"
     assert publish.await_args.kwargs["correlation_id"] == cid
+
+
+async def test_send_stamps_x_calf_kind_call_on_wire(container):
+    """Every client publish is a call-kind ingress: it carries ``x-calf-kind: call``
+    so a node/consumer classifies it correctly (the wire stamp PR-C's fault arm relies on)."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    await client.send("hi", "agent.input")
+
+    assert publish.await_args.kwargs["headers"][HDR_KIND] == "call"
 
 
 async def test_send_default_keeps_null_callback_on_wire(container):

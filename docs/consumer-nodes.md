@@ -40,13 +40,14 @@ $ python weather_sink.py
 ```
 
 An agent's `publish_topic` emits on **every** state transition — intermediate
-hops, tool completions, and terminals — so `result.output` is `None` on hops
-without final output parts. Filter via a gate if you only want agent terminals:
+hops, tool completions, and terminals — so `result.output` is `None` on
+intermediate (call-kind) hops that carry no reply slot. Filter via a gate if you
+only want agent terminals:
 
 ```python
 @consumer(
     subscribe_topics="weather_agent.output",
-    gates=[lambda ctx: bool(ctx.state.final_output_parts)],
+    gates=[lambda ctx: bool(ctx.output_parts)],
 )
 async def save_final(result: NodeResult) -> None:
     await db.save(result.output)  # always populated here
