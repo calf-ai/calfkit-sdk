@@ -29,7 +29,7 @@ from calfkit._vendor.pydantic_ai.messages import (
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client, NodeResult
 from calfkit.exceptions import DeserializationError
-from calfkit.models import ConsumerContext, SessionRunContext
+from calfkit.models import ConsumerContext, ReturnMessage, SessionRunContext
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import DataPart, TextPart
 from calfkit.models.session_context import CallFrameStack, WorkflowState
@@ -82,23 +82,21 @@ def _wire_agent_with_consumer(container, consumer_node: ConsumerNode) -> Agent:
     return agent
 
 
-def _text_state(text: str) -> State:
-    s = State()
-    s.final_output_parts = [TextPart(text=text)]
-    return s
+def _text_reply(text: str) -> ReturnMessage:
+    return ReturnMessage(in_reply_to=None, tag=None, parts=[TextPart(text=text)])
 
 
-def _data_state(data: dict) -> State:
-    s = State()
-    s.final_output_parts = [DataPart(data=data)]
-    return s
+def _data_reply(data: dict) -> ReturnMessage:
+    return ReturnMessage(in_reply_to=None, tag=None, parts=[DataPart(data=data)])
 
 
-def _envelope(state: State, *, deps: dict | None = None) -> Envelope:
-    """A frameless envelope — the shape a sink sees tapping a publish_topic."""
+def _envelope(reply: ReturnMessage | None = None, *, state: State | None = None, deps: dict | None = None) -> Envelope:
+    """A frameless envelope carrying a reply — the shape a sink sees tapping a
+    publish_topic. No ``reply`` = an intermediate (call-kind) hop."""
     return Envelope(
-        context=SessionRunContext(state=state, deps=deps or {}),
+        context=SessionRunContext(state=state if state is not None else State(), deps=deps or {}),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+        reply=reply,
     )
 
 
@@ -168,8 +166,9 @@ def test_async_generator_function_rejected_at_construction():
 
 
 def test_from_run_context_projects_fields_and_resources():
-    ctx = SessionRunContext(state=_text_state("done"), deps={"k": "v"})
+    ctx = SessionRunContext(state=State(), deps={"k": "v"})
     ctx._stamp_transport(correlation_id="cid-fc", emitter_node_id="up", emitter_node_kind="agent")
+    ctx._reply = _text_reply("done")
     sentinel = object()
     ctx._resources = {"db": sentinel}
 
@@ -304,8 +303,8 @@ async def test_consumer_fans_in_across_multiple_topics(container):
     headers_a = {HDR_EMITTER: "src_a", HDR_EMITTER_KIND: "client"}
     headers_b = {HDR_EMITTER: "src_b", HDR_EMITTER_KIND: "client"}
     async with TestKafkaBroker(broker):
-        await broker.publish(_envelope(_text_state("from_a")), topic="fanin.a", correlation_id="cid-a", headers=headers_a)
-        await broker.publish(_envelope(_text_state("from_b")), topic="fanin.b", correlation_id="cid-b", headers=headers_b)
+        await broker.publish(_envelope(_text_reply("from_a")), topic="fanin.a", correlation_id="cid-a", headers=headers_a)
+        await broker.publish(_envelope(_text_reply("from_b")), topic="fanin.b", correlation_id="cid-b", headers=headers_b)
 
     assert {c.output for c in received} == {"from_a", "from_b"}
 
@@ -321,7 +320,7 @@ async def test_intermediate_hop_passes_to_fn_with_output_none(caplog):
     node = ConsumerNode(node_id="int_sink", subscribe_topics="t", consume_fn=received.append)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        await _handle(node, _envelope(State()))
+        await _handle(node, _envelope())
 
     assert len(received) == 1
     assert received[0].output is None
@@ -335,7 +334,7 @@ async def test_validation_error_on_present_parts_logs_and_skips(caplog):
     node = ConsumerNode(node_id="val_sink", subscribe_topics="t", consume_fn=lambda ctx: invocations.append("ran"), agent_output_type=Report)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        await _handle(node, _envelope(_data_state({"unexpected": "shape"})))
+        await _handle(node, _envelope(_data_reply({"unexpected": "shape"})))
 
     assert invocations == []
     rec = [r for r in caplog.records if "projection failed" in r.getMessage()]
@@ -351,7 +350,7 @@ async def test_missing_emitter_header_warns_and_still_invokes_fn(caplog):
     node = ConsumerNode(node_id="noemit_sink", subscribe_topics="t", consume_fn=received.append)
 
     with caplog.at_level(logging.WARNING, logger=BASE_LOGGER):
-        await _handle(node, _envelope(_text_state("hello")), headers={})
+        await _handle(node, _envelope(_text_reply("hello")), headers={})
 
     assert len(received) == 1
     assert received[0].output == "hello"
@@ -373,7 +372,7 @@ async def test_consume_fn_exception_swallowed_and_logged(caplog):
     node = ConsumerNode(node_id="boom_sink", subscribe_topics="t", consume_fn=boom)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        resp = await _handle(node, _envelope(_text_state("hi")))
+        resp = await _handle(node, _envelope(_text_reply("hi")))
 
     assert resp is not None
     err = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
@@ -390,7 +389,7 @@ async def test_cancelled_error_always_propagates():
 
     node = ConsumerNode(node_id="cancel_sink", subscribe_topics="t", consume_fn=cancels)
     with pytest.raises(asyncio.CancelledError):
-        await _handle(node, _envelope(_text_state("hi")))
+        await _handle(node, _envelope(_text_reply("hi")))
 
 
 async def test_callable_class_generator_detected_at_call_site(caplog):
@@ -403,7 +402,7 @@ async def test_callable_class_generator_detected_at_call_site(caplog):
 
     node = ConsumerNode(node_id="gen_sink", subscribe_topics="t", consume_fn=GenSink())
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        await _handle(node, _envelope(_text_state("hi")))
+        await _handle(node, _envelope(_text_reply("hi")))
 
     rec = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
     assert rec and isinstance(rec[0].exc_info[1], TypeError)
@@ -418,7 +417,7 @@ async def test_function_returning_generator_object_detected(caplog):
 
     node = ConsumerNode(node_id="gen_ret", subscribe_topics="t", consume_fn=sink)
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        await _handle(node, _envelope(_text_state("hi")))
+        await _handle(node, _envelope(_text_reply("hi")))
 
     rec = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
     assert rec and isinstance(rec[0].exc_info[1], TypeError)
@@ -434,7 +433,7 @@ async def test_function_returning_async_generator_object_detected(caplog):
 
     node = ConsumerNode(node_id="agen_ret", subscribe_topics="t", consume_fn=sink)
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        await _handle(node, _envelope(_text_state("hi")))
+        await _handle(node, _envelope(_text_reply("hi")))
 
     rec = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
     assert rec and isinstance(rec[0].exc_info[1], TypeError)
@@ -488,16 +487,16 @@ async def test_gate_acceptance_runs_consume_fn(container):
 
 
 async def test_final_only_gate_idiom_filters_intermediate():
-    """Documented idiom: a gate keyed off final_output_parts drops intermediate hops."""
+    """Documented idiom: a gate keyed off the reply slot drops intermediate hops."""
     received: list[ConsumerContext] = []
 
     def has_final_output(ctx: SessionRunContext) -> bool:
-        return bool(ctx.state.final_output_parts)
+        return bool(ctx.output_parts)
 
     node = ConsumerNode(node_id="filtered", subscribe_topics="t", consume_fn=received.append, gates=[has_final_output])
 
-    await _handle(node, _envelope(State()), correlation_id="cid-int")  # intermediate → rejected
-    await _handle(node, _envelope(_text_state("final!")), correlation_id="cid-final")  # terminal → accepted
+    await _handle(node, _envelope(), correlation_id="cid-int")  # intermediate → rejected
+    await _handle(node, _envelope(_text_reply("final!")), correlation_id="cid-final")  # terminal → accepted
 
     assert len(received) == 1
     assert received[0].output == "final!"
@@ -519,11 +518,11 @@ async def test_consumer_sees_tool_results_via_state():
     state.add_tool_call(tool_call)
     state.add_tool_result(tool_call.tool_call_id, "sunny in Tokyo")
 
-    await _handle(node, _envelope(state), headers={HDR_EMITTER: "tool_get_weather", HDR_EMITTER_KIND: "tool"})
+    await _handle(node, _envelope(state=state), headers={HDR_EMITTER: "tool_get_weather", HDR_EMITTER_KIND: "tool"})
 
     assert len(captured) == 1
     c = captured[0]
-    assert c.output is None  # tool hop — no final_output_parts
+    assert c.output is None  # tool hop — no reply slot
     assert c.emitter_node_kind == "tool"
     assert c.state.tool_results[tool_call.tool_call_id] == "sunny in Tokyo"
     assert c.state.tool_calls[tool_call.tool_call_id].tool_name == "get_weather"
@@ -533,7 +532,7 @@ async def test_consumer_reads_inbound_deps():
     captured: list[ConsumerContext] = []
     node = ConsumerNode(node_id="deps_sink", subscribe_topics="t", consume_fn=captured.append)
 
-    await _handle(node, _envelope(_text_state("hi"), deps={"discord": {"channel_id": 42}}), correlation_id="cid-deps")
+    await _handle(node, _envelope(_text_reply("hi"), deps={"discord": {"channel_id": 42}}), correlation_id="cid-deps")
 
     assert captured[0].deps == {"discord": {"channel_id": 42}}
     assert captured[0].correlation_id == "cid-deps"
@@ -543,7 +542,7 @@ async def test_consumer_deps_defaults_to_empty_dict():
     captured: list[ConsumerContext] = []
     node = ConsumerNode(node_id="deps_empty", subscribe_topics="t", consume_fn=captured.append)
 
-    await _handle(node, _envelope(_text_state("hi")))
+    await _handle(node, _envelope(_text_reply("hi")))
 
     assert captured[0].deps == {}
 
@@ -553,14 +552,13 @@ async def test_consumer_convenience_properties_read_through_state():
     node = ConsumerNode(node_id="props", subscribe_topics="t", consume_fn=captured.append)
 
     state = State()
-    state.final_output_parts = [TextPart(text="hello")]
     state.message_history = [ModelRequest.user_text_prompt("hi")]
     state.metadata = {"app": "demo"}
 
-    await _handle(node, _envelope(state))
+    await _handle(node, _envelope(_text_reply("hello"), state=state))
 
     c = captured[0]
-    assert c.output_parts is c.state.final_output_parts
+    assert c.output_parts == [TextPart(text="hello")]  # reply-sourced field (not a state read-through)
     assert c.message_history is c.state.message_history
     assert c.metadata is c.state.metadata
 
@@ -571,7 +569,7 @@ async def test_resources_flow_from_node_bag():
     sentinel = object()
     node.resources["db"] = sentinel
 
-    await _handle(node, _envelope(_text_state("hi")))
+    await _handle(node, _envelope(_text_reply("hi")))
 
     assert captured[0].resources["db"] is sentinel
 
@@ -602,9 +600,7 @@ async def test_deps_round_trip_through_agent_to_consumer(container):
 
 
 def test_consumer_context_is_not_hashable():
-    state = State()
-    state.final_output_parts = [TextPart(text="x")]
-    cctx = ConsumerContext(output="x", state=state, correlation_id="cid")
+    cctx = ConsumerContext(output="x", state=State(), correlation_id="cid")
 
     assert ConsumerContext.__hash__ is None
     with pytest.raises(TypeError, match="unhashable"):
@@ -649,7 +645,7 @@ def test_consumer_reuses_prebuilt_type_adapter(monkeypatch):
     constructions_after_decoration = construct_count["n"]
     assert constructions_after_decoration == 1  # built once at __init__
 
-    env = _envelope(_data_state({"location": "Tokyo", "summary": "sunny"}))
+    env = _envelope(_data_reply({"location": "Tokyo", "summary": "sunny"}))
     for _ in range(3):
         asyncio.run(sink.handler(env, correlation_id="cid-reuse", headers=_HEADERS, broker=MagicMock()))
 
@@ -692,7 +688,7 @@ async def test_unexpected_projection_exception_is_logged_and_skipped(monkeypatch
     monkeypatch.setattr(consumer_mod, "ConsumerContext", _BoomContext)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        resp = await _handle(node, _envelope(_text_state("hi")), correlation_id="cid-safety")
+        resp = await _handle(node, _envelope(_text_reply("hi")), correlation_id="cid-safety")
 
     assert invocations == []
     assert resp is not None
@@ -710,7 +706,6 @@ async def test_unexpected_projection_exception_is_logged_and_skipped(monkeypatch
 
 def test_node_result_is_not_hashable():
     state = State()
-    state.final_output_parts = [TextPart(text="x")]
     state.message_history = [ModelRequest.user_text_prompt("hi")]
     result = NodeResult(output="x", state=state, correlation_id="cid-hash")
 
@@ -719,14 +714,14 @@ def test_node_result_is_not_hashable():
         hash(result)
 
 
-def test_strict_mode_raises_on_empty_final_output_parts():
-    envelope = _envelope(State())
+def test_strict_mode_raises_on_empty_reply():
+    envelope = _envelope()
     with pytest.raises(DeserializationError, match="No DataPart or TextPart"):
         NodeResult.from_envelope(envelope, correlation_id="cid-strict-empty")  # strict=True default
 
 
-def test_lenient_mode_returns_none_on_empty_final_output_parts():
-    envelope = _envelope(State())
+def test_lenient_mode_returns_none_on_empty_reply():
+    envelope = _envelope()
     result = NodeResult.from_envelope(envelope, correlation_id="cid-lenient", strict=False)
     assert result.output is None
     assert result.state is envelope.context.state  # client path: no copy in from_envelope

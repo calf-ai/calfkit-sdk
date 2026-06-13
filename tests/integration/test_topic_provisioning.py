@@ -55,6 +55,7 @@ import pytest
 from calfkit.client import Client
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart
+from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import (
     CallFrameStack,
     SessionRunContext,
@@ -210,13 +211,12 @@ def _text_envelope(text: str, correlation_id: str) -> Envelope:
     Mirrors the framework's on-wire shape (see ``tests/test_consumer`` helpers)
     so a real ``consumer`` node decodes it and exposes ``result.output == text``.
     """
-    state = State()
-    state.final_output_parts = [TextPart(text=text)]
-    ctx = SessionRunContext(state=state, deps={})
+    ctx = SessionRunContext(state=State(), deps={})
     ctx._correlation_id = correlation_id
     return Envelope(
         context=ctx,
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+        reply=ReturnMessage(in_reply_to=None, tag=None, parts=[TextPart(text=text)]),
     )
 
 

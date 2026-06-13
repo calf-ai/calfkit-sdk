@@ -13,7 +13,7 @@ Test layout mirrors the project's established patterns:
   ``tests/test_headers.py``).
 - ``@broker.subscriber`` observers for envelope-level inspection (per
   ``tests/test_headers.py::test_gate_reject_auto_publish_carries_emitter_header``).
-- ``consumer()`` sinks with ``final_output_parts`` gates for counting final
+- ``consumer()`` sinks with reply-slot gates for counting final
   hops (per ``tests/test_consumer.py``).
 - ``wait_for_condition`` from ``tests/utils.py`` for deterministic settling.
 """
@@ -122,7 +122,7 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
 
     @consumer(
         subscribe_topics="alpha_agent.out",
-        gates=[lambda ctx: bool(ctx.state.final_output_parts)],
+        gates=[lambda ctx: bool(ctx.output_parts)],
         node_id="alpha_final_sink",
     )
     def alpha_sink(ctx: ConsumerContext) -> None:
@@ -130,7 +130,7 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
 
     @consumer(
         subscribe_topics="bravo_agent.out",
-        gates=[lambda ctx: bool(ctx.state.final_output_parts)],
+        gates=[lambda ctx: bool(ctx.output_parts)],
         node_id="bravo_final_sink",
     )
     def bravo_sink(ctx: ConsumerContext) -> None:

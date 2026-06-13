@@ -11,6 +11,7 @@ from calfkit.models.actions import (  # noqa: I001 — actions first (see commen
 from calfkit.models.consumer_context import ConsumerContext
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import ContentPart, DataPart, FilePart, TextPart, ToolCallPart
+from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import (
     BaseSessionRunContext,
     CallFrame,
@@ -42,6 +43,8 @@ __all__ = [
     "_Call",
     # envelope
     "Envelope",
+    # reply
+    "ReturnMessage",
     # payload
     "ContentPart",
     "DataPart",

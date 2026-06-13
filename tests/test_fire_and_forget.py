@@ -29,7 +29,7 @@ import pytest
 from aiokafka.errors import UnknownTopicOrPartitionError
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
-from calfkit._protocol import HDR_EMITTER
+from calfkit._protocol import HDR_EMITTER, HDR_KIND
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -89,7 +89,7 @@ async def test_return_call_with_null_callback_publishes_no_callback():
     broker.publish = AsyncMock()
 
     final_state = State()
-    result = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-ff", broker)
+    result, _kind = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-ff", broker)
 
     assert broker.publish.call_count == 0, f"expected no callback publish for null-callback terminal; got {broker.publish.call_count}"
     # The terminal envelope must still be returned so the worker's @publisher
@@ -107,7 +107,7 @@ async def test_return_call_with_non_null_callback_publishes_to_callback():
     broker = MagicMock()
     broker.publish = AsyncMock()
 
-    result = await node._publish_action(ReturnCall(state=State()), envelope, "cid-cb", broker)
+    result, _kind = await node._publish_action(ReturnCall(state=State()), envelope, "cid-cb", broker)
 
     assert broker.publish.call_count == 1, f"expected exactly one callback publish for non-null callback; got {broker.publish.call_count}"
     assert broker.publish.call_args.kwargs["topic"] == "client.reply.inbox"
@@ -435,6 +435,17 @@ async def test_send_reply_to_sets_callback_topic_on_wire(container):
     assert publish.await_args.kwargs["correlation_id"] == cid
 
 
+async def test_send_stamps_x_calf_kind_call_on_wire(container):
+    """Every client publish is a call-kind ingress: it carries ``x-calf-kind: call``
+    so a node/consumer classifies it correctly (the wire stamp PR-C's fault arm relies on)."""
+    client = container.get(Client)
+    publish = _wire_spy(client)
+
+    await client.send("hi", "agent.input")
+
+    assert publish.await_args.kwargs["headers"][HDR_KIND] == "call"
+
+
 async def test_send_default_keeps_null_callback_on_wire(container):
     """Without ``reply_to``, ``send`` still publishes a ``callback_topic=None``
     bottom frame — the pre-spec fire-and-forget wire shape, byte-for-byte."""
@@ -589,7 +600,7 @@ async def test_return_call_callback_publish_failure_still_broadcasts(caplog):
 
     final_state = State()
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-        result = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-fail", broker)
+        result, _kind = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-fail", broker)
 
     # The broadcast channel survives: the terminal envelope is still returned.
     assert isinstance(result, Envelope)

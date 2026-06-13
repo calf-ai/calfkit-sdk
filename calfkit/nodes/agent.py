@@ -527,7 +527,7 @@ class BaseAgentNodeDef(
             # stamp author identity onto the agent's own responses (§4, §6.1)
             ctx.state.extend_with_responses(new_messages, self.name)
             if isinstance(result.output, str):
-                ctx.state.final_output_parts = [TextPart(text=result.output)]
+                parts: list[ContentPart] = [TextPart(text=result.output)]
             else:
                 # Surface a text preamble alongside the structured value when present (§7).
                 # ``structured_output_preamble`` reads the run's last ModelResponse and
@@ -535,13 +535,14 @@ class BaseAgentNodeDef(
                 # from the ``final_result`` call); in native/prompted mode the response's
                 # TextPart IS the JSON answer, so it returns "" to avoid duplicating it
                 # alongside the DataPart.
-                parts: list[ContentPart] = []
+                parts = []
                 preamble = structured_output_preamble(new_messages)
                 if preamble:
                     parts.append(TextPart(text=preamble))
                 parts.append(DataPart(data=result.output))
-                ctx.state.final_output_parts = parts
-            return ReturnCall[State](state=ctx.state)
+            # Output rides the reply slot (ReturnCall.value -> reply.parts at the
+            # chokepoint), not the retired State.final_output_parts side-channel (§4.5).
+            return ReturnCall[State](state=ctx.state, value=parts)
 
     def add_tools(self, *tools: ToolProvider | ToolBinding | ToolSelector) -> None:
         """Add tools after construction.

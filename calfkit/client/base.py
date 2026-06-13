@@ -8,7 +8,7 @@ import uuid_utils
 from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
-from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE
 from calfkit._routing import is_concrete_route_key
 from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client.invocation_handle import InvocationHandle
@@ -343,7 +343,7 @@ class BaseClient:
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),
         )
-        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND}
+        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call"}
         if route is not None:
             headers[HDR_ROUTE] = route
         await self._connection.publish(

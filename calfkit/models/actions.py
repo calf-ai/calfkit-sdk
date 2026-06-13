@@ -60,9 +60,14 @@ class TailCall(Generic[StateT], _Call[StateT]):
 
 @dataclass
 class ReturnCall(Generic[StateT]):
-    """Finish the node's execution and callback the caller."""
+    """Finish the node's execution and callback the caller.
+
+    ``value`` is the node's output, coerced to ``reply.parts`` at the publish
+    chokepoint (spec §4.5). It replaces the ``State.final_output_parts``
+    side-channel: output is now explicit in the action."""
 
     state: StateT
+    value: Any = None
 
 
 @dataclass

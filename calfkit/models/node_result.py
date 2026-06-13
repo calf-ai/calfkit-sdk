@@ -14,6 +14,7 @@ from calfkit.models.state import State
 
 if TYPE_CHECKING:
     from calfkit.models.envelope import Envelope
+    from calfkit.models.reply import ReturnMessage
     from calfkit.models.session_context import SessionRunContext
 
 _UNSET: Any = object()
@@ -56,26 +57,23 @@ class NodeResult(Generic[OutputT]):
 
     Build one with the :meth:`from_envelope` / :meth:`from_context` alternative
     constructors rather than calling the dataclass directly — they project the
-    output from ``state.final_output_parts`` and source identity from the
+    output from the delivery's reply slot and source identity from the
     transport-stamped context.
     """
 
     output: OutputT | None
     """Deserialized final output (typed via ``output_type``).
 
-    ``None`` on intermediate hops — envelopes whose ``state.final_output_parts``
-    is empty (e.g. agent hops mid-tool-call, tool completions). Populated when
-    the upstream node emitted a terminal envelope with final output parts.
-    Client-side strict-mode results (the default) always have ``output``
-    populated; consumer-side results may not.
+    ``None`` on intermediate hops — call-kind deliveries with no reply slot (e.g.
+    agent hops mid-tool-call, tool completions). Populated when the upstream node
+    emitted a terminal return carrying reply parts. Client-side strict-mode results
+    (the default) always have ``output`` populated; consumer-side results may not.
     """
 
     state: State
     """Full session state at this hop. Includes:
 
     * ``message_history`` — cumulative conversation
-    * ``final_output_parts`` — agent's structured/text output (empty on
-      intermediate hops)
     * ``tool_calls`` / ``tool_results`` — in-flight tool batch (keyed by
       ``tool_call_id``)
     * ``metadata`` — application-level metadata
@@ -88,6 +86,11 @@ class NodeResult(Generic[OutputT]):
 
     correlation_id: str
     """The correlation ID that ties this result to its invocation."""
+
+    output_parts: list[ContentPart] = field(default_factory=list)
+    """The raw reply parts this result was projected from (spec §4). ``[]`` on an
+    intermediate hop. Captured at construction from the delivery's reply slot, not
+    read through ``state`` (the retired ``final_output_parts``)."""
 
     emitter_node_id: str | None = None
     """Node id of the node that emitted this reply (sourced from the
@@ -160,11 +163,11 @@ class NodeResult(Generic[OutputT]):
                 ``ctx.correlation_id`` (which raises if the context was never
                 stamped).
             strict: When ``True`` (default — client semantics), raises
-                :class:`DeserializationError` if ``final_output_parts`` is empty or
-                doesn't contain the expected part type. When ``False`` (consumer
-                semantics), returns ``output=None`` for an empty
-                ``final_output_parts`` (intermediate hop / tool completion);
-                validation errors on *present* parts still propagate.
+                :class:`DeserializationError` if the reply parts are empty or
+                don't contain the expected part type. When ``False`` (consumer
+                semantics), returns ``output=None`` for an empty/absent reply
+                (intermediate hop / tool completion); validation errors on
+                *present* parts still propagate.
             type_adapter: An optional pre-built :class:`pydantic.TypeAdapter` to
                 use for validating ``DataPart.data`` against *output_type*. When
                 ``None`` (default), a new adapter is constructed per call.
@@ -180,7 +183,7 @@ class NodeResult(Generic[OutputT]):
 
         Raises:
             DeserializationError: If the expected content part is not found in
-                ``final_output_parts`` (and either ``strict=True`` or the parts
+                the reply parts (and either ``strict=True`` or the parts
                 list is non-empty but lacks the expected shape).
             pydantic.ValidationError: If ``output_type`` is provided and the
                 matching ``DataPart.data`` doesn't validate against it.
@@ -188,10 +191,11 @@ class NodeResult(Generic[OutputT]):
                 and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
         """
         state = ctx.state
-        output = project_output(state, output_type, strict=strict, type_adapter=type_adapter)
+        output = project_output(ctx._reply, output_type, strict=strict, type_adapter=type_adapter)
 
         return cls(
             output=output,
+            output_parts=ctx._reply.parts if ctx._reply is not None else [],
             state=state,
             correlation_id=correlation_id if correlation_id is not None else ctx.correlation_id,
             emitter_node_id=ctx.emitter_node_id,
@@ -229,11 +233,6 @@ class NodeResult(Generic[OutputT]):
         )
 
     @property
-    def output_parts(self) -> list[ContentPart]:
-        """Convenience: ``state.final_output_parts``."""
-        return self.state.final_output_parts
-
-    @property
     def message_history(self) -> list[ModelMessage]:
         """Convenience: ``state.message_history``."""
         return self.state.message_history
@@ -244,19 +243,21 @@ class NodeResult(Generic[OutputT]):
         return self.state.metadata
 
 
-def project_output(state: State, output_type: type[Any] = _UNSET, *, strict: bool, type_adapter: TypeAdapter[Any] | None = None) -> Any:
-    """Project the deserialized output from ``state.final_output_parts``.
+def project_output(
+    reply: ReturnMessage | None, output_type: type[Any] = _UNSET, *, strict: bool, type_adapter: TypeAdapter[Any] | None = None
+) -> Any:
+    """Project the deserialized output from the delivery's reply slot (spec §4.5).
 
     Shared by :meth:`NodeResult.from_context` (client, ``strict=True``) and
     :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). With
-    ``strict=False`` an empty ``final_output_parts`` (an intermediate hop) yields
-    ``None``; otherwise the matching part is extracted/validated per
-    ``output_type`` (raising ``DeserializationError``/``ValidationError`` on a
-    present-but-mismatched part).
+    ``strict=False`` an empty/absent reply (an intermediate hop) yields ``None``;
+    otherwise the matching part is extracted/validated per ``output_type`` (raising
+    ``DeserializationError``/``ValidationError`` on a present-but-mismatched part).
     """
-    if not state.final_output_parts and not strict:
+    parts = reply.parts if reply is not None else []
+    if not parts and not strict:
         return None
-    return _extract_output(state.final_output_parts, output_type, type_adapter=type_adapter)
+    return _extract_output(parts, output_type, type_adapter=type_adapter)
 
 
 def _extract_output(parts: list[Any], output_type: type[Any], type_adapter: TypeAdapter[Any] | None = None) -> Any:
@@ -276,7 +277,7 @@ def _extract_auto(parts: list[Any]) -> Any:
     for part in parts:
         if isinstance(part, TextPart):
             return part.text
-    raise DeserializationError("No DataPart or TextPart found in final_output_parts; cannot auto-detect output.")
+    raise DeserializationError("No DataPart or TextPart found in reply.parts; cannot auto-detect output.")
 
 
 def _extract_text(parts: list[Any]) -> str:
@@ -284,7 +285,7 @@ def _extract_text(parts: list[Any]) -> str:
     for part in parts:
         if isinstance(part, TextPart):
             return part.text
-    raise DeserializationError("No TextPart found in final_output_parts; expected output_type=str.")
+    raise DeserializationError("No TextPart found in reply.parts; expected output_type=str.")
 
 
 def _extract_data(parts: list[Any], output_type: type[Any], type_adapter: TypeAdapter[Any] | None = None) -> Any:
@@ -298,4 +299,4 @@ def _extract_data(parts: list[Any], output_type: type[Any], type_adapter: TypeAd
         if isinstance(part, DataPart):
             adapter = type_adapter if type_adapter is not None else TypeAdapter(output_type)
             return adapter.validate_python(part.data)
-    raise DeserializationError(f"No DataPart found in final_output_parts; expected output_type={getattr(output_type, '__name__', str(output_type))}.")
+    raise DeserializationError(f"No DataPart found in reply.parts; expected output_type={getattr(output_type, '__name__', str(output_type))}.")

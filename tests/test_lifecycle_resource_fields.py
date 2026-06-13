@@ -86,15 +86,17 @@ def test_node_result_resources_defaults_empty_and_accepts_override() -> None:
 
 
 def _make_text_envelope(text: str = "hello") -> Any:
-    from calfkit.models import State, TextPart
+    from calfkit.models import ReturnMessage, State, TextPart
     from calfkit.models.envelope import Envelope
     from calfkit.models.session_context import CallFrameStack, SessionRunContext, WorkflowState
 
-    state = State(final_output_parts=[TextPart(text=text)])
-    return Envelope(
-        context=SessionRunContext(state=state, deps={}),
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+        reply=ReturnMessage(in_reply_to=None, tag=None, parts=[TextPart(text=text)]),
     )
+    env.context._reply = env.reply  # as _on_reply stamps it before from_envelope projects
+    return env
 
 
 def test_from_envelope_threads_resources() -> None:

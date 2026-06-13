@@ -92,9 +92,9 @@ async def test_final_output_parts_tool_mode_structured_surfaces_preamble_and_str
     state = State(message_history=[ModelRequest.user_text_prompt("book flights")])
     ctx = _ctx(state)
 
-    await agent.run(ctx)
+    result = await agent.run(ctx)
 
-    parts = ctx.state.final_output_parts
+    parts = result.value  # output now rides ReturnCall.value -> reply.parts (§4.5)
     # BOTH the preamble and the structured value are surfaced, in order.
     assert len(parts) == 2, parts
     assert isinstance(parts[0], PayloadTextPart)
@@ -123,9 +123,9 @@ async def test_final_output_parts_tool_mode_structured_no_preamble_is_data_only(
     state = State(message_history=[ModelRequest.user_text_prompt("book flights")])
     ctx = _ctx(state)
 
-    await agent.run(ctx)
+    result = await agent.run(ctx)
 
-    parts = ctx.state.final_output_parts
+    parts = result.value  # output now rides ReturnCall.value -> reply.parts (§4.5)
     assert len(parts) == 1, parts
     assert isinstance(parts[0], DataPart)
     assert parts[0].data == FlightPlan(flights=7)
@@ -156,9 +156,9 @@ async def test_final_output_parts_prompted_mode_is_data_only_no_duplication():
     state = State(message_history=[ModelRequest.user_text_prompt("book flights")])
     ctx = _ctx(state)
 
-    await agent.run(ctx)
+    result = await agent.run(ctx)
 
-    parts = ctx.state.final_output_parts
+    parts = result.value  # output now rides ReturnCall.value -> reply.parts (§4.5)
     assert len(parts) == 1, parts  # only the structured value — no duplicated preamble
     assert isinstance(parts[0], DataPart)
     assert parts[0].data == FlightPlan(flights=5)
@@ -181,9 +181,9 @@ async def test_final_output_parts_str_output_unchanged():
     state = State(message_history=[ModelRequest.user_text_prompt("say something")])
     ctx = _ctx(state)
 
-    await agent.run(ctx)
+    result = await agent.run(ctx)
 
-    parts = ctx.state.final_output_parts
+    parts = result.value  # output now rides ReturnCall.value -> reply.parts (§4.5)
     assert len(parts) == 1, parts
     assert isinstance(parts[0], PayloadTextPart)
     assert parts[0].text == "plain string answer"
