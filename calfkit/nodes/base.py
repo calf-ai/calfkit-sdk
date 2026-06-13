@@ -10,7 +10,7 @@ from faststream.kafka.annotations import (
 )
 from pydantic import ValidationError
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ROUTE, NodeKind, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
 from calfkit.exceptions import RegistryConfigError
@@ -23,7 +23,9 @@ from calfkit.models import (
     State,
     TailCall,
 )
+from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
+from calfkit.models.reply import ReturnMessage
 from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.session_context import SessionRunContext
 from calfkit.worker.lifecycle import LifecycleHookMixin
@@ -229,18 +231,23 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             return dict(self.resources)
         return {**worker.resources, **self.resources}
 
-    def _emitter_headers(self) -> dict[str, str]:
-        return {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind}
+    def _headers(self, kind: MessageKind, *, route: str | None = None) -> dict[str, str]:
+        """Outbound headers for one publish: emitter id/kind + the ``x-calf-kind``
+        delivery classification (spec §4.1), plus ``x-calf-route`` when a ``Call``
+        addresses a sub-route of a downstream routed node (ingress-only, ``Call`` only)."""
+        h = {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind, HDR_KIND: kind}
+        if route is not None:
+            h[HDR_ROUTE] = route
+        return h
 
-    def _headers_for_call(self, call: Call[Any]) -> dict[str, str]:
-        """Emitter headers, plus the ``x-calf-route`` header when a ``Call`` addresses
-        a sub-route of a downstream routed node (ingress-only, ``Call`` only)."""
-        if call.route is None:
-            return self._emitter_headers()
-        return {**self._emitter_headers(), HDR_ROUTE: call.route}
-
-    async def _publish_action(self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Envelope:
+    async def _publish_action(
+        self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> tuple[Envelope, MessageKind]:
+        """Publish the node's action point-to-point and return the envelope to mirror
+        on ``publish_topic`` plus its ``x-calf-kind`` (spec §4). The kind is known here
+        per branch but not at the ``handler`` ``Response``, so it is returned upward."""
         publish_envelope: Envelope
+        kind: MessageKind = "call"
 
         if isinstance(output, list) and all(isinstance(item, Call) for item in output):
             # Parallel fan-out: publish each Call with independent workflow_state
@@ -256,9 +263,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                     topic=wf_copy.current_frame.target_topic,
                     correlation_id=correlation_id,
                     key=correlation_id.encode(),
-                    headers=self._headers_for_call(call),
+                    headers=self._headers("call", route=call.route),
                 )
-            return envelope
+            # No-reply hop: the mirror is the inbound envelope — clear any inbound reply
+            # so a return this node was processing is not re-broadcast under its own
+            # emitter to its observers (the I3 leak class).
+            envelope.reply = None
+            return envelope, "call"
 
         elif isinstance(output, Call):
             # push to callstack and call the target topic
@@ -274,20 +285,23 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 topic=target_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
-                headers=self._headers_for_call(output),
+                headers=self._headers("call", route=output.route),
             )
         elif isinstance(output, ReturnCall):
-            # unwind current frame and return to previous topic
+            # unwind current frame and return to previous topic, carrying the reply slot
             frame = envelope.internal_workflow_state.unwind_frame()
+            reply = ReturnMessage(in_reply_to=frame.frame_id, tag=frame.tag, parts=_coerce_to_parts(output.value))
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
+                reply=reply,
             )
+            kind = "return"
             if frame.callback_topic is None:
                 # Fire-and-forget terminal: no requester to return to. Skip the
                 # point-to-point callback publish, but still return
                 # ``publish_envelope`` below so the worker's @publisher broadcasts
-                # the terminal result to ``publish_topic`` (the traceability channel).
+                # the terminal result (with its reply) to ``publish_topic``.
                 logger.debug("[%s] ReturnCall no-callback fire-and-forget terminal node=%s", correlation_id[:8], self.node_id)
             else:
                 logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self.node_id)
@@ -297,7 +311,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                         topic=frame.callback_topic,
                         correlation_id=correlation_id,
                         key=correlation_id.encode(),
-                        headers=self._emitter_headers(),
+                        headers=self._headers("return"),
                     )
                 except KafkaError:
                     # Point-to-point delivery failed (e.g. a send(reply_to=...)
@@ -330,7 +344,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 topic=target_topic,
                 correlation_id=correlation_id,
                 key=correlation_id.encode(),
-                headers=self._emitter_headers(),
+                headers=self._headers("call"),
             )
 
         elif isinstance(output, Silent):
@@ -338,12 +352,14 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 "node (%s) ran and was silent with no explicit publish. This is the end of this event-stream, any state modifications will not be carried downstream.",  # noqa: E501
                 self.name,
             )
+            envelope.reply = None  # no-reply hop: don't re-broadcast an inbound reply (I3)
             publish_envelope = envelope
         else:
             logger.error("Return type is unknown or invalid so the message was not published anywhere.")
+            envelope.reply = None  # no-reply hop: don't re-broadcast an inbound reply (I3)
             publish_envelope = envelope
 
-        return publish_envelope
+        return publish_envelope, kind
 
     async def _dispatch_routed(
         self,
@@ -431,7 +447,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
 
         if not await self._evaluate_gates(ctx, correlation_id):
+            envelope.reply = None  # no-reply mirror (gate rejected): don't re-broadcast an inbound reply (I3)
             body: Envelope = envelope
+            kind: MessageKind = "call"
         else:
             frame = envelope.internal_workflow_state.current_frame_or_none
             payload = frame.payload if frame is not None else None
@@ -463,11 +481,12 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                     tuple(type(self)._handlers),
                     body_note,
                 )
-                return Response(envelope, headers=self._emitter_headers())
+                envelope.reply = None  # no-reply mirror (no result): don't re-broadcast an inbound reply (I3)
+                return Response(envelope, headers=self._headers("call"))
             logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
-            body = await self._publish_action(output, envelope, correlation_id, broker)
+            body, kind = await self._publish_action(output, envelope, correlation_id, broker)
 
-        return Response(body, headers=self._emitter_headers())
+        return Response(body, headers=self._headers(kind))
 
     @property
     def id(self) -> str:

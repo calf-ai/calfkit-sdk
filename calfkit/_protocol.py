@@ -31,10 +31,14 @@ Ingress-only: set by a client invocation or an explicit peer ``Call(route=...)``
 never auto-propagated across control-flow republishes. A node with registered
 ``@handler`` routes dispatches on this header (see ``BaseNodeDef.handler``)."""
 
+HDR_KIND = "x-calf-kind"
+"""Kafka header classifying every calfkit delivery (spec §4.1). Framework-stamped
+on every publish, never user-set. ``call`` = "do work" (Call / fan-out / TailCall /
+client send); ``return`` = "your call resolved" (a ``ReturnCall`` reply). PR-C adds
+``fault``. A missing header reads as ``call`` (raw-producer ingress norm)."""
 
-HDR_EVENT_TYPE = "x-calf-event-type"
-
-EventType = Literal["control-plane", "data-plane"]
+MessageKind = Literal["call", "return"]
+"""Closed value space for :data:`HDR_KIND` in PR-A. PR-C widens it with ``fault``."""
 
 
 def decode_header_str(value: Any) -> str | None:

@@ -89,7 +89,7 @@ async def test_return_call_with_null_callback_publishes_no_callback():
     broker.publish = AsyncMock()
 
     final_state = State()
-    result = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-ff", broker)
+    result, _kind = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-ff", broker)
 
     assert broker.publish.call_count == 0, f"expected no callback publish for null-callback terminal; got {broker.publish.call_count}"
     # The terminal envelope must still be returned so the worker's @publisher
@@ -107,7 +107,7 @@ async def test_return_call_with_non_null_callback_publishes_to_callback():
     broker = MagicMock()
     broker.publish = AsyncMock()
 
-    result = await node._publish_action(ReturnCall(state=State()), envelope, "cid-cb", broker)
+    result, _kind = await node._publish_action(ReturnCall(state=State()), envelope, "cid-cb", broker)
 
     assert broker.publish.call_count == 1, f"expected exactly one callback publish for non-null callback; got {broker.publish.call_count}"
     assert broker.publish.call_args.kwargs["topic"] == "client.reply.inbox"
@@ -589,7 +589,7 @@ async def test_return_call_callback_publish_failure_still_broadcasts(caplog):
 
     final_state = State()
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-        result = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-fail", broker)
+        result, _kind = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-fail", broker)
 
     # The broadcast channel survives: the terminal envelope is still returned.
     assert isinstance(result, Envelope)

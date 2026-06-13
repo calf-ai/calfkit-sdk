@@ -47,6 +47,11 @@ class CallFrame:
     Read by a routed ``@handler`` (via the ``x-calf-route`` header) or, for a
     routeless body, by the target's inherited ``@handler('*')`` ``run`` (e.g. a tool
     node validating a ``ToolCallRef``). ``None`` when the producer sent no body."""
+    tag: str | None = field(default=None)
+    """Caller-set opaque correlation token, echoed verbatim on the reply
+    (``ReturnMessage.tag``) when this frame unwinds. The agent sets it to
+    ``tool_call_id``. Transport metadata, never content. DORMANT until PR-B wires a
+    producer (``Call.tag`` + the agent); ``None`` on every frame in PR-A."""
 
 
 CallFrameStack = Stack[CallFrame]
