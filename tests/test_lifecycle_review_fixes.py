@@ -125,10 +125,10 @@ def test_tool_context_default_resources_is_a_mapping() -> None:
 def test_node_result_default_resources_is_a_mapping() -> None:
     from collections.abc import Mapping
 
-    from calfkit.models.node_result import NodeResult
+    from calfkit.models.node_result import InvocationResult
     from calfkit.models.state import State
 
-    result = NodeResult(output=None, state=State(), correlation_id="cid")
+    result = InvocationResult(output=None, state=State(), correlation_id="cid")
     assert isinstance(result.resources, Mapping)
     assert dict(result.resources) == {}
 

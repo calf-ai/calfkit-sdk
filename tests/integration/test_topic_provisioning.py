@@ -273,7 +273,7 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
     received: list[str] = []
 
     @consumer(subscribe_topics=inbox)
-    def sink(result: Any) -> None:  # NodeResult
+    def sink(result: Any) -> None:  # InvocationResult
         received.append(result.output)
 
     client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))

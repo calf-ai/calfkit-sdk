@@ -21,10 +21,10 @@ _UNSET: Any = object()
 
 
 @dataclass(frozen=True)
-class NodeResult(Generic[OutputT]):
+class InvocationResult(Generic[OutputT]):
     """Client-facing projection of the session state after a node returns.
 
-    A ``NodeResult`` is what callers receive in two places:
+    A ``InvocationResult`` is what callers receive in two places:
 
     * :meth:`Client.execute` / :meth:`InvocationHandle.result` — the
       final reply from an agent invocation.
@@ -35,7 +35,7 @@ class NodeResult(Generic[OutputT]):
     state fields. ``message_history``, ``output_parts``, and ``metadata`` are
     convenience properties that read through ``state``.
 
-    Treat ``NodeResult``, its ``state``, and its ``deps`` as read-only. The
+    Treat ``InvocationResult``, its ``state``, and its ``deps`` as read-only. The
     dataclass is frozen, but ``state`` is a mutable Pydantic model and ``deps``
     is the envelope's dict typed as a read-only ``Mapping`` (both shared with the
     envelope, not copied — the ``Mapping`` annotation makes accidental
@@ -44,13 +44,13 @@ class NodeResult(Generic[OutputT]):
 
     * **Consumer path**: the consumer never republishes (no ``publish_topic``),
       so mutations have no observable downstream effect. They can still
-      surprise other code holding the same ``NodeResult`` instance.
+      surprise other code holding the same ``InvocationResult`` instance.
     * **Client path** (:meth:`Client.execute` / :meth:`InvocationHandle.result`):
       the caller's lifetime owns the instance — mutations are caller-visible
       and may corrupt any other code holding a parallel reference (caches,
       retry layers, etc.).
 
-    ``NodeResult`` is intentionally unhashable (``__hash__ = None``): the
+    ``InvocationResult`` is intentionally unhashable (``__hash__ = None``): the
     underlying ``state`` field is a mutable Pydantic model and cannot be
     placed in a set or used as a dict key safely. Use ``correlation_id`` if
     you need a hashable identifier.
@@ -122,7 +122,7 @@ class NodeResult(Generic[OutputT]):
     ``result.resources[...] = ...`` is a type error at dev time (like ``deps``).
     Empty when the node owns no resources."""
 
-    # NodeResult holds a mutable Pydantic model (state); the dataclass-
+    # InvocationResult holds a mutable Pydantic model (state); the dataclass-
     # synthesized __hash__ would recursively try to hash unhashable fields and
     # raise at use-time. Declare unhashability explicitly so static type
     # checkers and runtime introspection agree.
@@ -138,8 +138,8 @@ class NodeResult(Generic[OutputT]):
         strict: bool = True,
         type_adapter: TypeAdapter[Any] | None = None,
         resources: Mapping[str, Any] | None = None,
-    ) -> NodeResult[Any]:
-        """Project a (transport-stamped) ``SessionRunContext`` into a ``NodeResult``.
+    ) -> InvocationResult[Any]:
+        """Project a (transport-stamped) ``SessionRunContext`` into a ``InvocationResult``.
 
         This is the core constructor; :meth:`from_envelope` delegates here. The
         context must already be stamped (``prepare_context``, the consumer
@@ -158,7 +158,7 @@ class NodeResult(Generic[OutputT]):
                   it through ``TypeAdapter(output_type)`` (or *type_adapter* if
                   provided).
             correlation_id: The transport ``correlation_id`` to surface as
-                ``NodeResult.correlation_id``. Sourced from the transport, never
+                ``InvocationResult.correlation_id``. Sourced from the transport, never
                 from the envelope body. When ``None``, falls back to
                 ``ctx.correlation_id`` (which raises if the context was never
                 stamped).
@@ -174,11 +174,11 @@ class NodeResult(Generic[OutputT]):
                 Consumers pre-build at wiring time so schema-generation errors
                 surface once at construction rather than per envelope.
             resources: The consuming node's lifecycle-managed resources, surfaced
-                as ``NodeResult.resources`` (read-only by type). Defaults to an
+                as ``InvocationResult.resources`` (read-only by type). Defaults to an
                 empty mapping.
 
         Returns:
-            A ``NodeResult`` whose ``.output`` is typed according to *output_type*
+            A ``InvocationResult`` whose ``.output`` is typed according to *output_type*
             (or ``None`` when ``strict=False`` and no parts are present).
 
         Raises:
@@ -214,8 +214,8 @@ class NodeResult(Generic[OutputT]):
         strict: bool = True,
         type_adapter: TypeAdapter[Any] | None = None,
         resources: Mapping[str, Any] | None = None,
-    ) -> NodeResult[Any]:
-        """Project an ``Envelope`` into a ``NodeResult``.
+    ) -> InvocationResult[Any]:
+        """Project an ``Envelope`` into a ``InvocationResult``.
 
         A thin convenience over :meth:`from_context` for callers holding a full
         envelope whose ``context`` was stamped in place (the client reply
@@ -248,7 +248,7 @@ def project_output(
 ) -> Any:
     """Project the deserialized output from the delivery's reply slot (spec §4.5).
 
-    Shared by :meth:`NodeResult.from_context` (client, ``strict=True``) and
+    Shared by :meth:`InvocationResult.from_context` (client, ``strict=True``) and
     :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). With
     ``strict=False`` an empty/absent reply (an intermediate hop) yields ``None``;
     otherwise the matching part is extracted/validated per ``output_type`` (raising

@@ -6,7 +6,7 @@ from typing import Any, Generic
 
 from calfkit._types import OutputT
 from calfkit.models.envelope import Envelope
-from calfkit.models.node_result import _UNSET, NodeResult
+from calfkit.models.node_result import _UNSET, InvocationResult
 
 
 @dataclass
@@ -17,14 +17,14 @@ class InvocationHandle(Generic[OutputT]):
     _future: asyncio.Future[Envelope] = field(repr=False, compare=False)
     _output_type: type[Any] = field(default=_UNSET, repr=False, compare=False)
 
-    async def result(self, timeout: float | None = None) -> NodeResult[OutputT]:
+    async def result(self, timeout: float | None = None) -> InvocationResult[OutputT]:
         """Await the invocation result.
 
         Args:
             timeout: Maximum seconds to wait. ``None`` means wait indefinitely.
 
         Returns:
-            A ``NodeResult`` with the deserialized output and session metadata.
+            A ``InvocationResult`` with the deserialized output and session metadata.
 
         Raises:
             asyncio.TimeoutError: If *timeout* elapses before a reply arrives.
@@ -52,4 +52,4 @@ class InvocationHandle(Generic[OutputT]):
             envelope = await asyncio.wait_for(self._future, timeout=timeout)
         else:
             envelope = await self._future
-        return NodeResult.from_envelope(envelope, self._output_type, correlation_id=self.correlation_id)
+        return InvocationResult.from_envelope(envelope, self._output_type, correlation_id=self.correlation_id)

@@ -3,7 +3,7 @@
 The consumer rides the shared ``BaseNodeDef.handler``: ``run`` is the inherited
 ``@handler('*')`` catch-all, and the user function receives a
 :class:`~calfkit.models.consumer_context.ConsumerContext` (not the client-facing
-``NodeResult``). Direct ``handler()`` calls pin contracts that TestKafkaBroker's
+``InvocationResult``). Direct ``handler()`` calls pin contracts that TestKafkaBroker's
 propagation makes ambiguous (error swallowing, projection skips).
 """
 
@@ -27,7 +27,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     TextPart as ModelTextPart,
 )
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
-from calfkit.client import Client, NodeResult
+from calfkit.client import Client, InvocationResult
 from calfkit.exceptions import DeserializationError
 from calfkit.models import ConsumerContext, ReturnMessage, SessionRunContext
 from calfkit.models.envelope import Envelope
@@ -698,7 +698,7 @@ async def test_unexpected_projection_exception_is_logged_and_skipped(monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Client-side NodeResult contract — the consumer no longer uses NodeResult, but
+# Client-side InvocationResult contract — the consumer no longer uses InvocationResult, but
 # Client.execute / InvocationHandle.result still return it. Kept here to
 # preserve the original coverage.
 # ---------------------------------------------------------------------------
@@ -707,9 +707,9 @@ async def test_unexpected_projection_exception_is_logged_and_skipped(monkeypatch
 def test_node_result_is_not_hashable():
     state = State()
     state.message_history = [ModelRequest.user_text_prompt("hi")]
-    result = NodeResult(output="x", state=state, correlation_id="cid-hash")
+    result = InvocationResult(output="x", state=state, correlation_id="cid-hash")
 
-    assert NodeResult.__hash__ is None
+    assert InvocationResult.__hash__ is None
     with pytest.raises(TypeError, match="unhashable"):
         hash(result)
 
@@ -717,12 +717,12 @@ def test_node_result_is_not_hashable():
 def test_strict_mode_raises_on_empty_reply():
     envelope = _envelope()
     with pytest.raises(DeserializationError, match="No DataPart or TextPart"):
-        NodeResult.from_envelope(envelope, correlation_id="cid-strict-empty")  # strict=True default
+        InvocationResult.from_envelope(envelope, correlation_id="cid-strict-empty")  # strict=True default
 
 
 def test_lenient_mode_returns_none_on_empty_reply():
     envelope = _envelope()
-    result = NodeResult.from_envelope(envelope, correlation_id="cid-lenient", strict=False)
+    result = InvocationResult.from_envelope(envelope, correlation_id="cid-lenient", strict=False)
     assert result.output is None
     assert result.state is envelope.context.state  # client path: no copy in from_envelope
 

@@ -1,6 +1,6 @@
 from calfkit.client.base import BaseClient
 from calfkit.client.client import Client
 from calfkit.client.invocation_handle import InvocationHandle
-from calfkit.models.node_result import NodeResult
+from calfkit.models.node_result import InvocationResult
 
-__all__ = ["BaseClient", "Client", "InvocationHandle", "NodeResult"]
+__all__ = ["BaseClient", "Client", "InvocationHandle", "InvocationResult"]

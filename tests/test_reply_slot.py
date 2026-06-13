@@ -27,7 +27,7 @@ from calfkit.models import (
     WorkflowState,
 )
 from calfkit.models._coerce import _coerce_to_parts
-from calfkit.models.node_result import NodeResult as InvocationResult
+from calfkit.models.node_result import InvocationResult
 from calfkit.models.reply import ReturnMessage, _ReplyBase
 from calfkit.models.state import State
 

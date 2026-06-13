@@ -2,7 +2,7 @@
 
 These cover the read surfaces that lifecycle ``@resource``/callback-owned
 resources reach: ``SessionRunContext`` (agent / ``BaseNodeDef``), ``ToolContext``
-(``agent_tool``), and ``NodeResult`` (consumer) plus the deserialize seam.
+(``agent_tool``), and ``InvocationResult`` (consumer) plus the deserialize seam.
 
 See ``docs/research/node-worker-lifecycle-hooks-plan-v7.md`` §2.5, §3.5.
 """
@@ -62,7 +62,7 @@ def test_tool_context_resources_defaults_empty_and_accepts_kw_only() -> None:
 
 
 def _make_node_result(**overrides: Any) -> Any:
-    from calfkit.models.node_result import NodeResult
+    from calfkit.models.node_result import InvocationResult
     from calfkit.models.state import State
 
     kwargs: dict[str, Any] = {
@@ -71,7 +71,7 @@ def _make_node_result(**overrides: Any) -> Any:
         "correlation_id": "cid",
     }
     kwargs.update(overrides)
-    return NodeResult(**kwargs)
+    return InvocationResult(**kwargs)
 
 
 def test_node_result_resources_defaults_empty_and_accepts_override() -> None:
@@ -100,15 +100,15 @@ def _make_text_envelope(text: str = "hello") -> Any:
 
 
 def test_from_envelope_threads_resources() -> None:
-    from calfkit.models.node_result import NodeResult
+    from calfkit.models.node_result import InvocationResult
 
     envelope = _make_text_envelope()
 
     # Default: empty mapping when resources not supplied.
-    default_result = NodeResult.from_envelope(envelope, str, correlation_id="cid")
+    default_result = InvocationResult.from_envelope(envelope, str, correlation_id="cid")
     assert dict(default_result.resources) == {}
 
-    # Threaded through into the built NodeResult.
+    # Threaded through into the built InvocationResult.
     sentinel = object()
-    result = NodeResult.from_envelope(envelope, str, correlation_id="cid", resources={"db": sentinel})
+    result = InvocationResult.from_envelope(envelope, str, correlation_id="cid", resources={"db": sentinel})
     assert result.resources["db"] is sentinel

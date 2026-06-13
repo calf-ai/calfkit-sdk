@@ -37,7 +37,7 @@ class ToolContext(RunContext[dict[str, Any]]):
         Alias of the inherited pydantic-ai ``run_id`` (calfkit always constructs
         a :class:`ToolContext` with ``run_id`` set to the correlation id), exposed
         under calfkit's own vocabulary so tool authors use the same name as the
-        rest of the SDK (``NodeResult.correlation_id``, ``Client.execute``).
+        rest of the SDK (``InvocationResult.correlation_id``, ``Client.execute``).
         """
         if self.run_id is None:
             raise RuntimeError("ToolContext was constructed without a run_id (correlation id).")

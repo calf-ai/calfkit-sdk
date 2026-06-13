@@ -320,7 +320,7 @@ async def test_parallel_fan_out_carries_emitter_per_call(container):
 
 
 # ---------------------------------------------------------------------------
-# Client receives the emitter of the callback reply on NodeResult.
+# Client receives the emitter of the callback reply on InvocationResult.
 # ---------------------------------------------------------------------------
 
 
