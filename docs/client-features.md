@@ -13,7 +13,7 @@ See also: [CLI reference](cli.md) · [Worker lifecycle](worker-lifecycle.md) ·
 
 | Method | Pattern | Returns |
 | --- | --- | --- |
-| `execute(...)` | Request/reply — publish and await the result in one call. | `NodeResult` |
+| `execute(...)` | Request/reply — publish and await the result in one call. | `InvocationResult` |
 | `start(...)` | Publish and get a handle; `await handle.result()` later. | `InvocationHandle` |
 | `send(...)` | One-way — dispatch and return immediately; no reply future. Optional `reply_to` return address. | `correlation_id` (str) |
 

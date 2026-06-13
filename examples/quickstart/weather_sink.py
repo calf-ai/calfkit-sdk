@@ -2,7 +2,7 @@
 
 Listens on the weather agent's ``publish_topic`` and runs arbitrary Python
 against every envelope that flows through it. The decorated function receives
-the same client-facing ``NodeResult`` returned by ``Client.execute()``.
+the same client-facing ``InvocationResult`` returned by ``Client.execute()``.
 
 Because an agent's ``publish_topic`` carries every state transition (not just
 the final reply), ``result.output`` is ``None`` on intermediate hops — pending
@@ -18,13 +18,13 @@ Run alongside the agent service:
 
 import asyncio
 
-from calfkit.client import Client, NodeResult
+from calfkit.client import Client, InvocationResult
 from calfkit.nodes import consumer
 from calfkit.worker import Worker
 
 
 @consumer(subscribe_topics="weather_agent.output")
-async def log_weather_output(result: NodeResult) -> None:
+async def log_weather_output(result: InvocationResult) -> None:
     if result.output is None:
         # Intermediate hop (e.g. agent about to call a tool). Observe and move on.
         print(f"[{result.correlation_id[:8]}] intermediate hop from {result.emitter_node_id}")

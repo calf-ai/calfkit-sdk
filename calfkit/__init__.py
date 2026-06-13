@@ -1,6 +1,6 @@
 from importlib.metadata import version
 
-from calfkit.client import Client, InvocationHandle, NodeResult
+from calfkit.client import Client, InvocationHandle, InvocationResult
 from calfkit.exceptions import DeserializationError, LifecycleConfigError, ToolExecutionError
 from calfkit.models import ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, GateFunction, NodeDef, ToolNodeDef, agent_tool, consumer
@@ -14,7 +14,7 @@ __all__ = [
     # client
     "Client",
     "InvocationHandle",
-    "NodeResult",
+    "InvocationResult",
     # models
     "ToolContext",
     # nodes

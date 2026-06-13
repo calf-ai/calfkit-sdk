@@ -2,7 +2,7 @@
 
 A **consumer node** is a terminal sink — it subscribes to one or more topics and
 runs arbitrary Python logic against every event flowing through. Consumers
-receive the same `NodeResult` that `Client.execute()` returns, including the
+receive the same `InvocationResult` that `Client.execute()` returns, including the
 full session state (`tool_calls`, `tool_results`, `message_history`, `metadata`)
 and the inbound producer `deps` via `result.deps["key"]` — the same data tools
 read as `ctx.deps["key"]`.
@@ -14,12 +14,12 @@ intermediate hops:
 ```python
 # weather_sink.py
 import asyncio
-from calfkit.client import Client, NodeResult
+from calfkit.client import Client, InvocationResult
 from calfkit.nodes import consumer
 from calfkit.worker import Worker
 
 @consumer(subscribe_topics="weather_agent.output")
-async def log_weather(result: NodeResult) -> None:
+async def log_weather(result: InvocationResult) -> None:
     if result.output is None:
         return  # intermediate hop — no final output yet
     print(f"[{result.correlation_id[:8]}] {result.output}")
@@ -49,7 +49,7 @@ only want agent terminals:
     subscribe_topics="weather_agent.output",
     gates=[lambda ctx: bool(ctx.output_parts)],
 )
-async def save_final(result: NodeResult) -> None:
+async def save_final(result: InvocationResult) -> None:
     await db.save(result.output)  # always populated here
 ```
 

@@ -12,7 +12,7 @@ from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client.base import BaseClient
 from calfkit.client.invocation_handle import InvocationHandle
 from calfkit.models import State
-from calfkit.models.node_result import _UNSET, NodeResult
+from calfkit.models.node_result import _UNSET, InvocationResult
 from calfkit.models.state import OverridesState
 from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, normalize_tool_bindings
 
@@ -173,7 +173,7 @@ class Client(BaseClient):
 
         Returns:
             An :class:`InvocationHandle` whose ``result()`` resolves to a
-            :class:`NodeResult`.
+            :class:`InvocationResult`.
         """
         correlation_id, state, overrides = self._build_state_and_overrides(
             user_prompt,
@@ -311,7 +311,7 @@ class Client(BaseClient):
         route: str | None = ...,
         body: Any | None = ...,
         timeout: float | None = ...,
-    ) -> NodeResult[OutputT]: ...
+    ) -> InvocationResult[OutputT]: ...
 
     @overload
     async def execute(
@@ -329,7 +329,7 @@ class Client(BaseClient):
         route: str | None = ...,
         body: Any | None = ...,
         timeout: float | None = ...,
-    ) -> NodeResult[Any]: ...
+    ) -> InvocationResult[Any]: ...
 
     async def execute(
         self,
@@ -347,7 +347,7 @@ class Client(BaseClient):
         route: str | None = None,
         body: Any | None = None,
         timeout: float | None = None,
-    ) -> NodeResult[Any]:
+    ) -> InvocationResult[Any]:
         """Invoke an agent node and await the reply in a single call.
 
         The **execute** pattern (cf. Temporal's ``execute_workflow``):
@@ -382,7 +382,7 @@ class Client(BaseClient):
                 wait indefinitely.
 
         Returns:
-            A :class:`NodeResult` containing the deserialized output and
+            A :class:`InvocationResult` containing the deserialized output and
             session metadata.
 
         Raises:

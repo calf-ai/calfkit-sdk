@@ -35,7 +35,7 @@ from faststream.kafka import TestKafkaBroker
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
-from calfkit.client import Client, NodeResult
+from calfkit.client import Client, InvocationResult
 from calfkit.exceptions import LifecycleConfigError
 from calfkit.models import Silent
 from calfkit.models.envelope import Envelope
@@ -204,11 +204,11 @@ async def test_resources_reach_custom_basenodedef_subclass() -> None:
 
 
 async def test_resources_reach_consumer_result() -> None:
-    received: list[NodeResult] = []
+    received: list[InvocationResult] = []
     worker = _make_worker()
 
     @consumer(subscribe_topics="surface_consumer.in")
-    def sink(result: NodeResult) -> None:
+    def sink(result: InvocationResult) -> None:
         received.append(result)
 
     sentinel = object()
@@ -230,7 +230,7 @@ async def test_consumer_gate_reads_resources() -> None:
     """A consumer's *gate* can read ``ctx.resources`` (parity with regular-node
     gates), so a gate can branch on a lifecycle resource — not just the consumer
     function via ``result.resources``."""
-    received: list[NodeResult] = []
+    received: list[InvocationResult] = []
     gate_saw: list[Any] = []
 
     def gate(ctx: SessionRunContext) -> bool:
@@ -241,7 +241,7 @@ async def test_consumer_gate_reads_resources() -> None:
     worker = _make_worker()
 
     @consumer(subscribe_topics="gate_res.in", gates=[gate])
-    def sink(result: NodeResult) -> None:
+    def sink(result: InvocationResult) -> None:
         received.append(result)
 
     sink.resources["flag"] = "ON"

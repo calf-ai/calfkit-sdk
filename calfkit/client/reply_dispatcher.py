@@ -70,13 +70,13 @@ class _ReplyDispatcher:
         from the envelope body.
         """
         # Stash the inbound correlation id + emitter so the context surfaces them
-        # (ctx.correlation_id, NodeResult.emitter_node_id / kind).
+        # (ctx.correlation_id, InvocationResult.emitter_node_id / kind).
         envelope.context._stamp_transport(
             correlation_id=correlation_id,
             emitter_node_id=decode_header_str(headers.get(HDR_EMITTER)),
             emitter_node_kind=decode_header_str(headers.get(HDR_EMITTER_KIND)),
         )
-        # Surface the per-delivery reply so NodeResult.from_envelope (via
+        # Surface the per-delivery reply so InvocationResult.from_envelope (via
         # from_context) projects the output from reply.parts (spec §4.5).
         envelope.context._reply = envelope.reply
 

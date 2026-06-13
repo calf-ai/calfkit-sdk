@@ -66,7 +66,7 @@ class ConsumerContext(Generic[OutputT]):
     Empty when the node owns no resources."""
 
     # Holds a mutable Pydantic model (state); declare unhashability explicitly so
-    # static checkers and runtime introspection agree (mirrors NodeResult).
+    # static checkers and runtime introspection agree (mirrors InvocationResult).
     __hash__ = None  # type: ignore[assignment]
 
     @classmethod

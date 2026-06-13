@@ -42,7 +42,7 @@ The same one-off provisioning is available from the CLI (no Python)::
 
 import asyncio
 
-from calfkit.client import NodeResult
+from calfkit.client import InvocationResult
 from calfkit.nodes import Agent, agent_tool, consumer
 from calfkit.providers import OpenAIResponsesModelClient
 from calfkit.provisioning import (
@@ -73,7 +73,7 @@ agent = Agent(
 
 
 @consumer(subscribe_topics="weather_agent.output")
-async def log_results(result: NodeResult) -> None:
+async def log_results(result: InvocationResult) -> None:
     print(result.output)
 
 
