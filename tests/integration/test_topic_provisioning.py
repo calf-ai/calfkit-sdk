@@ -4,7 +4,7 @@ These talk to a LIVE Kafka/Redpanda broker and are therefore gated behind
 :data:`tests.utils.skip_if_no_kafka` (driven by the ``CALF_TEST_KAFKA`` env
 var). Locally — where no broker is configured — the whole module collects and
 skips cleanly. The dedicated CI lane
-(``.github/workflows/kafka-integration.yml``) stands up a single-node Redpanda
+(``.github/workflows/integration-topic-provisioning.yml``) stands up a single-node Redpanda
 broker with ``auto_create_topics_enabled=false`` and sets ``CALF_TEST_KAFKA``
 so these run for real.
 

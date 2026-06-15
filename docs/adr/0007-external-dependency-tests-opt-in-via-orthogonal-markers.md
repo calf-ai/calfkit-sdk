@@ -38,7 +38,7 @@ reachable and fails for any other reason propagates as a real error — no silen
 green.
 
 Consequences worth remembering: the topic-provisioning lane
-(`kafka-integration.yml`, env-gated by `CALF_TEST_KAFKA`) is deliberately **not**
+(`integration-topic-provisioning.yml`, env-gated by `CALF_TEST_KAFKA`) is deliberately **not**
 folded onto testcontainers and keeps its own hand-run broker, because it asserts
 the "no silent topic create" contract and therefore needs `auto_create_topics`
 DISABLED — which testcontainers' `RedpandaContainer` (it runs `redpanda start

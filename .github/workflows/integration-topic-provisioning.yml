@@ -1,4 +1,4 @@
-name: Kafka Integration Tests
+name: "Integration: topic provisioning"
 
 # Dedicated gated lane for REAL-broker Kafka topic-provisioning tests
 # (opt-in topic provisioning, issue #174). Stands up a single-node Redpanda
@@ -26,15 +26,15 @@ on:
       - "tests/test_provisioning*.py"
       - "tests/utils.py"
       - "pyproject.toml"
-      - ".github/workflows/kafka-integration.yml"
+      - ".github/workflows/integration-topic-provisioning.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  kafka-integration:
-    name: Kafka Integration (Redpanda)
+  topic-provisioning:
+    name: Topic provisioning (auto-create disabled)
     runs-on: ubuntu-latest
 
     env:

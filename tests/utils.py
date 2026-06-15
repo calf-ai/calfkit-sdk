@@ -30,7 +30,7 @@ def _kafka_integration_enabled() -> bool:
     NOT open a TCP socket to the broker here: collection-time network probes are
     slow, flaky, and make a missing/cold broker look like a collection error
     rather than a clean skip. The dedicated CI lane (see
-    ``.github/workflows/kafka-integration.yml``) sets this var once a Redpanda
+    ``.github/workflows/integration-topic-provisioning.yml``) sets this var once a Redpanda
     services container is up; locally the tests skip cleanly because it is unset.
 
     Any non-empty value enables the lane.
