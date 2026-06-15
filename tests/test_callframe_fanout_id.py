@@ -3,8 +3,8 @@
 ``CallFrame`` carries ``fanout_id`` — the fan-out node's own inbound ``frame_id``.
 At fan-out dispatch it is stamped on the node's OWN frame within each sibling's stack
 copy (so it survives the callee's return-pop and is the top frame when the sibling
-reply re-enters this node), *not* on the pushed callee frame — the stamping op itself
-lands with the dispatch wiring. It defaults to ``None`` (unmarked) on every
+reply re-enters this node), *not* on the pushed callee frame — ``WorkflowState.mark_fanout``
+stamps it by replacing the frozen top frame. It defaults to ``None`` (unmarked) on every
 non-sibling frame and must survive the JSON hop.
 
 ``WorkflowState.invoke_frame`` takes a keyword-only ``frame_id`` so the fan-out OPEN
@@ -53,3 +53,23 @@ def test_workflowstate_roundtrips_fanout_id() -> None:
     ws = WorkflowState(call_stack=Stack([CallFrame(target_topic="t", callback_topic="cb", fanout_id="X")]))
     rt = WorkflowState.model_validate_json(ws.model_dump_json())
     assert rt.current_frame.fanout_id == "X"
+
+
+def test_mark_fanout_stamps_own_frame_id_on_top_frame() -> None:
+    # The marker value IS the frame's own id (the batch key); mark_fanout sets it on the
+    # node's own (top) frame without changing the frame_id.
+    ws = WorkflowState(call_stack=Stack())
+    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb", frame_id="agent-frame")
+    ws.mark_fanout()
+    assert ws.current_frame.fanout_id == "agent-frame"
+    assert ws.current_frame.frame_id == "agent-frame"
+
+
+def test_mark_fanout_only_marks_the_top_frame() -> None:
+    ws = WorkflowState(call_stack=Stack())
+    ws.invoke_frame(Call(target_topic="caller", state=State()), callback_topic=None, frame_id="bottom")
+    ws.invoke_frame(Call(target_topic="agent", state=State()), callback_topic="cb", frame_id="agent-frame")
+    ws.mark_fanout()
+    top = ws.unwind_frame()
+    assert top.fanout_id == "agent-frame"
+    assert ws.current_frame.fanout_id is None  # the lower frame is untouched

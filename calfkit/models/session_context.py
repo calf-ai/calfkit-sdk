@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Generic
 
@@ -111,6 +111,15 @@ class WorkflowState(BaseModel):
         else:
             frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, frame_id=frame_id)
         return self.call_stack.push(frame)
+
+    def mark_fanout(self) -> None:
+        """Stamp the current (top) frame as the fan-out origin: set ``fanout_id`` to the
+        frame's OWN ``frame_id`` (the batch key). ``CallFrame`` is frozen, so this replaces
+        the top frame with a marked copy. The marker rides the node's own frame — *not* the
+        pushed callee frames — so it survives the callee's return-pop and is the top frame
+        when a sibling reply re-enters this node, routing it into the durable fold."""
+        frame = self.call_stack.pop()
+        self.call_stack.push(replace(frame, fanout_id=frame.frame_id))
 
 
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):

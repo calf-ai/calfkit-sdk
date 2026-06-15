@@ -374,6 +374,31 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
         return publish_envelope, kind
 
+    async def _publish_reentry(self, envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> None:
+        """Self-publish the fan-out closure re-entry to this node's own return inbox.
+
+        A bespoke, frame-preserving self-return (NOT a ``ReturnCall``, which pops): the
+        node addresses ITSELF so its fan-out frame stays current, and the close (§4.3)
+        rebuilds context from the durable basestate. Deltas from a normal ``ReturnCall``:
+        no pop; ``in_reply_to`` = the fan-out frame's own id; ``parts=[]``; target = own
+        ``_return_topic``; ``key=correlation_id`` (same partition, single-writer); context
+        ``state``/``deps`` cleared (rebuilt at close); **not** broadcast-mirrored — a direct
+        point-to-point publish, never returned for the ``@publisher`` mirror.
+        """
+        frame = envelope.internal_workflow_state.current_frame  # the fan-out frame — NOT popped
+        reentry = Envelope(
+            context=SessionRunContext(state=State(), deps={}),  # cleared — rebuilt from basestate at close
+            internal_workflow_state=envelope.internal_workflow_state,
+            reply=ReturnMessage(in_reply_to=frame.frame_id, tag=frame.tag, parts=[]),
+        )
+        await broker.publish(
+            reentry,
+            topic=self._return_topic,
+            correlation_id=correlation_id,
+            key=correlation_id.encode(),
+            headers=self._headers("return"),
+        )
+
     async def _dispatch_routed(
         self,
         ctx: SessionRunContext,
