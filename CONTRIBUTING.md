@@ -55,7 +55,7 @@ opt-in, so `make test` stays fast and needs no Docker, network, or credentials.
 | Unit / component | nothing — `FunctionModel` + in-memory `TestKafkaBroker` | — | yes |
 | Real broker | a Kafka-protocol broker (Redpanda) | `@pytest.mark.kafka` | no — use `make test-kafka` |
 | Topic provisioning | a broker with topic auto-create **disabled** | `CALF_TEST_KAFKA` env var | no — separate lane |
-| Real LLM | a live model API | `OPENAI_API_KEY` env var | skips unless the key is set |
+| Real LLM | a live model API | `OPENAI_API_KEY` (+ `TEST_LLM_MODEL_NAME`) | skips unless the key is set |
 
 Default to **offline** tests: a scripted `FunctionModel` stands in for the LLM
 and FastStream's `TestKafkaBroker` stands in for Kafka, so the tests are
@@ -89,8 +89,10 @@ async def test_round_trip(kafka_bootstrap: str, topic_namespace: str) -> None:
 - **`topic_namespace`** — a unique per-test prefix. Derive every topic and
   consumer-group name from it so tests sharing the session broker don't collide.
 
-`tests/integration/test_real_broker_smoke.py` is the minimal working template to
-copy.
+For working examples, see `tests/integration/test_real_broker_smoke.py` (the
+minimal marker-and-fixtures wiring, using a raw `aiokafka` produce/consume
+round-trip) and `tests/integration/test_mcp_toolbox_capability.py` (a richer test
+that drives calfkit's `Client` against a live broker).
 
 ### Running the real-broker lane
 
@@ -98,12 +100,13 @@ copy.
 $ make test-kafka     # runs `-m kafka`; testcontainers starts/stops Redpanda
 ```
 
-This requires a running **Docker** daemon. Without Docker the lane skips cleanly
-rather than failing. To run against an already-running broker instead of
-testcontainers:
+This requires a running **Docker** daemon (the `integration` group, which `make
+test-kafka` installs, provides testcontainers). Without Docker the lane skips
+cleanly rather than failing. To run against an already-running broker instead —
+no Docker or `integration` group needed, since testcontainers is never imported:
 
 ```console
-$ CALF_TEST_KAFKA_BOOTSTRAP=localhost:9092 uv run --group integration pytest -m kafka
+$ CALF_TEST_KAFKA_BOOTSTRAP=localhost:9092 uv run pytest -m kafka
 ```
 
 ### The topic-provisioning lane
