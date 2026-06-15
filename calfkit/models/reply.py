@@ -2,16 +2,22 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from calfkit.models.error_report import ErrorReport
 from calfkit.models.payload import ContentPart
 
 
 class _ReplyBase(BaseModel):
     """Common per-delivery reply correlation (spec §4.2).
 
-    Shipped now so PR-C's ``FaultMessage`` is a pure sibling addition
-    (``class FaultMessage(_ReplyBase)``) rather than a re-parenting of
-    :class:`ReturnMessage`, and the ``Envelope.reply`` union widens to
-    ``ReturnMessage | FaultMessage`` with ``Field(discriminator="kind")``.
+    The shared parent of the two reply shapes: :class:`ReturnMessage` (a
+    successful output, content as parts) and :class:`FaultMessage` (a terminal
+    failure, an :class:`~calfkit.models.error_report.ErrorReport`) — ``result``
+    XOR ``error``, the JSON-RPC split.
+
+    The ``Envelope.reply`` slot still carries only ``ReturnMessage | None`` today;
+    it widens to ``ReturnMessage | FaultMessage`` with ``Field(discriminator="kind")``
+    when the rail starts producing faults (the projection/dispatch side of that
+    widening is where fault behavior lives, so it lands together there).
     """
 
     in_reply_to: str | None
@@ -32,3 +38,15 @@ class ReturnMessage(_ReplyBase):
 
     kind: Literal["return"] = "return"
     parts: list[ContentPart]
+
+
+class FaultMessage(_ReplyBase):
+    """A terminal failure, carried in the per-delivery reply slot (spec §4.2).
+
+    The same :class:`~calfkit.models.error_report.ErrorReport` reaches every
+    fault-aware surface — a caller's seam (the ``fault`` argument), the client
+    (``NodeFaultError.report``), and sinks (``ConsumerContext.fault``).
+    """
+
+    kind: Literal["fault"] = "fault"
+    error: ErrorReport

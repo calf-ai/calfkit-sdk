@@ -34,11 +34,18 @@ never auto-propagated across control-flow republishes. A node with registered
 HDR_KIND = "x-calf-kind"
 """Kafka header classifying every calfkit delivery (spec §4.1). Framework-stamped
 on every publish, never user-set. ``call`` = "do work" (Call / fan-out / TailCall /
-client send); ``return`` = "your call resolved" (a ``ReturnCall`` reply). PR-C adds
-``fault``. A missing header reads as ``call`` (raw-producer ingress norm)."""
+client send); ``return`` = "your call resolved" (a ``ReturnCall`` reply); ``fault`` =
+"your call failed" (a fault publish, accompanied by :data:`HDR_ERROR_TYPE`). A missing
+header reads as ``call`` (raw-producer ingress norm). The ``fault`` value is in the
+value space now; only the rail stamps it."""
 
-MessageKind = Literal["call", "return"]
-"""Closed value space for :data:`HDR_KIND` in PR-A. PR-C widens it with ``fault``."""
+HDR_ERROR_TYPE = "x-calf-error-type"
+"""Kafka header carrying a fault's ``error_type`` (spec §4.1), stamped alongside
+``x-calf-kind: fault``. Lets ops filter faults at the broker without deserializing
+the body. Framework-stamped, never user-set."""
+
+MessageKind = Literal["call", "return", "fault"]
+"""Closed value space for :data:`HDR_KIND` (spec §4.1)."""
 
 
 def decode_header_str(value: Any) -> str | None:

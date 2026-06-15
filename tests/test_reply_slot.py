@@ -137,7 +137,8 @@ class TestProtocolKind:
         assert HDR_KIND == "x-calf-kind"
 
     def test_message_kind_value_space(self) -> None:
-        assert typing.get_args(MessageKind) == ("call", "return")
+        # Widened with "fault" by the fault-wire-model PR (only the rail stamps it).
+        assert typing.get_args(MessageKind) == ("call", "return", "fault")
 
     def test_dead_event_type_constants_removed(self) -> None:
         # Drift cleanup: HDR_EVENT_TYPE / EventType had zero call sites.

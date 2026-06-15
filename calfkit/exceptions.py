@@ -1,5 +1,11 @@
 from typing import Any
 
+import pydantic_core
+
+from calfkit.models.error_report import ErrorReport
+
+_CALF_NAMESPACE = "calf."
+
 
 def safe_exc_message(e: BaseException) -> str:
     """Best-effort string of an exception, robust against a broken ``__str__``.
@@ -17,6 +23,66 @@ def safe_exc_message(e: BaseException) -> str:
             return repr(e)
         except Exception:
             return f"<unprintable {type(e).__name__}>"
+
+
+class NodeFaultError(Exception):
+    """A terminal fault — one class, symmetric for minting and receiving (spec §11).
+
+    **Mint** a deliberate typed fault from node/seam code::
+
+        raise NodeFaultError("billing.quota_exceeded", message="...", retryable=False, details={...})
+
+    **Receive** one at the client edge (the reply dispatcher fails the pending
+    future with ``NodeFaultError(report)``), then branch on the slotted report::
+
+        try:
+            result = await handle.result()
+        except NodeFaultError as e:
+            if e.report.find(FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED):  # find(), not == — groups compose
+                ...
+
+    The contract is the :class:`~calfkit.models.error_report.ErrorReport` on
+    ``report``, never an exception class — no ``error_type → exception`` registry,
+    so every surface (seams, sinks, client) reads the same slotted report.
+    """
+
+    report: ErrorReport
+
+    def __init__(
+        self,
+        error_type_or_report: str | ErrorReport,
+        *,
+        message: str = "",
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if isinstance(error_type_or_report, ErrorReport):
+            # RECEIVE/WRAP: carry an existing report verbatim. No namespace guard —
+            # it may legitimately be a framework-minted calf.* the client re-raises.
+            self.report = error_type_or_report
+        else:
+            # MINT: build a fresh report from a user-supplied type.
+            error_type = error_type_or_report
+            if error_type.startswith(_CALF_NAMESPACE):
+                raise ValueError(
+                    f"error_type {error_type!r} is under the reserved {_CALF_NAMESPACE!r} prefix, which is "
+                    "framework-only; choose a type outside it so consumers can trust the calf.* namespace."
+                )
+            # Eagerly check the details are wire-safe so an unserializable value
+            # fails here, at the keyboard, not later on the error path.
+            try:
+                pydantic_core.to_json(details or {})
+            except Exception as exc:
+                raise ValueError(f"NodeFaultError details are not JSON-serializable: {safe_exc_message(exc)}") from exc
+            self.report = ErrorReport.build_safe(error_type=error_type, message=message, retryable=retryable, details=details or {})
+        super().__init__(self.report.message or self.report.error_type)
+
+    def __reduce__(self) -> tuple[Any, tuple[ErrorReport]]:
+        # Reconstruct from the report, not by replaying self.args (a message
+        # string) through __init__, which would mis-route the string into the
+        # mint arm and rebuild a different report (cf. ReplyExpiredError /
+        # ToolExecutionError, which carry custom reductions for the same reason).
+        return (self.__class__, (self.report,))
 
 
 class DeserializationError(Exception):
