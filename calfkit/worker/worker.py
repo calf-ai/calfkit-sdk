@@ -74,9 +74,10 @@ class Worker(LifecycleHookMixin):
             nodes: List of ``BaseNodeDef`` instances to host.
             max_workers: FastStream subscriber concurrency cap for *observer*
                 (consumer) nodes. Caller-capable nodes (agents/tools/toolboxes)
-                are always registered with ``max_workers=1`` — their seam pipeline
-                and fan-out fold are await-spanning read-modify-writes that a
-                no-affinity concurrent subscriber would race.
+                are always registered with ``max_workers=1`` — handling a
+                continuation is an await-spanning read-modify-write of workflow
+                state that a no-affinity concurrent subscriber would race. A
+                request to raise it for a caller-capable node is logged and pinned.
             group_id: Optional Kafka consumer group override (defaults to
                 each node's name).
             extra_publish_kwargs: Forwarded to ``broker.publisher(...)``.
@@ -244,14 +245,23 @@ class Worker(LifecycleHookMixin):
                 topics,
                 node.publish_topic,
             )
-            # Caller-capable nodes (seam pipeline / fan-out fold) MUST consume serially:
-            # FastStream's max_workers>1 is a no-affinity coroutine pool that races the
-            # await-spanning read-modify-write. The worker's max_workers knob applies to
-            # observers; caller-capable nodes are framework-pinned to 1, overriding any
-            # worker/extra value (concurrency-model.md). The merge also avoids a duplicate
-            # max_workers kwarg when a user puts one in extra_subscribe_kwargs.
+            # Caller-capable nodes MUST consume serially: handling a continuation is an
+            # await-spanning read-modify-write of workflow state (the agent's tool-call
+            # batch aggregation today; the in-node fan-out fold next) that FastStream's
+            # no-affinity max_workers>1 coroutine pool would race. The worker's max_workers
+            # knob applies to observers; caller-capable nodes are framework-pinned to 1,
+            # overriding any worker/extra value. The merge into one dict also avoids a
+            # duplicate max_workers kwarg when a user sets one in extra_subscribe_kwargs.
             subscribe_kwargs = dict(self._extra_subscribe_kwargs)
             if node.is_caller_capable:
+                requested = subscribe_kwargs.get("max_workers", self._max_workers)
+                if requested != 1:
+                    # Don't silently discard a value the user passed to the framework.
+                    logger.info(
+                        "node=%s is caller-capable; pinning max_workers=1 (requested %s ignored — continuations must consume serially)",
+                        node.name,
+                        requested,
+                    )
                 subscribe_kwargs["max_workers"] = 1
             else:
                 subscribe_kwargs.setdefault("max_workers", self._max_workers)

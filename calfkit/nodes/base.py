@@ -75,12 +75,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
     :class:`~calfkit.client.base.BaseClient` and is not a valid subclass override.
     """
     is_caller_capable: ClassVar[bool] = True
-    """Whether this node type makes ``Call``s / runs the seam pipeline and fan-out fold
-    (agent, tool, MCP toolbox, custom ``BaseNodeDef`` subclasses). ``False`` only for
-    observers (``ConsumerNode``). Load-bearing for registration: caller-capable nodes are
-    pinned to ``max_workers=1`` because the seam pipeline and the fan-out fold are
-    await-spanning read-modify-writes that a no-affinity ``max_workers>1`` coroutine pool
-    would race (``concurrency-model.md``)."""
+    """Whether this node type handles ``Call``s and their ``ReturnCall`` continuations over
+    its own workflow state (agent, tool, MCP toolbox, custom ``BaseNodeDef`` subclasses);
+    ``False`` only for observers (``ConsumerNode``), which just consume. Subclasses may
+    override it. Load-bearing for registration: such nodes are pinned to ``max_workers=1``
+    because handling a continuation is an await-spanning read-modify-write of workflow state
+    — the agent's tool-call batch aggregation today, the in-node fan-out fold next — that a
+    no-affinity ``max_workers>1`` coroutine pool would race."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

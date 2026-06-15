@@ -142,8 +142,11 @@ class BaseClient:
                 ``KafkaBroker`` (e.g. ``security``, ``client_id``). Configure
                 broker/admin security with a FastStream ``security=`` object.
                 The shared producer defaults to ``acks="all"`` +
-                ``enable_idempotence=True`` (durable, non-duplicating publishes);
-                pass either here to override.
+                ``enable_idempotence=True`` (durable, non-duplicating publishes). To
+                relax durability, pass ``acks`` AND ``enable_idempotence=False``
+                together — ``acks`` below ``all`` alone is rejected by aiokafka, since
+                idempotence requires ``acks=all``. This hardening is a ``connect()``
+                default only; a hand-built broker passed to the constructor is untouched.
 
         Returns:
             A new client instance ready for use. Call ``broker.start()`` or use
@@ -198,12 +201,11 @@ class BaseClient:
         ensurer = StartupTopicEnsurer(config=provisioning)
         ensurer.declare([reply_topic], framework=True)
 
-        # calfkit hardens the shared producer: acks=all + idempotence, so a
-        # broker-acked publish survives leader failover and producer retries
-        # can't duplicate or reorder (fault-rail spec §13 — the fault rail's
-        # escalation hops and the in-node fan-out re-entry self-publish both
-        # depend on it). These are defaults only: a user may override either via
-        # ``Client.connect(**broker_kwargs)`` (document, don't police).
+        # calfkit hardens the shared producer: acks=all + idempotence, so a broker-acked
+        # publish survives leader failover and producer retries can't duplicate or reorder.
+        # Defaults only — a user may override via Client.connect(**broker_kwargs) (document,
+        # don't police). These apply to the connect()-built broker; a hand-built KafkaBroker
+        # passed to the constructor keeps aiokafka's defaults.
         producer_posture = {"acks": "all", "enable_idempotence": True}
         broker_connection = _PreStartHookBroker(
             server_list,
