@@ -3,6 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
+import uuid_utils
 from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 from faststream import Context, Response
 from faststream.kafka.annotations import (
@@ -25,10 +26,19 @@ from calfkit.models import (
 )
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
+from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import SessionRunContext
-from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore
+from calfkit.nodes._fanout_store import (
+    FANOUT_STORE_KEY,
+    FanoutBatchStore,
+    FoldAbort,
+    FoldComplete,
+    FoldParked,
+    FoldStray,
+    fold_sibling,
+)
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
 if TYPE_CHECKING:
@@ -438,6 +448,71 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if reply is None:
             return None  # a marked frame with no reply slot is not a fold/close continuation
         return "reentry" if reply.in_reply_to == frame.frame_id else "sibling"
+
+    async def _handle_fanout_open(
+        self, ctx: SessionRunContext, calls: list[Call[State]], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> Response:
+        """OPEN a durable fan-out batch, then publish the marked siblings (§4.1).
+
+        Pre-mint a callee slot id per ``Call``; register the batch (basestate snapshot THEN
+        state, awaiting acks before any sibling publishes — so *registration ⟹ basestate*);
+        then publish each sibling on its pre-minted id, with the node's OWN frame marked so
+        the marker survives the callee's return-pop. Returns the no-reply mirror — the
+        output is owed by the pending siblings."""
+        store = self._resolve_fanout_store(ctx)
+        fanout_id = envelope.internal_workflow_state.current_frame.frame_id
+        slot_ids = [uuid_utils.uuid7().hex for _ in calls]
+        reg = FanoutOpen(
+            fanout_id=fanout_id,
+            node_id=self.node_id,
+            expected=[SlotRef(frame_id=fid, tag=call.tag) for fid, call in zip(slot_ids, calls)],
+        )
+        snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
+        await store.open(fanout_id, reg, snapshot)
+        for call, slot_id in zip(calls, slot_ids):
+            wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
+            wf_copy.mark_fanout()  # mark the node's OWN (current top) frame, before the callee push
+            wf_copy.invoke_frame(call, self._return_topic, payload=call.body, frame_id=slot_id, tag=call.tag)
+            sibling = Envelope(
+                context=SessionRunContext(state=call.state, deps=envelope.context.deps),
+                internal_workflow_state=wf_copy,
+            )
+            await broker.publish(
+                sibling,
+                topic=wf_copy.current_frame.target_topic,
+                correlation_id=correlation_id,
+                key=correlation_id.encode(),
+                headers=self._headers("call", route=call.route),
+            )
+        envelope.reply = None  # no-reply mirror (I3): the output is owed by the pending siblings
+        return Response(envelope, headers=self._headers("call"))
+
+    async def _handle_sibling_fold(self, ctx: SessionRunContext, envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> Response:
+        """Fold one marked sibling reply into the durable batch (§4.2).
+
+        The reply is self-describing — ``in_reply_to`` is the slot id, ``tag`` the
+        tool_call_id, and the tool's result sits in ``ctx.state.tool_results[tag]``. Park
+        (no-reply mirror) until the batch completes; on completion self-publish the closure
+        re-entry. A stray is logged-and-ignored; a store abort strands the caller (pre-rail)."""
+        store = self._resolve_fanout_store(ctx)
+        frame = envelope.internal_workflow_state.current_frame
+        fanout_id = frame.frame_id  # == frame.fanout_id, the batch key
+        reply = envelope.reply
+        assert reply is not None  # guaranteed by _classify_fanout == "sibling"
+        tag = reply.tag
+        result = ctx.state.tool_results.get(tag) if tag is not None else None
+        outcome = FanoutOutcome(slot=reply.in_reply_to or "", tag=tag, result=result)
+        match await fold_sibling(store, fanout_id, outcome):
+            case FoldComplete():
+                await self._publish_reentry(envelope, correlation_id, broker)
+            case FoldStray(reason=reason):
+                logger.warning("[%s] fan-out stray (%s) slot=%s node=%s", correlation_id[:8], reason, reply.in_reply_to, self.node_id)
+            case FoldAbort(reason=reason):
+                logger.error("[%s] fan-out fold abort (%s) batch=%s node=%s; caller strands", correlation_id[:8], reason, fanout_id, self.node_id)
+            case FoldParked():
+                pass
+        envelope.reply = None  # no-reply mirror (_CONSUMED): the output is still owed
+        return Response(envelope, headers=self._headers("call"))
 
     async def _dispatch_routed(
         self,

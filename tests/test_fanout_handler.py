@@ -9,11 +9,17 @@ fake`). These pin the pieces the staged handler wires together in 6b-B:
 - _classify_fanout: marker + reply slot => SIBLING fold / RE-ENTRY close / NORMAL
 """
 
-import pytest
+from typing import Annotated, Any
 
-from calfkit._vendor.pydantic_ai.messages import ModelResponse, TextPart
+import pytest
+from faststream import Context
+from faststream.kafka import KafkaBroker, TestKafkaBroker
+
+from calfkit._vendor.pydantic_ai.messages import ModelResponse, TextPart, ToolReturn
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
+from calfkit.models import Call
 from calfkit.models.envelope import Envelope
+from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, SlotRef
 from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
@@ -21,6 +27,13 @@ from calfkit.nodes import Agent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.base import BaseNodeDef
 from tests._fanout_fakes import FakeFanoutBatchStore
+
+
+def _ctx_with_store(store: FakeFanoutBatchStore, *, deps: dict[str, Any] | None = None) -> SessionRunContext:
+    ctx = SessionRunContext(state=State(), deps=deps or {})
+    ctx._resources = {FANOUT_STORE_KEY: store}
+    ctx._correlation_id = "corr-1"
+    return ctx
 
 
 def _model(_messages: object, _info: AgentInfo) -> ModelResponse:
@@ -106,3 +119,112 @@ def test_classify_non_capable_node_is_normal() -> None:
     node = BaseNodeDef(node_id="n", subscribe_topics=["n.in"])
     env = _envelope(frame_id="A", fanout_id="A", reply_in_reply_to="B")
     assert node._classify_fanout(env) is None
+
+
+# ── OPEN dispatch path ───────────────────────────────────────────────────────
+
+
+async def test_handle_fanout_open_writes_open_and_publishes_marked_siblings() -> None:
+    broker = KafkaBroker("localhost")
+    captured: dict[str, Envelope] = {}
+
+    @broker.subscriber("tool.a", group_id="ta")
+    async def _ta(body: Envelope, _h: Annotated[dict[str, Any], Context("message.headers")]) -> None:
+        captured["tool.a"] = body
+
+    @broker.subscriber("tool.b", group_id="tb")
+    async def _tb(body: Envelope, _h: Annotated[dict[str, Any], Context("message.headers")]) -> None:
+        captured["tool.b"] = body
+
+    agent = _agent()
+    fake = FakeFanoutBatchStore()
+    ctx = _ctx_with_store(fake, deps={"k": "v"})
+    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={"k": "v"}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
+
+    async with TestKafkaBroker(broker):
+        await agent._handle_fanout_open(ctx, calls, env, "corr-1", broker)
+
+    state = await fake.read_state("A")
+    assert state is not None
+    assert {s.tag for s in state.open.expected} == {"tc1", "tc2"}
+    assert state.outcomes == {}
+    base = await fake.read_basestate("A")
+    assert base is not None
+    assert base.snapshot.deps == {"k": "v"}
+
+    assert set(captured) == {"tool.a", "tool.b"}
+    open_slot_ids = {s.frame_id for s in state.open.expected}
+    published_callee_ids = set()
+    for topic, tag in (("tool.a", "tc1"), ("tool.b", "tc2")):
+        stack = captured[topic].internal_workflow_state.call_stack._internal_list
+        callee, own_copy = stack[-1], stack[-2]
+        assert callee.target_topic == topic
+        assert callee.tag == tag  # the callee frame carries the tag (echoed on its reply)
+        assert callee.callback_topic == "a.private.return"  # returns to the agent's inbox
+        assert callee.fanout_id is None  # the callee frame is NOT marked
+        assert own_copy.frame_id == "A" and own_copy.fanout_id == "A"  # the node's OWN frame IS
+        published_callee_ids.add(callee.frame_id)
+    assert published_callee_ids == open_slot_ids  # OPEN slots == published callee frame ids
+
+
+# ── sibling fold + re-entry close paths ──────────────────────────────────────
+
+
+async def _open_batch(store: FakeFanoutBatchStore, *, slots: tuple[tuple[str, str], ...] = (("f1", "tc1"), ("f2", "tc2"))) -> None:
+    reg = FanoutOpen(fanout_id="A", node_id="a", expected=[SlotRef(frame_id=f, tag=t) for f, t in slots])
+    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A")
+    snap = EnvelopeSnapshot(state=State(), stack=WorkflowState(call_stack=Stack([own])), deps={})
+    await store.open("A", reg, snap)
+
+
+def _sibling(store: FakeFanoutBatchStore, *, slot: str, tag: str, value: str) -> tuple[SessionRunContext, Envelope]:
+    state = State()
+    state.add_tool_result(tag, ToolReturn(return_value=value))
+    ctx = SessionRunContext(state=state, deps={})
+    ctx._resources = {FANOUT_STORE_KEY: store}
+    ctx._correlation_id = "corr-1"
+    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A", fanout_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=state, deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+        reply=ReturnMessage(in_reply_to=slot, tag=tag, parts=[]),
+    )
+    return ctx, env
+
+
+async def test_handle_sibling_fold_parks_until_complete() -> None:
+    broker = KafkaBroker("localhost")
+    agent = _agent()
+    fake = FakeFanoutBatchStore()
+    await _open_batch(fake)
+    ctx, env = _sibling(fake, slot="f1", tag="tc1", value="r1")
+    async with TestKafkaBroker(broker):
+        resp = await agent._handle_sibling_fold(ctx, env, "corr-1", broker)
+    state = await fake.read_state("A")
+    assert state is not None and set(state.outcomes) == {"f1"}  # folded
+    assert resp.body.reply is None  # parked → no-reply mirror
+
+
+async def test_handle_sibling_fold_completes_and_publishes_reentry() -> None:
+    broker = KafkaBroker("localhost")
+    reentry: list[Envelope] = []
+
+    @broker.subscriber("a.private.return", group_id="re")
+    async def _re(body: Envelope, _h: Annotated[dict[str, Any], Context("message.headers")]) -> None:
+        reentry.append(body)
+
+    agent = _agent()
+    fake = FakeFanoutBatchStore()
+    await _open_batch(fake)
+    ctx1, env1 = _sibling(fake, slot="f1", tag="tc1", value="r1")
+    ctx2, env2 = _sibling(fake, slot="f2", tag="tc2", value="r2")
+    async with TestKafkaBroker(broker):
+        await agent._handle_sibling_fold(ctx1, env1, "corr-1", broker)  # park
+        await agent._handle_sibling_fold(ctx2, env2, "corr-1", broker)  # complete → re-entry
+    assert len(reentry) == 1
+    assert reentry[0].reply is not None and reentry[0].reply.in_reply_to == "A"
