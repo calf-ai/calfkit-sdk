@@ -74,6 +74,14 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
     :data:`~calfkit._protocol.NodeKind`. The ``"client"`` kind is reserved for the
     :class:`~calfkit.client.base.BaseClient` and is not a valid subclass override.
     """
+    is_caller_capable: ClassVar[bool] = True
+    """Whether this node type handles ``Call``s and their ``ReturnCall`` continuations over
+    its own workflow state (agent, tool, MCP toolbox, custom ``BaseNodeDef`` subclasses);
+    ``False`` only for observers (``ConsumerNode``), which just consume. Subclasses may
+    override it. Load-bearing for registration: such nodes are pinned to ``max_workers=1``
+    because handling a continuation is an await-spanning read-modify-write of workflow state
+    — the agent's tool-call batch aggregation today, the in-node fan-out fold next — that a
+    no-affinity ``max_workers>1`` coroutine pool would race."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

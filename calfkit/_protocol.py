@@ -6,6 +6,7 @@ worker, nodes — can depend on it without creating circular import chains.
 Do not add imports from ``calfkit.*`` to this module.
 """
 
+import re
 from typing import Any, Literal
 
 NodeKind = Literal["node", "agent", "tool", "client", "consumer", "toolbox"]
@@ -53,3 +54,23 @@ def decode_header_str(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return None
+
+
+# Kafka topic-name legality: charset [a-zA-Z0-9._-], 1-249 chars, with "." and ".."
+# reserved. Used to validate whole topic names (client reply topics/addresses) and the
+# name components interpolated into framework topics (a node_id in
+# "{node_id}.private.return"). Rejecting at construction turns an otherwise-remote failure
+# — an illegal name surfaces only as an argument-less UnknownTopicOrPartitionError /
+# request-timeout stall on another process — into a loud, local error.
+_KAFKA_TOPIC_RE = re.compile(r"[a-zA-Z0-9._-]{1,249}")
+
+
+def is_topic_safe(name: str) -> bool:
+    """Return ``True`` iff *name* is legal for a Kafka topic name.
+
+    Checks the charset (``[a-zA-Z0-9._-]``), the 1-249 length, and the reserved
+    ``"."`` / ``".."``. When *name* is a component interpolated into a longer topic
+    (e.g. a ``node_id`` in ``{node_id}.private.return``) this bounds the *component*,
+    not the assembled topic — a 249-char component can still yield an over-length topic.
+    """
+    return bool(_KAFKA_TOPIC_RE.fullmatch(name)) and name not in (".", "..")

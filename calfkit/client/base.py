@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -8,7 +7,7 @@ import uuid_utils
 from faststream.kafka import KafkaBroker
 from typing_extensions import Self
 
-from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, is_topic_safe
 from calfkit._routing import is_concrete_route_key
 from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client.invocation_handle import InvocationHandle
@@ -27,13 +26,6 @@ from calfkit.models.state import OverridesState
 from calfkit.provisioning import ProvisioningConfig, StartupTopicEnsurer
 
 logger = logging.getLogger(__name__)
-
-# Kafka's exact topic-name legality: [a-zA-Z0-9._-], 1-249 chars ("." and ".."
-# are additionally reserved). An illegal name would never get metadata at the
-# worker's terminal publish — a request_timeout stall into an argument-less
-# UnknownTopicOrPartitionError on a different process — so it is rejected
-# loudly at the client instead.
-_KAFKA_TOPIC_RE = re.compile(r"[a-zA-Z0-9._-]{1,249}")
 
 
 def _new_client_emitter_id(client_id: str | None = None) -> str:
@@ -149,6 +141,12 @@ class BaseClient:
             **broker_kwargs: Additional keyword arguments forwarded to
                 ``KafkaBroker`` (e.g. ``security``, ``client_id``). Configure
                 broker/admin security with a FastStream ``security=`` object.
+                The shared producer defaults to ``acks="all"`` +
+                ``enable_idempotence=True`` (durable, non-duplicating publishes). To
+                relax durability, pass ``acks`` AND ``enable_idempotence=False``
+                together — ``acks`` below ``all`` alone is rejected by aiokafka, since
+                idempotence requires ``acks=all``. This hardening is a ``connect()``
+                default only; a hand-built broker passed to the constructor is untouched.
 
         Returns:
             A new client instance ready for use. Call ``broker.start()`` or use
@@ -182,7 +180,7 @@ class BaseClient:
         client_id = uuid_utils.uuid7().hex
         if reply_topic is None:
             reply_topic = f"calf-client-reply-{client_id}"
-        elif not _KAFKA_TOPIC_RE.fullmatch(reply_topic) or reply_topic in (".", ".."):
+        elif not is_topic_safe(reply_topic):
             # The reply topic is the wire callback on every start()/execute()
             # frame and this client's own subscription — same legality rule,
             # same loud client-side rejection as send(reply_to=...).
@@ -203,11 +201,17 @@ class BaseClient:
         ensurer = StartupTopicEnsurer(config=provisioning)
         ensurer.declare([reply_topic], framework=True)
 
+        # calfkit hardens the shared producer: acks=all + idempotence, so a broker-acked
+        # publish survives leader failover and producer retries can't duplicate or reorder.
+        # Defaults only — a user may override via Client.connect(**broker_kwargs) (document,
+        # don't police). These apply to the connect()-built broker; a hand-built KafkaBroker
+        # passed to the constructor keeps aiokafka's defaults.
+        producer_posture = {"acks": "all", "enable_idempotence": True}
         broker_connection = _PreStartHookBroker(
             server_list,
             middlewares=[ContextInjectionMiddleware],
             pre_start=ensurer.run,
-            **broker_kwargs,
+            **{**producer_posture, **broker_kwargs},
         )
 
         dispatcher = _ReplyDispatcher(reply_ttl=reply_ttl)
@@ -396,7 +400,7 @@ class BaseClient:
         if reply_to is not None:
             if not reply_to.strip():
                 raise ValueError("reply_to must be a non-empty topic name or None")
-            if not _KAFKA_TOPIC_RE.fullmatch(reply_to) or reply_to in (".", ".."):
+            if not is_topic_safe(reply_to):
                 raise ValueError(
                     f"reply_to {reply_to!r} is not a valid Kafka topic name (allowed: letters, digits, '.', '_', '-'; max 249 chars; not '.' or '..')"
                 )
