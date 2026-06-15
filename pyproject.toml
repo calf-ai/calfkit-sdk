@@ -41,7 +41,7 @@ dependencies = [
     "typing-extensions>=4.15.0",
     "dishka>=1.9.1",
     "mcp>=1.27.2",
-    "ktables>=0.1.2",
+    "ktables>=0.2.0",
 ]
 
 [project.urls]
@@ -77,13 +77,6 @@ exclude = ["calfkit/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-
-# TODO(ktables>=0.1.2): remove once the py.typed marker ships
-# (https://github.com/ryan-yuuu/ktables/pull/6) — ktables IS typed; the
-# published wheel just lacks the PEP 561 marker.
-[[tool.mypy.overrides]]
-module = "ktables.*"
-ignore_missing_imports = true
 
 [tool.mypy]
 python_version = "3.10"

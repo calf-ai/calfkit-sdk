@@ -39,6 +39,7 @@ def _validate_consume_fn(consume_fn: Any) -> None:
 
 class ConsumerNode(Generic[OutputT], BaseNodeDef):
     _node_kind: ClassVar[NodeKind] = "consumer"
+    is_caller_capable: ClassVar[bool] = False  # observer: makes no Calls, runs no seam pipeline → uses the worker's max_workers
 
     def __init__(
         self,

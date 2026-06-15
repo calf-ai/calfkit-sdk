@@ -286,7 +286,7 @@ async def test_send_tool_overrides_only_builds_overrides(container):
     overrides carry the tool list and a None model_settings. A ToolProvider
     (here a ToolNodeDef) is normalized into its ToolBindings, same as
     ``Agent(tools=...)``."""
-    tool = agent_tool(lambda: "pong")  # a ToolProvider (ToolNodeDef)
+    tool = ping  # a ToolProvider (ToolNodeDef); a named fn yields a topic-safe node_id (a lambda's "tool_<lambda>" is rejected)
     client = container.get(Client)
     client._send = AsyncMock(return_value="cid")
 
@@ -302,7 +302,7 @@ async def test_send_tool_overrides_accepts_raw_bindings(container):
     """A raw ToolBinding passes through the override normalization verbatim."""
     from calfkit.models.tool_dispatch import ToolBinding
 
-    tool = agent_tool(lambda: "pong")
+    tool = ping
     binding = ToolBinding(tool_def=tool.tool_schema, dispatch_topic=tool.subscribe_topics[0])
     client = container.get(Client)
     client._send = AsyncMock(return_value="cid")

@@ -74,6 +74,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
     :data:`~calfkit._protocol.NodeKind`. The ``"client"`` kind is reserved for the
     :class:`~calfkit.client.base.BaseClient` and is not a valid subclass override.
     """
+    is_caller_capable: ClassVar[bool] = True
+    """Whether this node type makes ``Call``s / runs the seam pipeline and fan-out fold
+    (agent, tool, MCP toolbox, custom ``BaseNodeDef`` subclasses). ``False`` only for
+    observers (``ConsumerNode``). Load-bearing for registration: caller-capable nodes are
+    pinned to ``max_workers=1`` because the seam pipeline and the fan-out fold are
+    await-spanning read-modify-writes that a no-affinity ``max_workers>1`` coroutine pool
+    would race (``concurrency-model.md``)."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

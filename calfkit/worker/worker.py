@@ -72,7 +72,11 @@ class Worker(LifecycleHookMixin):
         Args:
             client: The calfkit Client (Kafka connection).
             nodes: List of ``BaseNodeDef`` instances to host.
-            max_workers: FastStream subscriber concurrency cap.
+            max_workers: FastStream subscriber concurrency cap for *observer*
+                (consumer) nodes. Caller-capable nodes (agents/tools/toolboxes)
+                are always registered with ``max_workers=1`` — their seam pipeline
+                and fan-out fold are await-spanning read-modify-writes that a
+                no-affinity concurrent subscriber would race.
             group_id: Optional Kafka consumer group override (defaults to
                 each node's name).
             extra_publish_kwargs: Forwarded to ``broker.publisher(...)``.
@@ -240,11 +244,21 @@ class Worker(LifecycleHookMixin):
                 topics,
                 node.publish_topic,
             )
+            # Caller-capable nodes (seam pipeline / fan-out fold) MUST consume serially:
+            # FastStream's max_workers>1 is a no-affinity coroutine pool that races the
+            # await-spanning read-modify-write. The worker's max_workers knob applies to
+            # observers; caller-capable nodes are framework-pinned to 1, overriding any
+            # worker/extra value (concurrency-model.md). The merge also avoids a duplicate
+            # max_workers kwarg when a user puts one in extra_subscribe_kwargs.
+            subscribe_kwargs = dict(self._extra_subscribe_kwargs)
+            if node.is_caller_capable:
+                subscribe_kwargs["max_workers"] = 1
+            else:
+                subscribe_kwargs.setdefault("max_workers", self._max_workers)
             subscriber = self._client._connection.subscriber(
                 *topics,
                 group_id=group_id,
-                max_workers=self._max_workers,
-                **self._extra_subscribe_kwargs,
+                **subscribe_kwargs,
             )
             handler = subscriber(node.handler)
             if node.publish_topic:

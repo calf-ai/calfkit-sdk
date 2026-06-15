@@ -1,5 +1,7 @@
 from dataclasses import KW_ONLY, dataclass
 
+from calfkit._protocol import is_topic_safe
+
 
 @dataclass
 class BaseNodeSchema:
@@ -22,3 +24,13 @@ class BaseNodeSchema:
         # silent zombie consumer.
         if not self.subscribe_topics:
             raise ValueError(f"node {self.node_id!r} requires at least one subscribe_topic; got empty list")
+        # node_id is interpolated raw into framework topic names
+        # (``{node_id}.private.return``, ``calf.fanout.{node_id}.*``), so it must be a
+        # legal Kafka topic-name component. Like the subscribe_topics guard, this lives
+        # here so it fires for every node kind (the one hook all subclasses run).
+        if not is_topic_safe(self.node_id):
+            raise ValueError(
+                f"node_id {self.node_id!r} is not a valid Kafka topic-name component "
+                "(allowed: letters, digits, '.', '_', '-'; 1-249 chars; not '.' or '..'); "
+                "it is embedded raw in framework topic names."
+            )

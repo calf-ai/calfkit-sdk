@@ -6,6 +6,7 @@ worker, nodes — can depend on it without creating circular import chains.
 Do not add imports from ``calfkit.*`` to this module.
 """
 
+import re
 from typing import Any, Literal
 
 NodeKind = Literal["node", "agent", "tool", "client", "consumer", "toolbox"]
@@ -53,3 +54,20 @@ def decode_header_str(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return None
+
+
+# Kafka topic-name legality: [a-zA-Z0-9._-], 1-249 chars ("." and ".." additionally
+# reserved). ``node_id`` is embedded raw in framework topic names
+# (``{node_id}.private.return``, ``calf.fanout.{node_id}.*``), and client reply
+# topics/addresses are topics directly. An illegal name only surfaces as a
+# request_timeout stall into an argument-less ``UnknownTopicOrPartitionError`` on a
+# different process, so it is rejected loudly at construction.
+_KAFKA_TOPIC_RE = re.compile(r"[a-zA-Z0-9._-]{1,249}")
+
+
+def is_topic_safe(name: str) -> bool:
+    """Return ``True`` iff *name* is a legal Kafka topic-name component.
+
+    Charset ``[a-zA-Z0-9._-]``, 1-249 chars; ``"."`` and ``".."`` are reserved.
+    """
+    return bool(_KAFKA_TOPIC_RE.fullmatch(name)) and name not in (".", "..")
