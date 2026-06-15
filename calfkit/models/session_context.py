@@ -54,6 +54,14 @@ class CallFrame:
     (``ReturnMessage.tag``) when this frame unwinds. The agent sets it to
     ``tool_call_id``. Transport metadata, never content. DORMANT until PR-B wires a
     producer (``Call.tag`` + the agent); ``None`` on every frame in PR-A."""
+    fanout_id: str | None = field(default=None)
+    """Fan-out batch marker: the fan-out node's OWN inbound ``frame_id``, stamped on
+    each sibling ``Call``'s frame copy at fan-out dispatch (and ONLY there). It routes a
+    marked sibling reply into the durable fold rather than the stateless-continuation
+    path, and its equality with the current frame id identifies the batch's closure
+    re-entry. ``None`` on every non-sibling frame (single calls, escalation hops); the
+    closure re-entry is built from the pre-stamp snapshot, so the continuation is
+    unmarked by construction."""
 
 
 CallFrameStack = Stack[CallFrame]
@@ -88,13 +96,14 @@ class WorkflowState(BaseModel):
     def unwind_frame(self) -> CallFrame:
         return self.call_stack.pop()
 
-    def invoke_frame(self, call: _Call, callback_topic: str | None, payload: Any = None) -> None:
+    def invoke_frame(self, call: _Call, callback_topic: str | None, payload: Any = None, *, fanout_id: str | None = None) -> None:
         if call.target_topic is None:
             raise Exception("")
         frame = CallFrame(
             target_topic=call.target_topic,
             callback_topic=callback_topic,
             payload=payload,
+            fanout_id=fanout_id,
         )
         return self.call_stack.push(frame)
 
