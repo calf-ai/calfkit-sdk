@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import typing
 
+import pydantic_core
 import pytest
 from pydantic import ValidationError
 
@@ -180,6 +181,34 @@ class TestBuildSafe:
         assert r8.details[FaultTypes.ELIDED]["causes"] == 1  # the depth-9 node drops
         assert _max_cause_depth(r8) <= 8
 
+    def test_breadcrumb_never_pushes_details_over_field_budget(self) -> None:
+        # round 2: the ELIDED breadcrumb is appended after the details clamp; on the
+        # buggy code a near-16-KB details + a forced elision pushed the field over its
+        # budget. The details field must stay within 16 KB regardless.
+        big = {"k": "v" * 16370}  # serializes just under 16 KB on its own
+        chain = [FrameRef(frame_id=f"f{i}", target_topic="t") for i in range(70)]
+        r = ErrorReport.build_safe(error_type="x", details=big, frame_chain=chain)
+        assert FaultTypes.ELIDED in r.details  # the elision is recorded
+        assert len(pydantic_core.to_json(r.details)) <= 16 * 1024
+
+    def test_caller_calf_namespace_details_key_is_stripped(self) -> None:
+        # round 2: calf.* is framework-reserved for details keys too — a caller value
+        # under it must not survive (even with no framework elision) and mislead a
+        # consumer; non-reserved keys are kept.
+        r = ErrorReport.build_safe(error_type="x", details={"calf.elided": {"user": "data"}, "ok": 1})
+        assert "calf.elided" not in r.details
+        assert r.details["ok"] == 1
+
+    def test_total_against_hostile_str_subclass(self) -> None:
+        # round 2: a str subclass whose __len__ raises breaks the clamp on the primary
+        # path AND, before the fix, the re-passed value re-broke it in the fallback.
+        class _EvilStr(str):
+            def __len__(self) -> int:
+                raise RuntimeError("len boom")
+
+        r = ErrorReport.build_safe(error_type="x", message=_EvilStr("hi"))
+        assert isinstance(r, ErrorReport)
+
 
 class TestImmutability:
     def test_error_report_is_frozen(self) -> None:
@@ -306,6 +335,24 @@ class TestNodeFaultError:
     def test_str_uses_message_then_error_type(self) -> None:
         assert str(NodeFaultError("billing.x")) == "billing.x"
         assert str(NodeFaultError("billing.x", message="over limit")) == "over limit"
+
+    def test_mint_rejects_calf_namespace_details_keys(self) -> None:
+        # round 2: the calf.* reservation extends to details keys so consumers can
+        # trust the namespace there too.
+        with pytest.raises(ValueError, match="calf"):
+            NodeFaultError("billing.x", details={"calf.foo": 1})
+
+    def test_mint_rejects_empty_or_blank_error_type(self) -> None:
+        # round 2: error_type is the contract; an empty/blank code is meaningless and
+        # would make str(e) empty and find("") match.
+        with pytest.raises(ValueError):
+            NodeFaultError("")
+        with pytest.raises(ValueError):
+            NodeFaultError("   ")
+
+    def test_str_is_never_empty_even_for_blank_received_report(self) -> None:
+        nfe = NodeFaultError(ErrorReport(error_type=""))
+        assert str(nfe) != ""
 
     def test_reduce_reconstructs_from_report(self) -> None:
         # __reduce__ must rebuild from the report, not replay self.args (a message

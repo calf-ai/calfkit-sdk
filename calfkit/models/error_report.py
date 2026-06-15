@@ -29,6 +29,13 @@ _MAX_CAUSES_DEPTH = 8
 _MAX_CAUSES_TOTAL = 64
 _MAX_FRAME_CHAIN = 64
 _MAX_DETAILS_BYTES = 16 * 1024
+# The details field budget covers user content AND the ELIDED breadcrumb appended
+# afterwards; reserve headroom for the breadcrumb so it can never push the field
+# over budget (the breadcrumb is a few small int/bool keys, well under the reserve).
+_ELIDED_RESERVE_BYTES = 512
+# Framework-reserved prefix for details keys (mirrors the error_type reservation),
+# so a consumer can trust a calf.* details key was written by the framework.
+_CALF_PREFIX = "calf."
 
 
 class FaultTypes:
@@ -85,8 +92,13 @@ class ErrorReport(BaseModel):
     Frozen: the report travels and is read at many surfaces (a seam's ``fault``
     arg, ``NodeFaultError.report``, ``ConsumerContext.fault``, the broadcast
     mirror) and — once the rail escalates it — passes up a frame chain untouched.
-    Immutability makes the "stable across hops" promise on ``report_id`` real and
+    Freezing makes the "stable across hops" promise on ``report_id`` real and
     matches the codebase's frozen wire values (``FailedToolCall``, ``CallFrame``).
+    The freeze is **shallow** — field *reassignment* is blocked, but the
+    ``causes``/``details``/``frame_chain`` containers remain mutable in place, so
+    transform a report you've handed off with ``model_copy(update=...)``, never by
+    mutating a container (e.g. the rail's batch-closure flatten copies metadata
+    onto a child's ``details`` via ``model_copy``).
     Bounds note: the carriage budgets are applied by :meth:`build_safe` at
     synthesis; the plain constructor (and inbound decode) are NOT re-bounded.
     """
@@ -192,6 +204,9 @@ class ErrorReport(BaseModel):
             bounded_causes = _bound_cause_list(list(causes or []), depth=2, budget=budget)
             bounded_chain, frames_dropped = _bound_frame_chain(list(frame_chain or []))
             bounded_details, details_bytes_dropped = _bound_details(dict(details or {}))
+            # calf.* details keys are framework-reserved; drop any a caller supplied so
+            # the framework's own ELIDED breadcrumb is authoritative and unambiguous.
+            bounded_details = {k: v for k, v in bounded_details.items() if not k.startswith(_CALF_PREFIX)}
             elided: dict[str, Any] = {}
             if budget.dropped:
                 elided["causes"] = budget.dropped
@@ -219,12 +234,15 @@ class ErrorReport(BaseModel):
             # under ELIDED — the fallback must not itself become a silent drop. Use
             # the exception class name (never str(exc), which can raise) and avoid
             # importing safe_exc_message to keep this module calfkit-import-free.
+            # ``type(x) is str`` (not isinstance): a str subclass with a hostile
+            # ``__len__``/``__getitem__`` is what likely broke the primary path's
+            # clamp, so re-passing it would re-break the fallback — coerce it out.
             return cls(
-                error_type=error_type if isinstance(error_type, str) else FaultTypes.UNHANDLED,
-                message=message if isinstance(message, str) else "",
-                retryable=retryable if isinstance(retryable, bool) else False,
-                origin_node_id=origin_node_id if isinstance(origin_node_id, str) else None,
-                origin_frame_id=origin_frame_id if isinstance(origin_frame_id, str) else None,
+                error_type=error_type if type(error_type) is str else FaultTypes.UNHANDLED,
+                message=message if type(message) is str else "",
+                retryable=retryable if type(retryable) is bool else False,
+                origin_node_id=origin_node_id if type(origin_node_id) is str else None,
+                origin_frame_id=origin_frame_id if type(origin_frame_id) is str else None,
                 details={FaultTypes.ELIDED: {"fallback": type(exc).__name__}},
             )
 
@@ -285,6 +303,8 @@ def _bound_details(details: dict[str, Any]) -> tuple[dict[str, Any], int | None]
         # reachable when something else (e.g. the rail) calls build_safe directly;
         # build_safe stays total regardless.
         return {}, None
-    if size <= _MAX_DETAILS_BYTES:
+    # Keep user content within the field budget LESS the breadcrumb reserve, so the
+    # ELIDED breadcrumb appended afterwards cannot push the field over budget.
+    if size <= _MAX_DETAILS_BYTES - _ELIDED_RESERVE_BYTES:
         return dict(details), 0
     return {}, size

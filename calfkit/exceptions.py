@@ -65,11 +65,17 @@ class NodeFaultError(Exception):
         else:
             # MINT: build a fresh report from a user-supplied type.
             error_type = error_type_or_report
+            if not error_type or error_type.isspace():
+                raise ValueError("error_type must be a non-empty code (it is the contract consumers branch on).")
             if error_type.startswith(_CALF_NAMESPACE):
                 raise ValueError(
                     f"error_type {error_type!r} is under the reserved {_CALF_NAMESPACE!r} prefix, which is "
                     "framework-only; choose a type outside it so consumers can trust the calf.* namespace."
                 )
+            if details:
+                reserved = sorted(k for k in details if k.startswith(_CALF_NAMESPACE))
+                if reserved:
+                    raise ValueError(f"details keys under the reserved {_CALF_NAMESPACE!r} prefix are framework-only: {reserved}.")
             # Eagerly check the details are JSON-serializable so an unserializable
             # value fails here, at the keyboard, not later on the error path. (An
             # oversized-but-serializable details is not rejected; build_safe bounds
@@ -79,7 +85,9 @@ class NodeFaultError(Exception):
             except Exception as exc:
                 raise ValueError(f"NodeFaultError details are not JSON-serializable: {safe_exc_message(exc)}") from exc
             self.report = ErrorReport.build_safe(error_type=error_type, message=message, retryable=retryable, details=details or {})
-        super().__init__(self.report.message or self.report.error_type)
+        # error_type can be empty on a *received* report (decode has no min_length);
+        # keep the exception string non-empty so logs/tracebacks never read blank.
+        super().__init__(self.report.message or self.report.error_type or "<unspecified fault>")
 
     def __reduce__(self) -> tuple[Any, tuple[ErrorReport]]:
         # Reconstruct from the report, not by replaying self.args (a message
