@@ -68,6 +68,12 @@ class BaseAgentNodeDef(
             model_settings=cast(ModelSettings | None, model_settings),
         )
 
+    @property
+    def _is_fanout_capable(self) -> bool:
+        """A non-sequential agent folds durable fan-out batches in-node; a
+        ``sequential_only_mode`` agent issues only single calls and never fans out."""
+        return not self.sequential_only_mode
+
     @staticmethod
     def _require_frame_id_for_write(ctx: SessionRunContext) -> str:
         """Resolve the per-invocation frame_id when WRITING a new parallel batch.

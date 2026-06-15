@@ -22,6 +22,11 @@ from calfkit.models.fanout import EnvelopeSnapshot, FanoutBaseState, FanoutOpen,
 
 logger = logging.getLogger(__name__)
 
+FANOUT_STORE_KEY = "calfkit.fanout.store"
+"""Resource-bag key under which a fan-out agent's :class:`FanoutBatchStore` lives — a
+node-owned ``@resource`` (ktables) in production, an injected fake in offline tests
+(``agent.resources[FANOUT_STORE_KEY] = fake``)."""
+
 
 class FanoutStoreUnavailableError(Exception):
     """The durable store is terminally unavailable, so freshness cannot be confirmed.

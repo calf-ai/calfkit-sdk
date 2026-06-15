@@ -1,7 +1,7 @@
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
 from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 from faststream import Context, Response
@@ -28,6 +28,7 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import SessionRunContext
+from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
 if TYPE_CHECKING:
@@ -398,6 +399,45 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             key=correlation_id.encode(),
             headers=self._headers("return"),
         )
+
+    @property
+    def _is_fanout_capable(self) -> bool:
+        """Whether this node folds durable fan-out batches in-node. ``False`` for every
+        node type except a non-sequential agent (which overrides this) — it gates the
+        staged handler's fan-out recognition and the OPEN dispatch path."""
+        return False
+
+    def _resolve_fanout_store(self, ctx: SessionRunContext) -> FanoutBatchStore:
+        """The node's durable fan-out store, from the resource bag.
+
+        Production: a node-owned ``@resource`` (ktables). Offline tests inject a fake
+        (``agent.resources[FANOUT_STORE_KEY] = fake``). Fan-out cannot proceed without it,
+        so a missing store is a misconfiguration (raise), never a silent skip."""
+        store = ctx.resources.get(FANOUT_STORE_KEY)
+        if store is None:
+            raise RuntimeError(
+                f"node={self.node_id} fanned out but no FanoutBatchStore is registered under "
+                f"{FANOUT_STORE_KEY!r}; a fan-out-capable agent needs its durable store resource."
+            )
+        return cast(FanoutBatchStore, store)
+
+    def _classify_fanout(self, envelope: Envelope) -> Literal["sibling", "reentry"] | None:
+        """Recognize a fan-out continuation on a fan-out-capable node.
+
+        ``"sibling"`` (a marked sibling reply → fold), ``"reentry"`` (the self-published
+        closure → close), or ``None`` (normal ingress / single-call continuation). The
+        marker rides the node's OWN frame (``fanout_id`` set), so it is the top frame when
+        a fan-out continuation re-enters; the reply slot's ``in_reply_to`` then tells a
+        sibling callee (≠ the frame id) from the re-entry (== it)."""
+        if not self._is_fanout_capable:
+            return None
+        frame = envelope.internal_workflow_state.current_frame_or_none
+        if frame is None or frame.fanout_id is None:
+            return None
+        reply = envelope.reply
+        if reply is None:
+            return None  # a marked frame with no reply slot is not a fold/close continuation
+        return "reentry" if reply.in_reply_to == frame.frame_id else "sibling"
 
     async def _dispatch_routed(
         self,
