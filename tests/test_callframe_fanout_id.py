@@ -73,3 +73,15 @@ def test_mark_fanout_only_marks_the_top_frame() -> None:
     top = ws.unwind_frame()
     assert top.fanout_id == "agent-frame"
     assert ws.current_frame.fanout_id is None  # the lower frame is untouched
+
+
+def test_call_carries_tag() -> None:
+    assert Call(target_topic="t", state=State(), tag="tc1").tag == "tc1"
+
+
+def test_invoke_frame_sets_caller_tag_on_frame() -> None:
+    # The fan-out OPEN passes each sibling's tool_call_id as the callee frame's tag, so
+    # the tool's reply echoes it (reply.tag) — a self-describing sibling reply.
+    ws = WorkflowState(call_stack=Stack())
+    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb", tag="tc1")
+    assert ws.current_frame.tag == "tc1"

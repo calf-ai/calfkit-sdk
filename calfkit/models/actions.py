@@ -31,15 +31,19 @@ class Call(Generic[StateT], _Call[StateT]):
 
     Optionally carries header-route-dispatch metadata: ``route`` (a concrete route
     key, stamped as the ``x-calf-route`` header on the publish) and ``body`` (an
-    optional payload validated against the target handler's ``schema``). These live
-    on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a route. ``init=False``
-    keeps the custom keyword-only ``route``/``body`` constructor while letting them
-    participate in ``__eq__``/``__repr__``."""
+    optional payload validated against the target handler's ``schema``). ``tag`` is the
+    caller's opaque correlation token (the agent sets it to ``tool_call_id``); the
+    framework carries it on the call frame and echoes it on the reply slot, so a fan-out
+    sibling's reply is self-describing (``reply.in_reply_to`` = slot id, ``reply.tag`` =
+    tool_call_id). These live on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a
+    route. ``init=False`` keeps the custom keyword-only ``route``/``body``/``tag``
+    constructor while letting them participate in ``__eq__``/``__repr__``."""
 
     route: str | None = None
     body: Any | None = None
+    tag: str | None = None
 
-    def __init__(self, target_topic: str, state: StateT, *, route: str | None = None, body: Any | None = None) -> None:
+    def __init__(self, target_topic: str, state: StateT, *, route: str | None = None, body: Any | None = None, tag: str | None = None) -> None:
         if route is not None and not is_concrete_route_key(route):
             raise ValueError(
                 f"Call route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
@@ -51,6 +55,7 @@ class Call(Generic[StateT], _Call[StateT]):
         super().__init__(target_topic, state)
         self.route = route
         self.body = body
+        self.tag = tag
 
 
 class TailCall(Generic[StateT], _Call[StateT]):

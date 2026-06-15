@@ -98,18 +98,21 @@ class WorkflowState(BaseModel):
     def unwind_frame(self) -> CallFrame:
         return self.call_stack.pop()
 
-    def invoke_frame(self, call: _Call, callback_topic: str | None, payload: Any = None, *, frame_id: str | None = None) -> None:
+    def invoke_frame(
+        self, call: _Call, callback_topic: str | None, payload: Any = None, *, frame_id: str | None = None, tag: str | None = None
+    ) -> None:
         if call.target_topic is None:
             raise Exception("")
         # ``frame_id`` lets the fan-out OPEN pre-mint each callee slot id, so the
-        # published callee frame *is* that id and a reply's ``in_reply_to`` matches
-        # the registered slot directly; ``None`` keeps the default fresh-uuid7 mint.
-        # ``invoke_frame`` never sets the ``fanout_id`` marker — that rides the node's
-        # OWN frame, not the pushed callee frame.
+        # published callee frame *is* that id and a reply's ``in_reply_to`` matches the
+        # registered slot directly; ``None`` keeps the default fresh-uuid7 mint. ``tag``
+        # (the caller's tool_call_id) rides the callee frame and is echoed on its reply,
+        # making a sibling reply self-describing. ``invoke_frame`` never sets the
+        # ``fanout_id`` marker — that rides the node's OWN frame, not the pushed callee.
         if frame_id is None:
-            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload)
+            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, tag=tag)
         else:
-            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, frame_id=frame_id)
+            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, frame_id=frame_id, tag=tag)
         return self.call_stack.push(frame)
 
     def mark_fanout(self) -> None:
