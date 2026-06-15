@@ -55,13 +55,15 @@ class CallFrame:
     ``tool_call_id``. Transport metadata, never content. DORMANT until PR-B wires a
     producer (``Call.tag`` + the agent); ``None`` on every frame in PR-A."""
     fanout_id: str | None = field(default=None)
-    """Fan-out batch marker: the fan-out node's OWN inbound ``frame_id``, stamped on
-    each sibling ``Call``'s frame copy at fan-out dispatch (and ONLY there). It routes a
-    marked sibling reply into the durable fold rather than the stateless-continuation
-    path, and its equality with the current frame id identifies the batch's closure
-    re-entry. ``None`` on every non-sibling frame (single calls, escalation hops); the
-    closure re-entry is built from the pre-stamp snapshot, so the continuation is
-    unmarked by construction."""
+    """Fan-out batch marker (= the fan-out node's OWN inbound ``frame_id``, which is
+    also the batch key for the durable tables). At fan-out dispatch it is stamped on the
+    node's **own** frame within each sibling's stack copy — *not* on the pushed callee
+    frame — so it survives the callee's return-pop and is the top frame when the sibling
+    reply re-enters this node, routing that reply into the durable fold rather than the
+    stateless-continuation path. A marked frame therefore has ``fanout_id == frame_id``.
+    ``None`` on every non-sibling frame (single calls, escalation hops); the closure
+    re-entry is built from the pre-stamp snapshot, so the continuation is unmarked by
+    construction."""
 
 
 CallFrameStack = Stack[CallFrame]
@@ -96,15 +98,18 @@ class WorkflowState(BaseModel):
     def unwind_frame(self) -> CallFrame:
         return self.call_stack.pop()
 
-    def invoke_frame(self, call: _Call, callback_topic: str | None, payload: Any = None, *, fanout_id: str | None = None) -> None:
+    def invoke_frame(self, call: _Call, callback_topic: str | None, payload: Any = None, *, frame_id: str | None = None) -> None:
         if call.target_topic is None:
             raise Exception("")
-        frame = CallFrame(
-            target_topic=call.target_topic,
-            callback_topic=callback_topic,
-            payload=payload,
-            fanout_id=fanout_id,
-        )
+        # ``frame_id`` lets the fan-out OPEN pre-mint each callee slot id, so the
+        # published callee frame *is* that id and a reply's ``in_reply_to`` matches
+        # the registered slot directly; ``None`` keeps the default fresh-uuid7 mint.
+        # ``invoke_frame`` never sets the ``fanout_id`` marker — that rides the node's
+        # OWN frame, not the pushed callee frame.
+        if frame_id is None:
+            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload)
+        else:
+            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, frame_id=frame_id)
         return self.call_stack.push(frame)
 
 

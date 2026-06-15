@@ -1,10 +1,16 @@
-"""PR-4 step 2: the fan-out marker carrier.
+"""PR-4: the fan-out marker carrier + caller-chosen slot frame ids.
 
-``CallFrame`` carries ``fanout_id`` — the fan-out node's own inbound ``frame_id``,
-stamped on each sibling ``Call``'s frame copy at fan-out dispatch (the stamping
-itself lands in step 5/6). It defaults to ``None`` (unmarked) on every non-sibling
-frame, and ``WorkflowState.invoke_frame`` accepts it as a keyword-only arg so the
-existing positional call sites are untouched. The marker must survive the JSON hop.
+``CallFrame`` carries ``fanout_id`` — the fan-out node's own inbound ``frame_id``.
+At fan-out dispatch it is stamped on the node's OWN frame within each sibling's stack
+copy (so it survives the callee's return-pop and is the top frame when the sibling
+reply re-enters this node), *not* on the pushed callee frame — the stamping op itself
+lands with the dispatch wiring. It defaults to ``None`` (unmarked) on every
+non-sibling frame and must survive the JSON hop.
+
+``WorkflowState.invoke_frame`` takes a keyword-only ``frame_id`` so the fan-out OPEN
+can pre-mint each callee slot's frame id: the published callee frame *is* that id, so
+a reply's ``in_reply_to`` matches the registered slot directly. Existing positional
+call sites are untouched, and ``invoke_frame`` never stamps the marker.
 """
 
 from calfkit.models.actions import Call
@@ -20,16 +26,27 @@ def test_callframe_carries_fanout_id() -> None:
     assert CallFrame(target_topic="t", callback_topic="cb", fanout_id="X").fanout_id == "X"
 
 
-def test_invoke_frame_unmarked_by_default() -> None:
+def test_invoke_frame_does_not_mark_pushed_frame() -> None:
+    # invoke_frame pushes the CALLEE frame; the fan-out marker belongs on the node's
+    # OWN frame, so the pushed callee frame is always unmarked.
     ws = WorkflowState(call_stack=Stack())
     ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb")
     assert ws.current_frame.fanout_id is None
 
 
-def test_invoke_frame_stamps_fanout_id() -> None:
+def test_invoke_frame_uses_caller_chosen_frame_id() -> None:
+    # The fan-out OPEN pre-mints each callee slot id and publishes the sibling on it,
+    # so a reply's in_reply_to matches the registered SlotRef.frame_id directly.
     ws = WorkflowState(call_stack=Stack())
-    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb", fanout_id="X")
-    assert ws.current_frame.fanout_id == "X"
+    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb", frame_id="slot-1")
+    assert ws.current_frame.frame_id == "slot-1"
+
+
+def test_invoke_frame_mints_frame_id_when_unspecified() -> None:
+    # Without a caller-chosen id, invoke_frame keeps minting a fresh uuid7 hex.
+    ws = WorkflowState(call_stack=Stack())
+    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb")
+    assert len(ws.current_frame.frame_id) == 32  # uuid7().hex
 
 
 def test_workflowstate_roundtrips_fanout_id() -> None:
