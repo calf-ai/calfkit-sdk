@@ -59,6 +59,8 @@ class NodeFaultError(Exception):
         if isinstance(error_type_or_report, ErrorReport):
             # RECEIVE/WRAP: carry an existing report verbatim. No namespace guard —
             # it may legitimately be a framework-minted calf.* the client re-raises.
+            if message or retryable or details is not None:
+                raise ValueError("message/retryable/details are mint-only; NodeFaultError(report) wraps a report verbatim.")
             self.report = error_type_or_report
         else:
             # MINT: build a fresh report from a user-supplied type.
@@ -68,8 +70,10 @@ class NodeFaultError(Exception):
                     f"error_type {error_type!r} is under the reserved {_CALF_NAMESPACE!r} prefix, which is "
                     "framework-only; choose a type outside it so consumers can trust the calf.* namespace."
                 )
-            # Eagerly check the details are wire-safe so an unserializable value
-            # fails here, at the keyboard, not later on the error path.
+            # Eagerly check the details are JSON-serializable so an unserializable
+            # value fails here, at the keyboard, not later on the error path. (An
+            # oversized-but-serializable details is not rejected; build_safe bounds
+            # it to 16 KB and records the drop under calf.elided.)
             try:
                 pydantic_core.to_json(details or {})
             except Exception as exc:

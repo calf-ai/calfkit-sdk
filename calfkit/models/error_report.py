@@ -51,9 +51,12 @@ class FaultTypes:
     SLOT_MATERIALIZATION_FAILED = "calf.slot.materialization_failed"
     AGENT_SELF_RETRY_EXHAUSTED = "calf.agent.self_retry_exhausted"
 
-    # details key: a non-silent breadcrumb recording what build_safe elided to
-    # stay within the carriage budget. Maps to a small dict, e.g.
-    # ``{"causes": 6, "frames": 6, "details_bytes": 20012}`` (only non-zero parts).
+    # details key: a non-silent breadcrumb recording what build_safe elided to stay
+    # within the carriage budget. Maps to a small dict carrying only the parts that
+    # applied: ``causes`` (int dropped), ``frames`` (int dropped), ``details_bytes``
+    # (int, oversized details dropped wholesale), ``details_unserializable`` (True),
+    # and ``fallback`` (the exception class name, when build_safe's last-resort arm
+    # dropped causes/frame_chain/details after an unexpected construction error).
     ELIDED = "calf.elided"
 
 
@@ -64,6 +67,8 @@ class FrameRef(BaseModel):
     data, so shipping them in every fault is a leak vector. With ``origin_payload``
     gone from the model, faults carry no user payloads by construction.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     frame_id: str
     target_topic: str
@@ -76,9 +81,17 @@ class ErrorReport(BaseModel):
     seams (the ``fault`` argument), the client (``NodeFaultError.report``) and
     sinks (``ConsumerContext.fault``). Exception identity never crosses the wire —
     ``error_type`` (a dotted string code) is the contract, not a class name.
+
+    Frozen: the report travels and is read at many surfaces (a seam's ``fault``
+    arg, ``NodeFaultError.report``, ``ConsumerContext.fault``, the broadcast
+    mirror) and — once the rail escalates it — passes up a frame chain untouched.
+    Immutability makes the "stable across hops" promise on ``report_id`` real and
+    matches the codebase's frozen wire values (``FailedToolCall``, ``CallFrame``).
+    Bounds note: the carriage budgets are applied by :meth:`build_safe` at
+    synthesis; the plain constructor (and inbound decode) are NOT re-bounded.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     report_id: str = Field(default_factory=lambda: uuid_utils.uuid7().hex)
     """Framework-minted UUID7 at synthesis — stable across hops and mirrors; the
@@ -179,12 +192,14 @@ class ErrorReport(BaseModel):
             bounded_causes = _bound_cause_list(list(causes or []), depth=2, budget=budget)
             bounded_chain, frames_dropped = _bound_frame_chain(list(frame_chain or []))
             bounded_details, details_bytes_dropped = _bound_details(dict(details or {}))
-            elided: dict[str, int] = {}
+            elided: dict[str, Any] = {}
             if budget.dropped:
                 elided["causes"] = budget.dropped
             if frames_dropped:
                 elided["frames"] = frames_dropped
-            if details_bytes_dropped:
+            if details_bytes_dropped is None:
+                elided["details_unserializable"] = True
+            elif details_bytes_dropped:
                 elided["details_bytes"] = details_bytes_dropped
             if elided:
                 bounded_details = {**bounded_details, FaultTypes.ELIDED: elided}
@@ -198,13 +213,19 @@ class ErrorReport(BaseModel):
                 details=bounded_details,
                 causes=bounded_causes,
             )
-        except Exception:
+        except Exception as exc:
+            # Last-resort total fallback: keep only the scalar identity that is safe
+            # to coerce, and record the wholesale drop of causes/frame_chain/details
+            # under ELIDED — the fallback must not itself become a silent drop. Use
+            # the exception class name (never str(exc), which can raise) and avoid
+            # importing safe_exc_message to keep this module calfkit-import-free.
             return cls(
                 error_type=error_type if isinstance(error_type, str) else FaultTypes.UNHANDLED,
                 message=message if isinstance(message, str) else "",
                 retryable=retryable if isinstance(retryable, bool) else False,
                 origin_node_id=origin_node_id if isinstance(origin_node_id, str) else None,
                 origin_frame_id=origin_frame_id if isinstance(origin_frame_id, str) else None,
+                details={FaultTypes.ELIDED: {"fallback": type(exc).__name__}},
             )
 
 
@@ -222,19 +243,19 @@ class _CauseBudget:
         self.dropped = 0
 
 
-def _count_tree(report: ErrorReport) -> int:
-    """Total number of reports in a cause subtree, ``report`` included."""
-    return 1 + sum(_count_tree(c) for c in report.causes)
-
-
 def _bound_cause_list(causes: list[ErrorReport], *, depth: int, budget: _CauseBudget) -> list[ErrorReport]:
     """Copy ``causes`` keeping the tree within the depth (≤ 8 levels below the
     root) and total-count (≤ 64) budgets; everything dropped is tallied on
-    ``budget.dropped`` so the caller can record it (never a silent drop)."""
+    ``budget.dropped`` so the caller can record it (never a silent drop).
+
+    A dropped cause is recursed with the budget already exhausted, so its whole
+    subtree falls through the same drop branch and is counted node-by-node — no
+    separate tree-walk is needed."""
     kept: list[ErrorReport] = []
     for cause in causes:
         if depth > _MAX_CAUSES_DEPTH or budget.remaining <= 0:
-            budget.dropped += _count_tree(cause)
+            budget.dropped += 1
+            _bound_cause_list(cause.causes, depth=depth + 1, budget=budget)  # tally the dropped subtree
             continue
         budget.remaining -= 1
         kept.append(cause.model_copy(update={"causes": _bound_cause_list(cause.causes, depth=depth + 1, budget=budget)}))
@@ -252,16 +273,18 @@ def _bound_frame_chain(chain: list[FrameRef]) -> tuple[list[FrameRef], int]:
     return [*chain[:head], *chain[-tail:]], len(chain) - _MAX_FRAME_CHAIN
 
 
-def _bound_details(details: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Bound ``details`` to ≤ 16 KB serialized. If it does not fit (or cannot be
-    serialized at all), drop it wholesale and return the dropped byte count so the
-    caller can leave a breadcrumb. Returns ``(bounded_details, bytes_dropped)``."""
+def _bound_details(details: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
+    """Bound ``details`` to ≤ 16 KB serialized. Returns ``(bounded_details, dropped)``
+    where ``dropped`` is the byte count dropped (``0`` if it fit), or ``None`` if the
+    details could not be serialized at all (dropped, size unmeasurable). The caller
+    turns each case into a distinct, non-magic breadcrumb."""
     try:
         size = len(pydantic_core.to_json(details))
     except Exception:
-        # Unserializable (NodeFaultError checks this at mint; build_safe stays
-        # total regardless): drop, marking the drop without a measurable size.
-        return {}, -1
+        # Unserializable. NodeFaultError checks this at mint, so this path is only
+        # reachable when something else (e.g. the rail) calls build_safe directly;
+        # build_safe stays total regardless.
+        return {}, None
     if size <= _MAX_DETAILS_BYTES:
         return dict(details), 0
     return {}, size

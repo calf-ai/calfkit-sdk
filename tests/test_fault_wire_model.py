@@ -10,6 +10,7 @@ from __future__ import annotations
 import typing
 
 import pytest
+from pydantic import ValidationError
 
 from calfkit._protocol import HDR_ERROR_TYPE, MessageKind
 from calfkit.exceptions import NodeFaultError
@@ -134,6 +135,63 @@ class TestBuildSafe:
         assert "big" not in r.details
         assert r.details[FaultTypes.ELIDED]["details_bytes"] > 0
 
+    def test_fallback_arm_records_breadcrumb_never_silent(self) -> None:
+        # A malformed input lands in the except-fallback; the wholesale drop of
+        # causes/frame_chain/details must NOT be silent — the whole feature exists
+        # to kill silent drops (review round 1, convergent MAJOR).
+        r = ErrorReport.build_safe(error_type="x", message="keep", causes=[123])  # type: ignore[list-item]
+        assert r.error_type == "x"
+        assert r.message == "keep"
+        assert r.causes == []
+        assert FaultTypes.ELIDED in r.details  # the drop is recorded
+
+    def test_unserializable_details_records_distinct_breadcrumb(self) -> None:
+        # Reachable when something other than NodeFaultError (which pre-checks at
+        # mint) calls build_safe directly — e.g. the rail. No magic -1 byte count.
+        r = ErrorReport.build_safe(error_type="x", details={"bad": object()})
+        assert isinstance(r, ErrorReport)
+        elided = r.details[FaultTypes.ELIDED]
+        assert elided.get("details_unserializable") is True
+        assert "details_bytes" not in elided
+
+    def test_report_id_preserved_through_cause_bounding(self) -> None:
+        child = ErrorReport(error_type="c")
+        r = ErrorReport.build_safe(error_type="root", causes=[child])
+        assert r.causes[0].report_id == child.report_id  # dedup key survives model_copy
+
+    def test_causes_boundary_64_kept_65_elides_one(self) -> None:
+        kept = [ErrorReport(error_type=f"c{i}") for i in range(64)]
+        r64 = ErrorReport.build_safe(error_type="g", causes=kept)
+        assert len(r64.causes) == 64 and FaultTypes.ELIDED not in r64.details
+        r65 = ErrorReport.build_safe(error_type="g", causes=[*kept, ErrorReport(error_type="extra")])
+        assert len(r65.causes) == 64 and r65.details[FaultTypes.ELIDED]["causes"] == 1
+
+    def test_frame_chain_boundary_64_kept_65_elides_one(self) -> None:
+        c = [FrameRef(frame_id=f"f{i}", target_topic="t") for i in range(64)]
+        r64 = ErrorReport.build_safe(error_type="x", frame_chain=c)
+        assert len(r64.frame_chain) == 64 and FaultTypes.ELIDED not in r64.details
+        r65 = ErrorReport.build_safe(error_type="x", frame_chain=[*c, FrameRef(frame_id="f64", target_topic="t")])
+        assert len(r65.frame_chain) == 64 and r65.details[FaultTypes.ELIDED]["frames"] == 1
+
+    def test_cause_depth_boundary_7_clean_8_elides(self) -> None:
+        r7 = ErrorReport.build_safe(error_type="root", causes=[_linear_cause_chain(7)])
+        assert FaultTypes.ELIDED not in r7.details  # chain sits at depths 2..8, all kept
+        r8 = ErrorReport.build_safe(error_type="root", causes=[_linear_cause_chain(8)])
+        assert r8.details[FaultTypes.ELIDED]["causes"] == 1  # the depth-9 node drops
+        assert _max_cause_depth(r8) <= 8
+
+
+class TestImmutability:
+    def test_error_report_is_frozen(self) -> None:
+        r = ErrorReport(error_type="x")
+        with pytest.raises(ValidationError):
+            r.error_type = "y"  # report_id is "the dedup key, stable across hops" — enforce it
+
+    def test_frame_ref_is_frozen(self) -> None:
+        ref = FrameRef(frame_id="f1", target_topic="t")
+        with pytest.raises(ValidationError):
+            ref.frame_id = "f2"
+
 
 class TestWalkAndFind:
     def test_walk_yields_self_then_nested_causes_preorder(self) -> None:
@@ -237,6 +295,17 @@ class TestNodeFaultError:
         # NOT trip the mint guard — the guard is only for user string mints.
         report = ErrorReport(error_type=FaultTypes.UNHANDLED)
         assert NodeFaultError(report).report.error_type == FaultTypes.UNHANDLED
+
+    def test_receive_rejects_mint_only_kwargs(self) -> None:
+        # message/retryable/details are mint-only; passing them with a report is a
+        # misuse that must fail loudly, not silently ignore them.
+        report = ErrorReport(error_type="x")
+        with pytest.raises(ValueError, match="mint-only"):
+            NodeFaultError(report, message="ignored")
+
+    def test_str_uses_message_then_error_type(self) -> None:
+        assert str(NodeFaultError("billing.x")) == "billing.x"
+        assert str(NodeFaultError("billing.x", message="over limit")) == "over limit"
 
     def test_reduce_reconstructs_from_report(self) -> None:
         # __reduce__ must rebuild from the report, not replay self.args (a message
