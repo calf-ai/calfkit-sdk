@@ -1,4 +1,4 @@
-.PHONY: help check lint-check lint-fix format-check format-fix type-check test fix build build-wheel clean publish-test
+.PHONY: help check lint-check lint-fix format-check format-fix type-check test test-kafka fix build build-wheel clean publish-test
 
 # Default target
 help:
@@ -9,7 +9,8 @@ help:
 	@echo "    make lint-check   - Run linter (ruff check)"
 	@echo "    make format-check - Check code formatting (ruff format --check)"
 	@echo "    make type-check   - Run type checker (mypy)"
-	@echo "    make test         - Run tests (pytest)"
+	@echo "    make test         - Run tests (pytest; real-broker tests deselected)"
+	@echo "    make test-kafka   - Run real-broker tests only (needs Docker; -m kafka)"
 	@echo ""
 	@echo "  Fixes:"
 	@echo "    make fix          - Fix all auto-fixable issues (lint + format)"
@@ -45,8 +46,12 @@ type-check:
 	@echo "✓ Type check passed"
 
 test:
-	@echo "Running tests..."
+	@echo "Running tests (real-broker 'kafka' tests deselected by default)..."
 	@uv run pytest tests/ -v
+
+test-kafka:
+	@echo "Running real-broker (Redpanda) tests... (requires Docker)"
+	@uv run --group integration pytest -m kafka -v --timeout=120
 
 # === Fixes ===
 

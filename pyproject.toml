@@ -91,6 +91,14 @@ omit = ["calfkit/_vendor/*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# --strict-markers: an unregistered marker is an error, not a silent no-op.
+# -m "not kafka": real-broker tests are OPT-IN. They are deselected by default
+# so a bare `pytest` / `make test` never needs Docker; run them with `-m kafka`
+# (see `make test-kafka`), whose CLI -m overrides this default selection.
+addopts = ["--strict-markers", "-m", "not kafka"]
+markers = [
+    "kafka: requires a real Kafka/Redpanda broker (testcontainers-managed unless CALF_TEST_KAFKA_BOOTSTRAP names an external broker)",
+]
 
 [dependency-groups]
 dev = [
@@ -115,4 +123,7 @@ examples = [
     "plotext>=5.3.2",
     "sympy>=1.13",
     "websockets>=16.0",
+]
+integration = [
+    "testcontainers[kafka]>=4.14.2",
 ]

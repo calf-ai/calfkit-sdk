@@ -319,15 +319,7 @@ See [ROADMAP.md](ROADMAP.md) for what's under consideration — listing there is
 
 Issues and pull requests are welcome. Please [open an issue](https://github.com/calf-ai/calfkit-sdk/issues) to discuss substantial changes before sending a PR.
 
-This project uses [uv](https://docs.astral.sh/uv/) for dependency management. Before raising a PR, make sure the checks pass:
-
-```console
-$ make fix     # auto-fix lint + formatting
-$ make check   # lint, format, and type checks
-$ make test    # run the test suite
-```
-
-PR titles follow [Conventional Commits](https://www.conventionalcommits.org/) (enforced by CI and used to generate the changelog).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the quality gates (`make fix` / `make check` / `make test`), PR conventions, and how to write and run tests — including the real-broker integration lane.
 
 <br>
 
