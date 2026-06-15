@@ -208,6 +208,36 @@ class TestBuildSafe:
 
         r = ErrorReport.build_safe(error_type="x", message=_EvilStr("hi"))
         assert isinstance(r, ErrorReport)
+        assert r.message == ""  # the hostile subclass is coerced out
+        assert r.details[FaultTypes.ELIDED]["fallback"] == "RuntimeError"
+
+    def test_details_kept_under_reserve_with_breadcrumb_stays_in_budget(self) -> None:
+        # round 3: the path the 512-byte reserve protects — user details kept just
+        # under threshold AND a breadcrumb appended — must stay within 16 KB.
+        chain = [FrameRef(frame_id=f"f{i}", target_topic="t") for i in range(70)]
+        r = ErrorReport.build_safe(error_type="x", details={"k": "v" * 15000}, frame_chain=chain)
+        assert "k" in r.details  # kept
+        assert FaultTypes.ELIDED in r.details  # breadcrumb present
+        assert len(pydantic_core.to_json(r.details)) <= 16 * 1024
+
+    def test_fallback_breadcrumb_class_name_is_bounded(self) -> None:
+        # round 3: a pathological (huge) exception class name must not blow the details
+        # budget. (A metaclass whose __name__ *raises* is unreachable by any real
+        # exception and is an accepted non-defense.)
+        huge = type("E" + "x" * 20000, (Exception,), {})
+
+        class _H(str):
+            def __len__(self) -> int:
+                raise huge("boom")
+
+        r = ErrorReport.build_safe(error_type="x", message=_H("hi"))
+        assert len(pydantic_core.to_json(r.details)) <= 16 * 1024
+
+    def test_oversized_reserved_key_does_not_evict_legit_details(self) -> None:
+        # round 3: a caller calf.* key is stripped; its size must not evict legit keys.
+        r = ErrorReport.build_safe(error_type="x", details={"calf.elided": "z" * 20000, "ok": 1})
+        assert "calf.elided" not in r.details
+        assert r.details.get("ok") == 1
 
 
 class TestImmutability:

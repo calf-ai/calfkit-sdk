@@ -203,10 +203,11 @@ class ErrorReport(BaseModel):
             budget = _CauseBudget()
             bounded_causes = _bound_cause_list(list(causes or []), depth=2, budget=budget)
             bounded_chain, frames_dropped = _bound_frame_chain(list(frame_chain or []))
-            bounded_details, details_bytes_dropped = _bound_details(dict(details or {}))
-            # calf.* details keys are framework-reserved; drop any a caller supplied so
-            # the framework's own ELIDED breadcrumb is authoritative and unambiguous.
-            bounded_details = {k: v for k, v in bounded_details.items() if not k.startswith(_CALF_PREFIX)}
+            # calf.* details keys are framework-reserved; drop any a caller supplied
+            # BEFORE bounding, so the framework's ELIDED breadcrumb stays authoritative
+            # and a reserved key's size can never evict legitimate user keys.
+            user_details = {k: v for k, v in dict(details or {}).items() if not k.startswith(_CALF_PREFIX)}
+            bounded_details, details_bytes_dropped = _bound_details(user_details)
             elided: dict[str, Any] = {}
             if budget.dropped:
                 elided["causes"] = budget.dropped
@@ -243,7 +244,7 @@ class ErrorReport(BaseModel):
                 retryable=retryable if type(retryable) is bool else False,
                 origin_node_id=origin_node_id if type(origin_node_id) is str else None,
                 origin_frame_id=origin_frame_id if type(origin_frame_id) is str else None,
-                details={FaultTypes.ELIDED: {"fallback": type(exc).__name__}},
+                details={FaultTypes.ELIDED: {"fallback": type(exc).__name__[:200]}},
             )
 
 
