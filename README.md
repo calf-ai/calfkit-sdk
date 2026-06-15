@@ -322,9 +322,10 @@ Issues and pull requests are welcome. Please [open an issue](https://github.com/
 This project uses [uv](https://docs.astral.sh/uv/) for dependency management. Before raising a PR, make sure the checks pass:
 
 ```console
-$ make fix     # auto-fix lint + formatting
-$ make check   # lint, format, and type checks
-$ make test    # run the test suite
+$ make fix         # auto-fix lint + formatting
+$ make check       # lint, format, and type checks
+$ make test        # run the test suite (real-broker tests excluded)
+$ make test-kafka  # real-broker integration tests, via testcontainers (needs Docker)
 ```
 
 PR titles follow [Conventional Commits](https://www.conventionalcommits.org/) (enforced by CI and used to generate the changelog).

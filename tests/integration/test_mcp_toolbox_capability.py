@@ -1,8 +1,9 @@
 """Integration: MCPToolbox publishes real CapabilityRecords a KafkaTable can read.
 
-Real Kafka writer + reader (ktables) against a broker on localhost:9092 —
-skipped when unreachable. The MCP session stays fake (no MCP server needed:
-the session surface used by publishing is just ``list_tools``).
+Real Kafka writer + reader (ktables) against a live broker supplied by the
+``kafka_bootstrap`` fixture (testcontainers-managed Redpanda, or an external
+broker via ``CALF_TEST_KAFKA_BOOTSTRAP``). The MCP session stays fake (no MCP
+server needed: the session surface used by publishing is just ``list_tools``).
 """
 
 from __future__ import annotations
@@ -21,7 +22,8 @@ from calfkit.models.capability import CapabilityRecord
 from calfkit.worker.lifecycle import ServingContext
 from calfkit.worker.worker_config import MCPDiscoveryConfig
 
-BOOTSTRAP = "localhost:9092"
+# Every test here needs a real broker.
+pytestmark = pytest.mark.kafka
 
 
 class FakeSession:
@@ -30,21 +32,23 @@ class FakeSession:
 
 
 @pytest.fixture
-async def capability_topic():
-    admin = AIOKafkaAdminClient(bootstrap_servers=BOOTSTRAP)
-    try:
-        await admin.start()
-    except Exception:
-        pytest.skip(f"no Kafka broker reachable at {BOOTSTRAP}")
+async def capability_topic(kafka_bootstrap: str):
+    # Broker availability is guaranteed by ``kafka_bootstrap`` (the lane skips
+    # cleanly when no broker is available), so a connect failure here is a real
+    # error, not a reason to skip.
+    admin = AIOKafkaAdminClient(bootstrap_servers=kafka_bootstrap)
+    await admin.start()
     name = f"calf.test.capabilities.{uuid.uuid4().hex[:8]}"
-    yield name
     try:
-        await admin.delete_topics([name])
+        yield name
     finally:
-        await admin.close()
+        try:
+            await admin.delete_topics([name])
+        finally:
+            await admin.close()
 
 
-async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str) -> None:
+async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str, kafka_bootstrap: str) -> None:
     toolbox = MCPToolbox(
         "docs_server",
         connection_params=StreamableHttpParameters(url="http://unused.local/mcp"),
@@ -53,7 +57,7 @@ async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str) 
     from types import SimpleNamespace
 
     toolbox._worker = SimpleNamespace(
-        _mcp_discovery=MCPDiscoveryConfig(topic=capability_topic, heartbeat_interval=0.05, bootstrap_servers=BOOTSTRAP),
+        _mcp_discovery=MCPDiscoveryConfig(topic=capability_topic, heartbeat_interval=0.05, bootstrap_servers=kafka_bootstrap),
         _client=None,
     )
 
@@ -65,7 +69,7 @@ async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str) 
     ctx = ServingContext(toolbox, toolbox.resources, broker=None)  # type: ignore[arg-type]
 
     table: KafkaTable[CapabilityRecord] = KafkaTable.json(
-        bootstrap_servers=BOOTSTRAP, topic=capability_topic, model=CapabilityRecord, ensure_topic=False
+        bootstrap_servers=kafka_bootstrap, topic=capability_topic, model=CapabilityRecord, ensure_topic=False
     )
     async with table:
         try:
@@ -101,7 +105,7 @@ async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str) 
         await anext(writer_gen)  # close the writer bracket
 
 
-async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str) -> None:
+async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str, kafka_bootstrap: str) -> None:
     """Spec §8.7: toolbox publishes -> worker view catches up -> agent turn
     resolves bindings -> clean shutdown tombstones -> next turn degrades."""
     from calfkit.client.client import Client
@@ -123,7 +127,7 @@ async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str) -> 
         async def request(self, *args: object, **kwargs: object) -> object:
             raise NotImplementedError
 
-    discovery = MCPDiscoveryConfig(topic=capability_topic, heartbeat_interval=5.0, bootstrap_servers=BOOTSTRAP)
+    discovery = MCPDiscoveryConfig(topic=capability_topic, heartbeat_interval=5.0, bootstrap_servers=kafka_bootstrap)
 
     # Toolbox side (as if hosted in another worker): real writer, real publish.
     from types import SimpleNamespace
@@ -145,7 +149,7 @@ async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str) -> 
         model_client=FakeModel(),
         tools=[toolbox.select(include=["search"])],
     )
-    client = Client.connect(BOOTSTRAP)
+    client = Client.connect(kafka_bootstrap)
     worker = Worker(client, nodes=[agent], mcp_discovery=discovery)
     worker._maybe_register_capability_view()
     [(name, genfn)] = [(n, g) for n, g in worker._resource_cms() if n == CAPABILITY_VIEW_RESOURCE_KEY]
