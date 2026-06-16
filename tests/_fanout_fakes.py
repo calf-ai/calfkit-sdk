@@ -58,3 +58,29 @@ class FakeFanoutBatchStore:
         self._guard()
         self._state.pop(fanout_id, None)
         self._basestate.pop(fanout_id, None)
+
+
+class OfflineFanoutBatchStore(FakeFanoutBatchStore):
+    """Constructor-compatible offline stand-in for :class:`KtablesFanoutBatchStore`.
+
+    A fan-out agent opens its durable store as a node ``@resource`` that runs on every
+    ``worker.start()``; offline (no broker) that bracket must not dial a real cluster. The
+    autouse ``_offline_fanout_store`` fixture (``tests/conftest.py``) swaps this class in for
+    ``calfkit.nodes.agent.KtablesFanoutBatchStore``, so any Worker hosting a fan-out agent boots
+    broker-free by default — no per-test injection.
+
+    It mirrors the real store's constructor signature exactly (so a future signature change
+    surfaces as a loud failure rather than silent skew) and adds the no-op ``start``/``stop`` the
+    bracket awaits — neither is on the :class:`FanoutBatchStore` Protocol, so the inherited
+    in-memory fold alone is not a drop-in. The transport kwargs are accepted and ignored: an
+    in-memory store has no cluster to reach.
+    """
+
+    def __init__(self, *, bootstrap_servers: str, node_id: str, catchup_timeout: float | None = None) -> None:
+        super().__init__()
+
+    async def start(self) -> None:
+        """No-op: there is no cluster to connect to or catch up against."""
+
+    async def stop(self) -> None:
+        """No-op: nothing to close."""
