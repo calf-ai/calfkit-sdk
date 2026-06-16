@@ -1,5 +1,4 @@
 import logging
-from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar, Generic, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
@@ -219,20 +218,3 @@ class NodeConsumeState(BaseModel, Generic[AgentStateSubsetT]):
 
     model_config = ConfigDict(extra="ignore")
     run_state: AgentStateSubsetT
-
-
-@dataclass
-class PendingToolBatch:
-    """Tracks an in-flight parallel tool call batch for one correlation chain."""
-
-    expected_tool_call_ids: frozenset[str]
-
-    # State snapshot at fan-out time, with tool_calls registered
-    base_state: State
-
-    # map of tool call IDs to tool call results
-    collected_results: dict[str, CalfToolResult | Any] = field(default_factory=dict)
-
-    @property
-    def is_complete(self) -> bool:
-        return self.expected_tool_call_ids == frozenset(self.collected_results.keys())

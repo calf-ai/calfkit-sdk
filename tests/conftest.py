@@ -21,6 +21,7 @@ from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.worker import Worker
+from tests._fanout_fakes import OfflineFanoutBatchStore
 from tests.providers import (
     INSTRUCTIONS_TEST_SYSTEM_PROMPT,
     AgentProvider,
@@ -38,6 +39,25 @@ from tests.providers import (
 load_dotenv()
 
 fake = Faker()
+
+
+@pytest.fixture(autouse=True)
+def _offline_fanout_store(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the offline lane broker-free for fan-out agents.
+
+    A fan-out agent opens its durable batch store as a node ``@resource`` that runs on every
+    ``worker.start()`` and, in production, dials a live cluster via ktables. Offline there is no
+    broker, so the store the bracket constructs is swapped for an in-memory drop-in
+    (:class:`OfflineFanoutBatchStore`). Every Worker hosting a fan-out agent then boots broker-free
+    by default — there is no per-test injection to remember, and a test can no longer silently
+    re-acquire a hidden live-broker dependency at ``worker.start()``.
+
+    The ``kafka`` lane is exempt: those tests assert the *real* ``KtablesFanoutBatchStore`` opens
+    its tables over the wire (see ``tests/integration/test_durable_fanout_agent_kafka.py``).
+    """
+    if request.node.get_closest_marker("kafka") is not None:
+        return
+    monkeypatch.setattr("calfkit.nodes.agent.KtablesFanoutBatchStore", OfflineFanoutBatchStore)
 
 
 @pytest.fixture

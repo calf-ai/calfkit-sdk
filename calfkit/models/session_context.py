@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Generic
 
@@ -51,9 +51,20 @@ class CallFrame:
     node validating a ``ToolCallRef``). ``None`` when the producer sent no body."""
     tag: str | None = field(default=None)
     """Caller-set opaque correlation token, echoed verbatim on the reply
-    (``ReturnMessage.tag``) when this frame unwinds. The agent sets it to
-    ``tool_call_id``. Transport metadata, never content. DORMANT until PR-B wires a
-    producer (``Call.tag`` + the agent); ``None`` on every frame in PR-A."""
+    (``ReturnMessage.tag``) when this frame unwinds. The agent sets it to ``tool_call_id`` on
+    fan-out tool ``Call``s so a sibling reply is self-describing — the durable fold reads that
+    sibling's result from ``state.tool_results[reply.tag]``. Transport metadata, never content.
+    ``None`` on frames whose producer set no ``Call.tag`` (single/sequential calls, escalation hops)."""
+    fanout_id: str | None = field(default=None)
+    """Fan-out batch marker (= the fan-out node's OWN inbound ``frame_id``, which is
+    also the batch key for the durable tables). At fan-out dispatch it is stamped on the
+    node's **own** frame within each sibling's stack copy — *not* on the pushed callee
+    frame — so it survives the callee's return-pop and is the top frame when the sibling
+    reply re-enters this node, routing that reply into the durable fold rather than the
+    stateless-continuation path. A marked frame therefore has ``fanout_id == frame_id``.
+    ``None`` on every non-sibling frame (single calls, escalation hops); the closure
+    re-entry is built from the pre-stamp snapshot, so the continuation is unmarked by
+    construction."""
 
 
 CallFrameStack = Stack[CallFrame]
@@ -88,15 +99,31 @@ class WorkflowState(BaseModel):
     def unwind_frame(self) -> CallFrame:
         return self.call_stack.pop()
 
-    def invoke_frame(self, call: _Call, callback_topic: str | None, payload: Any = None) -> None:
+    def invoke_frame(
+        self, call: _Call, callback_topic: str | None, payload: Any = None, *, frame_id: str | None = None, tag: str | None = None
+    ) -> None:
         if call.target_topic is None:
             raise Exception("")
-        frame = CallFrame(
-            target_topic=call.target_topic,
-            callback_topic=callback_topic,
-            payload=payload,
-        )
+        # ``frame_id`` lets the fan-out OPEN pre-mint each callee slot id, so the
+        # published callee frame *is* that id and a reply's ``in_reply_to`` matches the
+        # registered slot directly; ``None`` keeps the default fresh-uuid7 mint. ``tag``
+        # (the caller's tool_call_id) rides the callee frame and is echoed on its reply,
+        # making a sibling reply self-describing. ``invoke_frame`` never sets the
+        # ``fanout_id`` marker — that rides the node's OWN frame, not the pushed callee.
+        if frame_id is None:
+            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, tag=tag)
+        else:
+            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, frame_id=frame_id, tag=tag)
         return self.call_stack.push(frame)
+
+    def mark_fanout(self) -> None:
+        """Stamp the current (top) frame as the fan-out origin: set ``fanout_id`` to the
+        frame's OWN ``frame_id`` (the batch key). ``CallFrame`` is frozen, so this replaces
+        the top frame with a marked copy. The marker rides the node's own frame — *not* the
+        pushed callee frames — so it survives the callee's return-pop and is the top frame
+        when a sibling reply re-enters this node, routing it into the durable fold."""
+        frame = self.call_stack.pop()
+        self.call_stack.push(replace(frame, fanout_id=frame.frame_id))
 
 
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
@@ -162,15 +189,15 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     def frame_id(self) -> str | None:
         """Per-invocation identifier of the current call frame on the workflow stack.
 
-        Set by ``BaseNodeDef.prepare_context`` from
-        ``envelope.internal_workflow_state.current_frame.frame_id``. Every
-        ``Call`` published by the framework pushes a fresh ``CallFrame`` with a
-        UUID7-generated ``frame_id``, so parallel invocations of the same node
-        (which share a single ``correlation_id``) are still uniquely
-        identifiable per invocation. Used by the agent to key its in-memory
-        parallel tool-batch aggregation dict so concurrent fan-outs do not
-        collide. Backed by a ``PrivateAttr`` so it never rides on the wire and
-        cannot be spoofed via the model constructor.
+        Set by ``BaseNodeDef.prepare_context`` from the inbound frame
+        (``envelope.internal_workflow_state.current_frame.frame_id``), so it is the id
+        of the frame this delivery is running under. Every ``Call`` published by the
+        framework pushes a fresh ``CallFrame`` with a UUID7-generated ``frame_id``, so
+        parallel invocations of the same node (which share a single ``correlation_id``)
+        are still uniquely identifiable per invocation. No longer tied to any in-process
+        aggregation (durable fan-out is keyed by ``fanout_id`` in the store, not by this
+        field). Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be
+        spoofed via the model constructor.
         """
         return self._frame_id
 

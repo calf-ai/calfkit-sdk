@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Generic, cast
 
 from pydantic import ValidationError
@@ -15,15 +15,16 @@ from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.exceptions import MCPToolResolutionError, ToolExecutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
-from calfkit.models.actions import Silent
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.state import FailedToolCall, PendingToolBatch
+from calfkit.models.state import FailedToolCall
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
+from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, GateFunction
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
+from calfkit.worker.lifecycle import ResourceSetupContext
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,6 @@ class BaseAgentNodeDef(
         self.system_prompt = system_prompt
         self.tools, self._tool_selectors = split_tool_declarations(tools)
         self.sequential_only_mode = sequential_only_mode
-        self._pending_batches: dict[str, PendingToolBatch] = dict()
 
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
@@ -68,98 +68,41 @@ class BaseAgentNodeDef(
             model_settings=cast(ModelSettings | None, model_settings),
         )
 
-    @staticmethod
-    def _require_frame_id_for_write(ctx: SessionRunContext) -> str:
-        """Resolve the per-invocation frame_id when WRITING a new parallel batch.
+        if not self.sequential_only_mode:
+            # A true fan-out agent owns its durable batch store as a node @resource (opened by the
+            # worker lifecycle before serving; mirrors the worker's Capability View resource). The
+            # @resource never runs under the synchronous TestKafkaBroker — offline, the test harness
+            # injects a fake into the bag instead (tests/providers.py::prepare_worker).
+            self.resource(name=FANOUT_STORE_KEY)(self._fanout_store_resource)
 
-        ``ctx.frame_id`` is populated by ``BaseNodeDef.prepare_context`` from
-        ``envelope.internal_workflow_state.current_frame.frame_id``. It is the
-        only correct key for ``_pending_batches`` because parallel invocations
-        of the same agent share a single ``correlation_id`` — see
-        :meth:`_parallel_state_aggregation` for the collision scenario this
-        defends against. A ``None`` value at write time means the agent was
-        invoked outside the framework's prepare-context path (e.g. a test
-        driving ``run()`` directly without seeding ``_frame_id``); raising is
-        the right call because silently bucketing every batch under ``None``
-        would re-introduce the exact bug this keying is designed to prevent.
+    async def _fanout_store_resource(self, ctx: ResourceSetupContext["BaseAgentNodeDef[AgentOutputT]"]) -> AsyncIterator[FanoutBatchStore]:
+        """Open this fan-out agent's durable batch store for the worker's lifetime.
 
-        Read-side lookups tolerate ``None`` (treated as "no batch present")
-        because the only way a read can find a ``None``-keyed entry is if a
-        write was previously allowed to use ``None`` — which this guard
-        prevents at the source.
+        Mirrors the worker's Capability View resource: each ktables reader's ``start()`` is the
+        catch-up gate (replays the compacted state/basestate topics to their start-time offsets),
+        and the topics self-provision compacted via ktables' ``ensure_topic``. The resulting store
+        lands in this node's own ``ctx.resources`` under :data:`FANOUT_STORE_KEY`.
         """
-        frame_id = ctx.frame_id
-        if frame_id is None:
+        worker = self._worker
+        if worker is None:
+            raise RuntimeError(f"fan-out agent {self.node_id!r} has no hosting worker; cannot open its durable store")
+        bootstrap = worker._derive_bootstrap_servers()
+        if not bootstrap:
             raise RuntimeError(
-                "ctx.frame_id is None — parallel tool-batch dispatch requires a "
-                "frame_id, normally populated by BaseNodeDef.prepare_context from "
-                "the inbound envelope's current_frame. If you are driving run() "
-                "directly in a test that fans out a parallel batch, set "
-                "ctx._frame_id before invoking."
+                f"cannot derive Kafka bootstrap servers for fan-out agent {self.node_id!r}'s durable store (client built without connect()?)."
             )
-        return frame_id
+        store = KtablesFanoutBatchStore(bootstrap_servers=bootstrap, node_id=self.node_id)
+        await store.start()
+        try:
+            yield store
+        finally:
+            await store.stop()
 
-    def _parallel_state_aggregation(self, ctx: SessionRunContext) -> None:
-        # Keyed on ``ctx.frame_id`` (per-invocation), NOT ``ctx.correlation_id``:
-        # a supervisor that fans out two ``Call``s to the same agent topic shares one
-        # ``correlation_id`` across both invocations. Each invocation publishes onto
-        # its own fresh ``CallFrame`` (UUID7 ``frame_id``), so the per-invocation
-        # frame is the only key that keeps concurrent batches from clobbering each
-        # other in this dict.
-        frame_id = ctx.frame_id
-        if frame_id is None:
-            # ``BaseNodeDef.prepare_context`` unconditionally mirrors
-            # ``current_frame.frame_id`` (which has a ``default_factory``) onto
-            # ``ctx._frame_id``, so a None here means ``run()`` was driven outside
-            # the framework handler — either a unit test or a subclass that
-            # bypasses ``prepare_context``. Warn loudly so a future regression in
-            # the handler path surfaces immediately instead of silently skipping
-            # aggregation and potentially advancing past a real batch.
-            logger.warning(
-                "[%s] _parallel_state_aggregation: ctx.frame_id is None on node=%s; "
-                "skipping aggregation. prepare_context is the only legitimate "
-                "population path for _frame_id — a None value here indicates run() "
-                "was driven outside the framework handler.",
-                ctx.correlation_id[:8],
-                self.name,
-            )
-            return
-        batch = self._pending_batches.get(frame_id)
-        if batch is not None:
-            for tool_call_id in batch.expected_tool_call_ids:
-                if tool_call_id not in batch.collected_results and tool_call_id in ctx.state.tool_results:
-                    batch.collected_results[tool_call_id] = ctx.state.tool_results[tool_call_id]
-
-            if batch.is_complete:
-                for tool_call_id, tool_call_result in batch.collected_results.items():
-                    batch.base_state.add_tool_result(tool_call_id, tool_call_result)
-                ctx.state = batch.base_state
-                del self._pending_batches[frame_id]
-        else:
-            # Stray-reply / lost-batch detection: more than one tool_result for the
-            # current ``latest_tool_calls`` is present, but no batch is registered
-            # for this frame_id. The agent would have written a batch on dispatch
-            # (single-tool dispatch in parallel mode is the one legitimate
-            # no-batch path, hence the ``> 1`` floor to suppress that false
-            # positive). Likely causes: lost batch from partition rebalance or
-            # process restart, stray/duplicate delivery, or a routing error.
-            # Replies will not be aggregated; if any tool_call_ids remain
-            # incomplete the existing guard at the bottom of ``run()`` raises
-            # ``RuntimeError`` — this warning fires in the all-arrived-together
-            # race that would otherwise silently advance.
-            completed_latest = [tc for tc in ctx.state.latest_tool_calls() if tc.tool_call_id in ctx.state.tool_results]
-            if len(completed_latest) > 1:
-                logger.warning(
-                    "[%s] no PendingToolBatch for frame_id=%s on node=%s but %d completed "
-                    "tool replies present (tool_call_ids=%s); replies will NOT be "
-                    "aggregated. Likely a lost batch (partition rebalance or process "
-                    "restart), stray/duplicate delivery, or a routing error.",
-                    ctx.correlation_id[:8],
-                    frame_id,
-                    self.name,
-                    len(completed_latest),
-                    [tc.tool_call_id for tc in completed_latest],
-                )
+    @property
+    def _is_fanout_capable(self) -> bool:
+        """A non-sequential agent folds durable fan-out batches in-node; a
+        ``sequential_only_mode`` agent issues only single calls and never fans out."""
+        return not self.sequential_only_mode
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool
@@ -254,24 +197,10 @@ class BaseAgentNodeDef(
             len(ctx.state.message_history),
         )
 
-        if not self.sequential_only_mode:
-            self._parallel_state_aggregation(ctx)
-            # Defense-in-depth: ``_parallel_state_aggregation`` already warns
-            # and returns early on a None ``frame_id``, but a future refactor
-            # that calls this branch independently must not silently mask the
-            # missing key. See ``_require_frame_id_for_write`` for why write-side
-            # rejects None.
-            if ctx.frame_id is None:
-                logger.warning(
-                    "[%s] run(): ctx.frame_id is None on node=%s; cannot look up parallel batch — treating as no batch.",
-                    ctx.correlation_id[:8],
-                    self.name,
-                )
-                batch = None
-            else:
-                batch = self._pending_batches.get(ctx.frame_id)
-            if batch and not batch.is_complete:
-                return Silent()
+        # Parallel fan-out aggregation lives in the durable in-node fold (BaseNodeDef._aggregate):
+        # sibling replies are folded in the handler and never reach run(); run() is re-entered
+        # (with all tool results materialized) only at the batch's durable close. There is no
+        # in-process park here — incomplete batches park in the handler, not run().
 
         # Collect all FailedToolCall results in this turn so operators see every
         # failure in a parallel batch; raise on the first after logging all.
@@ -349,9 +278,10 @@ class BaseAgentNodeDef(
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
                     raise RuntimeError(
-                        f"[{ctx.correlation_id[:8]}] Parallel mode reached incomplete tool calls outside aggregation gate. "
+                        f"[{ctx.correlation_id[:8]}] Parallel mode reached incomplete tool calls in run(). "
                         f"node={self.name} frame_id={ctx.frame_id} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
-                        f"This indicates lost PendingToolBatch state (e.g. partition rebalance or process restart)."
+                        f"The durable in-node fold should re-enter run() only on a complete batch — this indicates "
+                        f"the fan-out did not fully fold before re-entry (e.g. a lost batch from rebalance/restart)."
                     )
 
             tool_results = DeferredToolResults(calls={tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id) for tc in latest_tool_calls})
@@ -504,21 +434,19 @@ class BaseAgentNodeDef(
                     body=ToolCallRef.from_tool_call_part(target_tool_call),
                 )
             else:
-                launch_tool_call_ids = [tc.tool_call_id for tc in pending_tool_calls]
+                # Parallel fan-out: each sibling Call carries its tool_call_id as ``tag`` so the
+                # callee echoes it on its reply, letting the durable fold read the result from
+                # ``state.tool_results[tag]``. The handler's _handle_fanout_open opens the durable
+                # batch from this list — replacing the old in-process _pending_batches registration.
                 parallel_tool_calls = [
                     Call[State](
                         tools_registry[tc.tool_name].dispatch_topic,
                         ctx.state.model_copy(deep=True),
                         body=ToolCallRef.from_tool_call_part(tc),
+                        tag=tc.tool_call_id,
                     )
                     for tc in pending_tool_calls
                 ]
-
-                self._pending_batches[self._require_frame_id_for_write(ctx)] = PendingToolBatch(
-                    expected_tool_call_ids=frozenset(launch_tool_call_ids),
-                    base_state=ctx.state.model_copy(deep=True),
-                )
-
                 return parallel_tool_calls
 
         else:

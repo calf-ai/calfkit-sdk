@@ -10,7 +10,9 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, BaseToolNodeDef, ToolNodeDef, agent_tool
+from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.worker import Worker
+from tests._fanout_fakes import FakeFanoutBatchStore
 
 load_dotenv()
 
@@ -170,3 +172,9 @@ class WorkerProvider(Provider):
 def prepare_worker(container):
     worker: Worker = container.get(Worker)
     worker.register_handlers()
+    # Offline analog of the production node-owned fan-out @resource (which never runs under the
+    # synchronous TestKafkaBroker): give each fan-out-capable node a fake durable store, unless a
+    # test already injected its own (e.g. the spy store in tests/test_durable_fanout_e2e.py).
+    for node in worker._nodes:
+        if node._is_fanout_capable and FANOUT_STORE_KEY not in node.resources:
+            node.resources[FANOUT_STORE_KEY] = FakeFanoutBatchStore()

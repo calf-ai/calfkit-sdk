@@ -1,8 +1,11 @@
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from dataclasses import dataclass
+from enum import Enum, auto
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, cast
 
+import uuid_utils
 from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 from faststream import Context, Response
 from faststream.kafka.annotations import (
@@ -25,9 +28,25 @@ from calfkit.models import (
 )
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
+from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import SessionRunContext
+from calfkit.nodes._fanout_store import (
+    FANOUT_STORE_KEY,
+    CloseAbandon,
+    CloseAbort,
+    CloseResume,
+    CloseSpurious,
+    FanoutBatchStore,
+    FoldAbort,
+    FoldComplete,
+    FoldParked,
+    FoldStray,
+    abort_batch,
+    close_batch,
+    fold_sibling,
+)
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
 if TYPE_CHECKING:
@@ -55,6 +74,46 @@ Returning ``False`` (or raising, or returning a non-bool) skips ``run()`` and re
 envelope unchanged. Gates stack with AND semantics in registration order and short-circuit
 on the first rejection.
 """
+
+
+# ---------------------------------------------------------------------------
+# Staged-pipeline outcome vocabulary (fault-rail spec §6.8) — return-only subset
+# ---------------------------------------------------------------------------
+
+
+# These are dataclasses (not ``_PipelineSentinel`` enum members) so the fault rail can add the
+# payload-carrying ``_BatchFaulted(report)`` arm additively, without an enum→union migration.
+@dataclass(frozen=True)
+class _BatchClosed:
+    """The aggregation stage resolved — proceed to the body. Either a completed fan-out
+    closure (the durable snapshot's state/stack/deps restored onto ``ctx``+``envelope``, its
+    outcomes materialized) or a stateless single-call continuation (no batch registered)."""
+
+
+@dataclass(frozen=True)
+class _BatchOpen:
+    """The fan-out batch is still open — park via the no-reply mirror (``_CONSUMED``). Either
+    an incomplete sibling fold, or a no-op close (a spurious/abandoned/aborted re-entry)."""
+
+
+# TODO(fault rail PR-6): add ``_BatchFaulted(report: ErrorReport)`` to this union — an unhandled
+# callee fault closes the batch through the fault arm. Needs the fault wire model (PR-5).
+
+
+class _PipelineSentinel(Enum):
+    """Non-action outcomes of the staged pipeline (§6.8) — narrowable singletons, distinct from
+    the publishable :data:`NodeResult` actions the handler routes to ``_publish_action``."""
+
+    CONSUMED = auto()
+    """A parked fan-out fold or a self-published re-entry: no publishable action this hop (the
+    output is still owed by pending siblings). The handler emits the no-reply broadcast mirror."""
+
+    DECLINED = auto()
+    """Every handler in the body's route Chain-of-Responsibility declined (all-declined terminal)."""
+
+
+_CONSUMED: Final = _PipelineSentinel.CONSUMED
+_DECLINED: Final = _PipelineSentinel.DECLINED
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +433,263 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
         return publish_envelope, kind
 
+    async def _publish_reentry(self, envelope: Envelope, correlation_id: str, broker: BrokerAnnotation) -> None:
+        """Self-publish the fan-out closure re-entry to this node's own return inbox.
+
+        A bespoke, frame-preserving self-return (NOT a ``ReturnCall``, which pops): the
+        node addresses ITSELF so its fan-out frame stays current, and the close (§4.3)
+        rebuilds context from the durable basestate. Deltas from a normal ``ReturnCall``:
+        no pop; ``in_reply_to`` = the fan-out frame's own id; ``parts=[]``; target = own
+        ``_return_topic``; ``key=correlation_id`` (same partition, single-writer); context
+        ``state``/``deps`` cleared (rebuilt at close); **not** broadcast-mirrored — a direct
+        point-to-point publish, never returned for the ``@publisher`` mirror.
+        """
+        frame = envelope.internal_workflow_state.current_frame  # the fan-out frame — NOT popped
+        reentry = Envelope(
+            context=SessionRunContext(state=State(), deps={}),  # cleared — rebuilt from basestate at close
+            internal_workflow_state=envelope.internal_workflow_state,
+            reply=ReturnMessage(in_reply_to=frame.frame_id, tag=frame.tag, parts=[]),
+        )
+        await broker.publish(
+            reentry,
+            topic=self._return_topic,
+            correlation_id=correlation_id,
+            key=correlation_id.encode(),
+            headers=self._headers("return"),
+        )
+
+    @property
+    def _is_fanout_capable(self) -> bool:
+        """Whether this node folds durable fan-out batches in-node. ``False`` for every
+        node type except a non-sequential agent (which overrides this) — it gates the
+        staged handler's fan-out recognition and the OPEN dispatch path."""
+        return False
+
+    def _resolve_fanout_store(self, ctx: SessionRunContext) -> FanoutBatchStore:
+        """The node's durable fan-out store, from the resource bag.
+
+        Production: a node-owned ``@resource`` (ktables). Offline tests inject a fake
+        (``agent.resources[FANOUT_STORE_KEY] = fake``). Fan-out cannot proceed without it,
+        so a missing store is a misconfiguration (raise), never a silent skip."""
+        store = ctx.resources.get(FANOUT_STORE_KEY)
+        if store is None:
+            raise RuntimeError(
+                f"node={self.node_id} fanned out but no FanoutBatchStore is registered under "
+                f"{FANOUT_STORE_KEY!r}; a fan-out-capable agent needs its durable store resource."
+            )
+        return cast(FanoutBatchStore, store)
+
+    def _classify(self, headers: dict[str, Any]) -> MessageKind:
+        """Classify the inbound delivery kind from the ``x-calf-kind`` header (§6.8 stage-0).
+
+        Missing ⇒ ``"call"`` (a producer that didn't stamp it / a fresh ingress). Return-only:
+        only ``call`` and ``return`` exist; an unrecognized value falls back to ``"call"``
+        (the pre-rail body path). The kind selects stage routing in :meth:`_execute`
+        (``return`` ⇒ the aggregation stage; ``call`` ⇒ straight to the body).
+
+        TODO(fault rail PR-6): widen to ``"fault"`` (``MessageKind`` gains the arm) and add the
+        unknown-value→ERROR-and-ignore + the kind↔reply-slot disagreement→stray checks
+        (fault-rail spec §6.8 stage-0). Both need the fault wire model, not yet in tree.
+        """
+        return "return" if decode_header_str(headers.get(HDR_KIND)) == "return" else "call"
+
+    def _classify_fanout(self, envelope: Envelope) -> Literal["sibling", "reentry"] | None:
+        """Recognize a fan-out continuation on a fan-out-capable node.
+
+        ``"sibling"`` (a marked sibling reply → fold), ``"reentry"`` (the self-published
+        closure → close), or ``None`` (normal ingress / single-call continuation). The
+        marker rides the node's OWN frame (``fanout_id`` set), so it is the top frame when
+        a fan-out continuation re-enters; the reply slot's ``in_reply_to`` then tells a
+        sibling callee (≠ the frame id) from the re-entry (== it)."""
+        if not self._is_fanout_capable:
+            return None
+        frame = envelope.internal_workflow_state.current_frame_or_none
+        if frame is None or frame.fanout_id is None:
+            return None
+        reply = envelope.reply
+        if reply is None:
+            return None  # a marked frame with no reply slot is not a fold/close continuation
+        return "reentry" if reply.in_reply_to == frame.frame_id else "sibling"
+
+    async def _handle_fanout_open(
+        self, ctx: SessionRunContext, calls: list[Call[State]], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> Response:
+        """OPEN a durable fan-out batch, then publish the marked siblings (§4.1).
+
+        Pre-mint a callee slot id per ``Call``; register the batch (basestate snapshot THEN
+        state, awaiting acks before any sibling publishes — so *registration ⟹ basestate*);
+        then publish each sibling on its pre-minted id, with the node's OWN frame marked so
+        the marker survives the callee's return-pop. Returns the no-reply mirror — the
+        output is owed by the pending siblings."""
+        store = self._resolve_fanout_store(ctx)
+        fanout_id = envelope.internal_workflow_state.current_frame.frame_id
+        slot_ids = [uuid_utils.uuid7().hex for _ in calls]
+        reg = FanoutOpen(
+            fanout_id=fanout_id,
+            node_id=self.node_id,
+            expected=[SlotRef(frame_id=fid, tag=call.tag) for fid, call in zip(slot_ids, calls)],
+        )
+        snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
+        await store.open(fanout_id, reg, snapshot)
+        for call, slot_id in zip(calls, slot_ids):
+            wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
+            wf_copy.mark_fanout()  # mark the node's OWN (current top) frame, before the callee push
+            wf_copy.invoke_frame(call, self._return_topic, payload=call.body, frame_id=slot_id, tag=call.tag)
+            sibling = Envelope(
+                context=SessionRunContext(state=call.state, deps=envelope.context.deps),
+                internal_workflow_state=wf_copy,
+            )
+            await broker.publish(
+                sibling,
+                topic=wf_copy.current_frame.target_topic,
+                correlation_id=correlation_id,
+                key=correlation_id.encode(),
+                headers=self._headers("call", route=call.route),
+            )
+        envelope.reply = None  # no-reply mirror (I3): the output is owed by the pending siblings
+        return Response(envelope, headers=self._headers("call"))
+
+    async def _aggregate(
+        self, ctx: SessionRunContext, envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> _BatchOpen | _BatchClosed:
+        """The durable fan-out fold/close stage (fault-rail §6.8 stage-2 made durable; in-node
+        spec §4.2/§4.3). Runs on ``kind == "return"`` deliveries.
+
+        - A non-fan-out return is a **stateless continuation** → ``_BatchClosed`` (run the body).
+        - A **marked sibling reply** folds into the durable batch → ``_BatchOpen`` (park); on the
+          completing fold it self-publishes the closure re-entry (a fresh delivery), still parked.
+        - The self-published **re-entry** closes the batch: the durable snapshot's state/stack/deps
+          are restored onto ``ctx``+``envelope`` and the materialized outcomes resume the body →
+          ``_BatchClosed``. A spurious/abandoned/aborted close is a no-op park → ``_BatchOpen``.
+
+        TODO(fault rail PR-6): add the ``_BatchFaulted`` arm (an unhandled callee fault closes the
+        batch through the fault group), the per-sibling stage-1 ``on_callee_error`` on fault
+        deliveries, and the ``seam_budgets`` tally — all need the fault wire model.
+        """
+        match self._classify_fanout(envelope):
+            case None:
+                return _BatchClosed()  # stateless single-call continuation → body
+            case "sibling":
+                store = self._resolve_fanout_store(ctx)
+                frame = envelope.internal_workflow_state.current_frame
+                fanout_id = frame.frame_id  # == frame.fanout_id, the batch key
+                reply = envelope.reply
+                assert reply is not None  # guaranteed by _classify_fanout == "sibling"
+                if reply.in_reply_to is None:
+                    logger.error(
+                        "[%s] malformed sibling reply (no in_reply_to) on fan-out node=%s; not folding",
+                        correlation_id[:8],
+                        self.node_id,
+                    )
+                    return _BatchOpen()
+                tag = reply.tag
+                result = ctx.state.tool_results.get(tag) if tag is not None else None
+                outcome = FanoutOutcome(slot=reply.in_reply_to, tag=tag, result=result)
+                match await fold_sibling(store, fanout_id, outcome):
+                    case FoldComplete():
+                        try:
+                            await self._publish_reentry(envelope, correlation_id, broker)
+                        except KafkaError:
+                            logger.error(
+                                "[%s] fan-out re-entry publish failed batch=%s node=%s; aborting + caller strands",
+                                correlation_id[:8],
+                                fanout_id,
+                                self.node_id,
+                            )
+                            await abort_batch(store, fanout_id)
+                            # TODO(fault rail PR-6): on a permanent re-entry-publish failure, escalate a typed fault to the
+                            # caller (spec §4.4) instead of stranding — the abort+tombstone here is the return-only precursor.
+                    case FoldStray(reason=reason):
+                        logger.warning("[%s] fan-out stray (%s) slot=%s node=%s", correlation_id[:8], reason, reply.in_reply_to, self.node_id)
+                    case FoldAbort(reason=reason):
+                        logger.error(
+                            "[%s] fan-out fold abort (%s) batch=%s node=%s; caller strands",
+                            correlation_id[:8],
+                            reason,
+                            fanout_id,
+                            self.node_id,
+                        )
+                    case FoldParked():
+                        pass
+                return _BatchOpen()  # park (no-reply mirror) — the output is still owed by siblings
+            case "reentry":
+                store = self._resolve_fanout_store(ctx)
+                fanout_id = envelope.internal_workflow_state.current_frame.frame_id
+                match await close_batch(store, fanout_id):
+                    case CloseResume(snapshot=snapshot):
+                        self._restore_from_snapshot(ctx, envelope, snapshot)
+                        return _BatchClosed()  # resume the body on the restored context
+                    case CloseSpurious():
+                        logger.warning("[%s] fan-out spurious re-entry (incomplete) batch=%s node=%s", correlation_id[:8], fanout_id, self.node_id)
+                    case CloseAbandon():
+                        logger.debug("[%s] fan-out re-entry on a closed batch=%s node=%s; abandoning", correlation_id[:8], fanout_id, self.node_id)
+                    case CloseAbort(reason=reason):
+                        logger.error(
+                            "[%s] fan-out close abort (%s) batch=%s node=%s; caller strands",
+                            correlation_id[:8],
+                            reason,
+                            fanout_id,
+                            self.node_id,
+                        )
+                return _BatchOpen()  # no-op park for a spurious/abandoned/aborted re-entry
+
+    def _restore_from_snapshot(self, ctx: SessionRunContext, envelope: Envelope, snapshot: EnvelopeSnapshot) -> None:
+        """Restore the closure context from the durable snapshot (in-node spec §4.3 stage-0).
+
+        ``_publish_reentry`` cleared the re-entry envelope's context, so the basestate snapshot
+        (its outcomes already materialized into ``snapshot.state`` by ``close_batch``) is the sole
+        restore source. Overwrites ``ctx``'s state/deps and the envelope's stack so the resumed
+        body runs on the conversation as of fan-out and its ``ReturnCall`` unwinds the original
+        (unmarked) fan-out frame back to its caller. ``resources`` are node-local — re-stamped
+        from the bag, never snapshotted.
+        """
+        frame = snapshot.stack.current_frame_or_none
+        # The snapshot's overrides are authoritative-by-capture (baked into snapshot.state.overrides
+        # at OPEN); do NOT re-stamp them from the restored frame here — the capture is the source of truth.
+        ctx.state = snapshot.state
+        ctx.deps = snapshot.deps
+        ctx._frame_id = frame.frame_id if frame is not None else None
+        ctx._resources = self._effective_resources()
+        ctx._reply = None
+        envelope.internal_workflow_state = snapshot.stack
+        envelope.context = SessionRunContext(state=snapshot.state, deps=snapshot.deps)
+
+    async def _execute(
+        self,
+        ctx: SessionRunContext,
+        kind: MessageKind,
+        envelope: Envelope,
+        route: str | None,
+        payload: Any,
+        *,
+        awaiting_reply: bool,
+        correlation_id: str,
+        broker: BrokerAnnotation,
+    ) -> NodeResult[State] | _PipelineSentinel:
+        """The staged inner pipeline (fault-rail §6.8 ``_execute``) — return-only subset.
+
+        Stage 2 (:meth:`_aggregate`) runs on ``return`` deliveries: an open batch parks
+        (``_CONSUMED``); a closed batch or a stateless continuation falls through to the body.
+        Stage 4 is the body — today's route Chain-of-Responsibility (:meth:`_dispatch_routed`),
+        untouched; an all-declined body is ``_DECLINED``.
+
+        TODO(fault rail PR-6): stage 1 ``on_callee_error`` (before stage 2, on ``fault`` kind),
+        stage 3 ``before_node`` (after ``_aggregate``, before the body), stage 6 ``after_node``
+        (wrapping the output), and the ``_BatchFaulted`` arm — all need the seam machinery + the
+        fault wire model. Gates currently occupy the stage-3 slot from the handler; the rail
+        deletes gates and adds ``before_node`` here.
+        """
+        if kind == "return":
+            match await self._aggregate(ctx, envelope, correlation_id, broker):
+                case _BatchOpen():
+                    return _CONSUMED
+                case _BatchClosed():
+                    pass  # fan-out close resume OR stateless continuation → run the body
+        result = await self._dispatch_routed(ctx, route, payload, awaiting_reply=awaiting_reply, correlation_id=correlation_id)
+        if result is None:
+            return _DECLINED
+        return result
+
     async def _dispatch_routed(
         self,
         ctx: SessionRunContext,
@@ -445,6 +761,19 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         headers: Annotated[dict[str, Any], Context("message.headers")],
         broker: BrokerAnnotation,
     ) -> Response:
+        """The closed per-delivery pipeline (fault-rail §6.8) — return-only subset.
+
+        stage-0 (emitter decode → :meth:`_classify` → :meth:`prepare_context`) → gates →
+        :meth:`_execute` (stage-2 :meth:`_aggregate` + stage-4 the body) → output disposition.
+        Returns a broadcast-mirror :class:`Response` whose ``x-calf-kind`` is the hop's kind.
+
+        TODO(fault rail PR-6): stage-0 ``_stray_check``/``_floor_stray`` (return-only has no
+        stage-0 strays — fan-out strays floor inside :meth:`_aggregate`, closure-recognition is in
+        :meth:`_classify_fanout`); the fault boundary wrapping ``_execute`` (try/except →
+        ``on_node_error``/``_publish_fault``) — pre-rail, body exceptions propagate (dropped under
+        ACK_FIRST → the caller strands, preserving today's at-most-once behavior); ``before_node``
+        replaces the gate block below. All need the seam machinery + the fault wire model.
+        """
         raw_emitter = headers.get(HDR_EMITTER)
         emitter = decode_header_str(raw_emitter)
         if emitter is None:
@@ -456,50 +785,65 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 "None" if raw_emitter is None else type(raw_emitter).__name__,
             )
         emitter_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
-        logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, emitter_kind)
+        kind = self._classify(headers)
+        logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
         ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
 
         if not await self._evaluate_gates(ctx, correlation_id):
             envelope.reply = None  # no-reply mirror (gate rejected): don't re-broadcast an inbound reply (I3)
-            body: Envelope = envelope
-            kind: MessageKind = "call"
-        else:
-            frame = envelope.internal_workflow_state.current_frame_or_none
-            payload = frame.payload if frame is not None else None
-            awaiting_reply = frame.callback_topic is not None if frame is not None else False
-            route = decode_header_str(headers.get(HDR_ROUTE))
-            output = await self._dispatch_routed(
-                ctx,
-                route,
-                payload,
-                awaiting_reply=awaiting_reply,
-                correlation_id=correlation_id,
-            )
-            if output is None:
-                # No matched handler produced a terminal result: every match declined
-                # (returned Next/None). The '*' handler (run) is always in the chain — the
-                # base run() always declines; an overridden run() may also decline, or a
-                # schema'd '*' run may have REJECTED the body (logged above). Stuck workflow
-                # if a caller awaits a return, else a fire-and-forget no-op. The body_note
-                # surfaces a present-but-unconsumed payload (e.g. a malformed tool ToolCallRef)
-                # so a dropped body is observable, not silent — callback-aware via `level`.
-                level = _stuck_level(awaiting_reply)
-                body_note = " — a body was not consumed (rejected by a schema handler, or unmatched)" if payload is not None else ""
-                logger.log(
-                    level,
-                    "[%s] no handler produced a result for route=%s on node=%s; registered=%s%s",
-                    correlation_id[:8],
-                    route,
-                    self.node_id,
-                    tuple(type(self)._handlers),
-                    body_note,
-                )
-                envelope.reply = None  # no-reply mirror (no result): don't re-broadcast an inbound reply (I3)
-                return Response(envelope, headers=self._headers("call"))
-            logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
-            body, kind = await self._publish_action(output, envelope, correlation_id, broker)
+            return Response(envelope, headers=self._headers("call"))
 
-        return Response(body, headers=self._headers(kind))
+        frame = envelope.internal_workflow_state.current_frame_or_none
+        payload = frame.payload if frame is not None else None
+        awaiting_reply = frame.callback_topic is not None if frame is not None else False
+        route = decode_header_str(headers.get(HDR_ROUTE))
+        output = await self._execute(
+            ctx,
+            kind,
+            envelope,
+            route,
+            payload,
+            awaiting_reply=awaiting_reply,
+            correlation_id=correlation_id,
+            broker=broker,
+        )
+
+        if output is _CONSUMED:
+            # A parked fan-out fold or a self-published re-entry: no publishable action this hop,
+            # the output is still owed by the pending siblings.
+            envelope.reply = None  # no-reply mirror (I3)
+            return Response(envelope, headers=self._headers("call"))
+        if output is _DECLINED:
+            # No matched handler produced a terminal result: every match declined (returned
+            # Next/None). The '*' handler (run) is always in the chain — the base run() always
+            # declines; an overridden run() may also decline, or a schema'd '*' run may have
+            # REJECTED the body (logged above). Stuck workflow if a caller awaits a return, else a
+            # fire-and-forget no-op. The body_note surfaces a present-but-unconsumed payload (e.g. a
+            # malformed tool ToolCallRef) so a dropped body is observable, not silent.
+            level = _stuck_level(awaiting_reply)
+            body_note = " — a body was not consumed (rejected by a schema handler, or unmatched)" if payload is not None else ""
+            logger.log(
+                level,
+                "[%s] no handler produced a result for route=%s on node=%s; registered=%s%s",
+                correlation_id[:8],
+                route,
+                self.node_id,
+                tuple(type(self)._handlers),
+                body_note,
+            )
+            envelope.reply = None  # no-reply mirror (no result): don't re-broadcast an inbound reply (I3)
+            return Response(envelope, headers=self._headers("call"))
+
+        # Fan-out OPEN: a fan-out-capable node whose body returned a parallel batch (N >= 2 Calls)
+        # registers the durable batch + publishes the marked siblings. A non-capable node's
+        # list[Call] stays the plain parallel publish in _publish_action; a 1-element list is a
+        # single stateless continuation (not a durable batch) and reroutes there too.
+        if self._is_fanout_capable and isinstance(output, list) and len(output) >= 2 and all(isinstance(c, Call) for c in output):
+            return await self._handle_fanout_open(ctx, output, envelope, correlation_id, broker)
+
+        logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
+        body, pubkind = await self._publish_action(output, envelope, correlation_id, broker)
+        return Response(body, headers=self._headers(pubkind))
 
     @property
     def id(self) -> str:

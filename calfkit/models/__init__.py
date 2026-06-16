@@ -26,7 +26,6 @@ from calfkit.models.state import (
     InFlightToolsState,
     NodeConsumeState,
     PartialState,
-    PendingToolBatch,
     State,
 )
 from calfkit.models.tool_context import ToolContext
@@ -65,7 +64,6 @@ __all__ = [
     "NodeConsumeState",
     "PartialState",
     "State",
-    "PendingToolBatch",
     # tool_context
     "ToolContext",
     # tool_dispatch
