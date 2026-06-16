@@ -13,11 +13,13 @@ durable and they pass.
 
 from __future__ import annotations
 
+import pytest
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
+from calfkit.exceptions import ToolExecutionError
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, agent_tool
@@ -35,6 +37,11 @@ def e2e_tool_a(ctx: ToolContext) -> str:
 @agent_tool
 def e2e_tool_b(ctx: ToolContext) -> str:
     return "b_result"
+
+
+@agent_tool
+def e2e_tool_boom(ctx: ToolContext) -> str:
+    raise ValueError("e2e boom")
 
 
 def _calls_two_then_done(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -96,3 +103,46 @@ async def test_durable_fanout_folds_in_store_and_closes_via_reentry(container) -
     assert spy.tombstones >= 1  # closed (tombstone-first at the re-entry)
     # ...and the agent resumed past the durable close to its final result.
     assert result.output is not None and "done" in result.output
+
+
+def _calls_ok_and_boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """Fan out a succeeding + a failing tool on the first turn."""
+    last = messages[-1]
+    if isinstance(last, ModelRequest) and any(isinstance(p, ToolReturnPart) for p in last.parts):
+        return ModelResponse(parts=[TextPart("done")])
+    return ModelResponse(parts=[ToolCallPart("e2e_tool_a"), ToolCallPart("e2e_tool_boom")])
+
+
+async def test_durable_fanout_with_failing_tool_strands_via_tool_execution_error(container) -> None:
+    # (coverage b) The return-only strand, end-to-end: a 2-tool fan-out where ONE tool raises. The
+    # failure folds durably as a FailedToolCall, the batch completes + closes, and the resumed agent
+    # body raises ToolExecutionError (the documented strand — the fault-rail PR will escalate a typed
+    # fault instead). Under TestKafkaBroker the raise escapes the handler and propagates out of
+    # client.execute, so pytest.raises is the cleanest end-to-end assertion.
+    worker = container.get(Worker)
+    agent = Agent(
+        "durable_fanout_fail_agent",
+        system_prompt="x",
+        subscribe_topics="durable_fanout_fail_agent.input",
+        model_client=FunctionModel(_calls_ok_and_boom),
+        tools=[e2e_tool_a, e2e_tool_boom],
+    )
+    spy = _SpyStore()
+    agent.resources[FANOUT_STORE_KEY] = spy
+    worker.add_nodes(agent, e2e_tool_a, e2e_tool_boom)
+    prepare_worker(container)
+
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        async with TestKafkaBroker(broker):
+            await client.execute("call both tools", "durable_fanout_fail_agent.input", timeout=10)
+
+    # The strand carries the failing tool's identity (sourced from the durably-folded marker).
+    assert exc_info.value.tool_name == "e2e_tool_boom"
+    assert exc_info.value.exc_type == "ValueError"
+    # And the failure travelled the DURABLE path: both siblings folded through the store before close.
+    assert spy.opens == 1
+    assert spy.folds == 2
+    assert spy.tombstones >= 1

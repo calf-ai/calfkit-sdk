@@ -31,9 +31,11 @@ class FakeFanoutBatchStore:
 
     async def open(self, fanout_id: str, reg: FanoutOpen, snapshot: EnvelopeSnapshot) -> None:
         self._guard()
-        # basestate THEN state (registration present ⟹ basestate present).
-        self._basestate[fanout_id] = FanoutBaseState(fanout_id=fanout_id, snapshot=snapshot)
-        self._state[fanout_id] = FanoutState(open=reg, outcomes={})
+        # basestate THEN state (registration present ⟹ basestate present). Store deep copies so the
+        # fake matches the real KtablesFanoutBatchStore's freeze-on-write (it serializes on ``set``):
+        # a later mutation of the caller's ``snapshot``/``reg`` must not bleed into the stored record.
+        self._basestate[fanout_id] = FanoutBaseState(fanout_id=fanout_id, snapshot=snapshot.model_copy(deep=True))
+        self._state[fanout_id] = FanoutState(open=reg.model_copy(deep=True), outcomes={})
 
     async def read_state(self, fanout_id: str) -> FanoutState | None:
         self._guard()

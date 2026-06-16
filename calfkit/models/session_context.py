@@ -189,15 +189,15 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     def frame_id(self) -> str | None:
         """Per-invocation identifier of the current call frame on the workflow stack.
 
-        Set by ``BaseNodeDef.prepare_context`` from
-        ``envelope.internal_workflow_state.current_frame.frame_id``. Every
-        ``Call`` published by the framework pushes a fresh ``CallFrame`` with a
-        UUID7-generated ``frame_id``, so parallel invocations of the same node
-        (which share a single ``correlation_id``) are still uniquely
-        identifiable per invocation. Used by the agent to key its in-memory
-        parallel tool-batch aggregation dict so concurrent fan-outs do not
-        collide. Backed by a ``PrivateAttr`` so it never rides on the wire and
-        cannot be spoofed via the model constructor.
+        Set by ``BaseNodeDef.prepare_context`` from the inbound frame
+        (``envelope.internal_workflow_state.current_frame.frame_id``), so it is the id
+        of the frame this delivery is running under. Every ``Call`` published by the
+        framework pushes a fresh ``CallFrame`` with a UUID7-generated ``frame_id``, so
+        parallel invocations of the same node (which share a single ``correlation_id``)
+        are still uniquely identifiable per invocation. No longer tied to any in-process
+        aggregation (durable fan-out is keyed by ``fanout_id`` in the store, not by this
+        field). Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be
+        spoofed via the model constructor.
         """
         return self._frame_id
 

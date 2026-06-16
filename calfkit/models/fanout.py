@@ -9,9 +9,9 @@ Fan-out batch state lives in two node-scoped compacted ktables, both keyed by
   write-once closure snapshot, read back at the re-entry to rebuild context.
 
 All values are plain pydantic models so ``KafkaTable.json(model=...)`` /
-``KafkaTableWriter.json(model=...)`` decode/encode them as JSON, and each carries a
-``version`` for forward-compatible schema evolution (drain-before-deploy is the
-cross-version contract; ktables' decoder swallows undecodable records).
+``KafkaTableWriter.json(model=...)`` decode/encode them as JSON. The cross-version
+contract is drain-before-deploy (the batch state never spans a schema change), and
+ktables' decoder swallows any record it cannot decode.
 """
 
 from typing import Any
@@ -38,13 +38,15 @@ class FanoutOpen(BaseModel):
     because it is embedded in :class:`FanoutState` and re-written on every fold.
     """
 
-    version: int = 1
     fanout_id: str
     """= the fan-out node's own inbound ``frame_id``; the batch key."""
     node_id: str
-    expected: list[SlotRef]
+    """Diagnostic/self-describing record field, not read at runtime: the batch is
+    namespaced by topic (``calf.fanout.{node_id}.*``) and keyed by ``fanout_id``."""
+    expected: list[SlotRef] = Field(..., min_length=2)
     """The full slot set, fixed at OPEN. Only a true fan-out (N >= 2) registers; a
-    single ``Call`` / batch-of-one is never registered (it is a stateless continuation)."""
+    single ``Call`` / batch-of-one is never registered (it is a stateless continuation).
+    ``min_length=2`` makes an empty/singleton batch unrepresentable at the type."""
 
 
 class FanoutOutcome(BaseModel):
@@ -57,7 +59,6 @@ class FanoutOutcome(BaseModel):
     of resolved returns.
     """
 
-    version: int = 1
     slot: str
     """The resolved slot's frame id (== :attr:`SlotRef.frame_id`); the idempotent fold key."""
     tag: str | None
@@ -72,7 +73,6 @@ class FanoutState(BaseModel):
     writes); completion is ``outcomes.keys() == {s.frame_id for s in open.expected}``.
     """
 
-    version: int = 1
     open: FanoutOpen
     outcomes: dict[str, FanoutOutcome] = Field(default_factory=dict)
     """Resolved slots by frame id. Folding a slot already present is an idempotent no-op
@@ -88,7 +88,6 @@ class EnvelopeSnapshot(BaseModel):
     re-stamped from the node's bag, so they are deliberately NOT snapshotted.
     """
 
-    version: int = 1
     state: State
     """Conversation State as of fan-out (pre tool-results)."""
     stack: WorkflowState
@@ -99,6 +98,5 @@ class EnvelopeSnapshot(BaseModel):
 class FanoutBaseState(BaseModel):
     """``calf.fanout.{node_id}.basestate`` value — written ONCE at OPEN, read at close."""
 
-    version: int = 1
     fanout_id: str
     snapshot: EnvelopeSnapshot

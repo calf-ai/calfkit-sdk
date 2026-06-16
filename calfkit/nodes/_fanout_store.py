@@ -176,10 +176,10 @@ async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
     aborts deterministically — the close never hangs.
     """
     try:
-        base = await store.read_basestate(fanout_id)
         state = await store.read_state(fanout_id)
         if state is None:
-            return CloseAbandon()
+            return CloseAbandon()  # abandon gate first — short-circuit the already-closed path
+        base = await store.read_basestate(fanout_id)
         if base is None:
             return CloseAbort("basestate_missing")
         expected = {s.frame_id for s in state.open.expected}

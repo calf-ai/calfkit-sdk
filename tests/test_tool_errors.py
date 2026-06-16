@@ -52,8 +52,9 @@ def _make_ctx(
     ctx = SessionRunContext(state=state, deps={})
     # ``_correlation_id`` / ``_frame_id`` are ``PrivateAttr``s populated by
     # ``BaseNodeDef.prepare_context`` in the live path; tests that drive
-    # ``agent.run`` directly must set them here. ``_frame_id`` matters for
-    # parallel-mode aggregation (which keys ``_pending_batches`` on it).
+    # ``agent.run`` directly must set them here. ``_frame_id`` surfaces the
+    # per-invocation frame id (used in the parallel-mode incomplete-batch
+    # diagnostic ``RuntimeError`` raised by ``agent.run``).
     ctx._correlation_id = correlation_id
     if frame_id is not None:
         ctx._frame_id = frame_id
@@ -1509,10 +1510,10 @@ async def test_agent_corrupt_marker_with_missing_tool_name_uses_sentinel():
 
 def test_prepare_context_populates_frame_id_from_envelope():
     # Plumbing regression: ``prepare_context`` must read
-    # ``current_frame.frame_id`` into ``ctx._frame_id`` so that
-    # ``_pending_batches`` lookups in ``agent.run`` see the right key. Without
-    # this, ``ctx.frame_id`` returns ``None`` and every parallel batch lives
-    # under a single ``None`` key, re-introducing the collision bug at runtime.
+    # ``current_frame.frame_id`` into ``ctx._frame_id`` so ``ctx.frame_id``
+    # reports the frame this delivery runs under. Without this, ``ctx.frame_id``
+    # returns ``None``. (Durable fan-out is keyed by ``fanout_id`` in the store,
+    # not by this field, but the per-invocation frame id is still surfaced.)
     import asyncio
 
     from calfkit.models.envelope import Envelope

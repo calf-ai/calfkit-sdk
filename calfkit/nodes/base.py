@@ -43,6 +43,7 @@ from calfkit.nodes._fanout_store import (
     FoldComplete,
     FoldParked,
     FoldStray,
+    abort_batch,
     close_batch,
     fold_sibling,
 )
@@ -80,6 +81,8 @@ on the first rejection.
 # ---------------------------------------------------------------------------
 
 
+# These are dataclasses (not ``_PipelineSentinel`` enum members) so the fault rail can add the
+# payload-carrying ``_BatchFaulted(report)`` arm additively, without an enum→union migration.
 @dataclass(frozen=True)
 class _BatchClosed:
     """The aggregation stage resolved — proceed to the body. Either a completed fan-out
@@ -572,12 +575,30 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 fanout_id = frame.frame_id  # == frame.fanout_id, the batch key
                 reply = envelope.reply
                 assert reply is not None  # guaranteed by _classify_fanout == "sibling"
+                if reply.in_reply_to is None:
+                    logger.error(
+                        "[%s] malformed sibling reply (no in_reply_to) on fan-out node=%s; not folding",
+                        correlation_id[:8],
+                        self.node_id,
+                    )
+                    return _BatchOpen()
                 tag = reply.tag
                 result = ctx.state.tool_results.get(tag) if tag is not None else None
-                outcome = FanoutOutcome(slot=reply.in_reply_to or "", tag=tag, result=result)
+                outcome = FanoutOutcome(slot=reply.in_reply_to, tag=tag, result=result)
                 match await fold_sibling(store, fanout_id, outcome):
                     case FoldComplete():
-                        await self._publish_reentry(envelope, correlation_id, broker)
+                        try:
+                            await self._publish_reentry(envelope, correlation_id, broker)
+                        except KafkaError:
+                            logger.error(
+                                "[%s] fan-out re-entry publish failed batch=%s node=%s; aborting + caller strands",
+                                correlation_id[:8],
+                                fanout_id,
+                                self.node_id,
+                            )
+                            await abort_batch(store, fanout_id)
+                            # TODO(fault rail PR-6): on a permanent re-entry-publish failure, escalate a typed fault to the
+                            # caller (spec §4.4) instead of stranding — the abort+tombstone here is the return-only precursor.
                     case FoldStray(reason=reason):
                         logger.warning("[%s] fan-out stray (%s) slot=%s node=%s", correlation_id[:8], reason, reply.in_reply_to, self.node_id)
                     case FoldAbort(reason=reason):
@@ -623,6 +644,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         from the bag, never snapshotted.
         """
         frame = snapshot.stack.current_frame_or_none
+        # The snapshot's overrides are authoritative-by-capture (baked into snapshot.state.overrides
+        # at OPEN); do NOT re-stamp them from the restored frame here — the capture is the source of truth.
         ctx.state = snapshot.state
         ctx.deps = snapshot.deps
         ctx._frame_id = frame.frame_id if frame is not None else None
@@ -811,10 +834,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             envelope.reply = None  # no-reply mirror (no result): don't re-broadcast an inbound reply (I3)
             return Response(envelope, headers=self._headers("call"))
 
-        # Fan-out OPEN: a fan-out-capable node whose body returned a parallel batch registers the
-        # durable batch + publishes the marked siblings. A non-capable node's list[Call] stays the
-        # plain parallel publish in _publish_action.
-        if self._is_fanout_capable and isinstance(output, list) and output and all(isinstance(c, Call) for c in output):
+        # Fan-out OPEN: a fan-out-capable node whose body returned a parallel batch (N >= 2 Calls)
+        # registers the durable batch + publishes the marked siblings. A non-capable node's
+        # list[Call] stays the plain parallel publish in _publish_action; a 1-element list is a
+        # single stateless continuation (not a durable batch) and reroutes there too.
+        if self._is_fanout_capable and isinstance(output, list) and len(output) >= 2 and all(isinstance(c, Call) for c in output):
             return await self._handle_fanout_open(ctx, output, envelope, correlation_id, broker)
 
         logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)

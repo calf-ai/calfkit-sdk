@@ -14,7 +14,7 @@ import pytest
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.session_context import CallFrame, Stack, WorkflowState
-from calfkit.models.state import State
+from calfkit.models.state import FailedToolCall, State
 from calfkit.nodes._fanout_store import (
     CloseAbandon,
     CloseAbort,
@@ -130,6 +130,22 @@ async def test_close_complete_batch_resumes_materialized_and_tombstones(store: F
     assert await store.read_basestate("X") is None
 
 
+async def test_close_materializes_failed_tool_call_as_typed_marker(store: FakeFanoutBatchStore) -> None:
+    # (coverage a) A return-only tool failure folds as a FailedToolCall outcome; on close it must
+    # materialize into the snapshot's State as a TYPED FailedToolCall (via the discriminator), not a
+    # bare dict or None — so the resumed agent body sees the marker and strands the caller.
+    marker = FailedToolCall.build_safe(tool_name="t", tool_call_id="tc1", exc_type="ValueError", exc_message="boom")
+    await store.open("X", _open(), _snapshot())
+    await fold_sibling(store, "X", FanoutOutcome(slot="f1", tag="tc1", result=marker))
+    await fold_sibling(store, "X", _outcome("f2", "tc2", value="ok"))  # completes
+    result = await close_batch(store, "X")
+    assert isinstance(result, CloseResume)
+    materialized = result.snapshot.state.get_tool_result("tc1")
+    assert isinstance(materialized, FailedToolCall)
+    assert materialized.exc_type == "ValueError"
+    assert materialized.tool_call_id == "tc1"
+
+
 async def test_close_incomplete_batch_is_spurious_and_keeps_state(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
     await fold_sibling(store, "X", _outcome("f1", "tc1"))  # only 1 of 2
@@ -164,8 +180,9 @@ async def test_close_unavailable_store_aborts(store: FakeFanoutBatchStore) -> No
 
 
 async def test_close_materialization_failure_on_missing_tag_aborts(store: FakeFanoutBatchStore) -> None:
-    await store.open("X", _open(slots=(("f1", "tc1"),)), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", tag=None))  # no tag → can't materialize
+    await store.open("X", _open(), _snapshot())  # 2-slot batch (the N>=2 invariant)
+    await fold_sibling(store, "X", _outcome("f1", "tc1"))
+    await fold_sibling(store, "X", _outcome("f2", tag=None))  # no tag → can't materialize → completes the batch
     result = await close_batch(store, "X")
     assert isinstance(result, CloseAbort)
     assert result.reason == "materialization_failed"

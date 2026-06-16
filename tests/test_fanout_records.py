@@ -4,13 +4,15 @@ ktables stores these as JSON (`KafkaTable.json(model=...)` decodes via
 `model_validate_json`; `KafkaTableWriter.json(...)` encodes via `model_dump_json`),
 so every record must round-trip through JSON. `FanoutOutcome.result` mirrors
 `State.tool_results`' value type, so a `CalfToolResult` (incl. a `FailedToolCall`)
-must come back TYPED via its discriminator, not as a bare dict. Every value carries
-a `version` defaulting to 1.
+must come back TYPED via its discriminator, not as a bare dict. `FanoutOpen.expected`
+enforces the N>=2 fan-out invariant at the type (`min_length=2`) — an empty/singleton
+batch is unrepresentable.
 """
 
 from typing import TypeVar
 
-from pydantic import BaseModel
+import pytest
+from pydantic import BaseModel, ValidationError
 
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models.fanout import (
@@ -31,12 +33,22 @@ def _roundtrip(model: _M) -> _M:
     return type(model).model_validate_json(model.model_dump_json())
 
 
-def test_fanout_open_roundtrips_and_defaults_version() -> None:
-    reg = FanoutOpen(fanout_id="x", node_id="agent", expected=[SlotRef(frame_id="f1", tag="tc1")])
-    assert reg.version == 1
+def test_fanout_open_roundtrips() -> None:
+    reg = FanoutOpen(fanout_id="x", node_id="agent", expected=[SlotRef(frame_id="f1", tag="tc1"), SlotRef(frame_id="f2", tag="tc2")])
     rt = _roundtrip(reg)
     assert rt == reg
     assert rt.expected[0].frame_id == "f1"
+
+
+def test_fanout_open_rejects_singleton_expected() -> None:
+    # The N>=2 invariant is enforced at the type: a single-slot batch is unrepresentable.
+    with pytest.raises(ValidationError):
+        FanoutOpen(fanout_id="x", node_id="agent", expected=[SlotRef(frame_id="f1", tag="tc1")])
+
+
+def test_fanout_open_rejects_empty_expected() -> None:
+    with pytest.raises(ValidationError):
+        FanoutOpen(fanout_id="x", node_id="agent", expected=[])
 
 
 def test_fanout_outcome_preserves_typed_tool_return() -> None:
@@ -56,7 +68,7 @@ def test_fanout_outcome_preserves_failed_tool_call_marker() -> None:
 
 def test_fanout_state_accumulates_outcomes_and_roundtrips() -> None:
     state = FanoutState(
-        open=FanoutOpen(fanout_id="x", node_id="agent", expected=[SlotRef(frame_id="f1", tag="tc1")]),
+        open=FanoutOpen(fanout_id="x", node_id="agent", expected=[SlotRef(frame_id="f1", tag="tc1"), SlotRef(frame_id="f2", tag="tc2")]),
         outcomes={"f1": FanoutOutcome(slot="f1", tag="tc1", result=ToolReturn(return_value="ok"))},
     )
     rt = _roundtrip(state)
@@ -65,7 +77,8 @@ def test_fanout_state_accumulates_outcomes_and_roundtrips() -> None:
 
 
 def test_fanout_state_outcomes_default_empty() -> None:
-    state = FanoutState(open=FanoutOpen(fanout_id="x", node_id="agent", expected=[]))
+    expected = [SlotRef(frame_id="f1", tag="tc1"), SlotRef(frame_id="f2", tag="tc2")]
+    state = FanoutState(open=FanoutOpen(fanout_id="x", node_id="agent", expected=expected))
     assert state.outcomes == {}
 
 

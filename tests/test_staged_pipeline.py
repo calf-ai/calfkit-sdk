@@ -9,7 +9,11 @@ these stages additively (the seam stages 1/3/6 + fault arms are TODO insertion p
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+import pytest
+from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 
 from calfkit._protocol import HDR_KIND
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
@@ -56,6 +60,14 @@ class _CaptureBroker:
 
     async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
         self.published.append((topic, envelope))
+
+
+class _RaisingBroker:
+    """A broker stub whose ``publish`` always raises ``KafkaError`` — exercises the
+    re-entry-publish-failure abort path in ``_aggregate``'s ``FoldComplete`` arm."""
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        raise KafkaError("simulated re-entry publish failure")
 
 
 def _fanout_node() -> _FanoutNode:
@@ -188,6 +200,91 @@ class TestAggregate:
         result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="A", tag=None), "corr-1", _CaptureBroker())
         assert isinstance(result, _BatchOpen)  # spurious early re-entry → no-op park
         assert await store.read_state("A") is not None  # batch left untouched
+
+    async def test_completing_fold_reentry_publish_failure_aborts_and_tombstones(self) -> None:
+        # (#1) The completing fold tries to self-publish the re-entry; if that publish raises
+        # KafkaError, _aggregate must NOT propagate — it aborts (tombstones both records) and
+        # still parks (_BatchOpen), so the caller strands rather than a complete-but-unclosed batch.
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        st1 = State()
+        st1.add_tool_result("tc1", ToolReturn(return_value="r1"))
+        await node._aggregate(_store_ctx(store, state=st1), _marked_env(in_reply_to="f1", tag="tc1", state=st1), "corr-1", _CaptureBroker())
+        # The SECOND fold completes the batch; its re-entry publish raises.
+        st2 = State()
+        st2.add_tool_result("tc2", ToolReturn(return_value="r2"))
+        result = await node._aggregate(_store_ctx(store, state=st2), _marked_env(in_reply_to="f2", tag="tc2", state=st2), "corr-1", _RaisingBroker())
+        assert isinstance(result, _BatchOpen)  # did not propagate; parked
+        assert await store.read_state("A") is None  # aborted: both records tombstoned
+        assert await store.read_basestate("A") is None
+
+    async def test_sibling_reply_without_in_reply_to_does_not_fold(self, caplog: pytest.LogCaptureFixture) -> None:
+        # (#6) A marked sibling reply that carries no in_reply_to is malformed: _aggregate must
+        # short-circuit to park (_BatchOpen), NOT fold (the store's outcomes are unchanged), and
+        # log a distinct "malformed sibling reply" error (proving the guard fired, not the
+        # foreign-stray fallthrough).
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        env = _marked_env(in_reply_to="f1", tag="tc1")
+        env.reply.in_reply_to = None  # malformed: marked sibling but no slot
+        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+            result = await node._aggregate(_store_ctx(store), env, "corr-1", _CaptureBroker())
+        assert isinstance(result, _BatchOpen)
+        state = await store.read_state("A")
+        assert state is not None and state.outcomes == {}  # nothing folded
+        assert any("malformed sibling reply" in r.getMessage() for r in caplog.records)
+
+    async def test_sibling_foreign_slot_parks_store_unchanged(self) -> None:
+        # (coverage c) A reply to a slot not in the batch is a foreign stray → park, store untouched.
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="f99", tag="tcX"), "corr-1", _CaptureBroker())
+        assert isinstance(result, _BatchOpen)
+        state = await store.read_state("A")
+        assert state is not None and state.outcomes == {}
+
+    async def test_sibling_duplicate_slot_parks_store_unchanged(self) -> None:
+        # (coverage c) A second reply for an already-folded slot is a duplicate stray → park.
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        st = State()
+        st.add_tool_result("tc1", ToolReturn(return_value="r1"))
+        await node._aggregate(_store_ctx(store, state=st), _marked_env(in_reply_to="f1", tag="tc1", state=st), "corr-1", _CaptureBroker())
+        result = await node._aggregate(_store_ctx(store, state=st), _marked_env(in_reply_to="f1", tag="tc1", state=st), "corr-1", _CaptureBroker())
+        assert isinstance(result, _BatchOpen)
+        state = await store.read_state("A")
+        assert state is not None and set(state.outcomes) == {"f1"}  # still just the one fold
+
+    async def test_sibling_fold_unavailable_store_parks_abort_path(self) -> None:
+        # (coverage c) A store that died mid-fold aborts (FoldAbort) but still parks (_BatchOpen).
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        store.make_unavailable()
+        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="f1", tag="tc1"), "corr-1", _CaptureBroker())
+        assert isinstance(result, _BatchOpen)
+
+    async def test_reentry_over_tombstoned_batch_abandons_parks(self) -> None:
+        # (coverage c) A re-entry whose batch is already closed/tombstoned → abandon → park.
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()  # never opened "A"
+        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="A", tag=None), "corr-1", _CaptureBroker())
+        assert isinstance(result, _BatchOpen)
+
+    async def test_reentry_basestate_missing_aborts_parks(self) -> None:
+        # (coverage c) A complete batch whose basestate is gone aborts at close → park.
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        await store.fold("A", FanoutOutcome(slot="f1", tag="tc1", result=ToolReturn(return_value="r1")))
+        await store.fold("A", FanoutOutcome(slot="f2", tag="tc2", result=ToolReturn(return_value="r2")))
+        store._basestate.pop("A")  # white-box: simulate the impossible-by-ordering miss
+        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="A", tag=None), "corr-1", _CaptureBroker())
+        assert isinstance(result, _BatchOpen)
 
 
 class TestExecute:

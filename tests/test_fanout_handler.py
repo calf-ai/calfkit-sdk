@@ -9,22 +9,28 @@ fake`). These pin the pieces the staged handler wires together in 6b-B:
 - _classify_fanout: marker + reply slot => SIBLING fold / RE-ENTRY close / NORMAL
 """
 
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import pytest
 from faststream import Context
 from faststream.kafka import KafkaBroker, TestKafkaBroker
+from pydantic import ValidationError
 
-from calfkit._vendor.pydantic_ai.messages import ModelResponse, TextPart
+from calfkit._protocol import HDR_KIND
+from calfkit._vendor.pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturn
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
+from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.models import Call
 from calfkit.models.envelope import Envelope
+from calfkit.models.fanout import FanoutOpen, SlotRef
 from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes import Agent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.base import BaseNodeDef
+from calfkit.nodes.node import NodeDef
+from calfkit.worker.lifecycle import ResourceSetupContext
 from tests._fanout_fakes import FakeFanoutBatchStore
 
 
@@ -136,6 +142,13 @@ def test_classify_non_capable_node_is_normal() -> None:
     assert node._classify_fanout(env) is None
 
 
+def test_classify_marked_frame_without_reply_is_normal() -> None:
+    # (coverage d) a marked frame with NO reply slot is not a fold/close continuation → None
+    env = _envelope(frame_id="A", fanout_id="A", reply_in_reply_to=None)  # reply_in_reply_to=None ⇒ reply=None
+    assert env.reply is None
+    assert _agent()._classify_fanout(env) is None
+
+
 # ── OPEN dispatch path ───────────────────────────────────────────────────────
 
 
@@ -191,3 +204,125 @@ async def test_handle_fanout_open_writes_open_and_publishes_marked_siblings() ->
 # helper was subsumed by BaseNodeDef._aggregate. The sibling-fold + re-entry-close behavior is
 # covered by tests/test_staged_pipeline.py::TestAggregate (fold→park, complete→publish re-entry,
 # re-entry→close+restore) and end-to-end by tests/test_durable_fanout_e2e.py.
+
+
+# ── the N>=2 OPEN gate (#2) ──────────────────────────────────────────────────
+
+
+def test_fanout_open_rejects_singleton_expected() -> None:
+    # The N>=2 fan-out invariant is enforced at the record type: a single-slot batch is
+    # unrepresentable, so a batch-of-one can never be registered.
+    with pytest.raises(ValidationError):
+        FanoutOpen(fanout_id="x", node_id="a", expected=[SlotRef(frame_id="f1", tag="tc1")])
+
+
+class _CaptureBroker:
+    """Node-side broker stub: records (topic, headers, envelope) per publish."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, dict[str, str], Envelope]] = []
+
+    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        self.published.append((topic, headers, envelope))
+
+
+class _SingleCallFanoutNode(NodeDef[Any]):
+    """A fan-out-capable node whose body returns a ONE-element list[Call]."""
+
+    @property
+    def _is_fanout_capable(self) -> bool:
+        return True
+
+    async def run(self, ctx: SessionRunContext) -> Any:
+        return [Call("only.tool", ctx.state, tag="tc1")]
+
+
+async def test_single_call_list_does_not_open_durable_batch() -> None:
+    # (#2) A fan-out-capable node whose body returns a 1-element list[Call] is a single stateless
+    # continuation, NOT a durable batch: the OPEN dispatch's len(output) >= 2 gate reroutes it
+    # through _publish_action (the plain parallel publish), so the store is never opened and the
+    # node's own frame is never marked.
+    node = _SingleCallFanoutNode(node_id="fan", subscribe_topics=["fan.in"])
+    fake = FakeFanoutBatchStore()
+    node.resources[FANOUT_STORE_KEY] = fake
+    own = CallFrame(target_topic="fan.in", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    broker = _CaptureBroker()
+
+    await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+
+    # The durable store was never opened — no batch registered for the single call.
+    assert await fake.read_state("A") is None
+    assert await fake.read_basestate("A") is None
+    # The single call was published via the normal parallel path (callee frame NOT fan-out-marked).
+    assert [t for t, _, _ in broker.published] == ["only.tool"]
+    callee = broker.published[0][2].internal_workflow_state.current_frame
+    assert callee.target_topic == "only.tool"
+    assert callee.fanout_id is None  # not marked: this is not a durable fan-out
+
+
+# ── @resource preconditions (coverage d) ─────────────────────────────────────
+
+
+class _NoBootstrapWorker:
+    """Minimal worker stub whose bootstrap address is underivable (client built without connect())."""
+
+    def _derive_bootstrap_servers(self) -> str | None:
+        return None
+
+
+async def test_fanout_store_resource_raises_without_worker() -> None:
+    # (coverage d) The fan-out store @resource cannot open without a hosting worker.
+    agent = _agent()
+    agent._worker = None
+    ctx = ResourceSetupContext(owner=agent, resources={})
+    gen = agent._fanout_store_resource(ctx)
+    with pytest.raises(RuntimeError, match="no hosting worker"):
+        await gen.__anext__()
+
+
+async def test_fanout_store_resource_raises_without_bootstrap() -> None:
+    # (coverage d) A worker present but with no derivable bootstrap address also raises (rather than
+    # opening a store against nothing).
+    agent = _agent()
+    agent._worker = cast(Any, _NoBootstrapWorker())
+    ctx = ResourceSetupContext(owner=agent, resources={})
+    gen = agent._fanout_store_resource(ctx)
+    with pytest.raises(RuntimeError, match="bootstrap servers"):
+        await gen.__anext__()
+
+
+# ── parallel-mode incomplete-batch guard in run() (coverage d) ────────────────
+
+
+async def test_parallel_run_on_incomplete_batch_raises_runtime_error() -> None:
+    # (coverage d) run() must only be re-entered on a COMPLETE batch (the durable close materializes
+    # every outcome first). A parallel-mode ctx whose latest tool-call set is incomplete (one call
+    # has no result) is the lost-batch/rebalance signal — run() raises a diagnostic RuntimeError
+    # rather than silently proceeding.
+    agent = Agent(
+        "agent_incomplete_batch",
+        system_prompt="x",
+        subscribe_topics="agent_incomplete_batch.input",
+        publish_topic="agent_incomplete_batch.output",
+        model_client=TestModel(),
+    )
+
+    state = State()
+    done_id, pending_id = "tc-done", "tc-pending"
+    for tool_name, tcid in (("tool_done", done_id), ("tool_pending", pending_id)):
+        part = ToolCallPart(tool_name=tool_name, args={}, tool_call_id=tcid)
+        state.add_tool_call(part)
+        state.message_history.append(ModelResponse(parts=[part]))
+    state.add_tool_result(done_id, ToolReturn(return_value="ok"))
+    # pending_id deliberately has NO result → the batch is incomplete.
+
+    ctx = SessionRunContext(state=state, deps={})
+    ctx._correlation_id = "cid-incomplete-batch"
+    ctx._frame_id = "frame-incomplete-batch"
+
+    with pytest.raises(RuntimeError, match="incomplete tool calls in run"):
+        await agent.run(ctx)
