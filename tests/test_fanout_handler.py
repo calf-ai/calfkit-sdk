@@ -15,11 +15,10 @@ import pytest
 from faststream import Context
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
-from calfkit._vendor.pydantic_ai.messages import ModelResponse, TextPart, ToolReturn
+from calfkit._vendor.pydantic_ai.messages import ModelResponse, TextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.models import Call
 from calfkit.models.envelope import Envelope
-from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, SlotRef
 from calfkit.models.reply import ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
@@ -92,6 +91,22 @@ def test_resolve_fanout_store_raises_when_absent() -> None:
     ctx._resources = {}
     with pytest.raises(RuntimeError):
         agent._resolve_fanout_store(ctx)
+
+
+# ── @resource registration ───────────────────────────────────────────────────
+
+
+def test_fanout_agent_registers_durable_store_resource() -> None:
+    # A non-sequential agent registers the node-owned fan-out store @resource (opened by the
+    # worker lifecycle in production; injected by prepare_worker offline). The @resource itself
+    # is not run here — only its registration is asserted.
+    names = {name for name, _ in _agent()._resource_registry()}
+    assert FANOUT_STORE_KEY in names
+
+
+def test_sequential_agent_registers_no_store_resource() -> None:
+    names = {name for name, _ in _agent(sequential=True)._resource_registry()}
+    assert FANOUT_STORE_KEY not in names
 
 
 # ── classification ───────────────────────────────────────────────────────────
@@ -172,59 +187,7 @@ async def test_handle_fanout_open_writes_open_and_publishes_marked_siblings() ->
     assert published_callee_ids == open_slot_ids  # OPEN slots == published callee frame ids
 
 
-# ── sibling fold + re-entry close paths ──────────────────────────────────────
-
-
-async def _open_batch(store: FakeFanoutBatchStore, *, slots: tuple[tuple[str, str], ...] = (("f1", "tc1"), ("f2", "tc2"))) -> None:
-    reg = FanoutOpen(fanout_id="A", node_id="a", expected=[SlotRef(frame_id=f, tag=t) for f, t in slots])
-    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A")
-    snap = EnvelopeSnapshot(state=State(), stack=WorkflowState(call_stack=Stack([own])), deps={})
-    await store.open("A", reg, snap)
-
-
-def _sibling(store: FakeFanoutBatchStore, *, slot: str, tag: str, value: str) -> tuple[SessionRunContext, Envelope]:
-    state = State()
-    state.add_tool_result(tag, ToolReturn(return_value=value))
-    ctx = SessionRunContext(state=state, deps={})
-    ctx._resources = {FANOUT_STORE_KEY: store}
-    ctx._correlation_id = "corr-1"
-    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A", fanout_id="A")
-    env = Envelope(
-        context=SessionRunContext(state=state, deps={}),
-        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
-        reply=ReturnMessage(in_reply_to=slot, tag=tag, parts=[]),
-    )
-    return ctx, env
-
-
-async def test_handle_sibling_fold_parks_until_complete() -> None:
-    broker = KafkaBroker("localhost")
-    agent = _agent()
-    fake = FakeFanoutBatchStore()
-    await _open_batch(fake)
-    ctx, env = _sibling(fake, slot="f1", tag="tc1", value="r1")
-    async with TestKafkaBroker(broker):
-        resp = await agent._handle_sibling_fold(ctx, env, "corr-1", broker)
-    state = await fake.read_state("A")
-    assert state is not None and set(state.outcomes) == {"f1"}  # folded
-    assert resp.body.reply is None  # parked → no-reply mirror
-
-
-async def test_handle_sibling_fold_completes_and_publishes_reentry() -> None:
-    broker = KafkaBroker("localhost")
-    reentry: list[Envelope] = []
-
-    @broker.subscriber("a.private.return", group_id="re")
-    async def _re(body: Envelope, _h: Annotated[dict[str, Any], Context("message.headers")]) -> None:
-        reentry.append(body)
-
-    agent = _agent()
-    fake = FakeFanoutBatchStore()
-    await _open_batch(fake)
-    ctx1, env1 = _sibling(fake, slot="f1", tag="tc1", value="r1")
-    ctx2, env2 = _sibling(fake, slot="f2", tag="tc2", value="r2")
-    async with TestKafkaBroker(broker):
-        await agent._handle_sibling_fold(ctx1, env1, "corr-1", broker)  # park
-        await agent._handle_sibling_fold(ctx2, env2, "corr-1", broker)  # complete → re-entry
-    assert len(reentry) == 1
-    assert reentry[0].reply is not None and reentry[0].reply.in_reply_to == "A"
+# NOTE: the isolated `_handle_sibling_fold` tests were removed in the dead-code sweep — that graft
+# helper was subsumed by BaseNodeDef._aggregate. The sibling-fold + re-entry-close behavior is
+# covered by tests/test_staged_pipeline.py::TestAggregate (fold→park, complete→publish re-entry,
+# re-entry→close+restore) and end-to-end by tests/test_durable_fanout_e2e.py.

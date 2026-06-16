@@ -188,11 +188,7 @@ class Worker(LifecycleHookMixin):
         from ktables import KafkaTable  # the one ktables import outside calfkit.mcp
 
         cfg = self._mcp_discovery
-        bootstrap = cfg.bootstrap_servers or self._client.server_urls
-        if not bootstrap:
-            kwargs = getattr(self._client.broker, "_connection_kwargs", None) or {}
-            servers = kwargs.get("bootstrap_servers")
-            bootstrap = servers if isinstance(servers, str) else ",".join(servers) if servers else None
+        bootstrap = cfg.bootstrap_servers or self._derive_bootstrap_servers()
         if not bootstrap:
             raise RuntimeError(
                 "cannot derive Kafka bootstrap servers for the MCP Capability View "
@@ -210,6 +206,21 @@ class Worker(LifecycleHookMixin):
         await table.start()
         yield table
         await table.stop()
+
+    def _derive_bootstrap_servers(self) -> str | None:
+        """The Kafka bootstrap address for this worker's client, or ``None`` if underivable.
+
+        Prefers the client's explicit ``server_urls`` (set by ``Client.connect``), falling back
+        to the broker's connection kwargs. A client built directly via ``__init__`` (no
+        ``connect()``) may have neither — callers raise their own contextual error on ``None``.
+        Shared by the MCP Capability View resource and each fan-out agent's durable store resource.
+        """
+        bootstrap = self._client.server_urls
+        if not bootstrap:
+            kwargs = getattr(self._client.broker, "_connection_kwargs", None) or {}
+            servers = kwargs.get("bootstrap_servers")
+            bootstrap = servers if isinstance(servers, str) else ",".join(servers) if servers else None
+        return bootstrap
 
     def register_handlers(self) -> None:
         """Register FastStream subscribers + publishers for every node.

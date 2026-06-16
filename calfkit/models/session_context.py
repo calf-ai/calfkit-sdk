@@ -51,9 +51,10 @@ class CallFrame:
     node validating a ``ToolCallRef``). ``None`` when the producer sent no body."""
     tag: str | None = field(default=None)
     """Caller-set opaque correlation token, echoed verbatim on the reply
-    (``ReturnMessage.tag``) when this frame unwinds. The agent sets it to
-    ``tool_call_id``. Transport metadata, never content. DORMANT until PR-B wires a
-    producer (``Call.tag`` + the agent); ``None`` on every frame in PR-A."""
+    (``ReturnMessage.tag``) when this frame unwinds. The agent sets it to ``tool_call_id`` on
+    fan-out tool ``Call``s so a sibling reply is self-describing — the durable fold reads that
+    sibling's result from ``state.tool_results[reply.tag]``. Transport metadata, never content.
+    ``None`` on frames whose producer set no ``Call.tag`` (single/sequential calls, escalation hops)."""
     fanout_id: str | None = field(default=None)
     """Fan-out batch marker (= the fan-out node's OWN inbound ``frame_id``, which is
     also the batch key for the durable tables). At fan-out dispatch it is stamped on the
