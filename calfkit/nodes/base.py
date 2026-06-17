@@ -386,6 +386,28 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         ctx._reply = envelope.reply
         return ctx
 
+    def _build_seam_context(self, run_ctx: SessionRunContext, envelope: Envelope, headers: dict[str, Any], kind: MessageKind) -> SeamContext[State]:
+        """Build the capability-scoped :class:`SeamContext` the four seams receive (spec §6.3).
+
+        Sourced from the already-prepared ``run_ctx`` + the inbound frame: ``state`` is the
+        SAME object as ``run_ctx.state`` (a ``before_node`` mutation transforms the input the
+        body then runs on), ``deps``/``resources``/identity are carried read-only, and the
+        stage-scoped fields (``failing_call``/``exception``) start empty (set by the pipeline
+        during their stages). ``route`` is exposed on call-kind ingress only (§6.3)."""
+        frame = envelope.internal_workflow_state.current_frame_or_none
+        return SeamContext(
+            state=run_ctx.state,  # SHARED with the body's run_ctx — the input-transform channel
+            deps=run_ctx.deps,
+            resources=run_ctx.resources,
+            payload=frame.payload if frame is not None else None,
+            node_id=self.node_id,
+            correlation_id=run_ctx.correlation_id,
+            emitter_node_id=run_ctx.emitter_node_id,
+            route=decode_header_str(headers.get(HDR_ROUTE)) if kind == "call" else None,
+            delivery_kind=kind,
+            awaiting_reply=frame.callback_topic is not None if frame is not None else False,
+        )
+
     def _effective_resources(self) -> dict[str, Any]:
         """The resources a per-message handler sees: worker-scoped merged under
         this node's own (node wins on key collision).
