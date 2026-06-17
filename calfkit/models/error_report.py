@@ -57,6 +57,14 @@ class FaultTypes:
     DELIVERY_UNDECODABLE = "calf.delivery.undecodable"
     SLOT_MATERIALIZATION_FAILED = "calf.slot.materialization_failed"
     AGENT_SELF_RETRY_EXHAUSTED = "calf.agent.self_retry_exhausted"
+    # A fan-out batch could not complete (a node-own infra failure mid-batch, not a callee fault): the
+    # durable store died, its basestate was missing, a sibling/re-entry publish failed, or the node's
+    # own work raised while slots were outstanding. The batch is tombstoned and the caller faulted ONCE
+    # (in-node spec §4.4). ``details.reason`` ∈ {store_unavailable, basestate_missing, reentry_failed,
+    # dispatch_failed}; a node-own raise mid-batch escalates the exception itself (``calf.unhandled``).
+    FANOUT_ABORTED = "calf.fanout.aborted"
+    REASON_REENTRY_FAILED = "reentry_failed"
+    REASON_DISPATCH_FAILED = "dispatch_failed"
 
     # details key: a non-silent breadcrumb recording what build_safe elided to stay
     # within the carriage budget. Maps to a small dict carrying only the parts that

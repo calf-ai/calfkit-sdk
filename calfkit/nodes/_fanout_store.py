@@ -212,6 +212,9 @@ async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
             return CloseAbandon()  # abandon gate first — short-circuit the already-closed path
         base = await store.read_basestate(fanout_id)
         if base is None:
+            # Impossible by §4.1's basestate-first ordering, but defended: tombstone the orphan state
+            # record (tombstone-first, §4.3) so the abort doesn't leak a corpse, then escalate.
+            await abort_batch(store, fanout_id)
             return CloseAbort("basestate_missing")
         expected = {s.frame_id for s in state.open.expected}
         if set(state.outcomes) != expected:

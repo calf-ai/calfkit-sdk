@@ -314,9 +314,9 @@ class TestAggregate:
         assert isinstance(result, _BatchOpen)  # spurious early re-entry → no-op park
         assert await store.read_state("A") is not None  # batch left untouched
 
-    async def test_completing_fold_reentry_publish_failure_aborts_and_tombstones(self) -> None:
+    async def test_completing_fold_reentry_publish_failure_aborts_and_escalates(self) -> None:
         # The completing fold tries to self-publish the re-entry; if that publish raises KafkaError,
-        # _aggregate must NOT propagate — it aborts (tombstones both) and still parks (_BatchOpen).
+        # _aggregate must NOT propagate — it tombstones both AND escalates a fault to the caller (4.6).
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
@@ -324,7 +324,9 @@ class TestAggregate:
         # The SECOND fold completes the batch; its re-entry publish raises.
         env2 = _marked_env(in_reply_to="f2", tag="tc2", parts=[TextPart(text="r2")])
         _run_ctx, _seam, result = await _agg(node, store, env2, "return", _RaisingBroker())
-        assert isinstance(result, _BatchOpen)  # did not propagate; parked
+        assert isinstance(result, _BatchFaulted)  # escalated, not parked
+        assert result.report.error_type == FaultTypes.FANOUT_ABORTED
+        assert result.report.details[FaultTypes.REASON] == FaultTypes.REASON_REENTRY_FAILED
         assert await store.read_state("A") is None  # aborted: both records tombstoned
         assert await store.read_basestate("A") is None
 
@@ -362,13 +364,16 @@ class TestAggregate:
         state = await store.read_state("A")
         assert state is not None and set(state.outcomes) == {"f1"}  # still just the one fold
 
-    async def test_sibling_unavailable_store_parks_abort_path(self) -> None:
+    async def test_sibling_unavailable_store_aborts_and_escalates(self) -> None:
+        # A store that died during the classify/fold tombstones (best-effort) AND escalates a fault.
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
         store.make_unavailable()
         _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return")
-        assert isinstance(result, _BatchOpen)
+        assert isinstance(result, _BatchFaulted)
+        assert result.report.error_type == FaultTypes.FANOUT_ABORTED
+        assert result.report.details[FaultTypes.REASON] == "store_unavailable"
 
     async def test_reentry_over_tombstoned_batch_abandons_parks(self) -> None:
         node = _fanout_node()
@@ -376,7 +381,7 @@ class TestAggregate:
         _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
         assert isinstance(result, _BatchOpen)
 
-    async def test_reentry_basestate_missing_aborts_parks(self) -> None:
+    async def test_reentry_basestate_missing_aborts_and_escalates(self) -> None:
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
@@ -384,7 +389,54 @@ class TestAggregate:
         await record_outcome(store, "A", _resolved_outcome("f2", "tc2", "r2"))
         store._basestate.pop("A")  # white-box: simulate the impossible-by-ordering miss
         _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
-        assert isinstance(result, _BatchOpen)
+        assert isinstance(result, _BatchFaulted)
+        assert result.report.error_type == FaultTypes.FANOUT_ABORTED
+        assert result.report.details[FaultTypes.REASON] == "basestate_missing"
+        assert await store.read_state("A") is None  # tombstoned on abort
+
+    async def test_reentry_store_dead_at_close_aborts_and_escalates(self) -> None:
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        await record_outcome(store, "A", _resolved_outcome("f1", "tc1", "r1"))
+        await record_outcome(store, "A", _resolved_outcome("f2", "tc2", "r2"))
+        store.make_unavailable()  # the store dies before the close reads it
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
+        assert isinstance(result, _BatchFaulted)
+        assert result.report.error_type == FaultTypes.FANOUT_ABORTED
+        assert result.report.details[FaultTypes.REASON] == "store_unavailable"
+
+
+class TestMidBatchAbort:
+    """A node-own raise / publish failure MID-BATCH (the marked fan-out frame on top, the batch still
+    OPEN) must abort — tombstone + escalate ONCE — NOT ``_publish_fault``/``on_node_error``, which would
+    double-reply while siblings are still pending (spec §6.8 / R4)."""
+
+    async def test_in_batch_work_reads_the_fanout_marker(self) -> None:
+        node = _fanout_node()
+        marked = node._build_seam_context(_store_ctx(FakeFanoutBatchStore()), _marked_env(in_reply_to="f1"), {}, "return")
+        unmarked = node._build_seam_context(_store_ctx(FakeFanoutBatchStore()), _plain_env(), {}, "call")
+        assert node._in_batch_work(_marked_env(in_reply_to="f1")) is True  # fanout_id set on the frame
+        assert node._in_batch_work(_plain_env()) is False
+        # the seam contexts exist only to keep the build helper exercised
+        assert marked is not None and unmarked is not None
+
+    async def test_node_own_raise_during_sibling_fold_aborts_once(self) -> None:
+        # An UNEXPECTED node-own raise while folding a sibling (marked frame, batch open) routes to the
+        # abort (tombstone + escalate the exception), not on_node_error → _publish_fault.
+        class _RaisingFoldNode(_FanoutNode):
+            async def _resolve_callee(self, *a: Any, **k: Any) -> Any:
+                raise RuntimeError("boom mid-fold")
+
+        node = _RaisingFoldNode(node_id="fan", subscribe_topics=["fan.in"])
+        store = FakeFanoutBatchStore()
+        node.resources[FANOUT_STORE_KEY] = store
+        await _open(store)
+        env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])
+        resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "return"}, broker=_CaptureBroker())  # type: ignore[arg-type]
+        assert isinstance(resp.body.reply, FaultMessage)  # escalated the node's own exception
+        assert resp.body.reply.error.error_type == FaultTypes.UNHANDLED
+        assert await store.read_state("A") is None  # the open batch was tombstoned (abort, not _publish_fault)
 
 
 class TestExecute:

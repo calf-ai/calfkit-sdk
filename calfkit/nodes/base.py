@@ -1018,23 +1018,15 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         except (KafkaError, FanoutStoreUnavailableError) as exc:
             # §4.4 dispatch-abort: the batch may be durably registered (basestate+state written) but
             # cannot complete — a sibling publish failed, or the store failed at OPEN. Tombstone both
-            # records so the orphan open batch is not leaked (reclaimed otherwise only by #220); any
-            # sibling already published then post_closure-stray-floors against the tombstone at its
-            # fold. ERROR-log + strand: the ACK_FIRST offset is already committed, so the inbound is
-            # not redelivered.
-            logger.error(
-                "[%s] fan-out OPEN failed batch=%s node=%s; aborting + caller strands: %r",
-                correlation_id[:8],
-                fanout_id,
-                self.node_id,
-                exc,
-            )
+            # records so the orphan open batch is not leaked (reclaimed otherwise only by #220), AND
+            # escalate a fault ONCE to the caller — the inbound stack (D's own fan-out frame on top)
+            # addresses it, so no basestate read is needed. Any sibling already published then
+            # post_closure-stray-floors against the tombstone at its fold.
+            logger.error("[%s] fan-out OPEN failed batch=%s node=%s; aborting + escalating: %r", correlation_id[:8], fanout_id, self.node_id, exc)
             await abort_batch(store, fanout_id)
-            # TODO(fault rail PR-6): escalate a typed fault to the caller (spec §4.4) instead of
-            # stranding — the abort+tombstone here is the return-only precursor, matching the
-            # _aggregate fold/close abort arms the rail likewise upgrades to escalation.
-        envelope.reply = None  # no-reply mirror (I3): nothing was returned point-to-point this hop
-        # (the siblings owe the output; or, on abort above, both records are tombstoned and the caller strands)
+            report = self._fanout_abort_report(FaultTypes.REASON_DISPATCH_FAILED)
+            return await self._fault_response(report, self._stack_snapshot(envelope), envelope, correlation_id, broker)
+        envelope.reply = None  # success path: no-reply mirror (I3) — the siblings owe the output this hop
         return Response(envelope, headers=self._headers("call"))
 
     async def _aggregate(
@@ -1083,11 +1075,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         envelope: Envelope,
         correlation_id: str,
         broker: BrokerAnnotation,
-    ) -> _BatchOpen:
+    ) -> _BatchOpen | _BatchFaulted:
         """Fold one marked sibling reply (in-node spec §4.2): classify (stray-check BEFORE the seams,
-        decision 10 / §6.7) → stage-1 ``on_callee_error`` on a LIVE slot → record → park; the
-        completing fold self-publishes the closure re-entry. Always parks (``_BatchOpen``) — the output
-        is owed by the still-pending siblings."""
+        decision 10 / §6.7) → stage-1 ``on_callee_error`` on a LIVE slot → record. A stray parks
+        (``_BatchOpen`` — the output is owed by the still-pending siblings); a node-own abort (store
+        death / a failed re-entry publish) tombstones and escalates ``_BatchFaulted`` (§4.4)."""
         store = self._resolve_fanout_store(run_ctx)
         fanout_id = envelope.internal_workflow_state.current_frame.frame_id  # == frame.fanout_id, the batch key
         reply = envelope.reply
@@ -1098,37 +1090,38 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         match await classify_sibling(store, fanout_id, reply.in_reply_to):
             case FoldStray(reason=reason):
                 logger.warning("[%s] fan-out stray (%s) slot=%s node=%s", correlation_id[:8], reason, reply.in_reply_to, self.node_id)
+                return _BatchOpen()
             case FoldAbort(reason=reason):
-                # 4.6 upgrades this to _publish_abort (tombstone + escalate once); return-only strand here.
-                logger.error("[%s] fan-out classify abort (%s) batch=%s node=%s; caller strands", correlation_id[:8], reason, fanout_id, self.node_id)
+                # The store died during classify (tombstoned best-effort): escalate ONCE to the caller.
+                logger.error("[%s] fan-out classify abort (%s) batch=%s node=%s; escalating", correlation_id[:8], reason, fanout_id, self.node_id)
+                return _BatchFaulted(self._fanout_abort_report(reason))
             case SiblingPending(slot_ref=slot_ref):
                 # Stage 1 runs ONLY on a live pending slot (the stray check above precedes the seams).
                 outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=slot_ref.target_topic)
-                await self._record_and_maybe_close(store, fanout_id, self._slot_to_fanout_outcome(outcome), envelope, correlation_id, broker)
-        return _BatchOpen()  # park (no-reply mirror) — the output is still owed by siblings
+                return await self._record_and_maybe_close(store, fanout_id, self._slot_to_fanout_outcome(outcome), envelope, correlation_id, broker)
 
     async def _record_and_maybe_close(
         self, store: FanoutBatchStore, fanout_id: str, outcome: FanoutOutcome, envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
-    ) -> None:
-        """Record the folded outcome; on the completing fold, self-publish the closure re-entry."""
+    ) -> _BatchOpen | _BatchFaulted:
+        """Record the folded outcome (park); on the completing fold, self-publish the closure re-entry.
+        A node-own abort (store death, or a permanently-failed re-entry publish) tombstones and
+        escalates ``_BatchFaulted`` (§4.4); otherwise parks (``_BatchOpen``)."""
         match await record_outcome(store, fanout_id, outcome):
             case FoldComplete():
                 try:
                     await self._publish_reentry(envelope, correlation_id, broker)
+                    return _BatchOpen()  # parked — the re-entry is a fresh delivery that resumes the body
                 except KafkaError:
-                    # 4.6 upgrades this to _publish_abort (escalate once); return-only strand here.
-                    logger.error(
-                        "[%s] fan-out re-entry publish failed batch=%s node=%s; aborting + caller strands",
-                        correlation_id[:8],
-                        fanout_id,
-                        self.node_id,
-                    )
+                    # A permanent re-entry-publish failure (round-4 §4.4): tombstone + escalate ONCE,
+                    # so a fully-folded batch never leaks a complete-but-unclosed corpse.
+                    logger.error("[%s] fan-out re-entry publish failed batch=%s node=%s; escalating", correlation_id[:8], fanout_id, self.node_id)
                     await abort_batch(store, fanout_id)
+                    return _BatchFaulted(self._fanout_abort_report(FaultTypes.REASON_REENTRY_FAILED))
             case FoldParked():
-                pass
+                return _BatchOpen()
             case FoldAbort(reason=reason):
-                # 4.6 upgrades this to _publish_abort; return-only strand here.
-                logger.error("[%s] fan-out record abort (%s) batch=%s node=%s; caller strands", correlation_id[:8], reason, fanout_id, self.node_id)
+                logger.error("[%s] fan-out record abort (%s) batch=%s node=%s; escalating", correlation_id[:8], reason, fanout_id, self.node_id)
+                return _BatchFaulted(self._fanout_abort_report(reason))
 
     def _slot_to_fanout_outcome(self, outcome: _SlotResolved | _SlotFailed) -> FanoutOutcome:
         """Project a stage-1 slot outcome into the durable :class:`FanoutOutcome` (parts XOR fault). A
@@ -1164,12 +1157,50 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 return _BatchClosed()  # resume the body on the restored, materialized context
             case CloseSpurious():
                 logger.warning("[%s] fan-out spurious re-entry (incomplete) batch=%s node=%s", correlation_id[:8], fanout_id, self.node_id)
+                return _BatchOpen()  # no-op park for a spurious re-entry (the batch is still open)
             case CloseAbandon():
                 logger.debug("[%s] fan-out re-entry on a closed batch=%s node=%s; abandoning", correlation_id[:8], fanout_id, self.node_id)
+                return _BatchOpen()  # no-op park for an already-closed batch
             case CloseAbort(reason=reason):
-                # 4.6 upgrades this to _publish_abort; return-only strand here.
-                logger.error("[%s] fan-out close abort (%s) batch=%s node=%s; caller strands", correlation_id[:8], reason, fanout_id, self.node_id)
-        return _BatchOpen()  # no-op park for a spurious/abandoned/aborted re-entry
+                # The close can't complete (store death / missing basestate, tombstoned by close_batch):
+                # escalate ONCE to the caller. The re-entry's stack carries the caller (the marked
+                # fan-out frame), so the handler's pre-mutation snapshot addresses it (no basestate read).
+                logger.error("[%s] fan-out close abort (%s) batch=%s node=%s; escalating", correlation_id[:8], reason, fanout_id, self.node_id)
+                return _BatchFaulted(self._fanout_abort_report(reason))
+
+    def _fanout_abort_report(self, reason: str) -> ErrorReport:
+        """Synthesize the fault for an ABORTED fan-out batch (in-node spec §4.4): the batch could not
+        complete due to a node-own infra failure — the durable store died, its basestate was missing, or
+        a sibling/re-entry publish failed — NOT a callee fault. ``details.reason`` discriminates so a
+        caller can branch (``find(FaultTypes.FANOUT_ABORTED)`` → ``details[REASON]``)."""
+        return ErrorReport.build_safe(
+            error_type=FaultTypes.FANOUT_ABORTED,
+            message=f"fan-out batch aborted ({reason})",
+            origin_node_id=self.node_id,
+            details={FaultTypes.REASON: reason},
+        )
+
+    def _in_batch_work(self, envelope: Envelope) -> bool:
+        """True iff this delivery is processing while a fan-out batch is OPEN — the current (top) frame
+        carries the ``fanout_id`` marker (the node holds ZERO in-process batch state post-PR-4, so the
+        marker is the discriminator). A node-own raise here must ABORT (tombstone + escalate once), NOT
+        ``_publish_fault``/recover — the still-pending siblings owe the output, so faulting the caller
+        directly would double-reply (spec §6.8 / R4)."""
+        frame = envelope.internal_workflow_state.current_frame_or_none
+        return frame is not None and frame.fanout_id is not None
+
+    async def _publish_abort(
+        self, report: ErrorReport, snapshot: WorkflowState, inbound: Envelope, ctx: SessionRunContext, correlation_id: str, broker: BrokerAnnotation
+    ) -> Response:
+        """Abort the open batch a node-own fault interrupted: tombstone both records, then escalate the
+        fault ONCE to the caller (in-node spec §4.4). The caller rides the inbound delivery's stack — the
+        marked fan-out frame is on top of ``snapshot``, so ``_fault_response`` pops it and addresses the
+        caller with NO basestate read (the abort fires on store/publish trouble — the worst moment to
+        read the store)."""
+        frame = snapshot.current_frame_or_none
+        if frame is not None and frame.fanout_id is not None:
+            await abort_batch(self._resolve_fanout_store(ctx), frame.fanout_id)  # frame_id == fanout_id == batch key
+        return await self._fault_response(report, snapshot, inbound, correlation_id, broker)
 
     def _build_fault_group(self, outcomes: list[FanoutOutcome], failed: list[FanoutOutcome]) -> ErrorReport:
         """Build the closing batch's fault from its unhandled-fault slots (§4.4/§7.3). Carries the
@@ -1417,6 +1448,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             return await self._fault_response(nfe.report, snapshot, envelope, correlation_id, broker)
         except Exception as exc:
             # ── stage 5: on_node_error — the node's own work raised uncaught ──
+            if self._in_batch_work(envelope):
+                # Mid-batch (a marked sibling delivery): recovery is FORBIDDEN — the still-pending
+                # siblings owe the output, so on_node_error → _publish_fault would double-reply. Abort
+                # (tombstone + escalate ONCE) instead (spec §6.8 / R4 / R5). _in_batch_work is False once
+                # the close has restored the unmarked frame, so a body raise at close recovers normally.
+                report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+                return await self._publish_abort(report, snapshot, envelope, ctx, correlation_id, broker)
             seam_ctx.exception = exc
             report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
             recovery = await run_chain_guarded(self._chains[ON_NODE_ERROR], seam_ctx, report)
@@ -1491,6 +1529,10 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
         # ── publish guard: a transport/size failure on the success rail NEVER re-enters
         # on_node_error; it faults the caller directly on the pre-mutation snapshot (§6.8 / scenario 42).
+        # No _in_batch_work arm here (unlike stage-5): _publish_action is only ever reached with an
+        # UNMARKED frame — a marked sibling delivery parks (_CONSUMED) and the close restores the unmarked
+        # frame before the body runs — so a publish failure here is never mid-batch. A fan-out OPEN's
+        # sibling-publish failure is owned by _handle_fanout_open's own abort, not this guard.
         try:
             body, pubkind = await self._publish_action(output, envelope, correlation_id, broker)
         except Exception as exc:
