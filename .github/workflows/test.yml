@@ -40,20 +40,16 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
+        # The default suite is fully offline (FunctionModel + in-memory
+        # TestKafkaBroker) and deselects the opt-in `kafka` and `live` lanes
+        # (ADR 0007), so it needs no Docker, network, or credentials. The live
+        # model-API lane runs separately on push-to-main (integration-live.yml).
         run: |
           if [ "${{ matrix.python-version }}" = "3.10" ]; then
             uv run pytest tests/ -v --tb=short --cov=calfkit --cov-report=term-missing --cov-report=xml
           else
             uv run pytest tests/ -v --tb=short
           fi
-        env:
-          OPENAI_API_KEY: ${{
-            (github.event_name == 'push' ||
-             contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'),
-                      github.event.pull_request.author_association))
-            && secrets.OPENAI_API_KEY || '' }}
-          TEST_LLM_MODEL_NAME: ${{ vars.TEST_LLM_MODEL_NAME }}
-          TEST_REASONING_EFFORT: ${{ vars.TEST_REASONING_EFFORT }}
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.10'

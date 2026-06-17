@@ -1,3 +1,4 @@
+import pytest
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai import models
@@ -10,13 +11,18 @@ from tests.providers import (
     prepare_worker,
     user_name,
 )
-from tests.utils import print_message_history, skip_if_no_openai_key
+from tests.utils import print_message_history, skip_if_no_live_llm
+
+# Every test here drives a real model API. Opt the whole module into the `live`
+# lane (deselected by default — see ADR 0007); `skip_if_no_live_llm` then skips
+# cleanly when credentials are absent.
+pytestmark = pytest.mark.live
 
 # Ensure model requests are allowed for integration tests
 models.ALLOW_MODEL_REQUESTS = True
 
 
-@skip_if_no_openai_key
+@skip_if_no_live_llm
 async def test_simple_agent_q_and_a(container, deploy_agent):
     prepare_worker(container)
 
@@ -33,7 +39,7 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
         print(f"Response message: {result.output}")
 
 
-@skip_if_no_openai_key
+@skip_if_no_live_llm
 async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_agent_tools):
     deploy_agent.add_tools(deploy_multiple_agent_tools[2])
     prepare_worker(container)
@@ -53,7 +59,7 @@ async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_a
         assert "1967" in result.output
 
 
-@skip_if_no_openai_key
+@skip_if_no_live_llm
 async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_multiple_agent_tools):
     deploy_agent.add_tools(*deploy_multiple_agent_tools)
     prepare_worker(container)
@@ -76,7 +82,7 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
         assert "snow" in result.output.lower()
 
 
-@skip_if_no_openai_key
+@skip_if_no_live_llm
 async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy_multiple_agent_tools):
     deploy_agent.add_tools(*deploy_multiple_agent_tools)
     prepare_worker(container)
@@ -112,7 +118,7 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
         print_message_history(result.message_history)
 
 
-@skip_if_no_openai_key
+@skip_if_no_live_llm
 async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_caller_id_agent_tool):
     deploy_agent.add_tools(deploy_caller_id_agent_tool)
     prepare_worker(container)
@@ -151,7 +157,7 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
         print_message_history(result.message_history)
 
 
-@skip_if_no_openai_key
+@skip_if_no_live_llm
 async def test_structured_output_agent(container, deploy_structured_agent):
     prepare_worker(container)
 

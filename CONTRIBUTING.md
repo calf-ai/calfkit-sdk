@@ -55,7 +55,7 @@ opt-in, so `make test` stays fast and needs no Docker, network, or credentials.
 | Unit / component | nothing — `FunctionModel` + in-memory `TestKafkaBroker` | — | yes |
 | Real broker | a Kafka-protocol broker (Redpanda) | `@pytest.mark.kafka` | no — use `make test-kafka` |
 | Topic provisioning | a broker with topic auto-create **disabled** | `CALF_TEST_KAFKA` env var | no — separate lane |
-| Real LLM | a live model API | `OPENAI_API_KEY` (+ `TEST_LLM_MODEL_NAME`) | skips unless the key is set |
+| Real LLM | a live model API | `@pytest.mark.live` (skips without `OPENAI_API_KEY` + `TEST_LLM_MODEL_NAME`) | no — use `make test-live` |
 
 Default to **offline** tests: a scripted `FunctionModel` stands in for the LLM
 and FastStream's `TestKafkaBroker` stands in for Kafka, so the tests are
@@ -108,6 +108,44 @@ no Docker or `integration` group needed, since testcontainers is never imported:
 ```console
 $ CALF_TEST_KAFKA_BOOTSTRAP=localhost:9092 uv run pytest -m kafka
 ```
+
+### Writing a live-LLM test
+
+Live-LLM tests prove our integration with a real model provider holds (real
+tool-calling, structured output, multi-turn). They use the in-memory
+`TestKafkaBroker` — no broker needed, only credentials. Carry the `live` marker
+and the `skip_if_no_live_llm` gate so the test skips cleanly when credentials are
+absent:
+
+```python
+import pytest
+
+from tests.utils import skip_if_no_live_llm
+
+pytestmark = pytest.mark.live  # opt the whole module into the live lane
+
+
+@skip_if_no_live_llm
+async def test_agent_answers(container, deploy_agent) -> None:
+    ...
+```
+
+The marker decides whether the `live` lane selects the test; `skip_if_no_live_llm`
+makes it skip cleanly (rather than erroring on a real request) when
+`OPENAI_API_KEY` or `TEST_LLM_MODEL_NAME` is unset. For working examples, see
+`tests/integration/test_agent_workers.py` and
+`tests/integration/test_agent_output_types.py`.
+
+### Running the live-LLM lane
+
+```console
+$ make test-live      # runs `-m live`; needs OPENAI_API_KEY + TEST_LLM_MODEL_NAME
+```
+
+Without credentials the lane skips cleanly rather than failing. In CI these tests
+run **only on push-to-main** (and on manual dispatch) via `integration-live.yml`,
+never on pull requests — so the paid, non-deterministic model calls stay off
+every PR and the provider secret is never exposed to PR runs.
 
 ### The topic-provisioning lane
 

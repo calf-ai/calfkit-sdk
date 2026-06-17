@@ -92,12 +92,16 @@ omit = ["calfkit/_vendor/*"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 # --strict-markers: an unregistered marker is an error, not a silent no-op.
-# -m "not kafka": real-broker tests are OPT-IN. They are deselected by default
-# so a bare `pytest` / `make test` never needs Docker; run them with `-m kafka`
-# (see `make test-kafka`), whose CLI -m overrides this default selection.
-addopts = ["--strict-markers", "-m", "not kafka"]
+# -m "not kafka and not live": external-dependency tests are OPT-IN, one
+# orthogonal marker per dependency (ADR 0007). They are deselected by default so
+# a bare `pytest` / `make test` never needs Docker, a network, or credentials.
+# Run a lane with `-m kafka` (`make test-kafka`) or `-m live` (`make test-live`),
+# whose CLI -m overrides this default selection. A test needing both carries both
+# markers (and is then selected by either lane).
+addopts = ["--strict-markers", "-m", "not kafka and not live"]
 markers = [
     "kafka: requires a real Kafka/Redpanda broker (testcontainers-managed unless CALF_TEST_KAFKA_BOOTSTRAP names an external broker)",
+    "live: requires a real model API (set OPENAI_API_KEY and TEST_LLM_MODEL_NAME); main-only CI lane, never on PRs",
 ]
 
 [dependency-groups]

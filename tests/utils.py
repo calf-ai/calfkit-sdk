@@ -15,10 +15,30 @@ from calfkit._vendor.pydantic_ai.messages import (
 
 load_dotenv()
 
-# Skip integration tests if OpenAI API key is not available
-skip_if_no_openai_key = pytest.mark.skipif(
-    not os.getenv("OPENAI_API_KEY"),
-    reason="Skipping integration test: OPENAI_API_KEY not set in environment",
+
+def _live_llm_enabled() -> bool:
+    """Return True if a live model API is reachable for the ``live`` lane.
+
+    Driven SYNCHRONOUSLY by env vars — an instant ``os.getenv`` check, never a
+    live API probe at collection time (a probe would be slow, flaky, and turn a
+    missing key into a collection error rather than a clean skip).
+
+    Requires BOTH credentials the live tests depend on: ``OPENAI_API_KEY`` (the
+    provider key) and ``TEST_LLM_MODEL_NAME`` (which the model-client fixture in
+    ``tests/conftest.py`` reads with ``os.environ[...]`` — absent, it raises a
+    ``KeyError`` mid-setup instead of skipping). Gating on both closes that gap
+    (see ADR 0007). The dedicated ``live`` CI lane sets both; locally the tests
+    skip cleanly when either is unset.
+    """
+    return bool(os.getenv("OPENAI_API_KEY") and os.getenv("TEST_LLM_MODEL_NAME"))
+
+
+# Skip live-LLM tests unless real-provider credentials are present. This is the
+# clean-skip safety net for the opt-in ``live`` lane (`-m live`): a selected test
+# with no credentials skips rather than erroring on a real request.
+skip_if_no_live_llm = pytest.mark.skipif(
+    not _live_llm_enabled(),
+    reason="Skipping live-LLM test: set OPENAI_API_KEY and TEST_LLM_MODEL_NAME to enable",
 )
 
 

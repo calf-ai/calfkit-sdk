@@ -21,14 +21,16 @@ at collection time: it is slow, flaky, and turns a cold or absent broker into a
 exactly that anti-pattern and was migrated off it.
 
 The decision is **orthogonal, composable pytest markers, one per external
-dependency**, deselected by default. `kafka` (a real broker) is registered now;
-`llm` (a real model API) is the planned second axis for the existing real-API
-tests, which for now keep their `skip_if_no_openai_key` gate. Markers are
+dependency**, deselected by default. Two axes are registered: `kafka` (a real
+broker) and `live` (a real model API). Markers are
 registered under `--strict-markers` (an unregistered marker is an error, not a
-silent no-op), and `addopts = ["--strict-markers", "-m", "not kafka"]` makes the
-broker lane opt-in: a bare `pytest` / `make test` deselects it and needs no
-Docker, while `-m kafka` / `make test-kafka` overrides the default selection. A
-both-axes test would simply carry both markers. The broker itself is a
+silent no-op), and `addopts = ["--strict-markers", "-m", "not kafka and not live"]`
+makes both lanes opt-in: a bare `pytest` / `make test` deselects them and needs no
+Docker, network, or credentials, while `-m kafka` / `make test-kafka` (or `-m live`
+/ `make test-live`) overrides the default selection. A
+both-axes test would simply carry both markers (and is then selected by either
+lane; each axis's clean-skip gate keeps it green where only one dependency is
+provisioned). The broker itself is a
 session-scoped single-node Redpanda started and torn down by **testcontainers**
 from inside the test session, so neither developers nor CI hand-run one;
 `CALF_TEST_KAFKA_BOOTSTRAP` is an escape hatch to reuse an external broker
@@ -46,7 +48,19 @@ DISABLED — which testcontainers' `RedpandaContainer` (it runs `redpanda start
 testcontainers lane is consequently far simpler than the provisioning one: no
 manual `docker run`, health-wait, or config steps. The Redpanda image tag is
 pinned and bumped deliberately, because the library's default
-(`RedpandaContainer`'s built-in `v23.1.13`) is years stale. And the `llm` axis
-is reserved but unwired: when it lands it should also close the latent gap where
-`skip_if_no_openai_key` checks only `OPENAI_API_KEY` while the model fixture also
-hard-requires `TEST_LLM_MODEL_NAME`. Decided 2026-06-14.
+(`RedpandaContainer`'s built-in `v23.1.13`) is years stale. Decided 2026-06-14.
+
+**Landed 2026-06-16 — the `live` axis.** The reserved second axis shipped as
+`live` (not `llm`): provider-agnostic, and distinct from `kafka`, which is also
+network-bound (so `network`/`remote_data` would not disambiguate the two lanes).
+The two live-LLM files carry `pytestmark = pytest.mark.live`, and their gate is
+now `skip_if_no_live_llm`, which closes the latent gap this ADR flagged — it
+requires BOTH `OPENAI_API_KEY` and `TEST_LLM_MODEL_NAME` (the model fixture reads
+the latter with `os.environ[...]`, so a key alone would have errored mid-setup
+instead of skipping). Unlike the `kafka` lane (which also runs on path-filtered
+PRs), the `live` lane runs **only on push-to-main and on manual dispatch, never
+on PRs** (`integration-live.yml`): the model calls are paid and
+non-deterministic, and keeping them off PRs also means the provider secret is
+never exposed to PR (incl. fork) runs — so `test.yml` dropped its conditional
+secret injection entirely. The default-suite coverage baseline re-levels on the
+next push to main once the live tests no longer contribute to it.
