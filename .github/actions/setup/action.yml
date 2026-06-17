@@ -1,0 +1,42 @@
+name: "Setup Python and uv"
+description: >-
+  Set up Python and uv (with caching), then optionally sync uv dependency
+  groups. Assumes the repository is already checked out (a local composite
+  action cannot run before checkout).
+
+inputs:
+  python-version:
+    description: "Python version to install."
+    required: false
+    default: "3.12"
+  groups:
+    description: >-
+      Space-separated uv dependency groups to sync (e.g. "dev integration").
+      An empty string skips the sync (e.g. for `uv build`, which needs no venv).
+    required: false
+    default: "dev"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+
+    - name: Sync dependencies
+      if: ${{ inputs.groups != '' }}
+      shell: bash
+      env:
+        GROUPS: ${{ inputs.groups }}
+      run: |
+        args=()
+        for group in $GROUPS; do
+          args+=(--group "$group")
+        done
+        uv sync "${args[@]}"

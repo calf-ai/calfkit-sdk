@@ -9,7 +9,7 @@ name: "Integration: real broker"
 # bring-up; the GitHub-hosted runner's Docker daemon is the only prerequisite.
 #
 # These tests are deselected from the default suite (see `addopts` in
-# pyproject.toml), so `test.yml` never needs Docker. Push-to-main runs
+# pyproject.toml), so `ci.yml` never needs Docker. Push-to-main runs
 # unconditionally as a post-merge safety net; PRs run only when relevant paths
 # change (a Docker image pull per run is not free).
 #
@@ -42,19 +42,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+      # `integration` adds testcontainers; `dev` provides pytest et al.
+      - name: Set up Python and dependencies
+        uses: ./.github/actions/setup
         with:
           python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        # `integration` adds testcontainers; `dev` provides pytest et al.
-        run: uv sync --group dev --group integration
+          groups: "dev integration"
 
       - name: Run real-broker tests
         # testcontainers starts/stops Redpanda using the runner's Docker daemon;
