@@ -33,7 +33,6 @@ $ pip install calfkit
   - [Next steps](#next-steps)
     - [Structured outputs](#structured-outputs)
     - [Deploying to production](#deploying-to-production)
-- [API](#api)
 - [Documentation](#documentation)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
@@ -253,39 +252,6 @@ $ python serve_tool.py
 
 <br>
 
-## API
-
-The full public surface is re-exported from the top-level `calfkit` package:
-
-```python
-from calfkit import (
-    Client, InvocationHandle, NodeResult,        # client
-    Agent, agent_tool, consumer,                 # node authoring
-    NodeDef, ToolNodeDef, ConsumerNodeDef, BaseNodeDef,  # node types
-    ConsumerFn, GateFunction,                    # node typing helpers
-    ToolContext,                                 # tool-side context
-    OpenAIModelClient, OpenAIResponsesModelClient, AnthropicModelClient,  # providers
-    Worker, LifecycleContext, ServingContext, ResourceSetupContext,       # worker + lifecycle
-    ProvisioningConfig,                          # provisioning (config only)
-    DeserializationError, LifecycleConfigError, ToolExecutionError,       # exceptions
-)
-```
-
-Key entry points:
-
-| Symbol | Purpose |
-| --- | --- |
-| `Client.connect(server_urls=None, reply_topic=None, reply_ttl=None, *, provisioning=None, ...)` | Connect to the broker. Defaults to `$CALF_HOST_URL` → `localhost`. |
-| `Client.execute(prompt, topic, *, output_type=..., deps=..., message_history=..., timeout=None, ...)` | Request/reply: publish and await the `NodeResult`. |
-| `Client.start(...)` / `Client.send(...)` | Async-handle variant, and one-way send (no reply future; optional `reply_to` return address). |
-| `Agent(node_id, *, system_prompt=..., subscribe_topics, publish_topic=None, model_client, tools=None, gates=None, final_output_type=str, model_settings=None, ...)` | An agent node. |
-| `@agent_tool` / `@consumer(...)` | Decorators that turn a function into a tool node / consumer node. |
-| `Worker(client, nodes=None, ...)` → `run()` / `start()` / `stop()` | Host one or more nodes against the broker. |
-
-Full signatures and behavior live in the source docstrings and the [documentation](#documentation) below.
-
-<br>
-
 ## Documentation
 
 In-repo documentation lives under [`docs/`](docs/).
@@ -300,6 +266,7 @@ In-repo documentation lives under [`docs/`](docs/).
 
 **Reference:**
 
+- **[API reference](docs/api.md)** — the public surface re-exported from the top-level `calfkit` package, with the key entry-point signatures.
 - **[CLI reference](docs/cli.md)** — the `calfkit run` and `calfkit topics` commands.
 - **[Topic provisioning](docs/topic-provisioning.md)** — the experimental, opt-in topic-creation helper for dev/CI.
 
