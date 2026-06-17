@@ -39,6 +39,7 @@ from calfkit.nodes._fanout_store import (
     CloseResume,
     CloseSpurious,
     FanoutBatchStore,
+    FanoutStoreUnavailableError,
     FoldAbort,
     FoldComplete,
     FoldParked,
@@ -530,23 +531,43 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             expected=[SlotRef(frame_id=fid, tag=call.tag) for fid, call in zip(slot_ids, calls)],
         )
         snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
-        await store.open(fanout_id, reg, snapshot)
-        for call, slot_id in zip(calls, slot_ids):
-            wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
-            wf_copy.mark_fanout()  # mark the node's OWN (current top) frame, before the callee push
-            wf_copy.invoke_frame(call, self._return_topic, payload=call.body, frame_id=slot_id, tag=call.tag)
-            sibling = Envelope(
-                context=SessionRunContext(state=call.state, deps=envelope.context.deps),
-                internal_workflow_state=wf_copy,
+        try:
+            await store.open(fanout_id, reg, snapshot)
+            for call, slot_id in zip(calls, slot_ids):
+                wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
+                wf_copy.mark_fanout()  # mark the node's OWN (current top) frame, before the callee push
+                wf_copy.invoke_frame(call, self._return_topic, payload=call.body, frame_id=slot_id, tag=call.tag)
+                sibling = Envelope(
+                    context=SessionRunContext(state=call.state, deps=envelope.context.deps),
+                    internal_workflow_state=wf_copy,
+                )
+                await broker.publish(
+                    sibling,
+                    topic=wf_copy.current_frame.target_topic,
+                    correlation_id=correlation_id,
+                    key=correlation_id.encode(),
+                    headers=self._headers("call", route=call.route),
+                )
+        except (KafkaError, FanoutStoreUnavailableError) as exc:
+            # §4.4 dispatch-abort: the batch may be durably registered (basestate+state written) but
+            # cannot complete — a sibling publish failed, or the store failed at OPEN. Tombstone both
+            # records so the orphan open batch is not leaked (reclaimed otherwise only by #220); any
+            # sibling already published then post_closure-stray-floors against the tombstone at its
+            # fold. ERROR-log + strand: the ACK_FIRST offset is already committed, so the inbound is
+            # not redelivered.
+            logger.error(
+                "[%s] fan-out OPEN failed batch=%s node=%s; aborting + caller strands: %r",
+                correlation_id[:8],
+                fanout_id,
+                self.node_id,
+                exc,
             )
-            await broker.publish(
-                sibling,
-                topic=wf_copy.current_frame.target_topic,
-                correlation_id=correlation_id,
-                key=correlation_id.encode(),
-                headers=self._headers("call", route=call.route),
-            )
-        envelope.reply = None  # no-reply mirror (I3): the output is owed by the pending siblings
+            await abort_batch(store, fanout_id)
+            # TODO(fault rail PR-6): escalate a typed fault to the caller (spec §4.4) instead of
+            # stranding — the abort+tombstone here is the return-only precursor, matching the
+            # _aggregate fold/close abort arms the rail likewise upgrades to escalation.
+        envelope.reply = None  # no-reply mirror (I3): nothing was returned point-to-point this hop
+        # (the siblings owe the output; or, on abort above, both records are tombstoned and the caller strands)
         return Response(envelope, headers=self._headers("call"))
 
     async def _aggregate(

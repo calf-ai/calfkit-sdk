@@ -9,7 +9,10 @@ over the in-memory fake so wiring them into the staged handler (step 6) is no re
 - abort_batch   : best-effort tombstone of both records (the §4.4 abort cleanup)
 """
 
+import logging
+
 import pytest
+from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
@@ -189,6 +192,37 @@ async def test_close_materialization_failure_on_missing_tag_aborts(store: FakeFa
     assert await store.read_state("X") is None  # the un-closable batch is tombstoned
 
 
+async def test_close_duplicate_tag_materializes_last_write_wins(store: FakeFanoutBatchStore) -> None:
+    # Two DISTINCT slots carrying the SAME tag (an anomaly — the agent mints distinct tool_call_ids,
+    # so nothing produces this in practice; the types do not enforce tag-uniqueness across slots)
+    # materialize into one tool_results[tag] key: close does a last-write-wins overwrite and still
+    # resumes cleanly. Pinned so PR-6 (which re-homes the materialization loop onto parts/fault) is
+    # aware of the behavior before touching it.
+    reg = FanoutOpen(fanout_id="X", node_id="agent", expected=[SlotRef(frame_id="f1", tag="dup"), SlotRef(frame_id="f2", tag="dup")])
+    await store.open("X", reg, _snapshot())
+    await fold_sibling(store, "X", FanoutOutcome(slot="f1", tag="dup", result=ToolReturn(return_value="first")))
+    await fold_sibling(store, "X", FanoutOutcome(slot="f2", tag="dup", result=ToolReturn(return_value="second")))
+    result = await close_batch(store, "X")
+    assert isinstance(result, CloseResume)
+    # outcomes is insertion-ordered, so the second fold (f2) wins the last-write-wins overwrite.
+    assert result.snapshot.state.get_tool_result("dup") == ToolReturn(return_value="second")
+
+
+async def test_close_tag_present_result_none_resumes_without_crashing(store: FakeFanoutBatchStore) -> None:
+    # A folded outcome with a tag but result=None — a marked sibling whose tag had no
+    # state.tool_results entry (base.py reads tool_results.get(tag), which can be None) — is
+    # materialized as add_tool_result(tag, None). This is a return-only anomaly; pin that close
+    # RESUMES (does not crash or abort) and the None lands, so the batch never hangs. The semantics of
+    # a None result are revisited by the rail (FanoutOutcome gains parts/fault).
+    await store.open("X", _open(), _snapshot())
+    await fold_sibling(store, "X", FanoutOutcome(slot="f1", tag="tc1", result=None))
+    await fold_sibling(store, "X", _outcome("f2", "tc2", value="ok"))
+    result = await close_batch(store, "X")
+    assert isinstance(result, CloseResume)
+    assert result.snapshot.state.get_tool_result("tc1") is None
+    assert await store.read_state("X") is None  # closed + tombstoned
+
+
 # ── abort_batch + sequential re-fan-out ──────────────────────────────────────
 
 
@@ -203,6 +237,22 @@ async def test_abort_batch_on_unavailable_store_is_best_effort(store: FakeFanout
     await store.open("X", _open(), _snapshot())
     store.make_unavailable()
     await abort_batch(store, "X")  # must not raise
+
+
+async def test_abort_batch_swallows_non_store_unavailable_tombstone_failure(caplog: pytest.LogCaptureFixture) -> None:
+    # abort_batch is best-effort: its docstring promises it "never masks itself behind a second
+    # failure." A tombstone that raises a NON-FanoutStoreUnavailableError (e.g. a raw KafkaError from
+    # the real writer's producer) must be swallowed + logged, not propagated — else the abort itself
+    # would escape the handler and re-open the silent-drop hole the abort exists to close.
+    class _TombstoneRaises(FakeFanoutBatchStore):
+        async def tombstone(self, fanout_id: str) -> None:
+            raise KafkaError("simulated writer failure during tombstone")
+
+    store = _TombstoneRaises()
+    await store.open("X", _open(), _snapshot())
+    with caplog.at_level(logging.ERROR):
+        await abort_batch(store, "X")  # must not raise
+    assert any("could not be tombstoned" in r.getMessage() for r in caplog.records)
 
 
 async def test_reopen_after_close_starts_fresh_batch(store: FakeFanoutBatchStore) -> None:

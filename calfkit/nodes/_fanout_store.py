@@ -201,14 +201,17 @@ async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
 async def abort_batch(store: FanoutBatchStore, fanout_id: str) -> None:
     """Best-effort tombstone of both records (the §4.4 abort cleanup).
 
-    A dead store can't be tombstoned — the corpse is left for the aged-reclaim issue
-    (#220) rather than raising, so an abort never masks itself behind a second failure.
+    A failed tombstone — a dead store (:class:`FanoutStoreUnavailableError`) or a writer error (a raw
+    broker ``KafkaError`` from the real :class:`KtablesFanoutBatchStore`) — is swallowed and logged
+    rather than raised: the corpse is left for the aged-reclaim issue (#220), so an abort never masks
+    itself behind a second failure (which, escaping the handler, would re-open the silent-drop hole
+    the abort exists to close).
     """
     try:
         await store.tombstone(fanout_id)
-    except FanoutStoreUnavailableError:
-        logger.error(
-            "fan-out batch %s could not be tombstoned (store unavailable); the record strands until reclaimed",
+    except Exception:
+        logger.exception(
+            "fan-out batch %s could not be tombstoned (store error); the record strands until reclaimed",
             fanout_id,
         )
 

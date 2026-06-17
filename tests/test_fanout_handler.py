@@ -9,9 +9,11 @@ fake`). These pin the pieces the staged handler wires together in 6b-B:
 - _classify_fanout: marker + reply slot => SIBLING fold / RE-ENTRY close / NORMAL
 """
 
+import logging
 from typing import Annotated, Any, cast
 
 import pytest
+from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 from faststream import Context
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from pydantic import ValidationError
@@ -226,6 +228,14 @@ class _CaptureBroker:
         self.published.append((topic, headers, envelope))
 
 
+class _RaisingBroker:
+    """Node-side broker stub whose ``publish`` always raises ``KafkaError`` — exercises the OPEN
+    dispatch-abort (§4.4): a sibling publish failing after the batch is durably registered."""
+
+    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        raise KafkaError("simulated sibling publish failure")
+
+
 class _SingleCallFanoutNode(NodeDef[Any]):
     """A fan-out-capable node whose body returns a ONE-element list[Call]."""
 
@@ -262,6 +272,54 @@ async def test_single_call_list_does_not_open_durable_batch() -> None:
     callee = broker.published[0][2].internal_workflow_state.current_frame
     assert callee.target_topic == "only.tool"
     assert callee.fanout_id is None  # not marked: this is not a durable fan-out
+
+
+# ── OPEN dispatch-abort path (§4.4) ──────────────────────────────────────────
+
+
+async def test_handle_fanout_open_sibling_publish_failure_aborts_and_tombstones() -> None:
+    # (§4.4 dispatch-abort) After the batch is registered, a sibling publish that raises must NOT
+    # propagate out of the handler: _handle_fanout_open tombstones both records (so the orphan open
+    # batch is not leaked to #220) and returns the no-reply mirror, stranding the caller. Any already-
+    # published sibling's later reply then post_closure-stray-floors against the tombstone.
+    agent = _agent()
+    fake = FakeFanoutBatchStore()
+    ctx = _ctx_with_store(fake)
+    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
+
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _RaisingBroker()))
+
+    assert resp is not None  # returned the no-reply mirror — did NOT propagate the KafkaError
+    assert await fake.read_state("A") is None  # aborted: both records tombstoned
+    assert await fake.read_basestate("A") is None
+
+
+async def test_handle_fanout_open_store_failure_does_not_propagate(caplog: pytest.LogCaptureFixture) -> None:
+    # (§4.4 dispatch-abort) If the durable store fails at OPEN (terminal unavailability, or a writer
+    # error in the real store), _handle_fanout_open best-effort tombstones and returns rather than
+    # letting the exception escape the handler (which under ACK_FIRST would drop the message and leak
+    # any partial registration with no cleanup).
+    agent = _agent()
+    fake = FakeFanoutBatchStore()
+    fake.make_unavailable()  # store.open raises FanoutStoreUnavailableError
+    ctx = _ctx_with_store(fake)
+    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
+
+    with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+        resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _CaptureBroker()))
+
+    assert resp is not None  # did not propagate
+    assert any("fan-out OPEN failed" in r.getMessage() for r in caplog.records)
 
 
 # ── @resource preconditions (coverage d) ─────────────────────────────────────
