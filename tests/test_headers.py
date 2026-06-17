@@ -191,8 +191,8 @@ async def test_agent_receives_tool_emitter_on_return(container):
 # ---------------------------------------------------------------------------
 # A normal run on a node with ``publish_topic`` must stamp the emitter header on
 # the auto-publish. Catches regressions that drop ``headers=`` from the Response.
-# (The gate-reject counterpart was removed with gates in PR-6; a no-output
-# delivery's mirror still carries the emitter via the _DECLINED path.)
+# (The gate-reject counterpart was removed with gates in PR-6; a fire-and-forget
+# no-output delivery's mirror still carries the emitter via the _Declined path.)
 # ---------------------------------------------------------------------------
 
 

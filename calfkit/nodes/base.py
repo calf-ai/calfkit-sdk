@@ -28,7 +28,7 @@ from calfkit.models import (
 )
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
-from calfkit.models.error_report import ErrorReport
+from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.node_result import _UNSET, _extract_output, extract_lenient
 from calfkit.models.node_schema import BaseNodeSchema
@@ -131,19 +131,29 @@ class _BatchFaulted:
 
 
 class _PipelineSentinel(Enum):
-    """Non-action outcomes of the staged pipeline (§6.8) — narrowable singletons, distinct from
-    the publishable :data:`NodeResult` actions the handler routes to ``_publish_action``."""
+    """The payload-less park outcome of the staged pipeline (§6.8) — a narrowable singleton,
+    distinct from the publishable :data:`NodeResult` actions the handler routes to
+    ``_publish_action``. The decline (:class:`_Declined`) and fault (:class:`_BatchFaulted`)
+    outcomes carry payloads and are their own dataclasses."""
 
     CONSUMED = auto()
     """A parked fan-out fold or a self-published re-entry: no publishable action this hop (the
     output is still owed by pending siblings). The handler emits the no-reply broadcast mirror."""
 
-    DECLINED = auto()
-    """Every handler in the body's route Chain-of-Responsibility declined (all-declined terminal)."""
-
 
 _CONSUMED: Final = _PipelineSentinel.CONSUMED
-_DECLINED: Final = _PipelineSentinel.DECLINED
+
+
+@dataclass(frozen=True)
+class _Declined:
+    """The body produced no terminal result — every matched handler declined, or a handler's
+    schema rejected the body (§10). Carries ``reason`` (the dispatcher's discriminator) so the
+    handler can auto-fault a reply-owing delivery (``calf.delivery.rejected`` with
+    ``details.reason``) — #201 closed by construction — while a fire-and-forget no-output stays a
+    DEBUG no-op. ``reason`` is one of
+    :attr:`~calfkit.models.error_report.FaultTypes.REASON_SCHEMA_REJECTED` / ``REASON_ALL_DECLINED``."""
+
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -1039,14 +1049,14 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         awaiting_reply: bool,
         correlation_id: str,
         broker: BrokerAnnotation,
-    ) -> NodeResult[State] | _PipelineSentinel | _BatchFaulted:
+    ) -> NodeResult[State] | _PipelineSentinel | _BatchFaulted | _Declined:
         """The staged inner pipeline (fault-rail §6.8 ``_execute``).
 
         Stage 2 (:meth:`_aggregate`) on ``return`` deliveries: an open batch parks
         (``_CONSUMED``); a closed batch / stateless continuation falls through (re-syncing
         ``seam_ctx`` from the possibly-restored ``run_ctx``). Stage 3 ``before_node`` may
         short-circuit the body with an output. Stage 4 is the body (:meth:`_dispatch_routed`);
-        an all-declined body is ``_DECLINED``. Stage 6 ``after_node`` (:meth:`_apply_after`)
+        an all-declined / schema-rejected body is a ``_Declined(reason)``. Stage 6 ``after_node`` (:meth:`_apply_after`)
         wraps the produced output. The body runs on ``run_ctx`` (``SessionRunContext``); the
         seams run on ``seam_ctx`` (``SeamContext``, sharing ``run_ctx.state``).
 
@@ -1075,8 +1085,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if pre is not None:
             return await self._apply_after(seam_ctx, self._interpret(seam_ctx, pre))
         result = await self._dispatch_routed(run_ctx, route, payload, awaiting_reply=awaiting_reply, correlation_id=correlation_id)  # stage 4
-        if result is None:
-            return _DECLINED
+        if isinstance(result, _Declined):
+            return result  # propagate the decline + its reason to the §10 auto-fault disposition
         return await self._apply_after(seam_ctx, result)  # ── stage 6: after_node ──
 
     async def _dispatch_routed(
@@ -1087,7 +1097,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         *,
         awaiting_reply: bool,
         correlation_id: str,
-    ) -> NodeResult[State] | None:
+    ) -> NodeResult[State] | _Declined:
         """Dispatch ``route`` to matched handlers as a Chain of Responsibility.
 
         Runs matched handlers most-specific → most-general. A handler that returns
@@ -1096,10 +1106,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         A handler with a ``schema`` whose body fails validation is skipped (logged,
         callback-aware level). ``run()`` is the inherited ``'*'`` handler dispatched
         last; the base ``run()`` declines (returns ``Next``), so a node with no real
-        match returns ``None``. ``route`` is ``None`` for a header-less message — only
-        the ``'*'`` handler matches it.
+        match returns a :class:`_Declined` carrying WHY it declined (§10): ``reason`` is
+        ``schema_rejected`` if any matched handler's schema rejected the body, else
+        ``all_declined`` — the discriminator the §10 auto-fault writer needs. ``route``
+        is ``None`` for a header-less message — only the ``'*'`` handler matches it.
         """
         cls = type(self)
+        schema_rejected = False
         if route is not None and not is_concrete_route_key(route):
             # Present-but-malformed inbound key (empty segment / trailing dot / wildcard):
             # never partial-matches a specific handler — only the "*"/run fallback catches it.
@@ -1119,11 +1132,12 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 try:
                     validated = info.schema.model_validate(payload)
                 except ValidationError:
-                    # TODO(#201): "skip to next handler" is correct for an optional specific
-                    # route, but for a reply-owing tool node whose only handler is the '*'
-                    # catch-all this declines without publishing a ReturnCall — the agent then
-                    # relies on its reply-TTL. Make a reply-owing catch-all schema rejection
-                    # produce a FailedToolCall reply (error-propagation work).
+                    # Record WHY for the §10 auto-fault: a reply-owing terminal where a schema
+                    # rejected the body faults the caller ``calf.delivery.rejected``
+                    # (reason=schema_rejected) — #201 closed by construction (the caller no longer
+                    # relies on its reply-TTL). Skipping to the next handler stays correct for an
+                    # optional specific route a later handler may still match.
+                    schema_rejected = True
                     level = _stuck_level(awaiting_reply)
                     logger.log(
                         level,
@@ -1141,7 +1155,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 # Decline (Next, or a handler that simply returned nothing) → advance.
                 continue
             return result
-        return None
+        return _Declined(FaultTypes.REASON_SCHEMA_REJECTED if schema_rejected else FaultTypes.REASON_ALL_DECLINED)
 
     def _decode_emitter(self, headers: dict[str, Any], correlation_id: str) -> tuple[str | None, str | None]:
         """Decode the inbound emitter id/kind headers — the per-delivery prelude shared by the
@@ -1186,8 +1200,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         ``x-calf-kind`` is the hop's kind. Observers (``ConsumerNode``) override this with the
         observe-only path — they never enter the fault pipeline (§6.6).
 
-        TODO(fault rail PR-6): the ``_DECLINED`` → ``calf.delivery.rejected`` auto-fault (step D);
-        the mid-batch ``_in_batch_work`` → ``_publish_abort`` arms (land with the fold, step 4).
+        TODO(fault rail PR-6 step 4): the mid-batch ``_in_batch_work`` → ``_publish_abort`` arms
+        (boundary + publish guard) land with the fold widen.
         """
         emitter, emitter_kind = self._decode_emitter(headers, correlation_id)
         # ── stage-0 guard: no user code may run before a context exists (§6.8 / R1) ──
@@ -1250,21 +1264,38 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             # the output is still owed by the pending siblings.
             envelope.reply = None  # no-reply mirror (I3)
             return Response(envelope, headers=self._headers("call"))
-        if output is _DECLINED:
-            # No matched handler produced a terminal result: every match declined (returned
-            # Next/None). The '*' handler (run) is always in the chain — the base run() always
-            # declines; an overridden run() may also decline, or a schema'd '*' run may have
-            # REJECTED the body (logged above). Stuck workflow if a caller awaits a return, else a
-            # fire-and-forget no-op. The body_note surfaces a present-but-unconsumed payload (e.g. a
-            # malformed tool ToolCallRef) so a dropped body is observable, not silent.
-            level = _stuck_level(awaiting_reply)
+        if isinstance(output, _Declined):
+            # No matched handler produced a terminal result: every match declined, or a schema
+            # rejected the body (``output.reason`` discriminates). On a REPLY-OWING delivery this
+            # auto-faults the caller (``calf.delivery.rejected`` + ``details.reason``, §10) — #201
+            # closed by construction, the caller never hangs. A fire-and-forget no-output stays a
+            # no-op (DEBUG; the stream-filter case, no reply owed). ``body_note`` surfaces a
+            # present-but-unconsumed payload (e.g. a malformed tool ToolCallRef) — observable, not silent.
             body_note = " — a body was not consumed (rejected by a schema handler, or unmatched)" if payload is not None else ""
-            logger.log(
-                level,
-                "[%s] no handler produced a result for route=%s on node=%s; registered=%s%s",
+            if awaiting_reply:
+                logger.warning(
+                    "[%s] no handler produced a result for route=%s on node=%s (reason=%s); auto-faulting %s; registered=%s%s",
+                    correlation_id[:8],
+                    route,
+                    self.node_id,
+                    output.reason,
+                    FaultTypes.DELIVERY_REJECTED,
+                    tuple(type(self)._handlers),
+                    body_note,
+                )
+                report = ErrorReport.build_safe(
+                    error_type=FaultTypes.DELIVERY_REJECTED,
+                    message=f"node {self.node_id!r} produced no result for this delivery ({output.reason})",
+                    origin_node_id=self.node_id,
+                    details={FaultTypes.REASON: output.reason},
+                )
+                return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
+            logger.debug(
+                "[%s] no handler produced a result for route=%s on node=%s (reason=%s); fire-and-forget no-op; registered=%s%s",
                 correlation_id[:8],
                 route,
                 self.node_id,
+                output.reason,
                 tuple(type(self)._handlers),
                 body_note,
             )

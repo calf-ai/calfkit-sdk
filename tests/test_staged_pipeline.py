@@ -25,7 +25,7 @@ from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
-from calfkit.nodes.base import _CONSUMED, _DECLINED, _BatchClosed, _BatchOpen
+from calfkit.nodes.base import _CONSUMED, _BatchClosed, _BatchOpen, _Declined
 from calfkit.nodes.node import NodeDef
 from tests._fanout_fakes import FakeFanoutBatchStore
 
@@ -325,7 +325,7 @@ class TestAggregate:
 class TestExecute:
     """``_execute`` orders the return-only stages: stage-2 ``_aggregate`` (on ``return`` kind)
     then stage-4 the body. ``_BatchOpen`` → ``_CONSUMED`` (park, body skipped); ``_BatchClosed``
-    → run the body; an all-declined body → ``_DECLINED``. ``call`` kind skips ``_aggregate``."""
+    → run the body; an all-declined body → ``_Declined(reason)``. ``call`` kind skips ``_aggregate``."""
 
     async def test_call_kind_runs_body(self) -> None:
         node = _BodyNode(node_id="b", subscribe_topics=["b.in"])
@@ -364,4 +364,4 @@ class TestExecute:
         env = _plain_env()
         seam = node._build_seam_context(ctx, env, {}, "call")
         result = await node._execute(ctx, seam, "call", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
-        assert result is _DECLINED
+        assert isinstance(result, _Declined) and result.reason == "all_declined"

@@ -11,6 +11,7 @@ from calfkit._protocol import HDR_ROUTE
 from calfkit._registry import handler
 from calfkit.exceptions import RegistryConfigError
 from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, ReturnCall, SessionRunContext, Silent, State, TailCall, WorkflowState
+from calfkit.nodes.base import _Declined
 from calfkit.nodes.node import NodeDef
 
 _CORR = "corr1234"
@@ -166,14 +167,15 @@ async def test_falls_through_to_run_when_all_handlers_decline() -> None:
     assert isinstance(out, ReturnCall)
 
 
-async def test_no_match_and_no_run_fallback_returns_none() -> None:
+async def test_no_match_and_no_run_fallback_declines() -> None:
     class N(NodeDef[Any]):
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             return Call("x", ctx.state)
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "payment.created")
-    assert out is None
+    # No matched handler + no schema rejection → _Declined("all_declined") (§10 discriminator).
+    assert isinstance(out, _Declined) and out.reason == "all_declined"
 
 
 async def test_malformed_inbound_route_does_not_partial_match_and_falls_to_fallback() -> None:
@@ -670,14 +672,14 @@ async def test_malformed_key_still_reaches_star_run_handler(bad_key: str) -> Non
     assert isinstance(out, Call) and out.target_topic == "star"
 
 
-async def test_all_matched_handlers_decline_with_no_run_returns_none() -> None:
+async def test_all_matched_handlers_decline_with_no_run_declines() -> None:
     class N(NodeDef[Any]):
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             return None  # decline, and there is no run() fallback
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
-    assert out is None
+    assert isinstance(out, _Declined) and out.reason == "all_declined"
 
 
 @pytest.mark.parametrize("awaiting,expected", [(True, logging.WARNING), (False, logging.DEBUG)])

@@ -13,8 +13,10 @@ from typing import Any
 
 import pytest
 from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
+from pydantic import BaseModel
 
 from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
+from calfkit._registry import handler
 from calfkit.exceptions import NodeFaultError
 from calfkit.models import CallFrame, CallFrameStack, Envelope, ReturnCall, SessionRunContext, State, TextPart, WorkflowState
 from calfkit.models.error_report import ErrorReport
@@ -463,3 +465,63 @@ class TestReceivedFaultEscalates:
 
         assert consulted == []  # on_node_error NOT consulted for a received callee fault
         assert broker.published[0][1].reply.error.error_type == "callee.boom"  # escalated as-is
+
+
+class _NeedsName(BaseModel):
+    name: str
+
+
+class _SchemaNode(BaseNodeDef):
+    """A node whose only handler validates a schema — an ill-shaped payload is rejected."""
+
+    @handler("*", schema=_NeedsName)
+    async def run(self, ctx: SessionRunContext, payload: _NeedsName) -> Any:
+        return ReturnCall(state=ctx.state, value=payload.name)
+
+
+class TestDeclineAutoFault:
+    async def test_reply_owing_all_declined_auto_faults(self) -> None:
+        # §10 / scenario 15 (reply-owing half): a reply-owing delivery whose body declines auto-faults
+        # the caller (calf.delivery.rejected, reason=all_declined) — #201 closed by construction, the
+        # caller never hangs.
+        node = _node()  # base run() declines (Next)
+        inbound = _framed_envelope(callback_topic="caller.return")  # reply-owing (callback set)
+        broker = _CaptureBroker()
+
+        resp = await node.handler(inbound, "cid", {}, broker)  # kind=call
+
+        assert len(broker.published) == 1
+        topic, env, headers = broker.published[0]
+        assert topic == "caller.return"
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.delivery.rejected"
+        assert env.reply.error.details["reason"] == "all_declined"
+        assert headers[HDR_KIND] == "fault"
+        assert isinstance(resp.body.reply, FaultMessage)  # broadcast mirror
+
+    async def test_reply_owing_schema_rejection_auto_faults(self) -> None:
+        # Scenario 39: a reply-owing delivery whose only matching handler rejects the body schema
+        # auto-faults with details.reason="schema_rejected" (the dispatcher reports WHY it declined).
+        node = _SchemaNode(node_id="n", subscribe_topics=["in"])
+        inbound = _framed_envelope(payload={"wrong": "shape"}, callback_topic="caller.return")
+        broker = _CaptureBroker()
+
+        await node.handler(inbound, "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.delivery.rejected"
+        assert env.reply.error.details["reason"] == "schema_rejected"
+
+    async def test_fire_and_forget_all_declined_is_a_noop(self) -> None:
+        # §10 / scenario 15 (f-a-f half): an all-declined fire-and-forget delivery (no callback owed)
+        # stays a no-op — NOT auto-faulted (the stream-filter case; the auto-fault is gated on a
+        # reply being owed).
+        node = _node()  # declines
+        inbound = _framed_envelope(callback_topic=None)  # fire-and-forget: not reply-owing
+        broker = _CaptureBroker()
+
+        resp = await node.handler(inbound, "cid", {}, broker)
+
+        assert broker.published == []  # no fault — no reply owed
+        assert resp.body.reply is None  # cleared no-reply mirror

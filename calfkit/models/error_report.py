@@ -79,6 +79,14 @@ class FaultTypes:
     # forensic breadcrumb in ``details``.
     EXCEPTION_TYPE = "calf.exception_type"
 
+    # details key + values: why a reply-owing delivery declined its body, written by the route
+    # dispatcher (§10) and carried on the ``DELIVERY_REJECTED`` auto-fault so a consumer can branch
+    # without typing a magic string. ``REASON`` is a plain (non-``calf.``) key by design — it is the
+    # framework's own field on a framework-minted report (the spec writes ``details.reason``).
+    REASON = "reason"
+    REASON_SCHEMA_REJECTED = "schema_rejected"
+    REASON_ALL_DECLINED = "all_declined"
+
 
 class FrameRef(BaseModel):
     """Topology-only breadcrumb of one call frame (spec §4.3).
