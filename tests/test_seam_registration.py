@@ -106,3 +106,20 @@ class TestRegistrationValidation:
             @node.after_node
             def only_ctx(ctx: object) -> None:
                 return None
+
+
+class TestNoSeamsOnObservers:
+    """§6.6: observers (``ConsumerNode``) have NO policy seams — they consume via their
+    own body and never call, so there is nothing for a seam to guard. Registering any
+    seam is rejected at registration time (the caller-capable-only API)."""
+
+    @pytest.mark.parametrize("seam", ["before_node", "after_node", "on_node_error", "on_callee_error"])
+    def test_registering_any_seam_on_a_consumer_raises(self, seam: str) -> None:
+        from calfkit.nodes.consumer import ConsumerNode
+
+        node = ConsumerNode(node_id="obs", subscribe_topics="in", consume_fn=lambda ctx: None)
+        register = getattr(node, seam)
+        # The guard fires before the callable/arity checks, so a perfectly valid handler
+        # is still rejected purely because the node is an observer.
+        with pytest.raises(RegistryConfigError, match="observer"):
+            register(lambda *args: None)

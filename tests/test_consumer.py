@@ -375,7 +375,7 @@ async def test_consume_fn_exception_swallowed_and_logged(caplog):
         resp = await _handle(node, _envelope(_text_reply("hi")))
 
     assert resp is not None
-    err = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
+    err = [r for r in caplog.records if "delivery handling failed" in r.getMessage()]
     assert err
     assert "emitter=upstream" in err[0].getMessage()
     assert "kind=agent" in err[0].getMessage()
@@ -420,7 +420,7 @@ async def test_callable_class_generator_detected_at_call_site(caplog):
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_text_reply("hi")))
 
-    rec = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
+    rec = [r for r in caplog.records if "delivery handling failed" in r.getMessage()]
     assert rec and isinstance(rec[0].exc_info[1], TypeError)
 
 
@@ -435,7 +435,7 @@ async def test_function_returning_generator_object_detected(caplog):
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_text_reply("hi")))
 
-    rec = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
+    rec = [r for r in caplog.records if "delivery handling failed" in r.getMessage()]
     assert rec and isinstance(rec[0].exc_info[1], TypeError)
     assert "generator" in str(rec[0].exc_info[1])
 
@@ -451,7 +451,7 @@ async def test_function_returning_async_generator_object_detected(caplog):
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_text_reply("hi")))
 
-    rec = [r for r in caplog.records if "consume_fn raised" in r.getMessage()]
+    rec = [r for r in caplog.records if "delivery handling failed" in r.getMessage()]
     assert rec and isinstance(rec[0].exc_info[1], TypeError)
     assert "async_generator" in str(rec[0].exc_info[1])
 

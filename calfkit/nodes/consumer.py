@@ -1,4 +1,3 @@
-import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
@@ -86,27 +85,18 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
             )
             return
 
-        try:
-            ret = self._func(cctx)
-
-            if inspect.isgenerator(ret) or inspect.isasyncgen(ret):
-                raise TypeError(
-                    f"consume_fn returned a {type(ret).__name__} object; the function body would never execute. "
-                    f"Iterate inside the function or refactor to a coroutine."
-                )
-            if inspect.isawaitable(ret):
-                await ret
-        except asyncio.CancelledError:
-            # Never swallow cooperative cancellation — let the event loop unwind.
-            raise
-        except Exception:
-            logger.exception(
-                "[%s] consumer=%s consume_fn raised (emitter=%s kind=%s)",
-                ctx.correlation_id[:8],
-                self.node_id,
-                ctx.emitter_node_id,
-                ctx.emitter_node_kind,
+        # A consume_fn raise is NOT swallowed here: it propagates to :meth:`_handle_delivery`'s
+        # single observer floor (§6.6) — the old run-level blanket catch is deleted. A
+        # ``CancelledError`` (a ``BaseException``) propagates through that floor's ``except Exception``,
+        # so cooperative cancellation is never swallowed.
+        ret = self._func(cctx)
+        if inspect.isgenerator(ret) or inspect.isasyncgen(ret):
+            raise TypeError(
+                f"consume_fn returned a {type(ret).__name__} object; the function body would never execute. "
+                f"Iterate inside the function or refactor to a coroutine."
             )
+        if inspect.isawaitable(ret):
+            await ret
 
     async def _handle_delivery(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any], broker: BrokerAnnotation) -> Response:
         """The observer delivery path (§6.6 / §6.7), overriding the caller-capable fault pipeline.
@@ -116,10 +106,11 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
         on the workflow's rails. Decode the emitter, build the context, run the consume body, and
         return the no-reply mirror.
 
-        ``run`` owns the ``consume_fn``'s own error handling (and re-raises ``CancelledError``); a
-        framework failure *before* the consume body (e.g. a projection error in
-        :meth:`prepare_context`) floor-logs here (P1) rather than faulting — a ``CancelledError``,
-        being a ``BaseException``, still propagates through the ``except Exception``.
+        This is the observer's **single floor** (§6.6): a failure anywhere in delivery handling —
+        a projection error in :meth:`prepare_context` OR the user's ``consume_fn`` raising (the old
+        ``run``-level blanket catch is deleted) — floor-logs at ERROR here rather than faulting. A
+        ``CancelledError``, being a ``BaseException``, still propagates through the ``except Exception``
+        so cooperative cancellation is never swallowed.
         """
         emitter, emitter_kind = self._decode_emitter(headers, correlation_id)
         try:
@@ -127,9 +118,11 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
             await self.run(ctx)
         except Exception:
             logger.exception(
-                "[%s] observer=%s delivery handling failed before the consume body; floored (observers never reach the rails)",
+                "[%s] observer=%s delivery handling failed; floored (observers never reach the rails) emitter=%s kind=%s",
                 correlation_id[:8],
                 self.node_id,
+                emitter,
+                emitter_kind,
             )
         envelope.reply = None  # observers never produce on the workflow's rails (§6.6)
         return Response(envelope, headers=self._headers("call"))

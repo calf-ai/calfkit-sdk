@@ -324,9 +324,17 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         """Validate and append one handler to a seam chain (spec §6.8 — registration-time,
         never mid-message). Shared by the constructor params and the instance decorators.
 
-        Validates the handler is callable and accepts the seam's positional arity
-        (``before_node(ctx)``; the rest ``(ctx, output/fault)``) — so a wrong-shaped
-        handler fails loudly at startup, not silently at first fire."""
+        Rejects registration on an observer (``ConsumerNode``, ``is_caller_capable=False``)
+        outright (§6.6): observers consume via their own body and never call, so there is
+        nothing for a seam to guard. Otherwise validates the handler is callable and accepts
+        the seam's positional arity (``before_node(ctx)``; the rest ``(ctx, output/fault)``) —
+        so a wrong-shaped handler fails loudly at startup, not silently at first fire."""
+        if not self.is_caller_capable:
+            raise RegistryConfigError(
+                f"node={self.node_id}: cannot register a {seam} seam on an observer (ConsumerNode); "
+                f"observers consume via their own body and never call, so there is nothing for a seam to "
+                f"guard. Policy seams exist only on caller-capable nodes."
+            )
         if not callable(fn):
             raise RegistryConfigError(f"node={self.node_id}: {seam} handler must be callable, got {type(fn).__name__}")
         arity = _SEAM_ARITY[seam]
