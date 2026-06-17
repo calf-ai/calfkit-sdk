@@ -73,6 +73,12 @@ class FaultTypes:
     # fault carries the trace of every recovery attempt that itself broke.
     SEAM_ERRORS = "calf.seam_errors"
 
+    # details key: the exception class name :meth:`ErrorReport.from_exception` records
+    # when synthesizing a ``calf.unhandled`` fault from an arbitrary exception (spec
+    # §6.7) — exception identity does not cross the wire, but the class name is a useful
+    # forensic breadcrumb in ``details``.
+    EXCEPTION_TYPE = "calf.exception_type"
+
 
 class FrameRef(BaseModel):
     """Topology-only breadcrumb of one call frame (spec §4.3).
@@ -268,6 +274,41 @@ class ErrorReport(BaseModel):
                 details={FaultTypes.ELIDED: {"fallback": type(exc).__name__[:200]}},
             )
 
+    @classmethod
+    def from_exception(
+        cls,
+        exc: BaseException,
+        *,
+        node: Any = None,
+        ctx: Any = None,
+        cause: ErrorReport | None = None,
+    ) -> ErrorReport:
+        """Synthesize a fault from an arbitrary exception (spec §6.7).
+
+        A non-``NodeFaultError`` maps to ``error_type="calf.unhandled"`` with the
+        exception's class name (``details[FaultTypes.EXCEPTION_TYPE]``) and a clamped
+        message; ``build_safe`` keeps it total — the error path must never itself raise.
+        ``node``/``ctx`` (optional, keyword) source the origin breadcrumb when present
+        (``node.node_id`` / ``ctx.frame_id``); ``cause`` chains a prior report (the §6.8
+        recovery-then-failure case). They are typed ``Any`` to keep this module
+        calfkit-import-free (the same reason ``build_safe`` inlines its own coercions).
+
+        A ``NodeFaultError`` is NOT routed here — the chokepoint converts it verbatim,
+        bypassing ``on_node_error`` (the mint rule, §6.5).
+        """
+        report = cls.build_safe(
+            error_type=FaultTypes.UNHANDLED,
+            message=_safe_exc_str(exc),
+            origin_node_id=getattr(node, "node_id", None),
+            origin_frame_id=getattr(ctx, "frame_id", None),
+            causes=[cause] if cause is not None else None,
+        )
+        # The exception-class breadcrumb is a framework-reserved calf.* details key, so it
+        # is set AFTER build_safe (which strips caller-supplied calf.* keys); the report is
+        # freshly built and owned here, so the in-place add is safe.
+        report.details[FaultTypes.EXCEPTION_TYPE] = type(exc).__name__[:200]
+        return report
+
 
 # ---------------------------------------------------------------------------
 # Carriage-bound helpers (used by ErrorReport.build_safe)
@@ -356,3 +397,20 @@ def _bound_details(details: dict[str, Any]) -> tuple[dict[str, Any], int | None]
     if size <= _MAX_DETAILS_BYTES - _ELIDED_RESERVE_BYTES:
         return dict(details), 0
     return {}, size
+
+
+def _safe_exc_str(exc: BaseException) -> str:
+    """Best-effort string of an exception, robust against a broken ``__str__``.
+
+    A local twin of ``calfkit.exceptions.safe_exc_message`` — duplicated deliberately
+    so this module stays calfkit-import-free (importing ``exceptions`` would be circular;
+    ``exceptions`` imports ``ErrorReport``). Used only by :meth:`ErrorReport.from_exception`,
+    whose contract is totality on the error path, so the ``str``/``repr`` calls are guarded.
+    """
+    try:
+        return str(exc)
+    except Exception:
+        try:
+            return repr(exc)
+        except Exception:
+            return f"<unprintable {type(exc).__name__}>"

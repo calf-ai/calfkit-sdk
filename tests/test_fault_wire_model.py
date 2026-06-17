@@ -469,3 +469,41 @@ class TestPublicExports:
         assert models.FrameRef is FrameRef
         assert models.ErrorReport is ErrorReport
         assert models.FaultTypes is FaultTypes
+
+
+class TestFromException:
+    """PR-6: ErrorReport.from_exception — the factory the rail's chokepoint uses to
+    synthesize a fault from an arbitrary (non-NodeFaultError) exception (spec §6.7)."""
+
+    def test_generic_exception_maps_to_calf_unhandled(self) -> None:
+        report = ErrorReport.from_exception(ValueError("boom"))
+        assert report.error_type == FaultTypes.UNHANDLED
+        # the exception class name is recorded as a framework details breadcrumb
+        assert report.details[FaultTypes.EXCEPTION_TYPE] == "ValueError"
+        # the clamped exception message rides the report's message field
+        assert "boom" in report.message
+
+    def test_is_total_on_a_broken_str_exception(self) -> None:
+        # The error path must never itself raise (spec §6.7/§4.3): an exception whose
+        # __str__ raises still produces a report, not a second exception.
+        class HostileError(Exception):
+            def __str__(self) -> str:
+                raise RuntimeError("no str for you")
+
+        report = ErrorReport.from_exception(HostileError())
+        assert report.error_type == FaultTypes.UNHANDLED
+        assert report.details[FaultTypes.EXCEPTION_TYPE] == "HostileError"
+
+    def test_chains_a_cause(self) -> None:
+        # The §6.8 recovery-then-failure case: the second error chains the original.
+        prior = ErrorReport(error_type="upstream")
+        report = ErrorReport.from_exception(RuntimeError("x"), cause=prior)
+        assert [c.report_id for c in report.causes] == [prior.report_id]
+
+    def test_sources_origin_node_id_from_node(self) -> None:
+        # origin breadcrumb (scenario 1): node.node_id → origin_node_id when given.
+        class FakeNode:
+            node_id = "orchestrator"
+
+        report = ErrorReport.from_exception(RuntimeError("x"), node=FakeNode())
+        assert report.origin_node_id == "orchestrator"
