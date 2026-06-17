@@ -124,3 +124,20 @@ class TestMaterializationFailed:
         out = await node._resolve_callee(_seam_ctx(), "fault", _fault(), target_topic=None)
         assert isinstance(out, _SlotFailed)
         assert out.report.error_type == FaultTypes.SLOT_MATERIALIZATION_FAILED
+
+
+class TestSlotPositionIsExemptFromOutputValidation:
+    async def test_on_callee_error_substitute_is_not_output_type_validated(self) -> None:
+        # scenario 44 (exempt half): on_callee_error substitutes are SLOT-position (a callee-output
+        # substitute materialized at the slot), NOT the node's own output — so they are NOT validated
+        # against the node's declared output type (e.g. surface_to_model's failure strings on a
+        # structured-output agent). _resolve_callee coerces via _coerce_to_parts, never _coerce_output.
+        class _StructuredNode(BaseNodeDef):
+            @property
+            def _seam_output_type(self) -> Any:
+                return int  # a type a plain string would FAIL if it were validated as output
+
+        node = _StructuredNode(node_id="n", subscribe_topics=["in"], on_callee_error=lambda ctx, fault: "a failure string")
+        out = await node._resolve_callee(_seam_ctx(), "fault", _fault(), target_topic=None)
+        assert isinstance(out, _SlotResolved)  # resolved, NOT rejected against the int output type
+        assert out.handled is True and out.parts == [TextPart(text="a failure string")]

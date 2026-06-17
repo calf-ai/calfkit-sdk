@@ -11,7 +11,7 @@ from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
 )
-from pydantic import ValidationError
+from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
@@ -769,6 +769,24 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         # bytes has no parts arm (§4.5) — reject rather than guess an encoding.
         if isinstance(value, bytes):
             raise SeamContractError("a seam returned bytes, which has no parts representation; return str, structured data, or a model.")
+        # Output-position validation (scenario 44): a TYPED node validates the substitute against its
+        # declared output type, so a type-breaking value fails HERE (→ a fault at the seam), not as a
+        # DeserializationError in the caller's process. This is the ONE caller-capable exception to
+        # "custom nodes are free" (§6.3) — the agent overrides _seam_output_type to final_output_type.
+        # An UNSET (custom) node and an unschematizable output type both SKIP (a valid exotic-output
+        # config must not crash); on_callee_error substitutes never reach here (they materialize at the
+        # slot via _resolve_slot, §6.9 — exempt by construction).
+        output_type = self._seam_output_type
+        if output_type is not _UNSET:
+            try:
+                TypeAdapter(output_type).validate_python(value)
+            except PydanticSchemaGenerationError:
+                logger.debug("node=%s seam output type is unschematizable; skipping output-position validation", self.node_id)
+            except ValidationError as exc:
+                raise SeamContractError(
+                    f"a seam substitute does not match node {self.node_id!r}'s declared output type "
+                    f"{getattr(output_type, '__name__', output_type)!r}: {exc}"
+                ) from exc
         return ReturnCall[State](state=ctx.state, value=value)
 
     @property
@@ -797,7 +815,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         output_type = self._seam_output_type
         if output_type is _UNSET:
             return extract_lenient(parts)
-        return _extract_output(parts, output_type)
+        try:
+            return _extract_output(parts, output_type)
+        except PydanticSchemaGenerationError:
+            # An unschematizable declared output type (an exotic OutputSpec) → fall back to the lenient
+            # view rather than crash; the strict projection a type-breaking VALUE fails (DeserializationError)
+            # still propagates as a fault.
+            return extract_lenient(parts)
 
     def _interpret(self, ctx: SeamContext[State], value: Any) -> NodeResult[State]:
         """Interpret a boundary seam's return (spec §6.3/§6.8 two-tier rule): a NodeResult

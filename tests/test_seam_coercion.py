@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from calfkit.exceptions import DeserializationError, SeamContractError
 from calfkit.models.actions import Call, ReturnCall, TailCall
@@ -24,6 +25,19 @@ from calfkit.nodes.base import BaseNodeDef
 
 def _node() -> BaseNodeDef:
     return BaseNodeDef(node_id="n", subscribe_topics=["in"])
+
+
+class _Report(BaseModel):
+    title: str
+
+
+class _TypedModelNode(BaseNodeDef):
+    """A node whose declared seam output type is a structured model (the agent's pattern: it overrides
+    _seam_output_type to its final_output_type). Exercises _coerce_output's output-position validation."""
+
+    @property
+    def _seam_output_type(self) -> Any:
+        return _Report
 
 
 def _ctx(state: State) -> SeamContext[State]:
@@ -52,6 +66,44 @@ class TestCoerceOutput:
         assert isinstance(result, ReturnCall)
         assert result.value == "hello"
         assert result.state is state
+
+
+class TestOutputPositionValidation:
+    """scenario 44: an agent's output-position seam substitute (before_node / on_node_error /
+    after_node — all flow through _coerce_output) is validated against its declared output type, so a
+    type-breaking substitute fails AT THE SEAM (→ a fault), not as a DeserializationError in the
+    caller's process. A custom node (untyped) and on_callee_error substitutes (slot position) are exempt."""
+
+    def test_typed_node_accepts_a_matching_substitute(self) -> None:
+        node = _TypedModelNode(node_id="t", subscribe_topics=["in"])
+        result = node._coerce_output(_ctx(State()), {"title": "ok"})  # validates as _Report
+        assert isinstance(result, ReturnCall) and result.value == {"title": "ok"}
+
+    def test_typed_node_rejects_a_type_breaking_substitute(self) -> None:
+        # The "after_node returning 'redacted'" case on a structured-output agent.
+        node = _TypedModelNode(node_id="t", subscribe_topics=["in"])
+        with pytest.raises(SeamContractError):
+            node._coerce_output(_ctx(State()), "redacted")
+
+    def test_untyped_node_skips_validation(self) -> None:
+        # A custom BaseNodeDef (base _seam_output_type=_UNSET) coerces generically — custom nodes are free.
+        result = _node()._coerce_output(_ctx(State()), "anything")
+        assert isinstance(result, ReturnCall) and result.value == "anything"
+
+    def test_unschematizable_output_type_skips_validation(self) -> None:
+        # An output type TypeAdapter cannot schematize degrades to a lenient SKIP (a valid exotic-output
+        # agent config must not crash at the seam) rather than raising.
+        class _Unschematizable:
+            pass
+
+        class _ExoticNode(BaseNodeDef):
+            @property
+            def _seam_output_type(self) -> Any:
+                return _Unschematizable
+
+        node = _ExoticNode(node_id="e", subscribe_topics=["in"])
+        result = node._coerce_output(_ctx(State()), "anything")  # cannot schematize → skip, no raise
+        assert isinstance(result, ReturnCall)
 
 
 class TestCoerceGuards:

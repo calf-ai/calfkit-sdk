@@ -117,6 +117,17 @@ class BaseAgentNodeDef(
         ``sequential_only_mode`` agent issues only single calls and never fans out."""
         return not self.sequential_only_mode
 
+    @property
+    def _seam_output_type(self) -> Any:
+        """The agent's declared output type, so its OUTPUT-position seam substitutes (``before_node``
+        short-circuit, ``on_node_error`` recovery, ``after_node`` replacement) are validated against it
+        at coercion (scenario 44 / §6.3) — a structured-output agent's contract is machine-projected by
+        its callers, so a type-breaking substitute must fail at the seam, not as a ``DeserializationError``
+        downstream. ``on_callee_error`` substitutes are EXEMPT (slot position — they materialize via
+        ``_resolve_slot``, never ``_coerce_output``). An exotic ``OutputSpec`` ``TypeAdapter`` cannot
+        schematize degrades to a lenient skip (in the base ``_coerce_output``/``_output_view``)."""
+        return self.final_output_type
+
     def _resolve_slot(self, ctx: SeamContext[State], outcome: _SlotResolved | _SlotFailed) -> None:
         """The agent's slot materialization (spec §6.9) — the SDK's single per-type codec. After the
         base records the ``CalleeResult``, a RESOLVED slot is materialized into the agent's private
