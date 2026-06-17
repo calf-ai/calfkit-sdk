@@ -296,7 +296,9 @@ class TestExecute:
         node = _BodyNode(node_id="b", subscribe_topics=["b.in"])
         ctx = SessionRunContext(state=State(), deps={})
         ctx._correlation_id = "corr-1"
-        result = await node._execute(ctx, "call", _plain_env(), None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        env = _plain_env()
+        seam = node._build_seam_context(ctx, env, {}, "call")
+        result = await node._execute(ctx, seam, "call", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
         assert isinstance(result, ReturnCall) and result.value == "done"
 
     async def test_return_stateless_continuation_runs_body(self) -> None:
@@ -304,7 +306,8 @@ class TestExecute:
         ctx = SessionRunContext(state=State(), deps={})
         ctx._correlation_id = "corr-1"
         env = _plain_env(reply=ReturnMessage(in_reply_to="A", tag="tc1", parts=[]))  # unmarked → _BatchClosed
-        result = await node._execute(ctx, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        seam = node._build_seam_context(ctx, env, {}, "return")
+        result = await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
         assert isinstance(result, ReturnCall)
 
     async def test_return_parked_fold_is_consumed_without_running_body(self) -> None:
@@ -315,12 +318,15 @@ class TestExecute:
         st.add_tool_result("tc1", ToolReturn(return_value="r1"))
         ctx = _store_ctx(store, state=st)
         env = _marked_env(in_reply_to="f1", tag="tc1", state=st)
-        result = await node._execute(ctx, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        seam = node._build_seam_context(ctx, env, {}, "return")
+        result = await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
         assert result is _CONSUMED  # parked fold — the body never runs
 
     async def test_all_declined_body_is_declined(self) -> None:
         node = _fanout_node()  # base run() declines (returns Next)
         ctx = SessionRunContext(state=State(), deps={})
         ctx._correlation_id = "corr-1"
-        result = await node._execute(ctx, "call", _plain_env(), None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        env = _plain_env()
+        seam = node._build_seam_context(ctx, env, {}, "call")
+        result = await node._execute(ctx, seam, "call", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
         assert result is _DECLINED

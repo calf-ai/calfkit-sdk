@@ -225,6 +225,71 @@ class _ReturningNode(BaseNodeDef):
         return ReturnCall(state=ctx.state, value="ok")
 
 
+class _BodyNode(BaseNodeDef):
+    """A node whose body returns a terminal value (so a before_node short-circuit is visible)."""
+
+    async def run(self, ctx: SessionRunContext) -> Any:
+        return ReturnCall(state=ctx.state, value="from-body")
+
+
+class TestBeforeNode:
+    async def test_before_node_value_short_circuits_the_body(self) -> None:
+        # §6.2/§6.4: a before_node returning a value becomes the node's output; the body never runs.
+        node = _BodyNode(node_id="n", subscribe_topics=["in"])
+
+        @node.before_node
+        def short(ctx: SeamContext[State]) -> str:
+            return "from-before-node"
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, ReturnMessage)
+        assert env.reply.parts == [TextPart(text="from-before-node")]  # not "from-body"
+
+    async def test_before_node_decline_runs_the_body(self) -> None:
+        node = _BodyNode(node_id="n", subscribe_topics=["in"])
+
+        @node.before_node
+        def declines(ctx: SeamContext[State]) -> None:
+            return None
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
+
+        assert broker.published[0][1].reply.parts == [TextPart(text="from-body")]  # body ran
+
+
+class TestAfterNodeStage:
+    async def test_after_node_replaces_the_body_output(self) -> None:
+        node = _BodyNode(node_id="n", subscribe_topics=["in"])
+
+        @node.after_node
+        def replace(ctx: SeamContext[State], output: object) -> str:
+            return "replaced-by-after"
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
+
+        assert broker.published[0][1].reply.parts == [TextPart(text="replaced-by-after")]
+
+    async def test_after_node_sees_the_body_output_view_and_can_keep_it(self) -> None:
+        node = _BodyNode(node_id="n", subscribe_topics=["in"])
+        seen: list[object] = []
+
+        @node.after_node
+        def observe(ctx: SeamContext[State], output: object) -> None:
+            seen.append(output)
+            return None  # decline → keep the body's output
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
+
+        assert seen == ["from-body"]  # the projected OutputT view of the body's ReturnCall
+        assert broker.published[0][1].reply.parts == [TextPart(text="from-body")]
+
+
 class _FailFirstBroker:
     """Fails the first publish (the terminal ReturnCall), captures the rest (the fault)."""
 

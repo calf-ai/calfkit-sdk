@@ -243,13 +243,27 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             publish_topic=publish_topic,
         )
         self.gates: list[GateFunction] = list(gates) if gates else []
-        # The four policy-seam chains (spec §6.1), populated by the constructor params
-        # (first) and the instance decorators (after); consulted by the staged pipeline (step 3).
-        self._chains: dict[str, list[Callable[..., Any]]] = {name: [] for name in SEAM_NAMES}
+        # The constructor seam params register first (decorator entries append after, §6.1
+        # chain-order). The chains themselves are lazily created by the ``_chains`` property.
         self._register_seam_params(BEFORE_NODE, before_node)
         self._register_seam_params(AFTER_NODE, after_node)
         self._register_seam_params(ON_NODE_ERROR, on_node_error)
         self._register_seam_params(ON_CALLEE_ERROR, on_callee_error)
+
+    @property
+    def _chains(self) -> dict[str, list[Callable[..., Any]]]:
+        """The four policy-seam chains (spec §6.1), consulted by the staged pipeline.
+
+        Lazily initialized so EVERY node type has them — including ``@dataclass`` node types
+        (``BaseToolNodeDef``, the MCP toolbox) whose auto-generated ``__init__`` bypasses
+        ``BaseNodeDef.__init__`` entirely (the same reason topic validation lives in
+        ``BaseNodeSchema.__post_init__``). Stored under a distinct ``__dict__`` key so the
+        property name stays read-only."""
+        chains = self.__dict__.get("_seam_chains")
+        if chains is None:
+            chains = {name: [] for name in SEAM_NAMES}
+            self.__dict__["_seam_chains"] = chains
+        return chains
 
     def _register_seam_params(self, seam: str, value: _SeamArg) -> None:
         """Normalize a seam constructor param (one handler / a list / unset) and register
@@ -408,6 +422,18 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             delivery_kind=kind,
             awaiting_reply=frame.callback_topic is not None if frame is not None else False,
         )
+
+    def _resync_seam_context(self, seam_ctx: SeamContext[State], run_ctx: SessionRunContext, envelope: Envelope) -> None:
+        """Re-sync the (shared) ``seam_ctx`` from ``run_ctx`` + the inbound frame after
+        ``_aggregate``. A no-op for a stateless continuation (``run_ctx`` unchanged); for a
+        fan-out CLOSE it propagates the restored snapshot ``state``/``deps``/frame so
+        ``before_node`` (fires at closure, §6.4) and ``after_node`` see the resumed
+        conversation, not the pre-close (cleared) re-entry state."""
+        frame = envelope.internal_workflow_state.current_frame_or_none
+        seam_ctx.state = run_ctx.state
+        seam_ctx.deps = run_ctx.deps
+        seam_ctx.payload = frame.payload if frame is not None else None
+        seam_ctx.awaiting_reply = frame.callback_topic is not None if frame is not None else False
 
     def _effective_resources(self) -> dict[str, Any]:
         """The resources a per-message handler sees: worker-scoped merged under
@@ -935,7 +961,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
     async def _execute(
         self,
-        ctx: SessionRunContext,
+        run_ctx: SessionRunContext,
+        seam_ctx: SeamContext[State],
         kind: MessageKind,
         envelope: Envelope,
         route: str | None,
@@ -945,29 +972,35 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         correlation_id: str,
         broker: BrokerAnnotation,
     ) -> NodeResult[State] | _PipelineSentinel:
-        """The staged inner pipeline (fault-rail §6.8 ``_execute``) — return-only subset.
+        """The staged inner pipeline (fault-rail §6.8 ``_execute``).
 
-        Stage 2 (:meth:`_aggregate`) runs on ``return`` deliveries: an open batch parks
-        (``_CONSUMED``); a closed batch or a stateless continuation falls through to the body.
-        Stage 4 is the body — today's route Chain-of-Responsibility (:meth:`_dispatch_routed`),
-        untouched; an all-declined body is ``_DECLINED``.
+        Stage 2 (:meth:`_aggregate`) on ``return`` deliveries: an open batch parks
+        (``_CONSUMED``); a closed batch / stateless continuation falls through (re-syncing
+        ``seam_ctx`` from the possibly-restored ``run_ctx``). Stage 3 ``before_node`` may
+        short-circuit the body with an output. Stage 4 is the body (:meth:`_dispatch_routed`);
+        an all-declined body is ``_DECLINED``. Stage 6 ``after_node`` (:meth:`_apply_after`)
+        wraps the produced output. The body runs on ``run_ctx`` (``SessionRunContext``); the
+        seams run on ``seam_ctx`` (``SeamContext``, sharing ``run_ctx.state``).
 
-        TODO(fault rail PR-6): stage 1 ``on_callee_error`` (before stage 2, on ``fault`` kind),
-        stage 3 ``before_node`` (after ``_aggregate``, before the body), stage 6 ``after_node``
-        (wrapping the output), and the ``_BatchFaulted`` arm — all need the seam machinery + the
-        fault wire model. Gates currently occupy the stage-3 slot from the handler; the rail
-        deletes gates and adds ``before_node`` here.
+        TODO(fault rail PR-6): stage 1 ``on_callee_error`` (before stage 2, on ``fault`` kind)
+        + the ``_BatchFaulted`` arm land with the fold widen (step 4), alongside ``_resolve_slot``
+        and the per-sibling handling.
         """
         if kind == "return":
-            match await self._aggregate(ctx, envelope, correlation_id, broker):
+            match await self._aggregate(run_ctx, envelope, correlation_id, broker):
                 case _BatchOpen():
                     return _CONSUMED
                 case _BatchClosed():
-                    pass  # fan-out close resume OR stateless continuation → run the body
-        result = await self._dispatch_routed(ctx, route, payload, awaiting_reply=awaiting_reply, correlation_id=correlation_id)
+                    # A fan-out close restored run_ctx + the stack; re-sync the shared seam_ctx so
+                    # before_node (fires at closure, §6.4) and after_node see the resumed state.
+                    self._resync_seam_context(seam_ctx, run_ctx, envelope)
+        pre = await run_chain(self._chains[BEFORE_NODE], seam_ctx)  # ── stage 3: before_node ──
+        if pre is not None:
+            return await self._apply_after(seam_ctx, self._interpret(seam_ctx, pre))
+        result = await self._dispatch_routed(run_ctx, route, payload, awaiting_reply=awaiting_reply, correlation_id=correlation_id)  # stage 4
         if result is None:
             return _DECLINED
-        return result
+        return await self._apply_after(seam_ctx, result)  # ── stage 6: after_node ──
 
     async def _dispatch_routed(
         self,
@@ -1082,6 +1115,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         try:
             output = await self._execute(
                 ctx,
+                seam_ctx,
                 kind,
                 envelope,
                 route,
