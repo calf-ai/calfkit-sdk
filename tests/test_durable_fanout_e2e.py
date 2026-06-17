@@ -113,6 +113,13 @@ def _calls_ok_and_boom(messages: list[ModelMessage], info: AgentInfo) -> ModelRe
     return ModelResponse(parts=[ToolCallPart("e2e_tool_a"), ToolCallPart("e2e_tool_boom")])
 
 
+@pytest.mark.skip(
+    reason="PR-6 step 3: the fault boundary now turns the agent's ToolExecutionError into a typed "
+    "fault (covered by tests/test_fault_pipeline.py) instead of stranding. This e2e asserted the "
+    "deleted FailedToolCall→ToolExecutionError strand AND client reception (deferred to the "
+    "reception PR, plan §0); it is rewritten to the parts/fault carriage in step 4 — the "
+    "FailedToolCall 3-file atomic, plan §R7."
+)
 async def test_durable_fanout_with_failing_tool_strands_via_tool_execution_error(container) -> None:
     # (coverage b) The return-only strand, end-to-end: a 2-tool fan-out where ONE tool raises. The
     # failure folds durably as a FailedToolCall, the batch completes + closes, and the resumed agent

@@ -13,10 +13,10 @@ from faststream.kafka.annotations import (
 )
 from pydantic import ValidationError
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
-from calfkit.exceptions import RegistryConfigError, SeamContractError
+from calfkit.exceptions import NodeFaultError, RegistryConfigError, SeamContractError
 from calfkit.models import (
     Call,
     Next,
@@ -28,12 +28,13 @@ from calfkit.models import (
 )
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
+from calfkit.models.error_report import ErrorReport
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.node_result import _UNSET, _extract_output, extract_lenient
 from calfkit.models.node_schema import BaseNodeSchema
-from calfkit.models.reply import ReturnMessage
+from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import SeamContext
-from calfkit.models.session_context import SessionRunContext
+from calfkit.models.session_context import SessionRunContext, WorkflowState
 from calfkit.nodes._fanout_store import (
     FANOUT_STORE_KEY,
     CloseAbandon,
@@ -50,7 +51,7 @@ from calfkit.nodes._fanout_store import (
     close_batch,
     fold_sibling,
 )
-from calfkit.nodes._seams import AFTER_NODE, BEFORE_NODE, ON_CALLEE_ERROR, ON_NODE_ERROR, SEAM_NAMES, run_chain
+from calfkit.nodes._seams import AFTER_NODE, BEFORE_NODE, ON_CALLEE_ERROR, ON_NODE_ERROR, SEAM_NAMES, _Minted, run_chain, run_chain_guarded
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
 if TYPE_CHECKING:
@@ -575,6 +576,74 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             headers=self._headers("return"),
         )
 
+    def _stack_snapshot(self, envelope: Envelope) -> WorkflowState:
+        """A deep copy of the inbound call stack, captured BEFORE ``_execute`` mutates it,
+        so ``_publish_fault`` addresses the pre-mutation caller (spec §6.8 / scenario 42)."""
+        return envelope.internal_workflow_state.model_copy(deep=True)
+
+    async def _publish_fault(
+        self, report: ErrorReport, snapshot: WorkflowState, inbound: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> tuple[Envelope, MessageKind]:
+        """Publish a typed fault on the node's success rail (P2) and return the fault-bearing
+        envelope for the broadcast mirror (spec §4.2/§6.8/§13).
+
+        Mirrors the ``ReturnCall`` arm against the PRE-MUTATION ``snapshot``: pop the answered
+        frame, mint ``FaultMessage(in_reply_to=popped.frame_id, tag=popped.tag, error=report)``,
+        carry the inbound ``context`` UNCHANGED (handler mutations die with the faulted turn,
+        §4.2), and publish to the popped ``callback_topic`` with ``x-calf-kind=fault`` +
+        ``x-calf-error-type``. A frameless / fire-and-forget terminal (no callback) is floored
+        (ERROR + full report JSON, §13). The point-to-point publish is log-only-guarded — a
+        failed delivery never re-enters the fault path; the broadcast mirror still fires.
+        Escalation NEVER wraps (§4.4): the same ``report`` is re-addressed each hop.
+        """
+        frame = snapshot.current_frame_or_none
+        callback_topic = frame.callback_topic if frame is not None else None
+        fault = FaultMessage(
+            in_reply_to=frame.frame_id if frame is not None else None,
+            tag=frame.tag if frame is not None else None,
+            error=report,
+        )
+        if frame is not None:
+            snapshot.unwind_frame()  # pop the answered frame; the remaining stack travels for the next hop
+        mirror = Envelope(context=inbound.context, internal_workflow_state=snapshot, reply=fault)
+        if callback_topic is None:
+            # Frameless / fire-and-forget terminal: no caller to answer → floor (§13). The
+            # broadcast mirror still fires where a publish_topic exists (the returned envelope).
+            logger.error(
+                "[%s] terminal fault floored (no callback_topic) node=%s error_type=%s report=%s",
+                correlation_id[:8],
+                self.node_id,
+                report.error_type,
+                report.model_dump_json(),
+            )
+        else:
+            try:
+                await broker.publish(
+                    mirror,
+                    topic=callback_topic,
+                    correlation_id=correlation_id,
+                    key=correlation_id.encode(),
+                    headers=self._headers("fault") | {HDR_ERROR_TYPE: report.error_type},
+                )
+            except Exception:
+                # Log-only-guarded (§6.8): a failed fault delivery must not re-enter the fault
+                # path; the broadcast mirror below still carries it for ops taps.
+                logger.exception(
+                    "[%s] fault delivery to callback_topic=%s failed node=%s; the fault still broadcasts on publish_topic",
+                    correlation_id[:8],
+                    callback_topic,
+                    self.node_id,
+                )
+        return mirror, "fault"
+
+    async def _fault_response(
+        self, report: ErrorReport, snapshot: WorkflowState, inbound: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> Response:
+        """Publish a fault and wrap its broadcast mirror as the handler's :class:`Response`
+        (so the worker's ``@publisher`` mirrors the fault on ``publish_topic``, §13)."""
+        mirror, fkind = await self._publish_fault(report, snapshot, inbound, correlation_id, broker)
+        return Response(mirror, headers=self._headers(fkind))
+
     @property
     def _is_fanout_capable(self) -> bool:
         """Whether this node folds durable fan-out batches in-node. ``False`` for every
@@ -1010,6 +1079,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         kind = self._classify(headers)
         logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
         ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
+        seam_ctx = self._build_seam_context(ctx, envelope, headers, kind)
 
         if not await self._evaluate_gates(ctx, correlation_id):
             envelope.reply = None  # no-reply mirror (gate rejected): don't re-broadcast an inbound reply (I3)
@@ -1019,16 +1089,38 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         payload = frame.payload if frame is not None else None
         awaiting_reply = frame.callback_topic is not None if frame is not None else False
         route = decode_header_str(headers.get(HDR_ROUTE))
-        output = await self._execute(
-            ctx,
-            kind,
-            envelope,
-            route,
-            payload,
-            awaiting_reply=awaiting_reply,
-            correlation_id=correlation_id,
-            broker=broker,
-        )
+        # The pre-mutation caller address every _publish_fault below addresses (§6.8 / scenario 42).
+        snapshot = self._stack_snapshot(envelope)
+        try:
+            output = await self._execute(
+                ctx,
+                kind,
+                envelope,
+                route,
+                payload,
+                awaiting_reply=awaiting_reply,
+                correlation_id=correlation_id,
+                broker=broker,
+            )
+        except NodeFaultError as nfe:
+            # The mint rule (§6.5): a deliberate typed fault converts verbatim, BYPASSING on_node_error.
+            return await self._fault_response(nfe.report, snapshot, envelope, correlation_id, broker)
+        except Exception as exc:
+            # ── stage 5: on_node_error — the node's own work raised uncaught ──
+            seam_ctx.exception = exc
+            report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+            recovery = await run_chain_guarded(self._chains[ON_NODE_ERROR], seam_ctx, report)
+            if isinstance(recovery, _Minted):  # a NodeFaultError raised inside the chain (§6.5)
+                return await self._fault_response(recovery.report, snapshot, envelope, correlation_id, broker)
+            if recovery is None:  # all handlers declined → the original fault escalates
+                return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
+            # Recovered: the value still passes after_node (ADK parity); SINGLE-SHOT — a raise while
+            # processing the recovery is terminal, chaining the original as a cause (§6.8).
+            try:
+                output = await self._apply_after(seam_ctx, self._interpret(seam_ctx, recovery))
+            except Exception as exc2:
+                report2 = ErrorReport.from_exception(exc2, node=self, ctx=seam_ctx, cause=report)
+                return await self._fault_response(report2, snapshot, envelope, correlation_id, broker)
 
         if output is _CONSUMED:
             # A parked fan-out fold or a self-published re-entry: no publishable action this hop,
