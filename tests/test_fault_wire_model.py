@@ -239,6 +239,29 @@ class TestBuildSafe:
         assert "calf.elided" not in r.details
         assert r.details.get("ok") == 1
 
+    def test_total_on_deep_cause_chain_keeps_precise_breadcrumb(self) -> None:
+        # A causes tree deeper than Python's recursion limit must NOT RecursionError into
+        # the fallback arm (which would silently downgrade the precise causes=N breadcrumb
+        # to a bare "fallback"): the dropped-subtree tally is iterative. The nested-fault-
+        # group path (§4.4) is exactly where deep causes trees arise.
+        deep = _linear_cause_chain(2000)  # well past sys.getrecursionlimit()
+        r = ErrorReport.build_safe(error_type="root", causes=[deep])
+        assert r.error_type == "root"  # total — no RecursionError
+        elided = r.details[FaultTypes.ELIDED]
+        assert "fallback" not in elided  # the precise tally, not the last-resort arm
+        assert elided["causes"] == 1993  # 2000 chain nodes − 7 kept at depths 2..8
+
+    def test_total_on_cyclic_causes(self) -> None:
+        # A self-referential causes cycle — possible only via in-process mutation of the
+        # shallow-frozen list, never off the wire (JSON is acyclic) — must terminate, not
+        # RecursionError. The id()-visited guard keeps each report once.
+        a = ErrorReport(error_type="a")
+        a.causes.append(a)  # cycle: a -> a
+        r = ErrorReport.build_safe(error_type="root", causes=[a])
+        assert r.error_type == "root"  # total, terminates
+        assert "fallback" not in r.details.get(FaultTypes.ELIDED, {})  # handled cleanly
+        assert r.causes[0].error_type == "a" and r.causes[0].causes == []  # cycle cut
+
 
 class TestImmutability:
     def test_error_report_is_frozen(self) -> None:
@@ -272,6 +295,21 @@ class TestWalkAndFind:
     def test_find_matches_self(self) -> None:
         r = ErrorReport(error_type="calf.fault_group")
         assert r.find("calf.fault_group") is r
+
+    def test_walk_terminates_on_cyclic_report(self) -> None:
+        # walk() is cycle-guarded: an in-process cycle (the shallow freeze leaves causes
+        # mutable) yields each report once and terminates, not recursing without bound.
+        a = ErrorReport(error_type="a")
+        b = ErrorReport(error_type="b", causes=[a])
+        a.causes.append(b)  # cycle: a -> b -> a
+        assert [r.error_type for r in a.walk()] == ["a", "b"]
+
+    def test_find_terminates_on_cyclic_report(self) -> None:
+        a = ErrorReport(error_type="a")
+        b = ErrorReport(error_type="b", causes=[a])
+        a.causes.append(b)  # cycle
+        assert a.find("b") is b
+        assert a.find("absent") is None  # terminates rather than RecursionError
 
 
 class TestToMinimal:

@@ -145,10 +145,24 @@ class ErrorReport(BaseModel):
         return v
 
     def walk(self) -> Iterator[ErrorReport]:
-        """Yield this report, then every nested cause (pre-order)."""
-        yield self
-        for cause in self.causes:
-            yield from cause.walk()
+        """Yield this report, then every nested cause (pre-order).
+
+        Iterative and cycle-guarded: a report off the wire is acyclic (JSON has no
+        cycles), but the shallow freeze leaves ``causes`` mutable in place, so an
+        in-process cycle (or a cause reached by two paths) is possible. An ``id()``-keyed
+        visited set yields each report once and terminates, instead of recursing without
+        bound — ``walk`` is the public traversal a consumer calls on a possibly
+        attacker-influenced ``NodeFaultError.report``.
+        """
+        seen: set[int] = set()
+        stack: list[ErrorReport] = [self]
+        while stack:
+            report = stack.pop()
+            if id(report) in seen:
+                continue
+            seen.add(id(report))
+            yield report
+            stack.extend(reversed(report.causes))  # reversed ⇒ first cause pops next (pre-order)
 
     def find(self, error_type: str) -> ErrorReport | None:
         """The first report in ``walk()`` order matching ``error_type``, or ``None``.
@@ -252,33 +266,59 @@ class ErrorReport(BaseModel):
 # Carriage-bound helpers (used by ErrorReport.build_safe)
 # ---------------------------------------------------------------------------
 class _CauseBudget:
-    """Shared accounting across the recursive cause bounding: how many reports may
-    still be kept (``remaining``) and how many were dropped (``dropped``)."""
+    """Shared accounting across the cause bounding: how many reports may still be kept
+    (``remaining``), how many were dropped (``dropped``), and the report ids already
+    visited (``seen``) so the walk is cycle/DAG-safe and always terminates."""
 
-    __slots__ = ("remaining", "dropped")
+    __slots__ = ("remaining", "dropped", "seen")
 
     def __init__(self) -> None:
         self.remaining = _MAX_CAUSES_TOTAL
         self.dropped = 0
+        self.seen: set[int] = set()
 
 
 def _bound_cause_list(causes: list[ErrorReport], *, depth: int, budget: _CauseBudget) -> list[ErrorReport]:
-    """Copy ``causes`` keeping the tree within the depth (≤ 8 levels below the
-    root) and total-count (≤ 64) budgets; everything dropped is tallied on
-    ``budget.dropped`` so the caller can record it (never a silent drop).
+    """Copy ``causes`` within the depth (≤ 8 levels, root included) and total-count (≤ 64)
+    budgets; everything dropped is tallied on ``budget.dropped`` so the caller records it
+    (never a silent drop).
 
-    A dropped cause is recursed with the budget already exhausted, so its whole
-    subtree falls through the same drop branch and is counted node-by-node — no
-    separate tree-walk is needed."""
+    The kept-build recursion is bounded by ``_MAX_CAUSES_DEPTH`` — it descends only while a
+    node is *kept* (``depth <= _MAX_CAUSES_DEPTH``), so it cannot exhaust Python's recursion
+    limit. A *dropped* subtree, by contrast, can be arbitrarily deep, so it is counted
+    **iteratively** (:func:`_count_subtree`), never by recursion: otherwise a deep ``causes``
+    chain (nested fault groups, §4.4) would ``RecursionError`` into ``build_safe``'s fallback
+    and silently downgrade the precise ``causes=N`` breadcrumb to a bare ``fallback``.
+    ``budget.seen`` (report ids) makes the whole walk cycle/DAG-safe — a report reached by
+    more than one path, or a self-referential cycle (possible only via in-process mutation of
+    the shallow-frozen ``causes``, never off the wire), is kept once and its re-occurrences
+    counted — so the transform always terminates."""
     kept: list[ErrorReport] = []
     for cause in causes:
-        if depth > _MAX_CAUSES_DEPTH or budget.remaining <= 0:
-            budget.dropped += 1
-            _bound_cause_list(cause.causes, depth=depth + 1, budget=budget)  # tally the dropped subtree
+        if depth > _MAX_CAUSES_DEPTH or budget.remaining <= 0 or id(cause) in budget.seen:
+            budget.dropped += _count_subtree(cause, budget)  # iterative, cycle-safe tally
             continue
+        budget.seen.add(id(cause))
         budget.remaining -= 1
         kept.append(cause.model_copy(update={"causes": _bound_cause_list(cause.causes, depth=depth + 1, budget=budget)}))
     return kept
+
+
+def _count_subtree(root: ErrorReport, budget: _CauseBudget) -> int:
+    """Count every not-yet-seen report in ``root``'s subtree (root included), iteratively and
+    cycle-safe, marking each on ``budget.seen``. The dropped-subtree tally behind the ``causes``
+    elision breadcrumb — the true number of reports elided, however deep or cyclic the dropped
+    input, with no recursion."""
+    count = 0
+    stack: list[ErrorReport] = [root]
+    while stack:
+        node = stack.pop()
+        if id(node) in budget.seen:
+            continue
+        budget.seen.add(id(node))
+        count += 1
+        stack.extend(node.causes)
+    return count
 
 
 def _bound_frame_chain(chain: list[FrameRef]) -> tuple[list[FrameRef], int]:
