@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 _MAX_SEAM_ERROR_CHARS = 2000
 
+# The four policy seams (spec §6.1) — names double as the ``_chains`` registry keys and
+# the instance decorator/constructor parameter names on ``BaseNodeDef``.
+BEFORE_NODE = "before_node"
+AFTER_NODE = "after_node"
+ON_NODE_ERROR = "on_node_error"
+ON_CALLEE_ERROR = "on_callee_error"
+SEAM_NAMES: tuple[str, ...] = (BEFORE_NODE, AFTER_NODE, ON_NODE_ERROR, ON_CALLEE_ERROR)
+
 
 @dataclass(frozen=True)
 class _Minted:

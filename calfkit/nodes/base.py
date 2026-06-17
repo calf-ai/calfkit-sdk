@@ -3,7 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, TypeVar, cast
 
 import uuid_utils
 from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
@@ -49,12 +49,27 @@ from calfkit.nodes._fanout_store import (
     close_batch,
     fold_sibling,
 )
+from calfkit.nodes._seams import AFTER_NODE, BEFORE_NODE, ON_CALLEE_ERROR, ON_NODE_ERROR, SEAM_NAMES
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
 if TYPE_CHECKING:
     from calfkit.worker.worker import Worker
 
 logger = logging.getLogger(__name__)
+
+_SeamFn = TypeVar("_SeamFn", bound=Callable[..., Any])
+"""Preserves a seam handler's concrete type through the registration decorators (the
+``gate()`` return-fn-unchanged precedent), so a decorated handler stays directly callable."""
+
+# A seam constructor parameter: one handler, a list of handlers, or unset. Typed loosely
+# (``Callable``) for now; the §6.3 per-seam typed aliases (``BeforeNodeSeam[StateT]`` etc.,
+# which require ``BaseNodeDef`` to become ``Generic[StateT, OutputT]``) are a typing
+# refinement deferred to step 3, where the pipeline consumes the typed signatures.
+_SeamArg = Callable[..., Any] | list[Callable[..., Any]] | None
+
+# Positional arity each seam invokes its handlers with: ``before_node(ctx)`` takes one;
+# the rest take two (``ctx`` + ``output``/``fault``). Validated at registration (spec §6.8).
+_SEAM_ARITY = {BEFORE_NODE: 1, AFTER_NODE: 2, ON_NODE_ERROR: 2, ON_CALLEE_ERROR: 2}
 
 
 def _accepts_extra_param(fn: Callable[..., Any]) -> bool:
@@ -180,6 +195,10 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         subscribe_topics: list[str],
         publish_topic: str | None = None,
         gates: list[GateFunction] | None = None,
+        before_node: _SeamArg = None,
+        after_node: _SeamArg = None,
+        on_node_error: _SeamArg = None,
+        on_callee_error: _SeamArg = None,
     ) -> None:
         """Initialize a node definition.
 
@@ -209,6 +228,66 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             publish_topic=publish_topic,
         )
         self.gates: list[GateFunction] = list(gates) if gates else []
+        # The four policy-seam chains (spec §6.1), populated by the constructor params
+        # (first) and the instance decorators (after); consulted by the staged pipeline (step 3).
+        self._chains: dict[str, list[Callable[..., Any]]] = {name: [] for name in SEAM_NAMES}
+        self._register_seam_params(BEFORE_NODE, before_node)
+        self._register_seam_params(AFTER_NODE, after_node)
+        self._register_seam_params(ON_NODE_ERROR, on_node_error)
+        self._register_seam_params(ON_CALLEE_ERROR, on_callee_error)
+
+    def _register_seam_params(self, seam: str, value: _SeamArg) -> None:
+        """Normalize a seam constructor param (one handler / a list / unset) and register
+        each in order — so a constructor-supplied chain precedes any later decorator
+        entries (spec §6.1 chain-order)."""
+        if value is None:
+            return
+        handlers = value if isinstance(value, list) else [value]
+        for fn in handlers:
+            self._register_seam(seam, fn)
+
+    def _register_seam(self, seam: str, fn: Callable[..., Any]) -> None:
+        """Validate and append one handler to a seam chain (spec §6.8 — registration-time,
+        never mid-message). Shared by the constructor params and the instance decorators.
+
+        Validates the handler is callable and accepts the seam's positional arity
+        (``before_node(ctx)``; the rest ``(ctx, output/fault)``) — so a wrong-shaped
+        handler fails loudly at startup, not silently at first fire."""
+        if not callable(fn):
+            raise RegistryConfigError(f"node={self.node_id}: {seam} handler must be callable, got {type(fn).__name__}")
+        arity = _SEAM_ARITY[seam]
+        try:
+            inspect.signature(fn).bind(*([None] * arity))
+        except TypeError as exc:
+            extra = ", fault/output" if arity == 2 else ""
+            raise RegistryConfigError(
+                f"node={self.node_id}: {seam} handler {getattr(fn, '__name__', fn)!r} must accept {arity} positional arg(s) (ctx{extra}); {exc}"
+            ) from exc
+        self._chains[seam].append(fn)
+
+    def before_node(self, fn: _SeamFn) -> _SeamFn:
+        """Register a ``before_node`` handler. Usable as an instance decorator; repeatable.
+
+        Appends to the same chain the ``before_node=`` constructor param feeds (constructor
+        entries first, then decorated), and returns ``fn`` unchanged so it stays directly
+        unit-testable (the ``gate()`` precedent)."""
+        self._register_seam(BEFORE_NODE, fn)
+        return fn
+
+    def after_node(self, fn: _SeamFn) -> _SeamFn:
+        """Register an ``after_node`` handler (instance decorator; repeatable; see :meth:`before_node`)."""
+        self._register_seam(AFTER_NODE, fn)
+        return fn
+
+    def on_node_error(self, fn: _SeamFn) -> _SeamFn:
+        """Register an ``on_node_error`` handler (instance decorator; repeatable; see :meth:`before_node`)."""
+        self._register_seam(ON_NODE_ERROR, fn)
+        return fn
+
+    def on_callee_error(self, fn: _SeamFn) -> _SeamFn:
+        """Register an ``on_callee_error`` handler (instance decorator; repeatable; see :meth:`before_node`)."""
+        self._register_seam(ON_CALLEE_ERROR, fn)
+        return fn
 
     def gate(self, fn: GateFunction) -> GateFunction:
         """Register a gate predicate. Usable as a decorator. Repeatable.
