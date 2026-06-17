@@ -20,7 +20,8 @@ from pydantic import BaseModel
 from calfkit._protocol import MessageKind
 from calfkit._types import StateT
 from calfkit.models.error_report import ErrorReport
-from calfkit.models.payload import ContentPart, DataPart, TextPart
+from calfkit.models.node_result import extract_lenient
+from calfkit.models.payload import ContentPart
 
 
 class CalleeResult(BaseModel):
@@ -48,21 +49,10 @@ class CalleeResult(BaseModel):
     @property
     def value(self) -> Any:
         """Convenience view of ``parts``: ``DataPart.data`` first, then
-        ``TextPart.text``, else ``None`` (spec §6.3).
-
-        The lenient mirror of ``node_result._extract_auto`` (which raises on no
-        match) — a seam handler reads a callee's output without a strict
-        projection. (Step 4 extracts a shared ``extract_lenient`` once the agent's
-        ``_resolve_slot`` becomes the second consumer.)
-        """
-        parts = self.parts or []
-        for part in parts:
-            if isinstance(part, DataPart):
-                return part.data
-        for part in parts:
-            if isinstance(part, TextPart):
-                return part.text
-        return None
+        ``TextPart.text``, else ``None`` (spec §6.3) — the shared lenient extraction
+        (``node_result.extract_lenient``), so a seam handler reads a callee's output
+        without a strict projection that could raise."""
+        return extract_lenient(self.parts)
 
 
 @dataclass

@@ -29,6 +29,7 @@ from calfkit.models import (
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
+from calfkit.models.node_result import _UNSET, _extract_output, extract_lenient
 from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.reply import ReturnMessage
 from calfkit.models.seam_context import SeamContext
@@ -49,7 +50,7 @@ from calfkit.nodes._fanout_store import (
     close_batch,
     fold_sibling,
 )
-from calfkit.nodes._seams import AFTER_NODE, BEFORE_NODE, ON_CALLEE_ERROR, ON_NODE_ERROR, SEAM_NAMES
+from calfkit.nodes._seams import AFTER_NODE, BEFORE_NODE, ON_CALLEE_ERROR, ON_NODE_ERROR, SEAM_NAMES, run_chain
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
 if TYPE_CHECKING:
@@ -70,6 +71,19 @@ _SeamArg = Callable[..., Any] | list[Callable[..., Any]] | None
 # Positional arity each seam invokes its handlers with: ``before_node(ctx)`` takes one;
 # the rest take two (``ctx`` + ``output``/``fault``). Validated at registration (spec §6.8).
 _SEAM_ARITY = {BEFORE_NODE: 1, AFTER_NODE: 2, ON_NODE_ERROR: 2, ON_CALLEE_ERROR: 2}
+
+# The publishable NodeResult action types (sans the ``list[Call]`` fan-out, handled in
+# :func:`_is_action`). ``Next`` is route-CoR vocabulary, not a publishable action.
+_ACTION_TYPES: tuple[type, ...] = (Call, ReturnCall, TailCall)
+
+
+def _is_action(value: Any) -> bool:
+    """True if ``value`` is a NodeResult action (spec §6.3 tier-2): a boundary seam
+    returning one executes it as-is, rather than coercing it to output. A ``list[Call]``
+    (fan-out) counts; a ``list[ContentPart]`` (a parts *value*) does not."""
+    if isinstance(value, _ACTION_TYPES):
+        return True
+    return isinstance(value, list) and bool(value) and all(isinstance(item, Call) for item in value)
 
 
 def _accepts_extra_param(fn: Callable[..., Any]) -> bool:
@@ -591,6 +605,59 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if isinstance(value, bytes):
             raise SeamContractError("a seam returned bytes, which has no parts representation; return str, structured data, or a model.")
         return ReturnCall[State](state=ctx.state, value=value)
+
+    @property
+    def _seam_output_type(self) -> Any:
+        """The output type ``after_node``'s view is projected to (spec §6.3).
+
+        The base is untyped (``_UNSET`` → lenient auto-detect, never raises). A typed
+        node — the agent — overrides this to its declared output type so the projection
+        becomes strict: a type-breaking output then faults at the seam, not downstream
+        (the agent's override lands with its body migration, step 4)."""
+        return _UNSET
+
+    def _output_view(self, ctx: SeamContext[State], output: NodeResult[State]) -> Any:
+        """Project a terminal output into the typed view ``after_node`` inspects (spec §6.9).
+
+        ``None`` for a non-terminal action (``Call``/``TailCall``/fan-out list) — ``after_node``
+        guards a *produced* output, and those produce nothing yet. The value is coerced to
+        parts first (so a raw body value and an agent's parts project uniformly), then
+        projected: lenient on an untyped node (``None`` on an unprojectable output, never a
+        fault), strict against :attr:`_seam_output_type` on a typed node."""
+        if not isinstance(output, ReturnCall):
+            return None
+        parts = _coerce_to_parts(output.value)
+        if not parts:
+            return None  # empty output → nothing for after_node to guard
+        output_type = self._seam_output_type
+        if output_type is _UNSET:
+            return extract_lenient(parts)
+        return _extract_output(parts, output_type)
+
+    def _interpret(self, ctx: SeamContext[State], value: Any) -> NodeResult[State]:
+        """Interpret a boundary seam's return (spec §6.3/§6.8 two-tier rule): a NodeResult
+        action executes as-is; any other value is coerced to the node's output. Used for
+        ``before_node`` short-circuits and ``on_node_error`` recovery values."""
+        return value if _is_action(value) else self._coerce_output(ctx, value)
+
+    async def _apply_after(self, ctx: SeamContext[State], output: NodeResult[State]) -> NodeResult[State]:
+        """Stage 6 (spec §6.8): run the ``after_node`` chain over the output's typed view.
+
+        Short-circuits when no ``after_node`` is registered — there is nothing to guard, and
+        the view (which can raise on a type-breaking output) is not computed. A handler
+        returning a value REPLACES the output (coerced); ``None`` keeps it; an action
+        violates ``after_node``'s values-only contract (§6.1) → ``SeamContractError``."""
+        if not self._chains[AFTER_NODE]:
+            return output
+        view = self._output_view(ctx, output)
+        if view is None:
+            return output  # non-terminal / empty output → nothing to guard
+        post = await run_chain(self._chains[AFTER_NODE], ctx, view)
+        if post is None:
+            return output
+        if _is_action(post):
+            raise SeamContractError("after_node returns a value, not an action; use before_node/on_node_error for actions.")
+        return self._coerce_output(ctx, post)
 
     def _classify(self, headers: dict[str, Any]) -> MessageKind:
         """Classify the inbound delivery kind from the ``x-calf-kind`` header (§6.8 stage-0).

@@ -280,6 +280,23 @@ def _extract_auto(parts: list[Any]) -> Any:
     raise DeserializationError("No DataPart or TextPart found in reply.parts; cannot auto-detect output.")
 
 
+def extract_lenient(parts: list[Any] | None) -> Any:
+    """Lenient auto-extraction: ``DataPart.data`` first, then ``TextPart.text``, else ``None``.
+
+    The non-raising twin of :func:`_extract_auto` — used where a best-effort value view is
+    wanted rather than a strict projection: ``CalleeResult.value`` (spec §6.3), the untyped
+    branch of ``BaseNodeDef._output_view``, and the agent's ``_resolve_slot`` (§6.9). Empty /
+    absent parts, or parts with neither a ``DataPart`` nor a ``TextPart``, yield ``None``.
+    """
+    for part in parts or []:
+        if isinstance(part, DataPart):
+            return part.data
+    for part in parts or []:
+        if isinstance(part, TextPart):
+            return part.text
+    return None
+
+
 def _extract_text(parts: list[Any]) -> str:
     """Extract the first TextPart.text."""
     for part in parts:

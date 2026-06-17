@@ -9,11 +9,14 @@ notes/pr6-fault-rail-implementation-plan.md §3 step 1 / §4 layer 2.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-from calfkit.exceptions import SeamContractError
-from calfkit.models.actions import ReturnCall
+from calfkit.exceptions import DeserializationError, SeamContractError
+from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.error_report import ErrorReport
+from calfkit.models.payload import DataPart
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.state import State
 from calfkit.nodes.base import BaseNodeDef
@@ -85,3 +88,111 @@ class TestCoerceGuards:
         node = _node()
         result = node._coerce_output(_ctx(State()), ErrorReport(error_type="x"))
         assert isinstance(result, ReturnCall)
+
+
+class TestOutputView:
+    def test_terminal_returncall_projects_lenient_view(self) -> None:
+        # _output_view gives after_node the OutputT view of a terminal output. On an
+        # untyped node (base _seam_output_type = _UNSET) it is the lenient projection.
+        node = _node()
+        view = node._output_view(_ctx(State()), ReturnCall[State](state=State(), value="hi"))
+        assert view == "hi"
+
+    def test_non_terminal_actions_have_no_view(self) -> None:
+        # after_node guards a *produced* output; a Call/TailCall produces nothing yet.
+        node, ctx = _node(), _ctx(State())
+        assert node._output_view(ctx, Call[State]("topic", State())) is None
+        assert node._output_view(ctx, TailCall[State](target_topic="t", state=State())) is None
+
+    def test_empty_output_has_no_view(self) -> None:
+        # A terminal output with no content → no view (lenient; never raises).
+        node = _node()
+        assert node._output_view(_ctx(State()), ReturnCall[State](state=State(), value=None)) is None
+
+    def test_typed_node_projects_strictly_against_its_output_type(self) -> None:
+        # A typed node (the agent's pattern) projects the view against its declared
+        # output type — strict, so it validates.
+        node = _TypedStrNode(node_id="t", subscribe_topics=["in"])
+        view = node._output_view(_ctx(State()), ReturnCall[State](state=State(), value="hello"))
+        assert view == "hello"
+
+    def test_typed_node_raises_on_an_unprojectable_output(self) -> None:
+        # A type-breaking output (no TextPart for a str-typed node) raises at the seam
+        # (→ a fault in the pipeline), not silently downstream (spec §6.3).
+        node = _TypedStrNode(node_id="t", subscribe_topics=["in"])
+        with pytest.raises(DeserializationError):
+            node._output_view(_ctx(State()), ReturnCall[State](state=State(), value=[DataPart(data={"x": 1})]))
+
+
+class _TypedStrNode(BaseNodeDef):
+    """A node whose seam output type is ``str`` — exercises _output_view's strict branch
+    (the agent overrides _seam_output_type to its final_output_type the same way, step 4)."""
+
+    @property
+    def _seam_output_type(self) -> Any:
+        return str
+
+
+class TestInterpret:
+    def test_action_passes_through_unchanged(self) -> None:
+        # §6.3 tier-2: a boundary seam returning a NodeResult action executes it as-is.
+        node, ctx = _node(), _ctx(State())
+        call = Call[State]("topic", State())
+        assert node._interpret(ctx, call) is call
+        tail = TailCall[State](target_topic="t", state=State())
+        assert node._interpret(ctx, tail) is tail
+
+    def test_fanout_list_passes_through_but_parts_list_is_a_value(self) -> None:
+        # list[Call] is an action (fan-out); list[ContentPart] is a value (parts).
+        node, ctx = _node(), _ctx(State())
+        calls = [Call[State]("a", State()), Call[State]("b", State())]
+        assert node._interpret(ctx, calls) is calls
+        parts_value = [DataPart(data={"k": 1})]
+        coerced = node._interpret(ctx, parts_value)
+        assert isinstance(coerced, ReturnCall) and coerced.value is parts_value
+
+    def test_plain_value_is_coerced_to_output(self) -> None:
+        node, ctx = _node(), _ctx(State())
+        result = node._interpret(ctx, "answer")
+        assert isinstance(result, ReturnCall)
+        assert result.value == "answer"
+
+
+class TestApplyAfter:
+    async def test_no_after_node_returns_output_unchanged(self) -> None:
+        # Short-circuit: with no after_node registered there is nothing to guard, so the
+        # output passes through untouched (and the view is never even computed).
+        node = _node()
+        output = ReturnCall[State](state=State(), value="orig")
+        assert await node._apply_after(_ctx(State()), output) is output
+
+    async def test_after_node_declining_keeps_output(self) -> None:
+        node = _node()
+
+        @node.after_node
+        def keep(ctx: object, output: object) -> None:
+            return None
+
+        output = ReturnCall[State](state=State(), value="orig")
+        assert await node._apply_after(_ctx(State()), output) is output
+
+    async def test_after_node_value_replaces_output(self) -> None:
+        node = _node()
+
+        @node.after_node
+        def replace(ctx: object, output: object) -> str:
+            return "replaced"
+
+        result = await node._apply_after(_ctx(State()), ReturnCall[State](state=State(), value="orig"))
+        assert isinstance(result, ReturnCall) and result.value == "replaced"
+
+    async def test_after_node_returning_an_action_raises(self) -> None:
+        # after_node is values-only (§6.1); returning an action is a contract violation.
+        node = _node()
+
+        @node.after_node
+        def bad(ctx: object, output: object) -> Call[State]:
+            return Call[State]("t", State())
+
+        with pytest.raises(SeamContractError):
+            await node._apply_after(_ctx(State()), ReturnCall[State](state=State(), value="orig"))
