@@ -14,7 +14,7 @@ import pytest
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.session_context import CallFrame, Stack, WorkflowState
-from calfkit.models.state import State
+from calfkit.models.state import FailedToolCall, State
 from calfkit.nodes._fanout_store import (
     CloseResume,
     FoldComplete,
@@ -71,5 +71,37 @@ async def test_fold_across_folds_then_close_and_tombstone(kafka_bootstrap: str, 
         # Tombstoned at close — a barriered re-read sees the delete (RYOW on the null tombstone).
         assert await store.read_state("A") is None
         assert await store.read_basestate("A") is None
+    finally:
+        await store.stop()
+
+
+async def test_failed_tool_call_folds_and_materializes_typed_over_real_broker(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """A return-only tool FAILURE folds and materializes as a TYPED marker over a real broker.
+
+    The offline fake cannot prove this: its fold never crosses real ktables JSON encode/decode, so it
+    can't show that a ``FailedToolCall`` survives the durable ``state`` table round-trip as a typed
+    instance (via the ``CalfToolResult`` discriminator) rather than a bare dict. This is the durable
+    analog of today's tool-failure → caller-strand path; PR-4 is return-only, so the failure rides as
+    a ``CalfToolResult`` marker, not yet a typed fault (the fault rail re-homes ``result`` to
+    parts/fault). Without this, the durable carriage of the core FAILURE path is untested over Kafka.
+    """
+    store = KtablesFanoutBatchStore(bootstrap_servers=kafka_bootstrap, node_id=f"{topic_namespace}-n")
+    await store.start()
+    try:
+        await store.open("A", _reg(), _snapshot())
+        marker = FailedToolCall.build_safe(tool_name="boom", tool_call_id="tc1", exc_type="ValueError", exc_message="kaboom")
+        first = await fold_sibling(store, "A", FanoutOutcome(slot="f1", tag="tc1", result=marker))
+        assert isinstance(first, FoldParked)
+        second = await fold_sibling(store, "A", FanoutOutcome(slot="f2", tag="tc2", result=ToolReturn(return_value="r2")))
+        assert isinstance(second, FoldComplete)
+
+        closed = await close_batch(store, "A")
+        assert isinstance(closed, CloseResume)
+        materialized = closed.snapshot.state.get_tool_result("tc1")
+        assert isinstance(materialized, FailedToolCall)  # typed via the discriminator after a REAL round-trip
+        assert materialized.exc_type == "ValueError"
+        assert materialized.tool_call_id == "tc1"
+        assert closed.snapshot.state.get_tool_result("tc2") == ToolReturn(return_value="r2")
+        assert await store.read_state("A") is None  # tombstoned at close
     finally:
         await store.stop()
