@@ -320,3 +320,47 @@ class TestPublishGuard:
         assert isinstance(env.reply, FaultMessage)
         assert headers[HDR_KIND] == "fault"
         assert isinstance(resp.body.reply, FaultMessage)
+
+
+class _Stage0RaisingNode(BaseNodeDef):
+    """Context construction raises — a stage-0 failure BELOW the seams (no ctx exists yet)."""
+
+    async def prepare_context(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("stage-0 boom")
+
+
+class TestStage0Guard:
+    async def test_call_kind_stage0_failure_faults_the_caller(self) -> None:
+        # §4.1/§6.8: a stage-0 raise on a call-kind ingress is caught below the seams and
+        # faults the caller where the stack is readable — no exception escapes the handler,
+        # and the awaiting caller never hangs.
+        node = _Stage0RaisingNode(node_id="n", subscribe_topics=["in"])
+        inbound = _framed_envelope(callback_topic="caller.return")  # no x-calf-kind ⇒ call
+        broker = _CaptureBroker()
+
+        resp = await node.handler(inbound, "cid", {}, broker)
+
+        assert len(broker.published) == 1
+        topic, env, headers = broker.published[0]
+        assert topic == "caller.return"
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.unhandled"
+        assert headers[HDR_KIND] == "fault"
+        assert isinstance(resp.body.reply, FaultMessage)  # the broadcast mirror carries the fault
+
+    async def test_fault_kind_stage0_failure_floors_only(self, caplog: pytest.LogCaptureFixture) -> None:
+        # §4.1: a stage-0 failure on a return/fault delivery must NEVER fault the node's own
+        # live invocation (junk on the return inbox) — floor only (the readable inbound report
+        # logged in full), returning the cleared no-reply mirror.
+        node = _Stage0RaisingNode(node_id="n", subscribe_topics=["in"])
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="f", tag="t", error=ErrorReport(error_type="upstream.boom"))
+        broker = _CaptureBroker()
+
+        with caplog.at_level(logging.ERROR):
+            resp = await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert broker.published == []  # the live invocation is NOT faulted
+        assert resp.body.reply is None  # cleared no-reply mirror
+        assert resp.headers[HDR_KIND] == "call"
+        assert "upstream.boom" in caplog.text  # the readable inbound report floored in full

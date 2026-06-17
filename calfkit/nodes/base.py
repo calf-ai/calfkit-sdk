@@ -605,6 +605,39 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         mirror, fkind = await self._publish_fault(report, snapshot, inbound, correlation_id, broker)
         return Response(mirror, headers=self._headers(fkind))
 
+    async def _floor_stage0(
+        self, exc: Exception, envelope: Envelope, headers: dict[str, Any], correlation_id: str, broker: BrokerAnnotation
+    ) -> Response:
+        """Handle a stage-0 failure (classify / context build raised) BELOW the seams (§4.1/§6.8).
+
+        No ``ctx`` exists yet, so no seam runs. The disposition reads the RAW ``x-calf-kind``
+        header (the original ``_classify`` may itself have raised, so it must not be re-invoked):
+
+        - **call-kind ingress** (missing / ``call``): a caller awaits a reply on the inbound top
+          frame, so fault it where the stack is readable (or floor, if frameless) — it never
+          hangs. The fault is ``calf.unhandled`` (a decoded-but-internally-broken envelope is an
+          unexpected internal failure; ``calf.delivery.undecodable`` is the distinct PRE-handler
+          decode floor).
+        - **return / fault delivery**: junk or an internal error on the return inbox must NEVER
+          fault the node's own live invocation — floor only (ERROR; the inbound ``ErrorReport`` in
+          full if a readable ``FaultMessage``), returning the cleared no-reply mirror (I3).
+        """
+        hdr_kind = decode_header_str(headers.get(HDR_KIND))
+        if hdr_kind is None or hdr_kind == "call":
+            report = ErrorReport.from_exception(exc, node=self)
+            return await self._fault_response(report, self._stack_snapshot(envelope), envelope, correlation_id, broker)
+        inbound_report = envelope.reply.error.model_dump_json() if isinstance(envelope.reply, FaultMessage) else None
+        logger.error(
+            "[%s] stage-0 failure on a %s delivery node=%s; flooring (a live invocation is not faulted): %r inbound_report=%s",
+            correlation_id[:8],
+            hdr_kind,
+            self.node_id,
+            exc,
+            inbound_report,
+        )
+        envelope.reply = None  # cleared no-reply mirror (I3)
+        return Response(envelope, headers=self._headers("call"))
+
     @property
     def _is_fanout_capable(self) -> bool:
         """Whether this node folds durable fan-out batches in-node. ``False`` for every
@@ -1044,10 +1077,17 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 "None" if raw_emitter is None else type(raw_emitter).__name__,
             )
         emitter_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
-        kind = self._classify(headers)
-        logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
-        ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
-        seam_ctx = self._build_seam_context(ctx, envelope, headers, kind)
+        # ── stage-0 guard: no user code may run before a context exists (§6.8 / R1) ──
+        # A raise in classify/context-build is handled BELOW the seams (no ctx yet): a
+        # call-kind ingress faults the caller where the stack is readable, a return/fault
+        # delivery floors only (junk must not fault a live invocation, §4.1). Never escapes.
+        try:
+            kind = self._classify(headers)
+            logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
+            ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
+            seam_ctx = self._build_seam_context(ctx, envelope, headers, kind)
+        except Exception as exc:
+            return await self._floor_stage0(exc, envelope, headers, correlation_id, broker)
 
         frame = envelope.internal_workflow_state.current_frame_or_none
         payload = frame.payload if frame is not None else None
