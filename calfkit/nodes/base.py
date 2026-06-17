@@ -1,7 +1,7 @@
 import inspect
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, TypeVar, cast
 
@@ -509,9 +509,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 )
 
         elif isinstance(output, TailCall):
-            # tailcall optimization: replace current call frame with new tailcall
+            # TailCall = the SAME pending call retargeted (§4.2/§15): preserve frame_id/tag/overrides/
+            # callback_topic on the replacement frame (a fresh frame_id would orphan the caller's slot —
+            # the eventual reply's in_reply_to must match the id the caller registered), clearing only
+            # payload (TailCall carries no body — the traveling State is its input) and fanout_id (a
+            # TailCall is never fan-out-marked). `invoke_frame` would mint a fresh id and drop overrides.
             frame = envelope.internal_workflow_state.unwind_frame()
-            envelope.internal_workflow_state.invoke_frame(output, frame.callback_topic)
+            envelope.internal_workflow_state.call_stack.push(replace(frame, target_topic=output.target_topic, payload=None, fanout_id=None))
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,

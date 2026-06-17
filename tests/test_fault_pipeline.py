@@ -18,10 +18,11 @@ from pydantic import BaseModel
 from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
 from calfkit._registry import handler
 from calfkit.exceptions import NodeFaultError
-from calfkit.models import CallFrame, CallFrameStack, Envelope, ReturnCall, SessionRunContext, State, TextPart, WorkflowState
+from calfkit.models import CallFrame, CallFrameStack, Envelope, ReturnCall, SessionRunContext, State, TailCall, TextPart, WorkflowState
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import SeamContext
+from calfkit.models.state import OverridesState
 from calfkit.nodes.base import BaseNodeDef
 
 
@@ -366,6 +367,44 @@ class TestStage0Guard:
         assert resp.body.reply is None  # cleared no-reply mirror
         assert resp.headers[HDR_KIND] == "call"
         assert "upstream.boom" in caplog.text  # the readable inbound report floored in full
+
+
+class TestTailCallFrameIdentity:
+    async def test_tailcall_preserves_frame_identity_and_retargets(self) -> None:
+        # §4.2/§15: a TailCall is the SAME pending call retargeted — its replacement frame preserves
+        # frame_id/tag/overrides/callback_topic (a fresh frame_id would orphan the caller's slot, so
+        # the eventual reply's in_reply_to no longer matches), clears payload (TailCall carries no
+        # body; the traveling State is its input) + fanout_id (a TailCall is never marked).
+        node = _node()
+        overrides = OverridesState()
+        stack = CallFrameStack()
+        stack.push(
+            CallFrame(
+                target_topic="agent.in",
+                callback_topic="caller.return",
+                frame_id="F1",
+                tag="t1",
+                overrides=overrides,
+                payload="old-body",
+                fanout_id="X",
+            )
+        )
+        envelope = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
+        broker = _CaptureBroker()
+
+        await node._publish_action(TailCall(target_topic="next.topic", state=State()), envelope, "cid", broker)
+
+        topic, env, headers = broker.published[0]
+        assert topic == "next.topic"  # retargeted
+        frame = env.internal_workflow_state.current_frame
+        assert frame.frame_id == "F1"  # PRESERVED — not minted fresh (escalation-correctness)
+        assert frame.tag == "t1"  # preserved
+        assert frame.overrides is overrides  # preserved
+        assert frame.callback_topic == "caller.return"  # preserved (the tailcallee inherits it)
+        assert frame.target_topic == "next.topic"  # retargeted
+        assert frame.payload is None  # cleared — TailCall carries no body
+        assert frame.fanout_id is None  # cleared — a TailCall is never fan-out-marked
+        assert headers[HDR_KIND] == "call"
 
 
 class TestUnknownKind:
