@@ -32,8 +32,9 @@ from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.node_result import _UNSET, _extract_output, extract_lenient
 from calfkit.models.node_schema import BaseNodeSchema
+from calfkit.models.payload import ContentPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
-from calfkit.models.seam_context import SeamContext
+from calfkit.models.seam_context import CalleeResult, SeamContext
 from calfkit.models.session_context import SessionRunContext, WorkflowState
 from calfkit.nodes._fanout_store import (
     FANOUT_STORE_KEY,
@@ -165,6 +166,34 @@ class _Stray:
     fault the node's own live invocation. ``kind`` is the asserted (header) kind, for the log."""
 
     kind: MessageKind
+
+
+# ── slot-outcome vocabulary (what a callee slot resolves to in stage 1 / the fan-out fold, §6.9) ──
+@dataclass(frozen=True)
+class _SlotResolved:
+    """A callee slot resolved to CONTENT — a plain return (``handled=False``) or an
+    ``on_callee_error`` substitute (``handled=True``). Recorded as a ``CalleeResult``; the agent
+    materializes it into the model conversation (a ``ToolReturn``, or a ``RetryPromptPart`` for a
+    ``calf.retry``-marked part). Carries the slot identity so the uniform stage-1 path resolves a
+    return and a fault the same way (the identity is not always on ``ctx.failing_call``)."""
+
+    frame_id: str
+    tag: str | None
+    target_topic: str
+    parts: list[ContentPart]
+    handled: bool
+
+
+@dataclass(frozen=True)
+class _SlotFailed:
+    """A callee slot that FAILED — its fault was unhandled (``on_callee_error`` declined) or a
+    coercion/materialization error. Recorded as a ``CalleeResult`` carrying the fault; **never
+    materialized** into the model conversation — the fault escalates at closure (§6.9)."""
+
+    frame_id: str
+    tag: str | None
+    target_topic: str
+    report: ErrorReport
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +821,19 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if _is_action(post):
             raise SeamContractError("after_node returns a value, not an action; use before_node/on_node_error for actions.")
         return self._coerce_output(ctx, post)
+
+    def _resolve_slot(self, ctx: SeamContext[State], outcome: _SlotResolved | _SlotFailed) -> None:
+        """Record a resolved callee slot on ``ctx.callee_results`` (spec §6.9 — a sealed generic
+        conversion). The base only RECORDS the ``CalleeResult``; the agent overrides to ALSO
+        materialize the slot into the model conversation (the SDK's single per-type codec). Driven
+        by the uniform stage-1 path (a return or a fault) and the fan-out closure."""
+        if isinstance(outcome, _SlotResolved):
+            result = CalleeResult(
+                frame_id=outcome.frame_id, tag=outcome.tag, target_topic=outcome.target_topic, parts=outcome.parts, handled=outcome.handled
+            )
+        else:
+            result = CalleeResult(frame_id=outcome.frame_id, tag=outcome.tag, target_topic=outcome.target_topic, fault=outcome.report)
+        ctx.callee_results.append(result)
 
     def _classify(self, headers: dict[str, Any]) -> MessageKind | None:
         """Classify the inbound delivery kind from the ``x-calf-kind`` header (§4.1 / §6.8 stage-0).

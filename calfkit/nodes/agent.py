@@ -2,13 +2,14 @@ import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Generic, cast
 
+import pydantic_core
 from pydantic import ValidationError
 
 from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
-from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
+from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolReturn
 from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
@@ -16,13 +17,15 @@ from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.exceptions import MCPToolResolutionError, ToolExecutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
-from calfkit.models.payload import ContentPart
+from calfkit.models.node_result import extract_lenient
+from calfkit.models.payload import ContentPart, is_retry
+from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import FailedToolCall
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, structured_output_preamble
-from calfkit.nodes.base import BaseNodeDef, _SeamArg
+from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
@@ -114,6 +117,40 @@ class BaseAgentNodeDef(
         """A non-sequential agent folds durable fan-out batches in-node; a
         ``sequential_only_mode`` agent issues only single calls and never fans out."""
         return not self.sequential_only_mode
+
+    def _resolve_slot(self, ctx: SeamContext[State], outcome: _SlotResolved | _SlotFailed) -> None:
+        """The agent's slot materialization (spec §6.9) — the SDK's single per-type codec. After the
+        base records the ``CalleeResult``, a RESOLVED slot is materialized into the agent's private
+        ``tool_results`` bookkeeping (I4), keyed by the echoed ``tag`` (the ``tool_call_id``), so the
+        unchanged ``DeferredToolResults`` consumer feeds it to the next model turn:
+
+        - a ``calf.retry``-marked part → ``RetryPromptPart`` (Anthropic ``is_error=True`` fidelity).
+          The wire carries the RAW message; the agent HYDRATES the richer retry — ``tool_name`` from
+          its own ``tool_calls`` (it issued the call) and the fix-and-retry suffix via the provider's
+          ``model_response()`` (so it is rendered exactly once, not doubled).
+        - a plain return / handled substitute → ``ToolReturn`` (eager ``to_json`` wire-safety on
+          substitutes too — a wire-unsafe value must fail here, not at the next publish).
+
+        A ``_SlotFailed`` is NOT materialized — the unhandled fault escalates at closure and never
+        reaches the model (``ErrorReport`` stays off ``tool_results``)."""
+        super()._resolve_slot(ctx, outcome)
+        if not isinstance(outcome, _SlotResolved):
+            return  # _SlotFailed: the fault escalates; it never reaches the model
+        tag = outcome.tag
+        if tag is None:  # impossible from a calfkit producer (the agent sets the tool_call_id as the tag)
+            logger.error(
+                "[%s] agent=%s resolved slot has no tag; cannot materialize into the model conversation", ctx.correlation_id[:8], self.node_id
+            )
+            return
+        if is_retry(outcome.parts):
+            call = ctx.state.tool_calls.get(tag)
+            ctx.state.add_tool_result(
+                tag, RetryPromptPart(content=extract_lenient(outcome.parts), tool_name=call.tool_name if call is not None else None, tool_call_id=tag)
+            )
+            return
+        tool_return = ToolReturn(return_value=extract_lenient(outcome.parts), metadata={"tool_call_id": tag})
+        pydantic_core.to_json(tool_return)  # eager wire-safety on substitutes too (I4)
+        ctx.state.add_tool_result(tag, tool_return)
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool
