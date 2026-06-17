@@ -87,6 +87,13 @@ class FaultTypes:
     REASON_SCHEMA_REJECTED = "schema_rejected"
     REASON_ALL_DECLINED = "all_declined"
 
+    # details key: the per-slot fan-out topology a closing batch's fault group carries (spec §4.4/§7) —
+    # a list of ``{tag, target_topic, status}`` plus ``ok``/``failed`` counts, so partial-success
+    # visibility survives without shipping the success VALUES (lean faults, §4.3 leak posture). On a
+    # SINGLETON-flattened group it is copied onto the bare child's ``details``. Framework-written, so it
+    # is a reserved ``calf.`` key (set after ``build_safe``, which strips caller-supplied ``calf.*``).
+    FANOUT_TOPOLOGY = "calf.fanout_topology"
+
 
 class FrameRef(BaseModel):
     """Topology-only breadcrumb of one call frame (spec §4.3).

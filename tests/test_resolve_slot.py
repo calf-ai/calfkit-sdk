@@ -70,6 +70,14 @@ class TestBaseResolveSlot:
         _node()._resolve_slot(ctx, _SlotResolved(frame_id="f1", tag="t1", target_topic="tool.in", parts=[TextPart(text="ok")], handled=False))
         assert ctx.state.get_tool_result("t1") is None
 
+    def test_single_call_slot_has_no_target_topic(self) -> None:
+        # A single (non-fan-out) call resolves with target_topic=None — there is no SlotRef to source
+        # it from (the fault-group topology only matters for a fan-out batch). CalleeResult.target_topic
+        # is str|None to carry this (decision 5).
+        ctx = _seam_ctx()
+        _node()._resolve_slot(ctx, _SlotResolved(frame_id="f1", tag="t1", target_topic=None, parts=[TextPart(text="ok")], handled=False))
+        assert ctx.callee_results[0].target_topic is None
+
 
 class TestAgentResolveSlot:
     def test_materializes_a_plain_return_as_a_tool_return(self) -> None:

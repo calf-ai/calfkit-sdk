@@ -9,8 +9,8 @@ unavailable store raises FanoutStoreUnavailableError (which the fold maps to abo
 
 import pytest
 
-from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
+from calfkit.models.payload import TextPart
 from calfkit.models.session_context import CallFrame, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes._fanout_store import FanoutBatchStore, FanoutStoreUnavailableError
@@ -21,7 +21,7 @@ def _open(fanout_id: str = "X") -> FanoutOpen:
     return FanoutOpen(
         fanout_id=fanout_id,
         node_id="agent",
-        expected=[SlotRef(frame_id="f1", tag="tc1"), SlotRef(frame_id="f2", tag="tc2")],
+        expected=[SlotRef(frame_id="f1", tag="tc1", target_topic="tool.a"), SlotRef(frame_id="f2", tag="tc2", target_topic="tool.b")],
     )
 
 
@@ -31,7 +31,7 @@ def _snapshot() -> EnvelopeSnapshot:
 
 
 def _outcome(slot: str = "f1", tag: str = "tc1", value: str = "ok") -> FanoutOutcome:
-    return FanoutOutcome(slot=slot, tag=tag, result=ToolReturn(return_value=value))
+    return FanoutOutcome(slot=slot, tag=tag, target_topic=f"tool.{slot}", handled=False, parts=[TextPart(text=value)])
 
 
 @pytest.fixture

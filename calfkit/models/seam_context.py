@@ -38,7 +38,9 @@ class CalleeResult(BaseModel):
     """The reply's ``in_reply_to`` — the framework slot key."""
     tag: str | None = None
     """The caller's correlation token, echoed back (§4.2; the agent's tool_call_id)."""
-    target_topic: str
+    target_topic: str | None = None
+    """The callee's topic — sourced from the matched ``SlotRef`` for a fan-out sibling; ``None`` for a
+    single (non-fan-out) call, where there is no slot registration to source it from (decision 5)."""
     parts: list[ContentPart] | None = None
     """Raw reply content (a return, or a handled substitute); ``None`` on a fault."""
     fault: ErrorReport | None = None

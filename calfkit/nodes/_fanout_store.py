@@ -8,8 +8,9 @@ since ktables can't run under the synchronous ``TestKafkaBroker`` — the two ta
 ktables (the kafka lane); ``tests._fanout_fakes.FakeFanoutBatchStore`` backs the offline
 lane.
 
-:func:`fold_sibling`, :func:`close_batch`, and :func:`abort_batch` are the durable
-analog of the agent's in-process ``_parallel_state_aggregation`` — store- and
+:func:`classify_sibling` (the stray check, BEFORE the seams — fault-rail §6.7),
+:func:`record_outcome` (the fold), :func:`close_batch`, and :func:`abort_batch` are the
+durable analog of the agent's in-process ``_parallel_state_aggregation`` — store- and
 caller-agnostic (no broker, no envelope), so the staged handler (the §6.8 ``_aggregate``
 stage) wires them in with no re-home.
 """
@@ -18,7 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from calfkit.models.fanout import EnvelopeSnapshot, FanoutBaseState, FanoutOpen, FanoutOutcome, FanoutState
+from calfkit.models.fanout import EnvelopeSnapshot, FanoutBaseState, FanoutOpen, FanoutOutcome, FanoutState, SlotRef
 
 if TYPE_CHECKING:
     from ktables import KafkaTable, KafkaTableWriter
@@ -80,42 +81,57 @@ class FanoutBatchStore(Protocol):
         ...
 
 
-# ── fold/close decision vocabulary (return-only; the rail adds a fault arm) ──────
+# ── fold/close decision vocabulary ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SiblingPending:
+    """A marked sibling reply landed on a LIVE pending slot — the caller runs stage-1
+    (``on_callee_error``) and then records its outcome. Carries the matched :class:`SlotRef`
+    so the caller sources ``FanoutOutcome.target_topic`` (the §7.3 fault-group topology)
+    without the reply carrying it."""
+
+    slot_ref: SlotRef
 
 
 @dataclass(frozen=True)
 class FoldParked:
-    """The slot was folded; the batch is still incomplete — park (no-reply mirror)."""
+    """The outcome was recorded; the batch is still incomplete — park (no-reply mirror)."""
 
 
 @dataclass(frozen=True)
 class FoldComplete:
-    """The slot was folded and the batch is now complete — publish the closure re-entry."""
+    """The outcome was recorded and the batch is now complete — publish the closure re-entry."""
 
 
 @dataclass(frozen=True)
 class FoldStray:
-    """The reply did not fold a live pending slot — floor (foreign / post_closure) or
-    idempotent-ignore (duplicate). ``reason`` drives the handler's log level."""
+    """The reply did not match a live pending slot — floor (foreign / post_closure) or
+    idempotent-ignore (duplicate). ``reason`` drives the handler's log level. Detected BEFORE
+    the seams run (decision 10 / fault-rail §6.7) so a stray never fires ``on_callee_error``."""
 
     reason: str
 
 
 @dataclass(frozen=True)
 class FoldAbort:
-    """The store died mid-fold — abort (tombstone attempted; the caller strands)."""
+    """The store died mid-classify/record — abort (tombstone attempted; escalate at 4.6)."""
 
     reason: str
 
 
-FoldResult = FoldParked | FoldComplete | FoldStray | FoldAbort
+ClassifyResult = SiblingPending | FoldStray | FoldAbort
+RecordResult = FoldParked | FoldComplete | FoldAbort
 
 
 @dataclass(frozen=True)
 class CloseResume:
-    """The batch closed cleanly — resume the body on this materialized snapshot."""
+    """The batch closed cleanly — resume the body. Carries the open-time ``snapshot`` (NOT
+    materialized — materialization moved to ``_aggregate``/``_resolve_slot``, fault-rail §6.9) and the
+    accumulated ``outcomes`` (parts XOR fault per slot) the caller partitions into resolved/failed."""
 
     snapshot: EnvelopeSnapshot
+    outcomes: list[FanoutOutcome]
 
 
 @dataclass(frozen=True)
@@ -139,24 +155,39 @@ class CloseAbort:
 CloseResult = CloseResume | CloseAbandon | CloseSpurious | CloseAbort
 
 
-async def fold_sibling(store: FanoutBatchStore, fanout_id: str, outcome: FanoutOutcome) -> FoldResult:
-    """Fold one marked sibling reply into the durable batch state.
+async def classify_sibling(store: FanoutBatchStore, fanout_id: str, slot: str) -> ClassifyResult:
+    """Classify a marked sibling reply's ``slot`` against the confirmed-fresh state, BEFORE the seams.
 
-    Reads the confirmed-fresh state, runs the stray check (§4.2) against it, and on a live
-    pending slot persists the outcome and reports completion. Idempotent per slot frame id
-    (a duplicate never re-folds or re-completes). A terminally-unavailable store aborts
-    (best-effort tombstone + strand).
-    """
+    The stray check (decision 10 / fault-rail §6.7): a slot that matches no live pending slot —
+    foreign, duplicate (already recorded), or post-closure (the batch is tombstoned) — is a stray, so
+    ``on_callee_error`` never fires for it. A live slot returns :class:`SiblingPending` carrying the
+    matched :class:`SlotRef` (for ``target_topic``); the caller then runs stage-1 and records. A
+    terminally-unavailable store aborts (best-effort tombstone + strand)."""
     try:
         state = await store.read_state(fanout_id)
         if state is None:
             return FoldStray("post_closure")  # batch already closed/tombstoned
-        expected = {s.frame_id for s in state.open.expected}
-        if outcome.slot not in expected:
+        by_slot = {s.frame_id: s for s in state.open.expected}
+        if slot not in by_slot:
             return FoldStray("foreign")
-        if outcome.slot in state.outcomes:
+        if slot in state.outcomes:
             return FoldStray("duplicate")
+        return SiblingPending(by_slot[slot])
+    except FanoutStoreUnavailableError:
+        await abort_batch(store, fanout_id)
+        return FoldAbort("store_unavailable")
+
+
+async def record_outcome(store: FanoutBatchStore, fanout_id: str, outcome: FanoutOutcome) -> RecordResult:
+    """Persist one resolved-slot ``outcome`` (parts XOR fault) into the durable batch state.
+
+    Idempotent per slot frame id (LWW absorbs a re-record). Returns :class:`FoldComplete` once every
+    expected slot has an outcome, else :class:`FoldParked`. The caller must have classified the slot
+    LIVE first (:func:`classify_sibling`) so stage-1 never ran for a stray. A terminally-unavailable
+    store aborts (best-effort tombstone + strand)."""
+    try:
         updated = await store.fold(fanout_id, outcome)
+        expected = {s.frame_id for s in updated.open.expected}
         if set(updated.outcomes) == expected:
             return FoldComplete()
         return FoldParked()
@@ -166,14 +197,14 @@ async def fold_sibling(store: FanoutBatchStore, fanout_id: str, outcome: FanoutO
 
 
 async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
-    """Close a fan-out batch on its re-entry: rebuild + materialize, then tombstone.
+    """Close a fan-out batch on its re-entry: read, tombstone, return the snapshot + outcomes.
 
-    Reads the basestate snapshot and state. ``state`` is the abandon gate (absent ⇒
-    already closed); an incomplete state is spurious. On a complete batch it materializes
-    every outcome into a fresh copy of the snapshot's ``State`` and **tombstones both
-    records before returning** (tombstone-first, §4.3) so the resumed body runs on a closed
-    batch. A missing basestate, a wire-unsafe materialization (no tag), or a dead store
-    aborts deterministically — the close never hangs.
+    Reads the basestate snapshot and state. ``state`` is the abandon gate (absent ⇒ already closed);
+    an incomplete state is spurious. On a complete batch it **tombstones both records before returning**
+    (tombstone-first, §4.3) so the resumed body runs on a closed batch, and returns the open-time
+    snapshot together with the accumulated outcomes — **un-materialized** (materialization moved UP to
+    ``_aggregate``/``_resolve_slot``, which is marker-aware and partitions resolved vs failed slots,
+    fault-rail §6.9). A missing basestate or a dead store aborts deterministically — close never hangs.
     """
     try:
         state = await store.read_state(fanout_id)
@@ -186,13 +217,9 @@ async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
         if set(state.outcomes) != expected:
             return CloseSpurious()
         snapshot = base.snapshot.model_copy(deep=True)
-        for outcome in state.outcomes.values():
-            if outcome.tag is None:
-                await abort_batch(store, fanout_id)
-                return CloseAbort("materialization_failed")
-            snapshot.state.add_tool_result(outcome.tag, outcome.result)
+        outcomes = list(state.outcomes.values())
         await store.tombstone(fanout_id)  # tombstone-first, before the body resumes
-        return CloseResume(snapshot)
+        return CloseResume(snapshot, outcomes)
     except FanoutStoreUnavailableError:
         await abort_batch(store, fanout_id)
         return CloseAbort("store_unavailable")

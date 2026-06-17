@@ -16,16 +16,16 @@ import pytest
 from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 
 from calfkit._protocol import HDR_KIND
-from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models import ReturnCall
 from calfkit.models.envelope import Envelope
-from calfkit.models.error_report import ErrorReport
+from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
+from calfkit.models.payload import TextPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
-from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
-from calfkit.nodes.base import _CONSUMED, _BatchClosed, _BatchOpen, _Declined
+from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, record_outcome
+from calfkit.nodes.base import _CONSUMED, _BatchClosed, _BatchFaulted, _BatchOpen, _Declined
 from calfkit.nodes.node import NodeDef
 from tests._fanout_fakes import FakeFanoutBatchStore
 
@@ -82,13 +82,21 @@ def _store_ctx(store: FakeFanoutBatchStore, *, state: State | None = None, deps:
     return ctx
 
 
-def _marked_env(*, in_reply_to: str, tag: str | None = "tc1", state: State | None = None) -> Envelope:
-    # A marked fan-out frame (fanout_id == frame_id == "A") on top, with a reply slot.
+def _marked_env(
+    *, in_reply_to: str, tag: str | None = "tc1", parts: list[Any] | None = None, fault: ErrorReport | None = None, state: State | None = None
+) -> Envelope:
+    # A marked fan-out frame (fanout_id == frame_id == "A") on top, with a reply slot. The carriage
+    # switch carries a sibling's result in reply.parts (a return) or reply.error (a fault).
     frame = CallFrame(target_topic="fan", callback_topic="caller", frame_id="A", fanout_id="A")
+    reply: ReturnMessage | FaultMessage
+    if fault is not None:
+        reply = FaultMessage(in_reply_to=in_reply_to, tag=tag, error=fault)
+    else:
+        reply = ReturnMessage(in_reply_to=in_reply_to, tag=tag, parts=parts if parts is not None else [])
     return Envelope(
         context=SessionRunContext(state=state if state is not None else State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=Stack([frame])),
-        reply=ReturnMessage(in_reply_to=in_reply_to, tag=tag, parts=[]),
+        reply=reply,
     )
 
 
@@ -102,11 +110,28 @@ def _plain_env(*, reply: ReturnMessage | FaultMessage | None = None) -> Envelope
     )
 
 
+def _seam(node: NodeDef[Any], run_ctx: SessionRunContext, env: Envelope, kind: str) -> Any:
+    """Build the seam context the staged pipeline threads (sharing run_ctx.state)."""
+    return node._build_seam_context(run_ctx, env, {}, kind)  # type: ignore[arg-type]
+
+
 async def _open(store: FakeFanoutBatchStore, *, snap_state: State | None = None, deps: dict[str, Any] | None = None) -> None:
     own = CallFrame(target_topic="fan", callback_topic="caller", frame_id="A")  # UNMARKED — the pre-stamp snapshot frame
     snap = EnvelopeSnapshot(state=snap_state if snap_state is not None else State(), stack=WorkflowState(call_stack=Stack([own])), deps=deps or {})
-    reg = FanoutOpen(fanout_id="A", node_id="fan", expected=[SlotRef(frame_id="f1", tag="tc1"), SlotRef(frame_id="f2", tag="tc2")])
+    reg = FanoutOpen(
+        fanout_id="A",
+        node_id="fan",
+        expected=[SlotRef(frame_id="f1", tag="tc1", target_topic="tool.a"), SlotRef(frame_id="f2", tag="tc2", target_topic="tool.b")],
+    )
     await store.open("A", reg, snap)
+
+
+def _resolved_outcome(slot: str, tag: str, value: str) -> FanoutOutcome:
+    return FanoutOutcome(slot=slot, tag=tag, target_topic=f"tool.{slot}", handled=False, parts=[TextPart(text=value)])
+
+
+def _failed_outcome(slot: str, tag: str, error_type: str = "callee.boom") -> FanoutOutcome:
+    return FanoutOutcome(slot=slot, tag=tag, target_topic=f"tool.{slot}", handled=False, fault=ErrorReport(error_type=error_type))
 
 
 class TestClassify:
@@ -161,164 +186,204 @@ class TestStrayCheck:
         assert _node()._stray_check("call", env) is not None
 
 
+async def _agg(
+    node: _FanoutNode, store: FakeFanoutBatchStore, env: Envelope, kind: str, broker: Any = None, *, state: State | None = None, deps: Any = None
+) -> Any:
+    """Drive ``_aggregate`` with a freshly built run_ctx + seam_ctx (sharing state); return all three."""
+    run_ctx = _store_ctx(store, state=state, deps=deps)
+    seam = _seam(node, run_ctx, env, kind)
+    result = await node._aggregate(run_ctx, seam, kind, env, "corr-1", broker or _CaptureBroker())
+    return run_ctx, seam, result
+
+
 class TestAggregate:
-    """``_aggregate`` is the durable fold/close stage (§6.8 stage-2). It returns
-    ``_BatchClosed`` (proceed to the body — a completed fan-out close OR a stateless
-    single-call continuation) or ``_BatchOpen`` (park — an incomplete fold or a no-op close).
-    """
+    """``_aggregate`` is the durable fold/close + stage-1 stage (§6.8 stage-2). It resolves the callee
+    slot uniformly (return materializes; fault runs on_callee_error) and returns ``_BatchClosed``
+    (proceed to body), ``_BatchOpen`` (park), or ``_BatchFaulted`` (escalate — single-call unhandled
+    fault, or a closing batch's fault group)."""
 
-    async def test_stateless_continuation_is_batch_closed(self) -> None:
-        # An unmarked frame (a single-call return) is not a fan-out → proceed to the body.
+    # ── single-call continuation (None arm) ──────────────────────────────────────
+    async def test_single_call_return_resolves_slot_and_closes(self) -> None:
+        # An unmarked frame (a single-call return) resolves the one slot, then proceeds to the body.
         node = _fanout_node()
-        frame = CallFrame(target_topic="fan", callback_topic="caller", frame_id="A")  # unmarked
-        env = Envelope(
-            context=SessionRunContext(state=State(), deps={}),
-            internal_workflow_state=WorkflowState(call_stack=Stack([frame])),
-            reply=ReturnMessage(in_reply_to="A", tag="tc1", parts=[]),
-        )
-        result = await node._aggregate(_store_ctx(FakeFanoutBatchStore()), env, "corr-1", _CaptureBroker())
+        env = _plain_env(reply=ReturnMessage(in_reply_to="cf1", tag="tc1", parts=[TextPart(text="r")]))
+        _run_ctx, seam, result = await _agg(node, FakeFanoutBatchStore(), env, "return")
         assert isinstance(result, _BatchClosed)
+        assert len(seam.callee_results) == 1 and seam.callee_results[0].tag == "tc1"
 
+    async def test_single_call_fault_unhandled_escalates(self) -> None:
+        # A single-call fault with no on_callee_error escalates (§8) — _BatchFaulted, the body skipped.
+        node = _fanout_node()
+        env = _plain_env(reply=FaultMessage(in_reply_to="cf1", tag="tc1", error=ErrorReport(error_type="callee.boom")))
+        _run_ctx, _seam, result = await _agg(node, FakeFanoutBatchStore(), env, "fault")
+        assert isinstance(result, _BatchFaulted) and result.report.error_type == "callee.boom"
+
+    async def test_single_call_fault_handled_resolves_and_closes(self) -> None:
+        # on_callee_error returns a substitute → the slot resolves (handled) and the body runs.
+        node = _fanout_node()
+        node.on_callee_error(lambda ctx, fault: "recovered")
+        env = _plain_env(reply=FaultMessage(in_reply_to="cf1", tag="tc1", error=ErrorReport(error_type="callee.boom")))
+        _run_ctx, seam, result = await _agg(node, FakeFanoutBatchStore(), env, "fault")
+        assert isinstance(result, _BatchClosed)
+        assert seam.callee_results[0].handled is True and seam.callee_results[0].parts == [TextPart(text="recovered")]
+
+    # ── sibling fold ─────────────────────────────────────────────────────────────
     async def test_sibling_fold_incomplete_parks(self) -> None:
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
-        st = State()
-        st.add_tool_result("tc1", ToolReturn(return_value="r1"))
-        result = await node._aggregate(_store_ctx(store, state=st), _marked_env(in_reply_to="f1", tag="tc1", state=st), "corr-1", _CaptureBroker())
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return")
         assert isinstance(result, _BatchOpen)  # 1 of 2 → parked
         state = await store.read_state("A")
         assert state is not None and set(state.outcomes) == {"f1"}
+        assert state.outcomes["f1"].parts == [TextPart(text="r1")]  # the reply's parts were folded
 
     async def test_sibling_fold_complete_publishes_reentry_and_parks(self) -> None:
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
         broker = _CaptureBroker()
-        st1 = State()
-        st1.add_tool_result("tc1", ToolReturn(return_value="r1"))
-        await node._aggregate(_store_ctx(store, state=st1), _marked_env(in_reply_to="f1", tag="tc1", state=st1), "corr-1", broker)
-        st2 = State()
-        st2.add_tool_result("tc2", ToolReturn(return_value="r2"))
-        result = await node._aggregate(_store_ctx(store, state=st2), _marked_env(in_reply_to="f2", tag="tc2", state=st2), "corr-1", broker)
+        await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return", broker)
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="f2", tag="tc2", parts=[TextPart(text="r2")]), "return", broker)
         assert isinstance(result, _BatchOpen)  # still parked — the re-entry is a fresh delivery
         assert [t for t, _ in broker.published] == ["fan.private.return"]  # closure re-entry self-published
         reentry_env = broker.published[0][1]
         assert reentry_env.reply is not None and reentry_env.reply.in_reply_to == "A"
 
-    async def test_reentry_close_restores_context_and_is_batch_closed(self) -> None:
+    async def test_sibling_fault_unhandled_folds_as_a_failed_outcome(self) -> None:
+        # A sibling FAULT with no on_callee_error folds as a failed outcome (escalates at closure).
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        env = _marked_env(in_reply_to="f1", tag="tc1", fault=ErrorReport(error_type="callee.boom"))
+        _run_ctx, _seam, result = await _agg(node, store, env, "fault")
+        assert isinstance(result, _BatchOpen)
+        state = await store.read_state("A")
+        assert state is not None and state.outcomes["f1"].fault is not None and state.outcomes["f1"].fault.error_type == "callee.boom"
+
+    # ── re-entry close (three-way) ───────────────────────────────────────────────
+    async def test_reentry_all_resolved_restores_materializes_and_closes(self) -> None:
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store, snap_state=State(), deps={"k": "v"})  # snapshot carries deps + a pre-tool state
-        await store.fold("A", FanoutOutcome(slot="f1", tag="tc1", result=ToolReturn(return_value="r1")))
-        await store.fold("A", FanoutOutcome(slot="f2", tag="tc2", result=ToolReturn(return_value="r2")))
-        # The re-entry envelope arrives with cleared context (as _publish_reentry builds it).
-        ctx = _store_ctx(store)
+        await record_outcome(store, "A", _resolved_outcome("f1", "tc1", "r1"))
+        await record_outcome(store, "A", _resolved_outcome("f2", "tc2", "r2"))
         env = _marked_env(in_reply_to="A", tag=None)  # in_reply_to == frame_id "A" → re-entry close
-        result = await node._aggregate(ctx, env, "corr-1", _CaptureBroker())
+        run_ctx, seam, result = await _agg(node, store, env, "return")
         assert isinstance(result, _BatchClosed)
-        # ctx restored from the snapshot, with both outcomes materialized into State.
-        assert ctx.state.get_tool_result("tc1") == ToolReturn(return_value="r1")
-        assert ctx.state.get_tool_result("tc2") == ToolReturn(return_value="r2")
-        assert ctx.deps == {"k": "v"}
-        # The envelope stack is restored to the UNMARKED snapshot frame so the resumed body's
-        # ReturnCall unwinds the original fan-out frame back to its caller.
+        # Each resolved slot was driven through _resolve_slot (base records a CalleeResult per outcome).
+        assert {cr.tag for cr in seam.callee_results} == {"tc1", "tc2"}
+        # ctx restored from the snapshot (deps + the UNMARKED frame so the body's ReturnCall unwinds it).
+        assert run_ctx.deps == {"k": "v"}
         assert env.internal_workflow_state.current_frame.frame_id == "A"
         assert env.internal_workflow_state.current_frame.fanout_id is None
         assert env.context.deps == {"k": "v"}
         assert await store.read_state("A") is None  # tombstoned at close
 
+    async def test_reentry_with_one_unhandled_fault_escalates_flattened(self) -> None:
+        # ANY unhandled fault fails the batch (§7.3); a SINGLE one flattens to the bare child fault
+        # (identity preserved, §4.4), the per-slot topology copied onto its details.
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        await record_outcome(store, "A", _resolved_outcome("f1", "tc1", "r1"))
+        await record_outcome(store, "A", _failed_outcome("f2", "tc2", "callee.boom"))
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
+        assert isinstance(result, _BatchFaulted)
+        assert result.report.error_type == "callee.boom"  # flattened to the bare child, not a group
+        assert result.report.details[FaultTypes.FANOUT_TOPOLOGY]["failed"] == 1
+        assert await store.read_state("A") is None  # tombstoned
+
+    async def test_reentry_with_two_unhandled_faults_is_a_fault_group(self) -> None:
+        node = _fanout_node()
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        await record_outcome(store, "A", _failed_outcome("f1", "tc1", "boom.a"))
+        await record_outcome(store, "A", _failed_outcome("f2", "tc2", "boom.b"))
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
+        assert isinstance(result, _BatchFaulted)
+        assert result.report.error_type == FaultTypes.FAULT_GROUP
+        assert {c.error_type for c in result.report.causes} == {"boom.a", "boom.b"}
+        assert result.report.details[FaultTypes.FANOUT_TOPOLOGY]["failed"] == 2
+
     async def test_reentry_spurious_incomplete_parks(self) -> None:
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)  # opened, no folds → incomplete
-        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="A", tag=None), "corr-1", _CaptureBroker())
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
         assert isinstance(result, _BatchOpen)  # spurious early re-entry → no-op park
         assert await store.read_state("A") is not None  # batch left untouched
 
     async def test_completing_fold_reentry_publish_failure_aborts_and_tombstones(self) -> None:
-        # (#1) The completing fold tries to self-publish the re-entry; if that publish raises
-        # KafkaError, _aggregate must NOT propagate — it aborts (tombstones both records) and
-        # still parks (_BatchOpen), so the caller strands rather than a complete-but-unclosed batch.
+        # The completing fold tries to self-publish the re-entry; if that publish raises KafkaError,
+        # _aggregate must NOT propagate — it aborts (tombstones both) and still parks (_BatchOpen).
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
-        st1 = State()
-        st1.add_tool_result("tc1", ToolReturn(return_value="r1"))
-        await node._aggregate(_store_ctx(store, state=st1), _marked_env(in_reply_to="f1", tag="tc1", state=st1), "corr-1", _CaptureBroker())
+        await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return")
         # The SECOND fold completes the batch; its re-entry publish raises.
-        st2 = State()
-        st2.add_tool_result("tc2", ToolReturn(return_value="r2"))
-        result = await node._aggregate(_store_ctx(store, state=st2), _marked_env(in_reply_to="f2", tag="tc2", state=st2), "corr-1", _RaisingBroker())
+        env2 = _marked_env(in_reply_to="f2", tag="tc2", parts=[TextPart(text="r2")])
+        _run_ctx, _seam, result = await _agg(node, store, env2, "return", _RaisingBroker())
         assert isinstance(result, _BatchOpen)  # did not propagate; parked
         assert await store.read_state("A") is None  # aborted: both records tombstoned
         assert await store.read_basestate("A") is None
 
+    # ── strays + edges (stray-check BEFORE the seams, decision 10) ────────────────
     async def test_sibling_reply_without_in_reply_to_does_not_fold(self, caplog: pytest.LogCaptureFixture) -> None:
-        # (#6) A marked sibling reply that carries no in_reply_to is malformed: _aggregate must
-        # short-circuit to park (_BatchOpen), NOT fold (the store's outcomes are unchanged), and
-        # log a distinct "malformed sibling reply" error (proving the guard fired, not the
-        # foreign-stray fallthrough).
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
-        env = _marked_env(in_reply_to="f1", tag="tc1")
+        env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])
+        assert env.reply is not None
         env.reply.in_reply_to = None  # malformed: marked sibling but no slot
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-            result = await node._aggregate(_store_ctx(store), env, "corr-1", _CaptureBroker())
+            _run_ctx, _seam, result = await _agg(node, store, env, "return")
         assert isinstance(result, _BatchOpen)
         state = await store.read_state("A")
         assert state is not None and state.outcomes == {}  # nothing folded
         assert any("malformed sibling reply" in r.getMessage() for r in caplog.records)
 
     async def test_sibling_foreign_slot_parks_store_unchanged(self) -> None:
-        # (coverage c) A reply to a slot not in the batch is a foreign stray → park, store untouched.
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
-        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="f99", tag="tcX"), "corr-1", _CaptureBroker())
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="f99", tag="tcX", parts=[TextPart(text="x")]), "return")
         assert isinstance(result, _BatchOpen)
         state = await store.read_state("A")
         assert state is not None and state.outcomes == {}
 
     async def test_sibling_duplicate_slot_parks_store_unchanged(self) -> None:
-        # (coverage c) A second reply for an already-folded slot is a duplicate stray → park.
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
-        st = State()
-        st.add_tool_result("tc1", ToolReturn(return_value="r1"))
-        await node._aggregate(_store_ctx(store, state=st), _marked_env(in_reply_to="f1", tag="tc1", state=st), "corr-1", _CaptureBroker())
-        result = await node._aggregate(_store_ctx(store, state=st), _marked_env(in_reply_to="f1", tag="tc1", state=st), "corr-1", _CaptureBroker())
+        await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return")
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1b")]), "return")
         assert isinstance(result, _BatchOpen)
         state = await store.read_state("A")
         assert state is not None and set(state.outcomes) == {"f1"}  # still just the one fold
 
-    async def test_sibling_fold_unavailable_store_parks_abort_path(self) -> None:
-        # (coverage c) A store that died mid-fold aborts (FoldAbort) but still parks (_BatchOpen).
+    async def test_sibling_unavailable_store_parks_abort_path(self) -> None:
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
         store.make_unavailable()
-        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="f1", tag="tc1"), "corr-1", _CaptureBroker())
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return")
         assert isinstance(result, _BatchOpen)
 
     async def test_reentry_over_tombstoned_batch_abandons_parks(self) -> None:
-        # (coverage c) A re-entry whose batch is already closed/tombstoned → abandon → park.
         node = _fanout_node()
         store = FakeFanoutBatchStore()  # never opened "A"
-        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="A", tag=None), "corr-1", _CaptureBroker())
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
         assert isinstance(result, _BatchOpen)
 
     async def test_reentry_basestate_missing_aborts_parks(self) -> None:
-        # (coverage c) A complete batch whose basestate is gone aborts at close → park.
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
-        await store.fold("A", FanoutOutcome(slot="f1", tag="tc1", result=ToolReturn(return_value="r1")))
-        await store.fold("A", FanoutOutcome(slot="f2", tag="tc2", result=ToolReturn(return_value="r2")))
+        await record_outcome(store, "A", _resolved_outcome("f1", "tc1", "r1"))
+        await record_outcome(store, "A", _resolved_outcome("f2", "tc2", "r2"))
         store._basestate.pop("A")  # white-box: simulate the impossible-by-ordering miss
-        result = await node._aggregate(_store_ctx(store), _marked_env(in_reply_to="A", tag=None), "corr-1", _CaptureBroker())
+        _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="A", tag=None), "return")
         assert isinstance(result, _BatchOpen)
 
 
@@ -349,10 +414,8 @@ class TestExecute:
         node = _BodyNode(node_id="fan", subscribe_topics=["fan.in"])
         store = FakeFanoutBatchStore()
         await _open(store)
-        st = State()
-        st.add_tool_result("tc1", ToolReturn(return_value="r1"))
-        ctx = _store_ctx(store, state=st)
-        env = _marked_env(in_reply_to="f1", tag="tc1", state=st)
+        ctx = _store_ctx(store)
+        env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])  # 1 of 2 → parks
         seam = node._build_seam_context(ctx, env, {}, "return")
         result = await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
         assert result is _CONSUMED  # parked fold — the body never runs

@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
-from calfkit.exceptions import NodeFaultError, RegistryConfigError, SeamContractError
+from calfkit.exceptions import NodeFaultError, RegistryConfigError, SeamContractError, safe_exc_message
 from calfkit.models import (
     Call,
     Next,
@@ -48,9 +48,11 @@ from calfkit.nodes._fanout_store import (
     FoldComplete,
     FoldParked,
     FoldStray,
+    SiblingPending,
     abort_batch,
+    classify_sibling,
     close_batch,
-    fold_sibling,
+    record_outcome,
 )
 from calfkit.nodes._seams import AFTER_NODE, BEFORE_NODE, ON_CALLEE_ERROR, ON_NODE_ERROR, SEAM_NAMES, _Minted, run_chain, run_chain_guarded
 from calfkit.worker.lifecycle import LifecycleHookMixin
@@ -179,7 +181,7 @@ class _SlotResolved:
 
     frame_id: str
     tag: str | None
-    target_topic: str
+    target_topic: str | None
     parts: list[ContentPart]
     handled: bool
 
@@ -192,7 +194,7 @@ class _SlotFailed:
 
     frame_id: str
     tag: str | None
-    target_topic: str
+    target_topic: str | None
     report: ErrorReport
 
 
@@ -473,7 +475,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             # Parallel fan-out: publish each Call with independent workflow_state
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
-                wf_copy.invoke_frame(call, self._return_topic, payload=call.body)
+                wf_copy.invoke_frame(call, self._return_topic, payload=call.body, tag=call.tag)
                 publish_envelope = Envelope(
                     context=SessionRunContext(state=call.state, deps=envelope.context.deps),
                     internal_workflow_state=wf_copy,
@@ -493,7 +495,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
         elif isinstance(output, Call):
             # push to callstack and call the target topic
-            envelope.internal_workflow_state.invoke_frame(output, self._return_topic, payload=output.body)
+            envelope.internal_workflow_state.invoke_frame(output, self._return_topic, payload=output.body, tag=output.tag)
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
@@ -835,6 +837,63 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             result = CalleeResult(frame_id=outcome.frame_id, tag=outcome.tag, target_topic=outcome.target_topic, fault=outcome.report)
         ctx.callee_results.append(result)
 
+    async def _resolve_callee(
+        self,
+        seam_ctx: SeamContext[State],
+        kind: MessageKind,
+        reply: ReturnMessage | FaultMessage,
+        target_topic: str | None,
+    ) -> _SlotResolved | _SlotFailed:
+        """Stage 1 (fault-rail §6.8/§6.9): resolve ONE callee slot — UNIFORM for a return AND a fault,
+        single-call AND fan-out. A return resolves directly (``on_callee_error`` runs only for faults).
+        A fault runs the ``on_callee_error`` chain: a substitute value resolves the slot
+        (``handled=True``, coerced to parts — a wire-unsafe substitute becomes
+        ``calf.slot.materialization_failed``); ``None`` (declined) fails the slot with the inbound report
+        (escalates at closure); a raise is SLOT-SCOPED, never a node-own failure (§6.5) — a
+        ``NodeFaultError`` honored verbatim, anything else wrapped ``calf.unhandled``, both chaining the
+        inbound fault via ``causes``. Carries the slot identity (frame_id/tag/target_topic) so the caller
+        resolves or folds it with no in-process correlation map.
+        """
+        frame_id = reply.in_reply_to or ""  # stray-checked: a fold/continuation reply always carries it
+        tag = reply.tag
+        if kind == "return":
+            assert isinstance(reply, ReturnMessage)  # stray-check guarantees return ⇔ ReturnMessage
+            return _SlotResolved(frame_id=frame_id, tag=tag, target_topic=target_topic, parts=reply.parts, handled=False)
+        assert isinstance(reply, FaultMessage)  # stray-check guarantees fault ⇔ FaultMessage
+        report = reply.error
+        seam_ctx.failing_call = CalleeResult(frame_id=frame_id, tag=tag, target_topic=target_topic, fault=report)
+        try:
+            handled = await run_chain(self._chains[ON_CALLEE_ERROR], seam_ctx, report)
+        except NodeFaultError as nfe:
+            # The per-slot transformation gesture (§6.5): the minted fault is honored verbatim, the
+            # inbound chained via causes — the `raise ... from` analog, done at the slot.
+            minted = nfe.report.model_copy(update={"causes": [*nfe.report.causes, report]})
+            return _SlotFailed(frame_id=frame_id, tag=tag, target_topic=target_topic, report=minted)
+        except Exception as exc:
+            # An accidental raise is SLOT-scoped (§6.5): wrapped calf.unhandled with the inbound chained
+            # — routing it to on_node_error would mint a whole-invocation outcome mid-batch (double
+            # replies, leaked batches). It propagates outward (the batch/escalation axis), not sideways.
+            chained = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx, cause=report)
+            return _SlotFailed(frame_id=frame_id, tag=tag, target_topic=target_topic, report=chained)
+        finally:
+            seam_ctx.failing_call = None  # set during on_callee_error ONLY
+        if handled is None:
+            return _SlotFailed(frame_id=frame_id, tag=tag, target_topic=target_topic, report=report)
+        try:
+            # I2's slot-materialization call site: the eager `to_json` inside coercion guards wire-safety.
+            parts = _coerce_to_parts(handled)
+        except Exception as exc:
+            # A wire-unsafe substitute is slot-scoped too (§6.5/§6.9) — mark the slot failed
+            # deterministically so the batch still closes; it never hangs.
+            mat = ErrorReport.build_safe(
+                error_type=FaultTypes.SLOT_MATERIALIZATION_FAILED,
+                message=f"on_callee_error substitute is not wire-serializable: {safe_exc_message(exc)}",
+                origin_node_id=self.node_id,
+                causes=[report],
+            )
+            return _SlotFailed(frame_id=frame_id, tag=tag, target_topic=target_topic, report=mat)
+        return _SlotResolved(frame_id=frame_id, tag=tag, target_topic=target_topic, parts=parts, handled=True)
+
     def _classify(self, headers: dict[str, Any]) -> MessageKind | None:
         """Classify the inbound delivery kind from the ``x-calf-kind`` header (§4.1 / §6.8 stage-0).
 
@@ -936,7 +995,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         reg = FanoutOpen(
             fanout_id=fanout_id,
             node_id=self.node_id,
-            expected=[SlotRef(frame_id=fid, tag=call.tag) for fid, call in zip(slot_ids, calls)],
+            expected=[SlotRef(frame_id=fid, tag=call.tag, target_topic=call.target_topic) for fid, call in zip(slot_ids, calls)],
         )
         snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
         try:
@@ -979,88 +1038,161 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         return Response(envelope, headers=self._headers("call"))
 
     async def _aggregate(
-        self, ctx: SessionRunContext, envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
-    ) -> _BatchOpen | _BatchClosed:
-        """The durable fan-out fold/close stage (fault-rail §6.8 stage-2 made durable; in-node
-        spec §4.2/§4.3). Runs on ``kind == "return"`` deliveries.
+        self,
+        run_ctx: SessionRunContext,
+        seam_ctx: SeamContext[State],
+        kind: MessageKind,
+        envelope: Envelope,
+        correlation_id: str,
+        broker: BrokerAnnotation,
+    ) -> _BatchOpen | _BatchClosed | _BatchFaulted:
+        """The durable fold/close + stage-1 stage (fault-rail §6.8 stage-2; in-node spec §4.2/§4.3).
+        Runs on ``return`` AND ``fault`` deliveries.
 
-        - A non-fan-out return is a **stateless continuation** → ``_BatchClosed`` (run the body).
-        - A **marked sibling reply** folds into the durable batch → ``_BatchOpen`` (park); on the
-          completing fold it self-publishes the closure re-entry (a fresh delivery), still parked.
-        - The self-published **re-entry** closes the batch: the durable snapshot's state/stack/deps
-          are restored onto ``ctx``+``envelope`` and the materialized outcomes resume the body →
-          ``_BatchClosed``. A spurious/abandoned/aborted close is a no-op park → ``_BatchOpen``.
-
-        TODO(fault rail PR-6): add the ``_BatchFaulted`` arm (an unhandled callee fault closes the
-        batch through the fault group), the per-sibling stage-1 ``on_callee_error`` on fault
-        deliveries, and the ``seam_budgets`` tally — all need the fault wire model.
+        - A non-fan-out delivery is a **stateless continuation** (§6.7): resolve the one callee slot
+          (``_resolve_callee`` — a return materializes; a fault runs ``on_callee_error``). Handled ⇒
+          ``_BatchClosed`` (run the body); unhandled ⇒ ``_BatchFaulted`` (escalate, body skipped).
+        - A **marked sibling reply** classifies (stray-check BEFORE the seams, decision 10), resolves
+          stage-1 per sibling, and folds the outcome → ``_BatchOpen`` (park); the completing fold
+          self-publishes the closure re-entry.
+        - The self-published **re-entry** closes the batch: restore the snapshot, then ANY unhandled
+          fault ⇒ the fault group (``_BatchFaulted``, skipping before_node/body/after_node); ALL
+          resolved ⇒ materialize each via ``_resolve_slot`` and ``_BatchClosed`` (resume the body).
         """
         match self._classify_fanout(envelope):
             case None:
-                return _BatchClosed()  # stateless single-call continuation → body
-            case "sibling":
-                store = self._resolve_fanout_store(ctx)
-                frame = envelope.internal_workflow_state.current_frame
-                fanout_id = frame.frame_id  # == frame.fanout_id, the batch key
+                # Single-call continuation: resolve the one slot uniformly (a return materializes; a
+                # fault runs on_callee_error). Unhandled ⇒ escalate; handled ⇒ materialize + run body.
                 reply = envelope.reply
-                assert reply is not None  # guaranteed by _classify_fanout == "sibling"
-                if reply.in_reply_to is None:
+                assert reply is not None  # kind in (return, fault) ⇒ a reply slot (stray-checked)
+                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=None)
+                if isinstance(outcome, _SlotFailed):
+                    return _BatchFaulted(outcome.report)  # escalate, unwrapped; the body never runs
+                self._resolve_slot(seam_ctx, outcome)  # materialize into the agent's private bookkeeping (I4)
+                return _BatchClosed()
+            case "sibling":
+                return await self._fold_sibling_reply(run_ctx, seam_ctx, kind, envelope, correlation_id, broker)
+            case "reentry":
+                return await self._close_fanout_batch(run_ctx, seam_ctx, envelope, correlation_id, broker)
+
+    async def _fold_sibling_reply(
+        self,
+        run_ctx: SessionRunContext,
+        seam_ctx: SeamContext[State],
+        kind: MessageKind,
+        envelope: Envelope,
+        correlation_id: str,
+        broker: BrokerAnnotation,
+    ) -> _BatchOpen:
+        """Fold one marked sibling reply (in-node spec §4.2): classify (stray-check BEFORE the seams,
+        decision 10 / §6.7) → stage-1 ``on_callee_error`` on a LIVE slot → record → park; the
+        completing fold self-publishes the closure re-entry. Always parks (``_BatchOpen``) — the output
+        is owed by the still-pending siblings."""
+        store = self._resolve_fanout_store(run_ctx)
+        fanout_id = envelope.internal_workflow_state.current_frame.frame_id  # == frame.fanout_id, the batch key
+        reply = envelope.reply
+        assert reply is not None  # guaranteed by _classify_fanout == "sibling"
+        if reply.in_reply_to is None:
+            logger.error("[%s] malformed sibling reply (no in_reply_to) on fan-out node=%s; not folding", correlation_id[:8], self.node_id)
+            return _BatchOpen()
+        match await classify_sibling(store, fanout_id, reply.in_reply_to):
+            case FoldStray(reason=reason):
+                logger.warning("[%s] fan-out stray (%s) slot=%s node=%s", correlation_id[:8], reason, reply.in_reply_to, self.node_id)
+            case FoldAbort(reason=reason):
+                # 4.6 upgrades this to _publish_abort (tombstone + escalate once); return-only strand here.
+                logger.error("[%s] fan-out classify abort (%s) batch=%s node=%s; caller strands", correlation_id[:8], reason, fanout_id, self.node_id)
+            case SiblingPending(slot_ref=slot_ref):
+                # Stage 1 runs ONLY on a live pending slot (the stray check above precedes the seams).
+                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=slot_ref.target_topic)
+                await self._record_and_maybe_close(store, fanout_id, self._slot_to_fanout_outcome(outcome), envelope, correlation_id, broker)
+        return _BatchOpen()  # park (no-reply mirror) — the output is still owed by siblings
+
+    async def _record_and_maybe_close(
+        self, store: FanoutBatchStore, fanout_id: str, outcome: FanoutOutcome, envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> None:
+        """Record the folded outcome; on the completing fold, self-publish the closure re-entry."""
+        match await record_outcome(store, fanout_id, outcome):
+            case FoldComplete():
+                try:
+                    await self._publish_reentry(envelope, correlation_id, broker)
+                except KafkaError:
+                    # 4.6 upgrades this to _publish_abort (escalate once); return-only strand here.
                     logger.error(
-                        "[%s] malformed sibling reply (no in_reply_to) on fan-out node=%s; not folding",
+                        "[%s] fan-out re-entry publish failed batch=%s node=%s; aborting + caller strands",
                         correlation_id[:8],
+                        fanout_id,
                         self.node_id,
                     )
-                    return _BatchOpen()
-                tag = reply.tag
-                result = ctx.state.tool_results.get(tag) if tag is not None else None
-                outcome = FanoutOutcome(slot=reply.in_reply_to, tag=tag, result=result)
-                match await fold_sibling(store, fanout_id, outcome):
-                    case FoldComplete():
-                        try:
-                            await self._publish_reentry(envelope, correlation_id, broker)
-                        except KafkaError:
-                            logger.error(
-                                "[%s] fan-out re-entry publish failed batch=%s node=%s; aborting + caller strands",
-                                correlation_id[:8],
-                                fanout_id,
-                                self.node_id,
-                            )
-                            await abort_batch(store, fanout_id)
-                            # TODO(fault rail PR-6): on a permanent re-entry-publish failure, escalate a typed fault to the
-                            # caller (spec §4.4) instead of stranding — the abort+tombstone here is the return-only precursor.
-                    case FoldStray(reason=reason):
-                        logger.warning("[%s] fan-out stray (%s) slot=%s node=%s", correlation_id[:8], reason, reply.in_reply_to, self.node_id)
-                    case FoldAbort(reason=reason):
-                        logger.error(
-                            "[%s] fan-out fold abort (%s) batch=%s node=%s; caller strands",
-                            correlation_id[:8],
-                            reason,
-                            fanout_id,
-                            self.node_id,
-                        )
-                    case FoldParked():
-                        pass
-                return _BatchOpen()  # park (no-reply mirror) — the output is still owed by siblings
-            case "reentry":
-                store = self._resolve_fanout_store(ctx)
-                fanout_id = envelope.internal_workflow_state.current_frame.frame_id
-                match await close_batch(store, fanout_id):
-                    case CloseResume(snapshot=snapshot):
-                        self._restore_from_snapshot(ctx, envelope, snapshot)
-                        return _BatchClosed()  # resume the body on the restored context
-                    case CloseSpurious():
-                        logger.warning("[%s] fan-out spurious re-entry (incomplete) batch=%s node=%s", correlation_id[:8], fanout_id, self.node_id)
-                    case CloseAbandon():
-                        logger.debug("[%s] fan-out re-entry on a closed batch=%s node=%s; abandoning", correlation_id[:8], fanout_id, self.node_id)
-                    case CloseAbort(reason=reason):
-                        logger.error(
-                            "[%s] fan-out close abort (%s) batch=%s node=%s; caller strands",
-                            correlation_id[:8],
-                            reason,
-                            fanout_id,
-                            self.node_id,
-                        )
-                return _BatchOpen()  # no-op park for a spurious/abandoned/aborted re-entry
+                    await abort_batch(store, fanout_id)
+            case FoldParked():
+                pass
+            case FoldAbort(reason=reason):
+                # 4.6 upgrades this to _publish_abort; return-only strand here.
+                logger.error("[%s] fan-out record abort (%s) batch=%s node=%s; caller strands", correlation_id[:8], reason, fanout_id, self.node_id)
+
+    def _slot_to_fanout_outcome(self, outcome: _SlotResolved | _SlotFailed) -> FanoutOutcome:
+        """Project a stage-1 slot outcome into the durable :class:`FanoutOutcome` (parts XOR fault). A
+        fan-out sibling always carries ``target_topic`` (sourced from its ``SlotRef``)."""
+        assert outcome.target_topic is not None  # a fan-out sibling sources target_topic from the SlotRef
+        tt = outcome.target_topic
+        if isinstance(outcome, _SlotResolved):
+            return FanoutOutcome(slot=outcome.frame_id, tag=outcome.tag, target_topic=tt, handled=outcome.handled, parts=outcome.parts)
+        return FanoutOutcome(slot=outcome.frame_id, tag=outcome.tag, target_topic=tt, handled=False, fault=outcome.report)
+
+    async def _close_fanout_batch(
+        self, run_ctx: SessionRunContext, seam_ctx: SeamContext[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
+    ) -> _BatchOpen | _BatchClosed | _BatchFaulted:
+        """Close the batch on its self-published re-entry (in-node spec §4.3). Restore the snapshot, then
+        the three-way: ANY unhandled fault ⇒ the fault group (``_BatchFaulted`` — skips
+        before_node/body/after_node, §7.3); ALL resolved ⇒ materialize each (``_resolve_slot``) and
+        ``_BatchClosed`` (resume the body). A spurious/abandoned/aborted re-entry is a no-op park."""
+        store = self._resolve_fanout_store(run_ctx)
+        fanout_id = envelope.internal_workflow_state.current_frame.frame_id
+        match await close_batch(store, fanout_id):
+            case CloseResume(snapshot=snapshot, outcomes=outcomes):
+                self._restore_from_snapshot(run_ctx, envelope, snapshot)
+                # Re-sync the (shared) seam_ctx onto the RESTORED state BEFORE materializing, so the
+                # outcomes land in snapshot.state (run_ctx.state), not the cleared re-entry state.
+                self._resync_seam_context(seam_ctx, run_ctx, envelope)
+                failed = [o for o in outcomes if o.fault is not None]
+                if failed:
+                    # Any unhandled fault fails the whole batch (§7.3): escalate the group, NO body.
+                    return _BatchFaulted(self._build_fault_group(outcomes, failed))
+                for o in outcomes:
+                    resolved = _SlotResolved(frame_id=o.slot, tag=o.tag, target_topic=o.target_topic, parts=o.parts or [], handled=o.handled)
+                    self._resolve_slot(seam_ctx, resolved)
+                return _BatchClosed()  # resume the body on the restored, materialized context
+            case CloseSpurious():
+                logger.warning("[%s] fan-out spurious re-entry (incomplete) batch=%s node=%s", correlation_id[:8], fanout_id, self.node_id)
+            case CloseAbandon():
+                logger.debug("[%s] fan-out re-entry on a closed batch=%s node=%s; abandoning", correlation_id[:8], fanout_id, self.node_id)
+            case CloseAbort(reason=reason):
+                # 4.6 upgrades this to _publish_abort; return-only strand here.
+                logger.error("[%s] fan-out close abort (%s) batch=%s node=%s; caller strands", correlation_id[:8], reason, fanout_id, self.node_id)
+        return _BatchOpen()  # no-op park for a spurious/abandoned/aborted re-entry
+
+    def _build_fault_group(self, outcomes: list[FanoutOutcome], failed: list[FanoutOutcome]) -> ErrorReport:
+        """Build the closing batch's fault from its unhandled-fault slots (§4.4/§7.3). Carries the
+        per-slot topology in ``details`` (lean — never the success VALUES, §4.3). A SINGLE unhandled
+        fault FLATTENS to the bare child fault (identity preserved, §4.4), the topology copied onto its
+        ``details``; 2+ compose a ``calf.fault_group`` carrying them in ``causes``."""
+        causes = [o.fault for o in failed if o.fault is not None]
+        topology: dict[str, Any] = {
+            "slots": [{"tag": o.tag, "target_topic": o.target_topic, "status": "failed" if o.fault is not None else "ok"} for o in outcomes],
+            "ok": sum(1 for o in outcomes if o.fault is None),
+            "failed": len(causes),
+        }
+        if len(causes) == 1:
+            child = causes[0]
+            return child.model_copy(update={"details": {**child.details, FaultTypes.FANOUT_TOPOLOGY: topology}})
+        group = ErrorReport.build_safe(
+            error_type=FaultTypes.FAULT_GROUP,
+            message=f"fan-out batch closed with {len(causes)} unhandled fault(s)",
+            origin_node_id=self.node_id,
+            causes=causes,
+        )
+        group.details[FaultTypes.FANOUT_TOPOLOGY] = topology  # framework-reserved calf.* key (set after build_safe)
+        return group
 
     def _restore_from_snapshot(self, ctx: SessionRunContext, envelope: Envelope, snapshot: EnvelopeSnapshot) -> None:
         """Restore the closure context from the durable snapshot (in-node spec §4.3 stage-0).
@@ -1106,23 +1238,18 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         wraps the produced output. The body runs on ``run_ctx`` (``SessionRunContext``); the
         seams run on ``seam_ctx`` (``SeamContext``, sharing ``run_ctx.state``).
 
-        Stage 1 (``fault`` kind): a received callee fault escalates by default (§8) as a
-        ``_BatchFaulted`` — RETURNED, never raised (R5), so it never trips the node's own
-        ``on_node_error``. The body never runs for a fault delivery.
-
-        TODO(fault rail PR-6 step 4): the FULL ``on_callee_error`` chain + ``_resolve_slot`` of
-        handled substitutes + the fan-out per-sibling stage-1 + the closure fault group (which also
-        yields ``_BatchFaulted``) land with the fold widen.
+        Stages 1+2 (``return``/``fault`` kinds, :meth:`_aggregate`): the uniform slot resolution +
+        fold/close. An open batch parks (``_CONSUMED``); an unhandled fault (single-call escalation or
+        the closing batch's fault group) returns ``_BatchFaulted`` — RETURNED, never raised (R5), so it
+        never trips the node's own ``on_node_error``; a resolved continuation / completed close falls
+        through to the body. The body never runs for an unhandled fault.
         """
-        if kind == "fault":  # ── stage 1: on_callee_error (minimal: escalate-by-default, §8) ──
-            # The stray-check (stage 0) guarantees a fault-kind delivery carries a FaultMessage, so
-            # reply.error is safe. Escalate the callee's fault up this node's own rail, unwrapped.
-            assert isinstance(envelope.reply, FaultMessage)  # stray-checked: fault kind ⇔ FaultMessage
-            return _BatchFaulted(envelope.reply.error)
-        if kind == "return":
-            match await self._aggregate(run_ctx, envelope, correlation_id, broker):
+        if kind in ("return", "fault"):  # ── stages 1+2: on_callee_error + fold/close (_aggregate) ──
+            match await self._aggregate(run_ctx, seam_ctx, kind, envelope, correlation_id, broker):
                 case _BatchOpen():
                     return _CONSUMED
+                case _BatchFaulted() as faulted:
+                    return faulted  # escalate (single-call unhandled fault, or the closing fault group)
                 case _BatchClosed():
                     # A fan-out close restored run_ctx + the stack; re-sync the shared seam_ctx so
                     # before_node (fires at closure, §6.4) and after_node see the resumed state.

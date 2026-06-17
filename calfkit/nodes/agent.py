@@ -14,14 +14,13 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.exceptions import MCPToolResolutionError, ToolExecutionError, safe_exc_message
+from calfkit.exceptions import MCPToolResolutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.node_result import extract_lenient
 from calfkit.models.payload import ContentPart, is_retry
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.state import FailedToolCall
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, structured_output_preamble
@@ -249,61 +248,12 @@ class BaseAgentNodeDef(
         # sibling replies are folded in the handler and never reach run(); run() is re-entered
         # (with all tool results materialized) only at the batch's durable close. There is no
         # in-process park here — incomplete batches park in the handler, not run().
-
-        # Collect all FailedToolCall results in this turn so operators see every
-        # failure in a parallel batch; raise on the first after logging all.
-        # Also defend against corrupt marker dicts: a payload with the calfkit
-        # marker tag that fails ``FailedToolCall`` validation (e.g. schema drift
-        # during rolling deploy, a required field added without default, a
-        # tampered wire payload) round-trips through the union's ``| Any`` arm
-        # as a plain ``dict``. Synthesize a typed marker so the silent-failure
-        # path closes — operators still see the raise and the corrupt-keys
-        # context.
-        failed_tool_calls: list[FailedToolCall] = []
-        for tc in latest_tool_calls:
-            result = ctx.state.tool_results.get(tc.tool_call_id)
-            if isinstance(result, FailedToolCall):
-                failed_tool_calls.append(result)
-            elif isinstance(result, dict) and result.get("marker_kind") == "calfkit-tool-error":
-                logger.error(
-                    "[%s] corrupt FailedToolCall marker detected node=%s tool_call_id=%s raw_keys=%s; "
-                    "likely schema drift or version skew across the Kafka boundary",
-                    ctx.correlation_id[:8],
-                    self.name,
-                    tc.tool_call_id,
-                    sorted(result.keys()),
-                )
-                # Synthesize a typed marker with sentinel fields known to pass
-                # FailedToolCall's validators. tc.tool_call_id is the LLM-emitted
-                # correlation key; fall back to "<missing>" if it's empty so
-                # ``min_length=1`` doesn't itself raise.
-                raw_tool_name = result.get("tool_name")
-                failed_tool_calls.append(
-                    FailedToolCall(
-                        tool_name=raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "<unknown>",
-                        tool_call_id=tc.tool_call_id or "<missing>",
-                        exc_type="CorruptFailedToolCallMarker",
-                        exc_message=f"Marker dict failed validation as FailedToolCall (likely schema drift); raw_keys={sorted(result.keys())}",
-                    )
-                )
-        if failed_tool_calls:
-            for failure in failed_tool_calls:
-                logger.error(
-                    "[%s] tool execution error detected node=%s tool=%s tool_call_id=%s exc_type=%s exc_message=%s",
-                    ctx.correlation_id[:8],
-                    self.name,
-                    failure.tool_name,
-                    failure.tool_call_id,
-                    failure.exc_type,
-                    failure.exc_message,
-                )
-            first = failed_tool_calls[0]
-            raise ToolExecutionError(
-                tool_name=first.tool_name,
-                tool_call_id=first.tool_call_id,
-                exc_type=first.exc_type,
-                exc_message=first.exc_message,
-            )
+        #
+        # A faulting tool no longer lands a FailedToolCall in tool_results — its exception escalates via
+        # the rail (the handler's stage-1 on_callee_error / the closing batch's fault group, §6.9), so
+        # everything materialized into tool_results is a ToolReturn / RetryPromptPart. The agent's old
+        # FailedToolCall scan → ToolExecutionError is gone (the carriage switch, 4.4); nothing
+        # un-materializable reaches the DeferredToolResults consumer below.
 
         tool_results = None
 
@@ -322,6 +272,9 @@ class BaseAgentNodeDef(
                         tools_registry[target_tool_call.tool_name].dispatch_topic,
                         ctx.state,
                         body=ToolCallRef.from_tool_call_part(target_tool_call),
+                        # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
+                        # echoes it on reply.tag and the agent materializes the result at that slot.
+                        tag=target_tool_call.tool_call_id,
                     )
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
@@ -480,11 +433,14 @@ class BaseAgentNodeDef(
                     tools_registry[target_tool_call.tool_name].dispatch_topic,
                     ctx.state,
                     body=ToolCallRef.from_tool_call_part(target_tool_call),
+                    # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
+                    # echoes it on reply.tag and the agent materializes the result at that slot.
+                    tag=target_tool_call.tool_call_id,
                 )
             else:
-                # Parallel fan-out: each sibling Call carries its tool_call_id as ``tag`` so the
-                # callee echoes it on its reply, letting the durable fold read the result from
-                # ``state.tool_results[tag]``. The handler's _handle_fanout_open opens the durable
+                # Parallel fan-out: each sibling Call carries its tool_call_id as ``tag`` so the callee
+                # echoes it on its reply (reply.tag); stage-1 resolves the slot and the durable fold
+                # records the outcome under it. The handler's _handle_fanout_open opens the durable
                 # batch from this list — replacing the old in-process _pending_batches registration.
                 parallel_tool_calls = [
                     Call[State](

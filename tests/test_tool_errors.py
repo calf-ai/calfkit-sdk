@@ -7,7 +7,6 @@ layer.
 from __future__ import annotations
 
 import asyncio
-import logging
 import pickle  # nosec B403 - used in test for regression coverage of ToolExecutionError picklability
 from typing import Annotated
 
@@ -30,6 +29,7 @@ from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.exceptions import ToolExecutionError
 from calfkit.models import SessionRunContext, ToolCallRef, ToolContext
 from calfkit.models.actions import Call, ReturnCall, TailCall
+from calfkit.models.payload import TextPart, is_retry
 from calfkit.models.state import (
     FailedToolCall,
     OverridesState,
@@ -90,186 +90,87 @@ def _model_emits_tool_calls(tool_calls: list[ToolCallPart]) -> FunctionModel:
 
 
 # ---------------------------------------------------------------------------
-# Worker-side: ToolNodeDef.run executes from the ToolCallRef payload alone
+# Worker-side: ToolNodeDef.run returns its result on the reply slot (4.4 carriage)
 # ---------------------------------------------------------------------------
+# The carriage switch (fault-rail §4.5/§6.9): the tool body stops blob-writing into
+# ``state.tool_results`` and instead returns its result as ``ReturnCall.value``, which the
+# chokepoint coerces onto ``reply.parts``. The agent materializes it from the reply slot at
+# the callee slot (``_resolve_slot``), keyed by the echoed ``tag``. A generic tool exception
+# is no longer captured into a ``FailedToolCall`` — it ESCAPES to the chokepoint, where
+# ``on_node_error`` gets its edge chance and the fault rail carries an ``ErrorReport``.
 
 
-async def test_tool_executes_from_payload_without_state_lookup():
-    # The ToolCallRef payload is the authoritative invocation source: name,
-    # args, and tool_call_id all come from the ref, with NO lookup of the
-    # ToolCallPart in ctx.state. An empty state must not change the outcome.
+async def test_tool_executes_from_payload_and_returns_value():
+    # The ToolCallRef payload is the authoritative invocation source: name, args, and
+    # tool_call_id all come from the ref, with NO lookup of the ToolCallPart in ctx.state.
     def echo(ctx: ToolContext, x: int) -> str:
         return f"got {x}"
 
-    tool_node = ToolNodeDef.create_tool_node(
-        func=echo,
-        subscribe_topics="tool.echo.input",
-        publish_topic="tool.echo.output",
-    )
+    tool_node = ToolNodeDef.create_tool_node(func=echo, subscribe_topics="tool.echo.input", publish_topic="tool.echo.output")
 
     ctx = _make_ctx(State())  # deliberately no registered tool call
     result = await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-payload-001", args={"x": 7}, name="echo"))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
-    stored = ctx.state.tool_results.get("tc-payload-001")
-    assert isinstance(stored, ToolReturn), f"expected ToolReturn, got {type(stored).__name__}: {stored!r}"
-    assert stored.return_value == "got 7"
+    assert result.value == "got 7"  # rides the reply slot, not a tool_results blob-write
+    assert ctx.state.tool_results == {}  # the blob-write protocol is gone
 
 
-async def test_tool_failure_metadata_comes_from_payload():
-    # On failure, the FailedToolCall marker's identifiers are sourced from the
-    # payload (not a state-side ToolCallPart) — pin name and id propagation.
-    def boom(ctx: ToolContext) -> str:
-        raise ValueError("payload-sourced")
-
-    tool_node = ToolNodeDef.create_tool_node(
-        func=boom,
-        subscribe_topics="tool.boom.input",
-        publish_topic="tool.boom.output",
-    )
-
-    ctx = _make_ctx(State())
-    result = await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-payload-002", args={}, name="boom"))
-
-    assert isinstance(result, ReturnCall)
-    stored = ctx.state.tool_results.get("tc-payload-002")
-    assert isinstance(stored, FailedToolCall)
-    assert stored.tool_name == "boom"
-    assert stored.tool_call_id == "tc-payload-002"
-    assert stored.exc_message == "payload-sourced"
-
-
-# ---------------------------------------------------------------------------
-# Worker-side: ToolNodeDef.run captures exceptions into typed results
-# ---------------------------------------------------------------------------
-
-
-async def test_tool_raises_arbitrary_exception_stores_error_marker():
+async def test_tool_raises_arbitrary_exception_escapes():
+    # The generic-exception catch is deleted: an uncaught tool exception ESCAPES to the
+    # chokepoint (on_node_error → fault rail), not captured into a FailedToolCall blob.
     def boom(ctx: ToolContext) -> str:
         raise ValueError("bad")
 
-    tool_node = ToolNodeDef.create_tool_node(
-        func=boom,
-        subscribe_topics="tool.boom.input",
-        publish_topic="tool.boom.output",
-    )
+    tool_node = ToolNodeDef.create_tool_node(func=boom, subscribe_topics="tool.boom.input", publish_topic="tool.boom.output")
 
-    state = State()
-    tool_call_id = "tc-arb-001"
-    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
-
-    # The reply path must still publish so the agent gets unblocked.
-    assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
-
-    stored = ctx.state.tool_results.get(tool_call_id)
-    assert isinstance(stored, FailedToolCall), f"expected FailedToolCall in tool_results, got {type(stored).__name__}: {stored!r}"
-    assert stored.exc_type == "ValueError"
-    assert stored.exc_message == "bad"
-    assert stored.tool_name == "boom"
-    assert stored.tool_call_id == tool_call_id
-    assert stored.marker_kind == "calfkit-tool-error"
-    # Pin that ReturnCall.state IS the same state holding the marker — a
-    # regression that returned ReturnCall(state=State()) would otherwise pass.
-    assert result.state.tool_results[tool_call_id] is stored
+    ctx = _make_ctx(State())
+    with pytest.raises(ValueError, match="bad"):
+        await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-arb-001", args={}, name="boom"))
+    assert ctx.state.tool_results == {}  # nothing captured
 
 
-async def test_tool_raises_model_retry_stores_retry_prompt():
+async def test_tool_raises_model_retry_returns_marked_text():
+    # ModelRetry stays a model-visible recoverable (P3), but its carriage migrated (§4.5): the
+    # tool renders it AT ORIGIN to a calf.retry-marked TextPart on the reply slot — the RAW message
+    # (option 1; the agent hydrates the RetryPromptPart, the provider renders the suffix once). NOT
+    # a tool_results blob-write, NOT the fault rail.
     def please_retry(ctx: ToolContext) -> str:
         raise ModelRetry("please slow down")
 
-    tool_node = ToolNodeDef.create_tool_node(
-        func=please_retry,
-        subscribe_topics="tool.please_retry.input",
-        publish_topic="tool.please_retry.output",
-    )
+    tool_node = ToolNodeDef.create_tool_node(func=please_retry, subscribe_topics="tool.please_retry.input", publish_topic="tool.please_retry.output")
 
-    state = State()
-    tool_call_id = "tc-retry-001"
-    part = _register_tool_call(state, tool_name="please_retry", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
+    ctx = _make_ctx(State())
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-retry-001", args={}, name="please_retry"))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
-
-    stored = ctx.state.tool_results.get(tool_call_id)
-    assert isinstance(stored, RetryPromptPart), f"expected RetryPromptPart, got {type(stored).__name__}: {stored!r}"
-    # The marker must NOT be used for ModelRetry — that would short-circuit
-    # the LLM-visible retry behavior we explicitly preserve.
-    assert not isinstance(stored, FailedToolCall)
-    assert stored.content == "please slow down"
-    assert stored.tool_name == "please_retry"
-    assert stored.tool_call_id == tool_call_id
-    assert result.state.tool_results[tool_call_id] is stored
+    assert isinstance(result.value, list) and len(result.value) == 1
+    part = result.value[0]
+    assert isinstance(part, TextPart) and part.text == "please slow down"  # the raw message, not rendered+suffixed
+    assert is_retry([part])  # carries the calf.retry marker the agent honors
+    assert ctx.state.tool_results == {}
 
 
-async def test_tool_success_unchanged():
+async def test_tool_success_returns_value():
     def happy(ctx: ToolContext) -> str:
         return "ok"
 
-    tool_node = ToolNodeDef.create_tool_node(
-        func=happy,
-        subscribe_topics="tool.happy.input",
-        publish_topic="tool.happy.output",
-    )
+    tool_node = ToolNodeDef.create_tool_node(func=happy, subscribe_topics="tool.happy.input", publish_topic="tool.happy.output")
 
-    state = State()
-    tool_call_id = "tc-happy-001"
-    part = _register_tool_call(state, tool_name="happy", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
+    ctx = _make_ctx(State())
+    result = await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-happy-001", args={}, name="happy"))
 
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
-
-    stored = ctx.state.tool_results.get(tool_call_id)
-    assert isinstance(stored, ToolReturn), f"expected ToolReturn, got {type(stored).__name__}: {stored!r}"
-    assert not isinstance(stored, FailedToolCall)
-    assert not isinstance(stored, RetryPromptPart)
-    assert stored.return_value == "ok"
-    assert result.state.tool_results[tool_call_id] is stored
+    assert result.value == "ok"
+    assert ctx.state.tool_results == {}
 
 
 # ---------------------------------------------------------------------------
-# Agent-side: BaseAgentNodeDef.run raises on observed error marker
+# Agent-side: the happy path (a materialized tool result → the run completes)
 # ---------------------------------------------------------------------------
-
-
-async def test_agent_detects_error_marker_and_raises_tool_execution_error():
-    agent = Agent(
-        "agent_under_test",
-        system_prompt="x",
-        subscribe_topics="agent_under_test.input",
-        publish_topic="agent_under_test.output",
-        model_client=TestModel(),
-    )
-
-    state = State()
-    tool_call_id = "id1"
-    tool_name = "t"
-    _register_tool_call(state, tool_name=tool_name, tool_call_id=tool_call_id)
-    state.add_tool_result(
-        tool_call_id,
-        FailedToolCall(
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            exc_type="ValueError",
-            exc_message="boom",
-        ),
-    )
-    ctx = _make_ctx(state)
-
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await agent.run(ctx)
-
-    err = exc_info.value
-    assert err.tool_name == tool_name
-    assert err.tool_call_id == tool_call_id
-    assert err.exc_type == "ValueError"
-    assert err.exc_message == "boom"
+# The old FailedToolCall-scan → ToolExecutionError is deleted (4.4): a faulting tool now escalates
+# via the rail (handler stage-1 / closing fault group), so a FailedToolCall never reaches the agent's
+# tool_results and run() never scans for one. The agent-side scan regressions retire with it.
 
 
 async def test_agent_success_path_unchanged():
@@ -359,138 +260,11 @@ def test_existing_tool_result_types_survive_json_round_trip():
     assert restored.tool_results[retry_id].content == "please retry"
 
 
-async def test_agent_raises_on_marker_after_json_round_trip():
-    # End-to-end wire-compat: marker survives JSON, agent still raises.
-    agent = Agent(
-        "agent_roundtrip",
-        system_prompt="x",
-        subscribe_topics="agent_roundtrip.input",
-        publish_topic="agent_roundtrip.output",
-        model_client=TestModel(),
-    )
-
-    state = State()
-    tool_call_id = "tc-rt-error-001"
-    tool_name = "buggy_tool"
-    _register_tool_call(state, tool_name=tool_name, tool_call_id=tool_call_id)
-    state.add_tool_result(
-        tool_call_id,
-        FailedToolCall(
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            exc_type="ValueError",
-            exc_message="boom",
-        ),
-    )
-
-    wired_state = State.model_validate_json(state.model_dump_json())
-    ctx = _make_ctx(wired_state)
-
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await agent.run(ctx)
-
-    err = exc_info.value
-    assert err.tool_name == tool_name
-    assert err.tool_call_id == tool_call_id
-    assert err.exc_type == "ValueError"
-    assert err.exc_message == "boom"
-
-
-async def test_agent_ignores_stale_marker_not_in_latest_tool_calls():
-    # The detection loop is scoped to ``latest_tool_calls()`` so a marker for
-    # a tool_call_id that belongs to a previous turn (still lingering in
-    # ``tool_results``) does NOT re-fire. Without this scope, a higher layer
-    # that catches ``ToolExecutionError`` and retries would loop forever on
-    # the stale entry.
-    agent = Agent(
-        "agent_stale",
-        system_prompt="x",
-        subscribe_topics="agent_stale.input",
-        publish_topic="agent_stale.output",
-        model_client=_final_text_model(),
-    )
-
-    state = State()
-    current_id = "tc-current-ok"
-    _register_tool_call(state, tool_name="happy_tool", tool_call_id=current_id)
-    state.add_tool_result(
-        current_id,
-        ToolReturn(return_value="ok", metadata={"tool_call_id": current_id}),
-    )
-
-    # Inject a stale FailedToolCall for a tool_call_id that is NOT in the
-    # current ModelResponse, i.e. not returned by latest_tool_calls().
-    stale_id = "tc-stale-fail"
-    state.tool_results[stale_id] = FailedToolCall(
-        tool_name="old_tool",
-        tool_call_id=stale_id,
-        exc_type="ValueError",
-        exc_message="from-a-previous-turn",
-    )
-
-    ctx = _make_ctx(state)
-
-    result = await agent.run(ctx)
-    assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
-
-
-# ---------------------------------------------------------------------------
-# Parallel fanout: success + failure in the same batch
-# ---------------------------------------------------------------------------
-
-
-async def test_failed_tool_in_completed_batch_raises_tool_execution_error():
-    # Durable model: a completed fan-out batch is materialized and the body re-entered via the
-    # in-node fold, so run() sees all tool results at once. A FailedToolCall among them raises
-    # ToolExecutionError (the return-only strand — the rail PR will escalate a typed fault).
-    agent = Agent(
-        "agent_parallel",
-        system_prompt="x",
-        subscribe_topics="agent_parallel.input",
-        publish_topic="agent_parallel.output",
-        model_client=TestModel(),
-    )
-
-    correlation_id = "cid-parallel-mixed"
-    frame_id = "frame-parallel-mixed"
-    success_id = "tc-parallel-ok"
-    fail_id = "tc-parallel-fail"
-
-    inflight_state = State()
-    _register_tool_call(inflight_state, tool_name="happy_tool", tool_call_id=success_id)
-    _register_tool_call(inflight_state, tool_name="buggy_tool", tool_call_id=fail_id)
-    inflight_state.add_tool_result(
-        success_id,
-        ToolReturn(return_value="ok", metadata={"tool_call_id": success_id}),
-    )
-    inflight_state.add_tool_result(
-        fail_id,
-        FailedToolCall(
-            tool_name="buggy_tool",
-            tool_call_id=fail_id,
-            exc_type="ValueError",
-            exc_message="boom",
-        ),
-    )
-
-    ctx = _make_ctx(inflight_state, correlation_id=correlation_id, frame_id=frame_id)
-
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await agent.run(ctx)
-
-    err = exc_info.value
-    assert err.tool_call_id == fail_id
-    assert err.tool_name == "buggy_tool"
-    assert err.exc_type == "ValueError"
-    assert err.exc_message == "boom"
-
-
-# NOTE: the old `test_agent_parallel_mode_waits_for_incomplete_batch` (white-box: set
-# `_pending_batches`, call run(), expect `Silent()` while incomplete) was removed in the durable
-# fan-out cutover. run() is no longer re-entered on an incomplete batch — sibling folds park in the
-# handler (BaseNodeDef._aggregate); run() resumes only at the complete close. The parking behavior
-# is covered durably by tests/test_staged_pipeline.py::TestAggregate.test_sibling_fold_incomplete_parks
-# and TestExecute.test_return_parked_fold_is_consumed_without_running_body.
+# NOTE: the agent-side FailedToolCall scan (a marker in tool_results → ToolExecutionError, incl. the
+# JSON-round-trip, stale-marker-scoping, corrupt-marker, and completed-fan-out-batch variants) retired
+# with the carriage switch (4.4). A faulting tool escalates via the rail, so a FailedToolCall never
+# reaches the agent's tool_results — the typed fault escalation is covered by the staged-pipeline +
+# durable-fan-out e2e tests.
 
 
 # ---------------------------------------------------------------------------
@@ -799,38 +573,6 @@ async def test_agent_handles_non_dict_json_args_as_retry_prompt():
     assert "Malformed tool arguments" in str(stored.content)
 
 
-async def test_tool_long_exception_message_is_clamped_not_rejected():
-    # Regression: previously a >4096-char exc_message caused FailedToolCall
-    # construction to raise ValidationError inside the worker's except block,
-    # hanging the run. The clamping validator must silently truncate instead.
-    long_msg = "x" * 5000
-
-    def boom_with_long_msg(ctx: ToolContext) -> str:
-        raise ValueError(long_msg)
-
-    tool_node = ToolNodeDef.create_tool_node(
-        func=boom_with_long_msg,
-        subscribe_topics="tool.boom_long.input",
-        publish_topic="tool.boom_long.output",
-    )
-
-    state = State()
-    tool_call_id = "tc-long-msg-001"
-    part = _register_tool_call(state, tool_name="boom_with_long_msg", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
-
-    assert isinstance(result, ReturnCall), f"expected ReturnCall (no hang), got {type(result).__name__}"
-
-    stored = ctx.state.tool_results.get(tool_call_id)
-    assert isinstance(stored, FailedToolCall)
-    assert stored.exc_type == "ValueError"
-    # exc_message must be clamped to 4096, not the full 5000.
-    assert len(stored.exc_message) == 4096, f"expected clamped to 4096 chars, got {len(stored.exc_message)}"
-    assert stored.exc_message == "x" * 4096
-
-
 # ---------------------------------------------------------------------------
 # Discriminator: direct unit coverage of _calf_tool_result_discriminator
 # ---------------------------------------------------------------------------
@@ -920,132 +662,6 @@ def test_validate_call_args_raises_on_missing_required_arg():
 
     with pytest.raises(ValidationError):
         tool_node.validate_call_args({"x": 5})  # missing y
-
-
-# ---------------------------------------------------------------------------
-# Adversarial worker-side regressions: broken __str__, logger.exception
-# ---------------------------------------------------------------------------
-
-
-async def test_tool_exception_with_broken_str_still_produces_failed_tool_call():
-    # Regression: a bare str(e) on the worker can itself raise if the
-    # exception's __str__ is broken. That would propagate out of except Exception
-    # and re-introduce the silent-hang failure mode the feature prevents.
-    class BadStrError(Exception):
-        def __str__(self) -> str:
-            raise RuntimeError("cannot stringify")
-
-    def boom(ctx: ToolContext) -> str:
-        raise BadStrError()
-
-    tool_node = ToolNodeDef.create_tool_node(
-        func=boom,
-        subscribe_topics="tool.bad_str.input",
-        publish_topic="tool.bad_str.output",
-    )
-
-    state = State()
-    tool_call_id = "tc-bad-str-001"
-    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
-
-    assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
-
-    stored = ctx.state.tool_results.get(tool_call_id)
-    assert isinstance(stored, FailedToolCall), f"expected FailedToolCall, got {type(stored).__name__}"
-    assert stored.exc_type == "BadStrError"
-    # exc_message should be a non-empty string (the safe fallback content)
-    assert stored.exc_message, f"expected non-empty exc_message, got {stored.exc_message!r}"
-
-
-async def test_tool_worker_logs_exception_with_traceback(caplog):
-    # The PR explicitly trades client-side observability for worker-side log
-    # diagnostics. Pin that logger.exception (not logger.error) fires so the
-    # traceback is captured — a silent demote to logger.debug would lose the
-    # only forensic surface across the Kafka boundary.
-    def boom(ctx: ToolContext) -> str:
-        raise ValueError("bad-for-logs")
-
-    tool_node = ToolNodeDef.create_tool_node(
-        func=boom,
-        subscribe_topics="tool.boom_log.input",
-        publish_topic="tool.boom_log.output",
-    )
-
-    state = State()
-    tool_call_id = "tc-log-001"
-    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    with caplog.at_level(logging.ERROR, logger="calfkit.nodes.tool"):
-        await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
-
-    # Find the worker's exception log record.
-    err_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert err_records, "expected at least one ERROR-level log from the worker"
-    # exc_info must be present (logger.exception sets this) so the traceback
-    # is captured across the Kafka boundary.
-    matching = [r for r in err_records if r.exc_info is not None]
-    assert matching, "expected logger.exception with exc_info, got logger.error only"
-    # tool_call_id should be in the log message for correlation.
-    assert any(tool_call_id in r.getMessage() for r in matching), "tool_call_id missing from worker log"
-
-
-# ---------------------------------------------------------------------------
-# Multi-failure parallel batch: every failure must be logged before raising
-# ---------------------------------------------------------------------------
-
-
-async def test_agent_parallel_mode_logs_all_failures_before_raising(caplog):
-    # Regression: a parallel batch with multiple failures must log every one
-    # so operators see all failures, not just the first to be raised.
-    agent = Agent(
-        "agent_multi_fail",
-        system_prompt="x",
-        subscribe_topics="agent_multi_fail.input",
-        publish_topic="agent_multi_fail.output",
-        model_client=TestModel(),
-    )
-
-    correlation_id = "cid-multi-fail"
-    frame_id = "frame-multi-fail"
-    first_id = "tc-first-fail"
-    second_id = "tc-second-fail"
-
-    inflight_state = State()
-    _register_tool_call(inflight_state, tool_name="buggy_a", tool_call_id=first_id)
-    _register_tool_call(inflight_state, tool_name="buggy_b", tool_call_id=second_id)
-    inflight_state.add_tool_result(
-        first_id,
-        FailedToolCall(
-            tool_name="buggy_a",
-            tool_call_id=first_id,
-            exc_type="ValueError",
-            exc_message="boom-a",
-        ),
-    )
-    inflight_state.add_tool_result(
-        second_id,
-        FailedToolCall(
-            tool_name="buggy_b",
-            tool_call_id=second_id,
-            exc_type="KeyError",
-            exc_message="boom-b",
-        ),
-    )
-
-    ctx = _make_ctx(inflight_state, correlation_id=correlation_id, frame_id=frame_id)
-
-    with caplog.at_level(logging.ERROR, logger="calfkit.nodes.agent"):
-        with pytest.raises(ToolExecutionError):
-            await agent.run(ctx)
-
-    # Both failures must appear in the logs.
-    log_text = caplog.text
-    assert "buggy_a" in log_text and first_id in log_text, "first failure missing from logs"
-    assert "buggy_b" in log_text and second_id in log_text, "second failure missing from logs"
 
 
 # ---------------------------------------------------------------------------
@@ -1145,56 +761,6 @@ async def test_agent_override_path_malformed_args_become_retry_prompt():
     stored = ctx.state.tool_results.get("tc-override-malformed")
     assert isinstance(stored, RetryPromptPart)
     assert "Malformed tool arguments" in str(stored.content)
-
-
-# ---------------------------------------------------------------------------
-# Defensive construction: the worker's failure path must not itself raise
-# ---------------------------------------------------------------------------
-
-
-async def test_tool_failed_marker_construction_falls_back_to_sentinel():
-    # Regression: if the primary FailedToolCall construction raises (e.g.
-    # min_length=1 rejects an empty tool_call_id), the worker must fall back
-    # to a hardcoded sentinel marker and still publish a reply. Without this,
-    # the ValidationError would escape the ``except Exception`` block and
-    # re-introduce the silent-hang failure mode the feature exists to prevent.
-    def boom(ctx: ToolContext) -> str:
-        raise ValueError("original failure")
-
-    tool_node = ToolNodeDef.create_tool_node(
-        func=boom,
-        subscribe_topics="tool.fallback.input",
-        publish_topic="tool.fallback.output",
-    )
-
-    state = State()
-    # Empty tool_call_id triggers FailedToolCall's min_length=1 rejection
-    # during primary construction.
-    part = ToolCallPart(tool_name="boom", args={}, tool_call_id="")
-    state.add_tool_call(part)
-    state.message_history.append(ModelResponse(parts=[part]))
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
-
-    # Reply still publishes — no silent hang.
-    assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
-
-    # Marker stored under the original tool_call_id key so the agent can find
-    # it via state.tool_results.get(tool_call_id).
-    stored = ctx.state.tool_results.get("")
-    assert isinstance(stored, FailedToolCall), f"expected FailedToolCall, got {type(stored).__name__}"
-    # Fallback preserves real ``tool_name`` (operators need correlation), only
-    # substitutes ``<missing>`` for the empty ``tool_call_id`` that caused
-    # primary construction to fail. ``exc_type`` is the construction-failure
-    # sentinel.
-    assert stored.tool_call_id == "<missing>"
-    assert stored.tool_name == "boom"
-    assert stored.exc_type == "FailedToolCallConstructionError"
-    # The fallback message references the original exception type so the
-    # operator can still see what actually failed.
-    assert "could not construct marker" in stored.exc_message
-    assert "ValueError" in stored.exc_message
 
 
 # ---------------------------------------------------------------------------
@@ -1331,71 +897,16 @@ async def test_agent_handles_typeerror_args_as_retry_prompt():
 
 
 # ---------------------------------------------------------------------------
-# Sentinel fallback preserves real tool identity when valid
+# Unserializable tool return: the B1 wire-safety check escapes to the chokepoint
 # ---------------------------------------------------------------------------
 
 
-async def test_fallback_marker_preserves_real_tool_name_and_id_when_valid(monkeypatch):
-    # Regression: when primary FailedToolCall construction fails for any reason
-    # OTHER than empty tool_call_id/tool_name (the previously-documented trigger),
-    # the ``build_safe`` fallback must still preserve real ``tool_name`` /
-    # ``tool_call_id`` so operators don't lose the correlation key. Patch
-    # ``__init__`` (not the module attribute) because the primary construction
-    # happens inside the ``build_safe`` classmethod via ``cls(...)``.
-    _original_init = FailedToolCall.__init__
-    _call_count = {"n": 0}
-
-    def _failing_then_real_init(self, *args, **kwargs):
-        _call_count["n"] += 1
-        if _call_count["n"] == 1:
-            # Simulate ANY construction failure unrelated to the input fields
-            # (e.g., a future schema-evolution constraint).
-            raise RuntimeError("simulated primary construction failure")
-        _original_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(FailedToolCall, "__init__", _failing_then_real_init)
-
-    def boom(ctx: ToolContext) -> str:
-        raise ValueError("original tool failure")
-
-    tool_node = ToolNodeDef.create_tool_node(
-        func=boom,
-        subscribe_topics="tool.preserve.input",
-        publish_topic="tool.preserve.output",
-    )
-
-    state = State()
-    tool_call_id = "real-correlation-id-abc123"
-    part = _register_tool_call(state, tool_name="boom", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
-    assert isinstance(result, ReturnCall)
-
-    stored = ctx.state.tool_results.get(tool_call_id)
-    assert isinstance(stored, FailedToolCall)
-    # Real values preserved — operators can still grep the log for the call id.
-    assert stored.tool_call_id == tool_call_id, f"expected real id preserved, got {stored.tool_call_id!r}"
-    assert stored.tool_name == "boom", f"expected real tool_name preserved, got {stored.tool_name!r}"
-    # exc_type marks this as a fallback marker; the message references the
-    # original exception type.
-    assert stored.exc_type == "FailedToolCallConstructionError"
-    assert "could not construct marker" in stored.exc_message
-    assert "ValueError" in stored.exc_message
-
-
-# ---------------------------------------------------------------------------
-# Unserializable tool return values must not silently hang the worker
-# ---------------------------------------------------------------------------
-
-
-async def test_tool_unserializable_return_value_becomes_failed_tool_call():
-    # Regression: a tool returning a non-JSON-serializable value (a user class,
-    # an unmapped stdlib type, etc.) would pass through ``ToolReturn(__init__)``
-    # but raise ``PydanticSerializationError`` at FastStream's envelope publish
-    # boundary — killing the worker handler before any reply published, which
-    # is the silent-hang failure mode this module exists to prevent. The worker
-    # must eagerly verify wire-safety and surface a FailedToolCall instead.
+async def test_tool_unserializable_return_value_escapes_via_wire_safety_check():
+    # The B1 eager wire-safety check (``pydantic_core.to_json(result)``) runs in the tool body so a
+    # non-JSON-serializable return raises HERE and ESCAPES to the chokepoint (on_node_error → the
+    # fault rail), instead of killing the envelope serialization mid-publish (the silent-hang mode).
+    # With the generic-except deleted, it is no longer captured into a FailedToolCall.
+    import pydantic_core
 
     class _NotJsonSerializable:
         pass
@@ -1409,96 +920,10 @@ async def test_tool_unserializable_return_value_becomes_failed_tool_call():
         publish_topic="tool.unserializable.output",
     )
 
-    state = State()
-    tool_call_id = "tc-unserializable-001"
-    part = _register_tool_call(state, tool_name="returns_unserializable", tool_call_id=tool_call_id)
-    ctx = _make_ctx(state)
-
-    result = await tool_node.run(ctx, ToolCallRef.from_tool_call_part(part))
-    assert isinstance(result, ReturnCall), f"expected ReturnCall (no hang), got {type(result).__name__}"
-
-    stored = ctx.state.tool_results.get(tool_call_id)
-    assert isinstance(stored, FailedToolCall), f"expected FailedToolCall, got {type(stored).__name__}"
-    assert stored.exc_type == "PydanticSerializationError"
-    assert "Unable to serialize" in stored.exc_message
-
-    # And critically: the state must now JSON-round-trip cleanly so the actual
-    # Kafka publish wouldn't itself raise.
-    state.model_dump_json()
-
-
-# ---------------------------------------------------------------------------
-# Corrupt FailedToolCall marker dict (schema drift / version skew) must raise
-# ---------------------------------------------------------------------------
-
-
-async def test_agent_detects_corrupt_marker_dict_and_raises():
-    # Regression: an entry in ``tool_results`` that carries the calfkit marker
-    # tag but fails FailedToolCall validation (e.g. a required field added in
-    # a newer schema; a stale message replayed; a tampered payload) round-trips
-    # through ``CalfToolResult | Any`` as a plain dict. The agent's isinstance
-    # check would silently miss it without this defense.
-    agent = Agent(
-        "agent_corrupt_marker",
-        system_prompt="x",
-        subscribe_topics="agent_corrupt_marker.input",
-        publish_topic="agent_corrupt_marker.output",
-        model_client=TestModel(),
-    )
-
-    state = State()
-    tool_call_id = "tc-corrupt-001"
-    _register_tool_call(state, tool_name="buggy", tool_call_id=tool_call_id)
-    # Insert a raw dict carrying the marker tag but missing required fields;
-    # bypass model validation by writing directly to the dict.
-    state.tool_results[tool_call_id] = {
-        "marker_kind": "calfkit-tool-error",
-        "tool_name": "buggy",
-        "tool_call_id": tool_call_id,
-        # missing exc_type, exc_message
-    }
-    ctx = _make_ctx(state)
-
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await agent.run(ctx)
-
-    err = exc_info.value
-    assert err.exc_type == "CorruptFailedToolCallMarker"
-    assert err.tool_call_id == tool_call_id
-    # Real tool_name from the dict is preserved when valid.
-    assert err.tool_name == "buggy"
-    # Diagnostic message names the corruption shape.
-    assert "schema drift" in err.exc_message or "raw_keys" in err.exc_message
-
-
-async def test_agent_corrupt_marker_with_missing_tool_name_uses_sentinel():
-    # Defense-in-depth: a corrupt marker dict missing even ``tool_name`` must
-    # still produce a typed raise rather than crashing the agent. Sentinel
-    # value substituted.
-    agent = Agent(
-        "agent_corrupt_no_name",
-        system_prompt="x",
-        subscribe_topics="agent_corrupt_no_name.input",
-        publish_topic="agent_corrupt_no_name.output",
-        model_client=TestModel(),
-    )
-
-    state = State()
-    tool_call_id = "tc-corrupt-noname"
-    _register_tool_call(state, tool_name="some_tool", tool_call_id=tool_call_id)
-    state.tool_results[tool_call_id] = {
-        "marker_kind": "calfkit-tool-error",
-        # missing tool_name, exc_type, exc_message
-    }
-    ctx = _make_ctx(state)
-
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await agent.run(ctx)
-
-    err = exc_info.value
-    assert err.exc_type == "CorruptFailedToolCallMarker"
-    assert err.tool_name == "<unknown>"
-    assert err.tool_call_id == tool_call_id
+    ctx = _make_ctx(State())
+    with pytest.raises(pydantic_core.PydanticSerializationError):
+        await tool_node.run(ctx, ToolCallRef(tool_call_id="tc-unserializable-001", args={}, name="returns_unserializable"))
+    assert ctx.state.tool_results == {}  # nothing captured
 
 
 # NOTE: the white-box `_parallel_state_aggregation` regressions (per-frame-id batch keying;

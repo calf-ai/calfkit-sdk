@@ -10,12 +10,10 @@ from calfkit._protocol import NodeKind
 from calfkit._registry import handler
 from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
-from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolReturn
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
-from calfkit.exceptions import safe_exc_message
 from calfkit.models import SessionRunContext, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
-from calfkit.models.state import FailedToolCall
+from calfkit.models.payload import retry_text_part
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
 
@@ -105,61 +103,28 @@ class ToolNodeDef(BaseToolNodeDef):
         )
 
         # TODO(#143): bounded retries / backoff for non-ModelRetry exceptions.
-        # ModelRetry below provides LLM-visible retry per pydantic-ai semantics
-        # but is not yet rate-limited on the deferred path.
+        # ModelRetry stays a model-visible recoverable (rendered at origin, §4.5); any OTHER
+        # exception ESCAPES to the chokepoint (on_node_error → the fault rail), no longer captured
+        # into a FailedToolCall — that terminal carriage is now the rail's ErrorReport.
         try:
             result = await self._tool.function_schema.call(payload.args, tool_call_ctx)
-            # Construct the ToolReturn and eagerly verify it is wire-safe BEFORE
-            # storing in state. FastStream's envelope serialization at publish
-            # time would raise PydanticSerializationError on a non-serializable
-            # return_value, killing the worker handler before the reply
-            # publishes — the silent-hang failure mode this module exists to
-            # prevent. By serializing inside the try block, any failure flows
-            # through ``except Exception`` below and surfaces as a FailedToolCall.
-            tool_return = ToolReturn(return_value=result, metadata={"tool_call_id": tool_call_id})
-            pydantic_core.to_json(tool_return)
+            # B1 eager wire-safety (fault-rail decision 2): a non-serializable result raises HERE so
+            # it escapes to the chokepoint and faults via ``on_node_error`` (giving the dev's edge
+            # seam its chance), instead of killing the envelope serialization mid-publish (the
+            # silent-hang failure mode) or faulting directly at the publish-guard coercion.
+            pydantic_core.to_json(result)
         except ModelRetry as e:
-            logger.warning(
-                "[%s] tool=%s raised ModelRetry: %s",
-                ctx.correlation_id[:8],
-                self.name,
-                e.message,
-            )
-            ctx.state.add_tool_result(
-                tool_call_id,
-                RetryPromptPart(
-                    content=e.message,
-                    tool_name=payload.name,
-                    tool_call_id=tool_call_id,
-                ),
-            )
-            return ReturnCall[State](state=ctx.state)
-        except Exception as e:
-            logger.exception(
-                "[%s] tool=%s tool_call_id=%s raised %s; surfacing FailedToolCall to agent",
-                ctx.correlation_id[:8],
-                self.name,
-                tool_call_id,
-                type(e).__name__,
-            )
-            # ``build_safe`` never raises (it falls back to sentinel identifiers if the
-            # marker itself can't be constructed, e.g. an empty ``tool_call_id``), so the
-            # failure reply is always published and the agent never hangs on reply-TTL.
-            marker = FailedToolCall.build_safe(
-                tool_name=payload.name,
-                tool_call_id=tool_call_id,
-                exc_type=type(e).__name__,
-                exc_message=safe_exc_message(e),
-            )
-            ctx.state.add_tool_result(tool_call_id, marker)
-            return ReturnCall[State](state=ctx.state)
-
-        # ``tool_return`` was constructed and serialization-verified inside the
-        # try block above; reuse it rather than constructing twice.
-        ctx.state.add_tool_result(tool_call_id, tool_return)
+            logger.warning("[%s] tool=%s raised ModelRetry: %s", ctx.correlation_id[:8], self.name, e.message)
+            # Render at origin to a calf.retry-marked TextPart on the reply slot — the RAW message
+            # (option 1): the agent hydrates the RetryPromptPart so the provider renders the
+            # fix-and-retry suffix exactly once. NOT a tool_results blob-write, NOT the fault rail.
+            return ReturnCall[State](state=ctx.state, value=[retry_text_part(e.message)])
 
         logger.debug("[%s] tool completed tool=%s", ctx.correlation_id[:8], self.name)
-        return ReturnCall[State](state=ctx.state)
+        # The result rides the reply slot (ReturnCall.value -> reply.parts at the chokepoint), not a
+        # state.tool_results blob-write; the calling agent materializes it at the callee slot
+        # (``_resolve_slot``) keyed by the echoed ``tag``.
+        return ReturnCall[State](state=ctx.state, value=result)
 
 
 def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> ToolNodeDef:
