@@ -19,7 +19,7 @@ from calfkit._protocol import HDR_ROUTE
 from calfkit._registry import handler
 from calfkit._routing import is_concrete_route_key, match_chain, route_matches
 from calfkit.exceptions import RegistryConfigError
-from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Silent, State, ToolContext, WorkflowState
+from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, State, ToolContext, WorkflowState
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.node import NodeDef
@@ -71,7 +71,7 @@ def test_run_may_be_redecorated_handler_star_with_schema() -> None:
     class N(NodeDef[Any]):
         @handler("*", schema=Body)
         async def run(self, ctx: SessionRunContext, payload: Body) -> Any:  # type: ignore[override]
-            return Silent()
+            return Next()
 
     assert "*" in N.routes()
 
@@ -86,7 +86,7 @@ async def test_run_star_handler_receives_routeless_payload() -> None:
         @handler("*", schema=Body)
         async def run(self, ctx: SessionRunContext, payload: Body) -> Any:  # type: ignore[override]
             seen["val"] = payload.val
-            return Silent()
+            return Next()
 
     await _handle(N(node_id="n", subscribe_topics=["t"]), {}, _envelope(payload={"val": "hi"}))
     assert seen["val"] == "hi"
@@ -98,7 +98,7 @@ async def test_plain_run_override_serves_routeless_message_as_star() -> None:
     class N(NodeDef[Any]):
         async def run(self, ctx: SessionRunContext) -> Any:
             seen.append("run")
-            return Silent()
+            return Next()
 
     await _handle(N(node_id="n", subscribe_topics=["t"]), {})
     assert seen == ["run"]
@@ -111,7 +111,7 @@ async def test_routes_only_node_skips_unmatched_via_declining_base_run() -> None
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             seen.append("created")
-            return Silent()
+            return Next()
 
     env = _envelope(callback_topic=None)
     resp = await _handle(N(node_id="n", subscribe_topics=["t"]), {HDR_ROUTE: "payment.x"}, env)
@@ -131,7 +131,7 @@ def test_extra_positional_run_without_schema_raises_at_class_def() -> None:
         # name intentionally-unused (CodeQL) while staying CapWords-valid (ruff N801).
         class _N(NodeDef[Any]):
             async def run(self, ctx: SessionRunContext, extra: Any) -> Any:  # type: ignore[override]
-                return Silent()
+                return Next()
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ async def test_unconsumed_routeless_body_auto_faults_callback_aware(caplog: pyte
     class N(NodeDef[Any]):
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
 
     published: list[Any] = []
 

@@ -190,8 +190,8 @@ async def test_agent_success_path_unchanged():
     result = await agent.run(ctx)
 
     # Pin the happy-path shape: a successful tool result followed by a terminal
-    # model response should end the agent run with a ReturnCall, not Silent,
-    # TailCall, or an exception. Locks the regression gate against accidental
+    # model response should end the agent run with a ReturnCall, not a
+    # TailCall or an exception. Locks the regression gate against accidental
     # short-circuits.
     assert isinstance(result, ReturnCall), f"expected ReturnCall, got {type(result).__name__}"
 

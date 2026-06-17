@@ -10,7 +10,6 @@ the node's own routes.
 from typing import Any
 
 from calfkit._registry import handler
-from calfkit.models import Silent
 from calfkit.models.session_context import SessionRunContext
 from calfkit.nodes.node import NodeDef
 
@@ -18,11 +17,9 @@ from calfkit.nodes.node import NodeDef
 def test_node_subclass_collects_handlers_and_run_is_registered_as_star() -> None:
     class GreeterNode(NodeDef):
         @handler("greet")
-        async def on_greet(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+        async def on_greet(self, ctx: SessionRunContext) -> Any: ...
 
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+        async def run(self, ctx: SessionRunContext) -> Any: ...
 
     # RegistryMixin.__init_subclass__ ran on the node → handler collected.
     assert "greet" in GreeterNode.routes()

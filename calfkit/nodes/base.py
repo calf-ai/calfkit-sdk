@@ -22,7 +22,6 @@ from calfkit.models import (
     Next,
     NodeResult,
     ReturnCall,
-    Silent,
     State,
     TailCall,
 )
@@ -63,8 +62,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SeamFn = TypeVar("_SeamFn", bound=Callable[..., Any])
-"""Preserves a seam handler's concrete type through the registration decorators (the
-``gate()`` return-fn-unchanged precedent), so a decorated handler stays directly callable."""
+"""Preserves a seam handler's concrete type through the registration decorators (which
+return the handler fn unchanged), so a decorated handler stays directly callable."""
 
 # A seam constructor parameter: one handler, a list of handlers, or unset. Typed loosely
 # (``Callable``) for now; the §6.3 per-seam typed aliases (``BeforeNodeSeam[StateT]`` etc.,
@@ -345,7 +344,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
 
         Appends to the same chain the ``before_node=`` constructor param feeds (constructor
         entries first, then decorated), and returns ``fn`` unchanged so it stays directly
-        unit-testable (the ``gate()`` precedent)."""
+        unit-testable."""
         self._register_seam(BEFORE_NODE, fn)
         return fn
 
@@ -561,13 +560,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 headers=self._headers("call"),
             )
 
-        elif isinstance(output, Silent):
-            logger.warning(
-                "node (%s) ran and was silent with no explicit publish. This is the end of this event-stream, any state modifications will not be carried downstream.",  # noqa: E501
-                self.name,
-            )
-            envelope.reply = None  # no-reply hop: don't re-broadcast an inbound reply (I3)
-            publish_envelope = envelope
         else:
             logger.error("Return type is unknown or invalid so the message was not published anywhere.")
             envelope.reply = None  # no-reply hop: don't re-broadcast an inbound reply (I3)

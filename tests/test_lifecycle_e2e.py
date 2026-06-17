@@ -37,7 +37,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse, Te
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client, InvocationResult
 from calfkit.exceptions import LifecycleConfigError
-from calfkit.models import Silent
+from calfkit.models import ReturnCall
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart as PayloadTextPart
 from calfkit.models.reply import ReturnMessage
@@ -103,7 +103,7 @@ class _ProbeNode(BaseNodeDef):
 
     async def run(self, ctx: SessionRunContext) -> Any:
         self._captured["resources"] = dict(ctx.resources)
-        return Silent()
+        return ReturnCall(state=ctx.state)
 
 
 # ---------------------------------------------------------------------------

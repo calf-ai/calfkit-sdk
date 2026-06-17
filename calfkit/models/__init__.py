@@ -4,7 +4,6 @@ from calfkit.models.actions import (  # noqa: I001 — actions first (see commen
     Next,
     NodeResult,
     ReturnCall,
-    Silent,
     TailCall,
     _Call,
 )
@@ -38,7 +37,6 @@ __all__ = [
     "Next",
     "NodeResult",
     "ReturnCall",
-    "Silent",
     "TailCall",
     "_Call",
     # envelope

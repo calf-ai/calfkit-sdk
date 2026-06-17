@@ -18,7 +18,6 @@ from calfkit.models import (
     Next,
     ReturnCall,
     SessionRunContext,
-    Silent,
     State,
     TailCall,
     TextPart,
@@ -63,17 +62,11 @@ class _RetNode(NodeDef[Any]):
     async def go(self, ctx: SessionRunContext) -> Any:
         return ReturnCall(state=ctx.state, value="hello")
 
-    async def run(self, ctx: SessionRunContext) -> Any:
-        return Silent()
-
 
 class _CallNode(NodeDef[Any]):
     @handler("go")
     async def go(self, ctx: SessionRunContext) -> Any:
         return Call("downstream", ctx.state)
-
-    async def run(self, ctx: SessionRunContext) -> Any:
-        return Silent()
 
 
 class _FanNode(NodeDef[Any]):
@@ -81,17 +74,11 @@ class _FanNode(NodeDef[Any]):
     async def go(self, ctx: SessionRunContext) -> Any:
         return [Call("a", ctx.state), Call("b", ctx.state)]
 
-    async def run(self, ctx: SessionRunContext) -> Any:
-        return Silent()
-
 
 class _TailNode(NodeDef[Any]):
     @handler("go")
     async def go(self, ctx: SessionRunContext) -> Any:
         return TailCall("downstream", ctx.state)
-
-    async def run(self, ctx: SessionRunContext) -> Any:
-        return Silent()
 
 
 async def _run(node: NodeDef[Any], env: Envelope, broker: _CaptureBroker) -> Any:
@@ -192,20 +179,6 @@ class TestNoReplyMirrorClearsInboundReply:
         broker = _CaptureBroker()
         leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
         resp = await _run(_FanNode(node_id="n", subscribe_topics=["t"]), _envelope(reply=leak), broker)
-        assert resp.body.reply is None
-
-    async def test_silent_mirror_clears_inbound_reply(self) -> None:
-        class _SilentNode(NodeDef[Any]):
-            @handler("go")
-            async def go(self, ctx: SessionRunContext) -> Any:
-                return Silent()
-
-            async def run(self, ctx: SessionRunContext) -> Any:
-                return Silent()
-
-        broker = _CaptureBroker()
-        leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
-        resp = await _run(_SilentNode(node_id="n", subscribe_topics=["t"]), _envelope(reply=leak), broker)
         assert resp.body.reply is None
 
     async def test_no_result_mirror_clears_inbound_reply(self) -> None:

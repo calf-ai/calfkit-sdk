@@ -22,7 +22,7 @@ def _node(**kwargs: object) -> BaseNodeDef:
 class TestDecoratorRegistration:
     def test_before_node_decorator_registers_in_order_and_returns_fn(self) -> None:
         # The decorator appends to the chain (registration order) and returns the
-        # function unchanged, so it stays directly unit-testable (the .gate() precedent).
+        # function unchanged, so it stays directly unit-testable.
         node = _node()
 
         @node.before_node
