@@ -420,3 +420,46 @@ class TestStrayCheck:
         assert resp.headers[HDR_KIND] == "fault"
         assert resp.headers[HDR_ERROR_TYPE] == "upstream.boom"
         assert "upstream.boom" in caplog.text  # floored in full
+
+
+class TestReceivedFaultEscalates:
+    async def test_received_fault_escalates_to_the_caller_by_default(self) -> None:
+        # §8 default (minimal stage-1): a node with no on_callee_error escalates a received callee
+        # fault up its own rail — the SAME report (stable report_id) re-addressed to the node's
+        # caller, never wrapped (§4.4). The body never runs.
+        node = _node()
+        report = ErrorReport(error_type="callee.boom", message="downstream failed")
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="callee-frame", tag="tc", error=report)
+        broker = _CaptureBroker()
+
+        resp = await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert len(broker.published) == 1
+        topic, env, headers = broker.published[0]
+        assert topic == "caller.return"
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.report_id == report.report_id  # re-addressed, never wrapped
+        assert env.reply.error.error_type == "callee.boom"
+        assert headers[HDR_KIND] == "fault"
+        assert isinstance(resp.body.reply, FaultMessage)  # broadcast mirror carries the fault
+
+    async def test_escalating_callee_fault_does_not_trip_on_node_error(self) -> None:
+        # R5 / §6.8: _BatchFaulted is RETURNED, never raised — escalating a callee fault must not
+        # trip the node's OWN on_node_error (the swallow trap that would convert it to a success).
+        node = _node()
+        consulted: list[bool] = []
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            consulted.append(True)
+            return "should-never-recover-a-callee-fault"
+
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="cf", tag="tc", error=ErrorReport(error_type="callee.boom"))
+        broker = _CaptureBroker()
+
+        await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert consulted == []  # on_node_error NOT consulted for a received callee fault
+        assert broker.published[0][1].reply.error.error_type == "callee.boom"  # escalated as-is

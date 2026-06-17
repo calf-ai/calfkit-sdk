@@ -119,8 +119,15 @@ class _BatchOpen:
     an incomplete sibling fold, or a no-op close (a spurious/abandoned/aborted re-entry)."""
 
 
-# TODO(fault rail PR-6): add ``_BatchFaulted(report: ErrorReport)`` to this union — an unhandled
-# callee fault closes the batch through the fault arm. Needs the fault wire model (PR-5).
+@dataclass(frozen=True)
+class _BatchFaulted:
+    """The aggregation / stage-1 stage resolved to a FAULT — escalate it up the node's own rail
+    (§6.8). **Returned, never raised** (R5): raising would trip the node's OWN ``on_node_error``
+    (the swallow trap that could convert a callee fault into a success). In step 3 it carries a
+    received callee fault escalating by default (§8); step 4 also produces it when a fan-out batch
+    closes with unhandled sibling faults (the fault group)."""
+
+    report: ErrorReport
 
 
 class _PipelineSentinel(Enum):
@@ -1032,7 +1039,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         awaiting_reply: bool,
         correlation_id: str,
         broker: BrokerAnnotation,
-    ) -> NodeResult[State] | _PipelineSentinel:
+    ) -> NodeResult[State] | _PipelineSentinel | _BatchFaulted:
         """The staged inner pipeline (fault-rail §6.8 ``_execute``).
 
         Stage 2 (:meth:`_aggregate`) on ``return`` deliveries: an open batch parks
@@ -1043,10 +1050,19 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         wraps the produced output. The body runs on ``run_ctx`` (``SessionRunContext``); the
         seams run on ``seam_ctx`` (``SeamContext``, sharing ``run_ctx.state``).
 
-        TODO(fault rail PR-6): stage 1 ``on_callee_error`` (before stage 2, on ``fault`` kind)
-        + the ``_BatchFaulted`` arm land with the fold widen (step 4), alongside ``_resolve_slot``
-        and the per-sibling handling.
+        Stage 1 (``fault`` kind): a received callee fault escalates by default (§8) as a
+        ``_BatchFaulted`` — RETURNED, never raised (R5), so it never trips the node's own
+        ``on_node_error``. The body never runs for a fault delivery.
+
+        TODO(fault rail PR-6 step 4): the FULL ``on_callee_error`` chain + ``_resolve_slot`` of
+        handled substitutes + the fan-out per-sibling stage-1 + the closure fault group (which also
+        yields ``_BatchFaulted``) land with the fold widen.
         """
+        if kind == "fault":  # ── stage 1: on_callee_error (minimal: escalate-by-default, §8) ──
+            # The stray-check (stage 0) guarantees a fault-kind delivery carries a FaultMessage, so
+            # reply.error is safe. Escalate the callee's fault up this node's own rail, unwrapped.
+            assert isinstance(envelope.reply, FaultMessage)  # stray-checked: fault kind ⇔ FaultMessage
+            return _BatchFaulted(envelope.reply.error)
         if kind == "return":
             match await self._aggregate(run_ctx, envelope, correlation_id, broker):
                 case _BatchOpen():
@@ -1254,6 +1270,12 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             )
             envelope.reply = None  # no-reply mirror (no result): don't re-broadcast an inbound reply (I3)
             return Response(envelope, headers=self._headers("call"))
+
+        if isinstance(output, _BatchFaulted):
+            # A callee fault escalating up this node's rail (§6.8): RETURNED from _execute, never
+            # raised, so it never tripped this node's own on_node_error. Re-address it to the caller
+            # on the pre-mutation snapshot — the same report, unwrapped (§4.4).
+            return await self._fault_response(output.report, snapshot, envelope, correlation_id, broker)
 
         # Fan-out OPEN: a fan-out-capable node whose body returned a parallel batch (N >= 2 Calls)
         # registers the durable batch + publishes the marked siblings. A non-capable node's
