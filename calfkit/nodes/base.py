@@ -495,29 +495,17 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 logger.debug("[%s] ReturnCall no-callback fire-and-forget terminal node=%s", correlation_id[:8], self.node_id)
             else:
                 logger.debug("[%s] ReturnCall callback=%s node=%s", correlation_id[:8], frame.callback_topic, self.node_id)
-                try:
-                    await broker.publish(
-                        publish_envelope,
-                        topic=frame.callback_topic,
-                        correlation_id=correlation_id,
-                        key=correlation_id.encode(),
-                        headers=self._headers("return"),
-                    )
-                except KafkaError:
-                    # Point-to-point delivery failed (e.g. a send(reply_to=...)
-                    # topic missing with auto-create off, or unauthorized).
-                    # Losing it must not also take down the publish_topic
-                    # broadcast below — the documented traceability fallback —
-                    # which only fires if this handler returns publish_envelope.
-                    # No retry/DLQ here: redelivery policy belongs to the
-                    # fault rail (#193 successor).
-                    logger.exception(
-                        "[%s] terminal result could not be delivered to callback_topic=%s node=%s; "
-                        "the terminal envelope is still returned for the publish_topic broadcast (no retry)",
-                        correlation_id,
-                        frame.callback_topic,
-                        self.node_id,
-                    )
+                # The publish failure is NOT swallowed here (the old traceability fallback):
+                # it propagates to the handler's publish guard, which faults the caller on the
+                # pre-mutation snapshot (scenario 42). The fault path is what carries the
+                # broadcast mirror now — so a lost delivery is still observable, as a fault.
+                await broker.publish(
+                    publish_envelope,
+                    topic=frame.callback_topic,
+                    correlation_id=correlation_id,
+                    key=correlation_id.encode(),
+                    headers=self._headers("return"),
+                )
 
         elif isinstance(output, TailCall):
             # tailcall optimization: replace current call frame with new tailcall
@@ -1156,7 +1144,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             return await self._handle_fanout_open(ctx, output, envelope, correlation_id, broker)
 
         logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
-        body, pubkind = await self._publish_action(output, envelope, correlation_id, broker)
+        # ── publish guard: a transport/size failure on the success rail NEVER re-enters
+        # on_node_error; it faults the caller directly on the pre-mutation snapshot (§6.8 / scenario 42).
+        try:
+            body, pubkind = await self._publish_action(output, envelope, correlation_id, broker)
+        except Exception as exc:
+            report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+            return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
         return Response(body, headers=self._headers(pubkind))
 
     @property

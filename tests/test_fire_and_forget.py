@@ -586,33 +586,20 @@ async def test_send_reply_to_rejects_illegal_topic_names(container):
     assert publish.await_count == 1
 
 
-async def test_return_call_callback_publish_failure_still_broadcasts(caplog):
-    """If the terminal point-to-point publish fails (e.g. the ``reply_to``
-    topic does not exist and auto-create is off), the failure must not take
-    the ``publish_topic`` broadcast down with it: the worker logs an ERROR
-    naming the topic and correlation id, and still returns the terminal
-    envelope so the traceability channel fires."""
+async def test_return_call_callback_publish_failure_propagates_to_the_publish_guard():
+    """The terminal point-to-point publish failure is no longer swallowed inside
+    ``_publish_action`` (the old broadcast-the-return traceability fallback, PR-6 scenario 42):
+    it propagates so the handler's publish guard faults the caller on the pre-mutation snapshot.
+    Traceability survives — as the fault's broadcast mirror — and the handler-level behavior is
+    covered in tests/test_fault_pipeline.py::TestPublishGuard."""
     node = _make_node()
     envelope = _make_envelope(callback_topic="missing.sink")
 
     broker = MagicMock()
     broker.publish = AsyncMock(side_effect=UnknownTopicOrPartitionError())
 
-    final_state = State()
-    with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-        result, _kind = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-fail", broker)
-
-    # The broadcast channel survives: the terminal envelope is still returned.
-    assert isinstance(result, Envelope)
-    assert result.context.state is final_state
-
-    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert errors, "callback publish failure must be logged at ERROR, not swallowed or escaped"
-    message = errors[-1].getMessage()
-    assert "missing.sink" in message, f"ERROR log must name the callback topic; got: {message}"
-    assert "cid-fail" in message, f"ERROR log must carry the correlation id; got: {message}"
-    # logger.exception attaches the traceback — the part an operator needs most.
-    assert errors[-1].exc_info, "the ERROR must carry exc_info (logged via logger.exception)"
+    with pytest.raises(UnknownTopicOrPartitionError):
+        await node._publish_action(ReturnCall(state=State()), envelope, "cid-fail", broker)
 
 
 async def test_tail_call_preserves_reply_to_callback():

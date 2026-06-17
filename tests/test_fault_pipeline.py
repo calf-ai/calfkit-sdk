@@ -12,10 +12,11 @@ import logging
 from typing import Any
 
 import pytest
+from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 
 from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
 from calfkit.exceptions import NodeFaultError
-from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, TextPart, WorkflowState
+from calfkit.models import CallFrame, CallFrameStack, Envelope, ReturnCall, SessionRunContext, State, TextPart, WorkflowState
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import SeamContext
@@ -217,3 +218,40 @@ class _MintingNode(BaseNodeDef):
 
     async def run(self, ctx: SessionRunContext) -> Any:
         raise NodeFaultError("billing.quota_exceeded", message="no funds")
+
+
+class _ReturningNode(BaseNodeDef):
+    async def run(self, ctx: SessionRunContext) -> Any:
+        return ReturnCall(state=ctx.state, value="ok")
+
+
+class _FailFirstBroker:
+    """Fails the first publish (the terminal ReturnCall), captures the rest (the fault)."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, Any, dict[str, str]]] = []
+        self.calls = 0
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            raise KafkaError("transient publish failure")
+        self.published.append((topic, envelope, headers))
+
+
+class TestPublishGuard:
+    async def test_failed_terminal_publish_becomes_a_fault_to_the_caller(self) -> None:
+        # Scenario 42: a broker failure on the terminal ReturnCall publish synthesizes a fault
+        # addressed to the caller via the pre-mutation snapshot (the publish guard never
+        # re-enters on_node_error). _publish_action no longer swallows the failure internally.
+        node = _ReturningNode(node_id="n", subscribe_topics=["in"])
+        broker = _FailFirstBroker()
+
+        resp = await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        assert broker.calls == 2  # the failed return publish, then the fault publish
+        topic, env, headers = broker.published[0]
+        assert topic == "caller.return"
+        assert isinstance(env.reply, FaultMessage)
+        assert headers[HDR_KIND] == "fault"
+        assert isinstance(resp.body.reply, FaultMessage)
