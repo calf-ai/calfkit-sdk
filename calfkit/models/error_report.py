@@ -66,6 +66,13 @@ class FaultTypes:
     # dropped causes/frame_chain/details after an unexpected construction error).
     ELIDED = "calf.elided"
 
+    # details key: the breadcrumb the on_node_error chain runner records when a
+    # recovery handler *accidentally* raises (spec §6.5 / scenario 9). The handler
+    # is treated as declining, but its failure is noted here — a list of
+    # ``{"handler", "exc_type", "exc_message"}`` dicts — so the escalating original
+    # fault carries the trace of every recovery attempt that itself broke.
+    SEAM_ERRORS = "calf.seam_errors"
+
 
 class FrameRef(BaseModel):
     """Topology-only breadcrumb of one call frame (spec §4.3).
