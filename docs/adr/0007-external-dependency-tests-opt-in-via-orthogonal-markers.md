@@ -61,6 +61,6 @@ instead of skipping). Unlike the `kafka` lane (which also runs on path-filtered
 PRs), the `live` lane runs **only on push-to-main and on manual dispatch, never
 on PRs** (`integration-live.yml`): the model calls are paid and
 non-deterministic, and keeping them off PRs also means the provider secret is
-never exposed to PR (incl. fork) runs — so `test.yml` dropped its conditional
-secret injection entirely. The default-suite coverage baseline re-levels on the
+never exposed to PR (incl. fork) runs — so the default-suite workflow
+(`ci.yml`) carries no conditional secret injection. The default-suite coverage baseline re-levels on the
 next push to main once the live tests no longer contribute to it.

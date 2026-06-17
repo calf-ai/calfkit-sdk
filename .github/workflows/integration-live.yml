@@ -6,7 +6,7 @@ name: "Integration: live LLM"
 # needs NO Docker or broker -- only model-API credentials.
 #
 # These tests are deselected from the default suite (see `addopts` in
-# pyproject.toml, ADR 0007), so `test.yml` never needs credentials. This lane
+# pyproject.toml, ADR 0007), so `ci.yml` never needs credentials. This lane
 # runs ONLY on push-to-main (a post-merge check) and on manual dispatch -- never
 # on pull requests. That keeps the paid, non-deterministic model calls off every
 # PR, and means the provider secret is never exposed to PR (incl. fork) runs, so
@@ -33,20 +33,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+      # No `integration` group: the live tests use the in-memory TestKafkaBroker,
+      # not a real broker, so testcontainers/Docker are not needed.
+      - name: Set up Python and dependencies
+        uses: ./.github/actions/setup
         with:
           python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        # No `integration` group: the live tests use the in-memory TestKafkaBroker,
-        # not a real broker, so testcontainers/Docker are not needed.
-        run: uv sync --group dev
+          groups: "dev"
 
       - name: Run live-LLM tests
         # `-m live` overrides the default `-m "not kafka and not live"` deselection.
