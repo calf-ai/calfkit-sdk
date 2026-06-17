@@ -10,6 +10,7 @@ from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.models.node_result import _UNSET, project_output
 from calfkit.models.payload import ContentPart
+from calfkit.models.reply import ReturnMessage  # runtime: output_parts isinstance-guards on it
 from calfkit.models.state import State
 
 if TYPE_CHECKING:
@@ -90,7 +91,7 @@ class ConsumerContext(Generic[OutputT]):
         """
         return cls(
             output=project_output(ctx._reply, output_type, strict=False, type_adapter=type_adapter),
-            output_parts=ctx._reply.parts if ctx._reply is not None else [],
+            output_parts=ctx._reply.parts if isinstance(ctx._reply, ReturnMessage) else [],
             state=ctx.state,
             correlation_id=ctx.correlation_id,
             emitter_node_id=ctx.emitter_node_id,

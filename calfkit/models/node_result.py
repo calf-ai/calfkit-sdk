@@ -10,11 +10,12 @@ from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import DeserializationError
 from calfkit.models.payload import ContentPart, DataPart, TextPart
+from calfkit.models.reply import ReturnMessage  # runtime: project_output isinstance-guards on it
 from calfkit.models.state import State
 
 if TYPE_CHECKING:
     from calfkit.models.envelope import Envelope
-    from calfkit.models.reply import ReturnMessage
+    from calfkit.models.reply import FaultMessage
     from calfkit.models.session_context import SessionRunContext
 
 _UNSET: Any = object()
@@ -195,7 +196,7 @@ class InvocationResult(Generic[OutputT]):
 
         return cls(
             output=output,
-            output_parts=ctx._reply.parts if ctx._reply is not None else [],
+            output_parts=ctx._reply.parts if isinstance(ctx._reply, ReturnMessage) else [],
             state=state,
             correlation_id=correlation_id if correlation_id is not None else ctx.correlation_id,
             emitter_node_id=ctx.emitter_node_id,
@@ -244,17 +245,23 @@ class InvocationResult(Generic[OutputT]):
 
 
 def project_output(
-    reply: ReturnMessage | None, output_type: type[Any] = _UNSET, *, strict: bool, type_adapter: TypeAdapter[Any] | None = None
+    reply: ReturnMessage | FaultMessage | None,
+    output_type: type[Any] = _UNSET,
+    *,
+    strict: bool,
+    type_adapter: TypeAdapter[Any] | None = None,
 ) -> Any:
     """Project the deserialized output from the delivery's reply slot (spec §4.5).
 
     Shared by :meth:`InvocationResult.from_context` (client, ``strict=True``) and
-    :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). With
-    ``strict=False`` an empty/absent reply (an intermediate hop) yields ``None``;
-    otherwise the matching part is extracted/validated per ``output_type`` (raising
-    ``DeserializationError``/``ValidationError`` on a present-but-mismatched part).
+    :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). A
+    ``FaultMessage`` reply has no parts, so it reads as no-parts (never an
+    ``AttributeError``); the typed fault reception is the deferred reception PR's job.
+    With ``strict=False`` an empty/absent reply (an intermediate hop, or a fault) yields
+    ``None``; otherwise the matching part is extracted/validated per ``output_type``
+    (raising ``DeserializationError``/``ValidationError`` on a present-but-mismatched part).
     """
-    parts = reply.parts if reply is not None else []
+    parts = reply.parts if isinstance(reply, ReturnMessage) else []
     if not parts and not strict:
         return None
     return _extract_output(parts, output_type, type_adapter=type_adapter)
