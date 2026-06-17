@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
-from calfkit.exceptions import RegistryConfigError
+from calfkit.exceptions import RegistryConfigError, SeamContractError
 from calfkit.models import (
     Call,
     Next,
@@ -31,6 +31,7 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.node_schema import BaseNodeSchema
 from calfkit.models.reply import ReturnMessage
+from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
 from calfkit.nodes._fanout_store import (
     FANOUT_STORE_KEY,
@@ -479,6 +480,38 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 f"{FANOUT_STORE_KEY!r}; a fan-out-capable agent needs its durable store resource."
             )
         return cast(FanoutBatchStore, store)
+
+    # ── seam conversions (generic, sealed; spec §6.9) ────────────────────────────
+    # Additive in step 1 — wired into the staged pipeline (stage 3/5/6) in step 3.
+
+    def _coerce_output(self, ctx: SeamContext[State], value: Any) -> NodeResult[State]:
+        """Convert a seam's plain return value into the node's output action (spec §6.9).
+
+        The value becomes a ``ReturnCall`` carrying ``ctx.state``; the value→parts
+        coercion happens once later, at the publish chokepoint (§4.5). Used for every
+        value-substituting seam (``before_node`` short-circuit, ``on_node_error``
+        recovery, ``after_node`` replacement) so seam handling needs no per-seam cases.
+
+        The §6.2 teaching guards reject return types that can never be a node output,
+        loudly (``SeamContractError`` → ``on_node_error`` → fault), never silently.
+        """
+        # bool BEFORE any int-accepting path: bool subclasses int, and a gate's
+        # `return True` ported to a seam must not become the node's output (§6.2).
+        if isinstance(value, bool):
+            raise SeamContractError(
+                "a seam returned a bool, which is never a node output; return None to proceed, substitute a real output, or raise to reject."
+            )
+        # The session record / the context itself must not be serialized out as the
+        # node's answer — the reflexive functional idiom; mutate ctx.state instead (§6.2).
+        if isinstance(value, (State, SeamContext)):
+            raise SeamContractError(
+                "a seam returned the session State or the SeamContext itself, which is not a node "
+                "output; transform the input by mutating ctx.state in place and returning None."
+            )
+        # bytes has no parts arm (§4.5) — reject rather than guess an encoding.
+        if isinstance(value, bytes):
+            raise SeamContractError("a seam returned bytes, which has no parts representation; return str, structured data, or a model.")
+        return ReturnCall[State](state=ctx.state, value=value)
 
     def _classify(self, headers: dict[str, Any]) -> MessageKind:
         """Classify the inbound delivery kind from the ``x-calf-kind`` header (§6.8 stage-0).

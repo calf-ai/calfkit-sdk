@@ -97,6 +97,17 @@ class NodeFaultError(Exception):
         return (self.__class__, (self.report,))
 
 
+class SeamContractError(Exception):
+    """A policy seam violated its contract (spec §6.2 / §6.8).
+
+    Raised when a seam returns a value that can never be a node output — a ``bool``,
+    the session ``State`` or the ``SeamContext`` itself, or ``bytes`` (the §6.2
+    coercion guards) — or when ``after_node`` returns an action instead of a value
+    (§6.8). It faults loudly (P1) so a migration trap corrupts nothing silently; the
+    skeleton routes it to ``on_node_error`` like any other node-own raise.
+    """
+
+
 class DeserializationError(Exception):
     """Raised when client-side output deserialization fails."""
 
