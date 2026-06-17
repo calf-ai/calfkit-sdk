@@ -19,8 +19,9 @@ from calfkit._protocol import HDR_KIND
 from calfkit._vendor.pydantic_ai.messages import ToolReturn
 from calfkit.models import ReturnCall
 from calfkit.models.envelope import Envelope
+from calfkit.models.error_report import ErrorReport
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
-from calfkit.models.reply import ReturnMessage
+from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
@@ -91,7 +92,7 @@ def _marked_env(*, in_reply_to: str, tag: str | None = "tc1", state: State | Non
     )
 
 
-def _plain_env(*, reply: ReturnMessage | None = None) -> Envelope:
+def _plain_env(*, reply: ReturnMessage | FaultMessage | None = None) -> Envelope:
     # An ordinary (non-fan-out) delivery: a single unmarked frame on top.
     frame = CallFrame(target_topic="b", callback_topic="caller", frame_id="A")
     return Envelope(
@@ -132,6 +133,32 @@ class TestClassify:
         # An unrecognized value is not classified as work — None signals ignore (§4.1 rule 2):
         # a node must not execute a delivery it cannot classify.
         assert _node()._classify({HDR_KIND: "bogus"}) is None
+
+
+class TestStrayCheck:
+    """``_stray_check`` gates the kind↔reply-slot SHAPE agreement (§4.1 rule 3): ``call``↔no reply,
+    ``return``↔``ReturnMessage``, ``fault``↔``FaultMessage``. Agreement → ``None`` (proceed); a
+    disagreement → a ``_Stray`` (floored, never run as work). A pure body-aware gate, separate
+    from header classification."""
+
+    def test_agreeing_shapes_are_not_stray(self) -> None:
+        node = _node()
+        assert node._stray_check("call", _plain_env(reply=None)) is None
+        assert node._stray_check("return", _plain_env(reply=ReturnMessage(in_reply_to="A", tag="t", parts=[]))) is None
+        assert node._stray_check("fault", _plain_env(reply=FaultMessage(in_reply_to="A", tag="t", error=ErrorReport(error_type="x")))) is None
+
+    def test_fault_kind_with_no_reply_is_stray(self) -> None:
+        # scenario 29: kind=fault but reply=None — a disagreement (never the node-own-failure path).
+        assert _node()._stray_check("fault", _plain_env(reply=None)) is not None
+
+    def test_return_kind_with_fault_reply_is_stray(self) -> None:
+        env = _plain_env(reply=FaultMessage(in_reply_to="A", tag="t", error=ErrorReport(error_type="x")))
+        assert _node()._stray_check("return", env) is not None
+
+    def test_call_kind_with_a_reply_is_stray(self) -> None:
+        # A call carries no reply slot; one present is a disagreement.
+        env = _plain_env(reply=ReturnMessage(in_reply_to="A", tag="t", parts=[]))
+        assert _node()._stray_check("call", env) is not None
 
 
 class TestAggregate:

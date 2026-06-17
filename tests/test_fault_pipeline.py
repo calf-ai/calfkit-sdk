@@ -384,3 +384,39 @@ class TestUnknownKind:
         assert resp.headers[HDR_KIND] == "call"
         assert "bogus" in caplog.text  # the unrecognized value is logged
         assert "upstream.boom" in caplog.text  # the readable inbound report floored in full
+
+
+class TestStrayCheck:
+    async def test_fault_kind_with_no_reply_is_a_stray_not_escalated(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Scenario 29: kind=fault but reply=None (kind/slot disagreement) → stray, WARNING + ignore.
+        # NEVER the node-own-failure path: junk on the return inbox must not fault a live
+        # invocation. The body never runs (no publish), cleared no-reply mirror returned.
+        node = _ReturningNode(node_id="n", subscribe_topics=["in"])  # body WOULD publish a ReturnCall
+        inbound = _framed_envelope(callback_topic="caller.return")  # reply is None
+        broker = _CaptureBroker()
+
+        with caplog.at_level(logging.WARNING):
+            resp = await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert broker.published == []  # not escalated, body did not run
+        assert resp.body.reply is None  # cleared no-reply mirror
+        assert resp.headers[HDR_KIND] == "call"
+        assert "stray" in caplog.text.lower()
+
+    async def test_stray_readable_fault_floors_and_broadcasts(self, caplog: pytest.LogCaptureFixture) -> None:
+        # §6.7: a readable FaultMessage under a disagreeing header (kind=return) → ERROR + the
+        # report floored in full + broadcast mirror (kind=fault headers) — never a bare warning,
+        # and never a point-to-point publish (a stray has no caller relationship).
+        node = _ReturningNode(node_id="n", subscribe_topics=["in"])
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="f", tag="t", error=ErrorReport(error_type="upstream.boom"))
+        broker = _CaptureBroker()
+
+        with caplog.at_level(logging.ERROR):
+            resp = await node.handler(inbound, "cid", {HDR_KIND: "return"}, broker)
+
+        assert broker.published == []  # no point-to-point publish
+        assert isinstance(resp.body.reply, FaultMessage)  # broadcast mirror carries the fault
+        assert resp.headers[HDR_KIND] == "fault"
+        assert resp.headers[HDR_ERROR_TYPE] == "upstream.boom"
+        assert "upstream.boom" in caplog.text  # floored in full

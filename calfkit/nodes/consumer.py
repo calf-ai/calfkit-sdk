@@ -4,12 +4,15 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar, Generic
 
+from faststream import Response
+from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 from pydantic import TypeAdapter, ValidationError
 
 from calfkit._protocol import NodeKind
 from calfkit._types import OutputT
 from calfkit.exceptions import DeserializationError
 from calfkit.models.consumer_context import ConsumerContext
+from calfkit.models.envelope import Envelope
 from calfkit.models.node_result import _UNSET
 from calfkit.models.session_context import SessionRunContext
 from calfkit.nodes.base import BaseNodeDef
@@ -104,6 +107,32 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
                 ctx.emitter_node_id,
                 ctx.emitter_node_kind,
             )
+
+    async def _handle_delivery(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any], broker: BrokerAnnotation) -> Response:
+        """The observer delivery path (§6.6 / §6.7), overriding the caller-capable fault pipeline.
+
+        Every kind reaches the consume body as an observation — there are **no** seams, no
+        stray-check, no fault boundary, no auto-fault, and no escalation: an observer never produces
+        on the workflow's rails. Decode the emitter, build the context, run the consume body, and
+        return the no-reply mirror.
+
+        ``run`` owns the ``consume_fn``'s own error handling (and re-raises ``CancelledError``); a
+        framework failure *before* the consume body (e.g. a projection error in
+        :meth:`prepare_context`) floor-logs here (P1) rather than faulting — a ``CancelledError``,
+        being a ``BaseException``, still propagates through the ``except Exception``.
+        """
+        emitter, emitter_kind = self._decode_emitter(headers, correlation_id)
+        try:
+            ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
+            await self.run(ctx)
+        except Exception:
+            logger.exception(
+                "[%s] observer=%s delivery handling failed before the consume body; floored (observers never reach the rails)",
+                correlation_id[:8],
+                self.node_id,
+            )
+        envelope.reply = None  # observers never produce on the workflow's rails (§6.6)
+        return Response(envelope, headers=self._headers("call"))
 
 
 def consumer(

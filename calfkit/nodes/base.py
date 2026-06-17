@@ -139,6 +139,17 @@ _CONSUMED: Final = _PipelineSentinel.CONSUMED
 _DECLINED: Final = _PipelineSentinel.DECLINED
 
 
+@dataclass(frozen=True)
+class _Stray:
+    """A stage-0 stray: the inbound delivery's reply-slot SHAPE disagrees with its asserted
+    ``x-calf-kind`` (§4.1 rule 3 — ``call`` ↔ no reply, ``return`` ↔ ``ReturnMessage``,
+    ``fault`` ↔ ``FaultMessage``). Floored and ignored before the seams by
+    :meth:`BaseNodeDef._floor_stray`, never run as work — a junk/foreign delivery must never
+    fault the node's own live invocation. ``kind`` is the asserted (header) kind, for the log."""
+
+    kind: MessageKind
+
+
 # ---------------------------------------------------------------------------
 # Base node definition
 # ---------------------------------------------------------------------------
@@ -783,6 +794,51 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             return "fault"
         return None
 
+    def _stray_check(self, kind: MessageKind, envelope: Envelope) -> _Stray | None:
+        """Check the kind ↔ reply-slot-shape agreement (§4.1 rule 3 / §6.7), run BEFORE the seams.
+
+        The single publish chokepoint stamps ``x-calf-kind`` and the reply slot together, so a
+        calfkit-produced delivery always agrees (``call`` ↔ no reply, ``return`` ↔ ``ReturnMessage``,
+        ``fault`` ↔ ``FaultMessage``). A disagreement is a foreign/malformed delivery — a ``_Stray``,
+        floored and ignored (:meth:`_floor_stray`); it must never reach the seams or fault the node's
+        own live invocation (without this, a ``fault``-kind delivery with no slot would ``reply.error``
+        → ``AttributeError`` and escalate the whole invocation). Pure and body-aware, by design
+        distinct from header classification (:meth:`_classify`)."""
+        reply = envelope.reply
+        agrees = (
+            (kind == "call" and reply is None)
+            or (kind == "return" and isinstance(reply, ReturnMessage))
+            or (kind == "fault" and isinstance(reply, FaultMessage))
+        )
+        return None if agrees else _Stray(kind=kind)
+
+    def _floor_stray(self, stray: _Stray, envelope: Envelope, correlation_id: str) -> Response:
+        """Floor + drop a stray (kind ↔ slot disagreement, §6.7), never run as work.
+
+        A readable :class:`FaultMessage` under a disagreeing header takes the floor — ERROR with the
+        full report + the broadcast mirror (kind/error-type headers stamped) so ops can tap it where
+        a ``publish_topic`` exists — but NO point-to-point publish (a stray has no caller relationship
+        to answer). Any other disagreement is WARNING + ignore, returning the cleared no-reply mirror
+        (I3). Either way the node's own live invocation is untouched (P1's floor arm)."""
+        reply = envelope.reply
+        if isinstance(reply, FaultMessage):
+            logger.error(
+                "[%s] stray fault (asserted kind=%s ↔ slot disagreement) node=%s; flooring report=%s",
+                correlation_id[:8],
+                stray.kind,
+                self.node_id,
+                reply.error.model_dump_json(),
+            )
+            return Response(envelope, headers=self._headers("fault") | {HDR_ERROR_TYPE: reply.error.error_type})
+        logger.warning(
+            "[%s] stray %s (kind ↔ slot disagreement) node=%s; ignoring (the live invocation is untouched)",
+            correlation_id[:8],
+            stray.kind,
+            self.node_id,
+        )
+        envelope.reply = None  # cleared no-reply mirror (I3)
+        return Response(envelope, headers=self._headers("call"))
+
     def _classify_fanout(self, envelope: Envelope) -> Literal["sibling", "reentry"] | None:
         """Recognize a fan-out continuation on a fan-out-capable node.
 
@@ -1071,26 +1127,10 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             return result
         return None
 
-    async def handler(
-        self,
-        envelope: Envelope,
-        correlation_id: Annotated[str, Context()],
-        headers: Annotated[dict[str, Any], Context("message.headers")],
-        broker: BrokerAnnotation,
-    ) -> Response:
-        """The closed per-delivery pipeline (fault-rail §6.8).
-
-        stage-0 (emitter decode → :meth:`_classify` → :meth:`prepare_context` →
-        :meth:`_build_seam_context`) → the fault boundary around :meth:`_execute` (the seam stages
-        + the body) → output disposition + the publish guard. A node-own raise becomes a typed
-        fault on the success rail (P1 — no silent drop); a ``NodeFaultError`` is the mint gesture
-        (bypasses ``on_node_error``, §6.5); a failed terminal publish faults the caller (scenario 42).
-        Returns a broadcast-mirror :class:`Response` whose ``x-calf-kind`` is the hop's kind.
-
-        TODO(fault rail PR-6): stage-0 ``_stray_check``/``_floor_stray`` + the ``_classify``
-        kind/slot-disagreement arm; the ``_DECLINED`` → ``calf.delivery.rejected`` auto-fault;
-        the mid-batch ``_in_batch_work`` → ``_publish_abort`` arms (land with the fold, step 4).
-        """
+    def _decode_emitter(self, headers: dict[str, Any], correlation_id: str) -> tuple[str | None, str | None]:
+        """Decode the inbound emitter id/kind headers — the per-delivery prelude shared by the
+        caller-capable and observer paths. The emitter is diagnostic (logging + ``ctx`` stamping),
+        never load-bearing, so a missing/garbled id (a non-calfkit producer) WARNs but never fails."""
         raw_emitter = headers.get(HDR_EMITTER)
         emitter = decode_header_str(raw_emitter)
         if emitter is None:
@@ -1101,7 +1141,39 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 HDR_EMITTER,
                 "None" if raw_emitter is None else type(raw_emitter).__name__,
             )
-        emitter_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
+        return emitter, decode_header_str(headers.get(HDR_EMITTER_KIND))
+
+    async def handler(
+        self,
+        envelope: Envelope,
+        correlation_id: Annotated[str, Context()],
+        headers: Annotated[dict[str, Any], Context("message.headers")],
+        broker: BrokerAnnotation,
+    ) -> Response:
+        """The FastStream per-delivery entrypoint. Single-sources the dependency-injection
+        annotations (``correlation_id``/``headers``/``broker``) and forwards to the polymorphic
+        :meth:`_handle_delivery` — caller-capable nodes run the §6.8 fault pipeline; observers
+        (:class:`~calfkit.nodes.consumer.ConsumerNode`) run the observe-only consume path (§6.6).
+        Kept thin so a node family varies its delivery handling by overriding ``_handle_delivery``,
+        never by re-declaring the FastStream contract."""
+        return await self._handle_delivery(envelope, correlation_id, headers, broker)
+
+    async def _handle_delivery(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any], broker: BrokerAnnotation) -> Response:
+        """The caller-capable per-delivery pipeline (fault-rail §6.8).
+
+        Emitter decode → stage-0 guard (:meth:`_classify` → :meth:`prepare_context` →
+        :meth:`_build_seam_context` → :meth:`_stray_check`) → the fault boundary around
+        :meth:`_execute` (the seam stages + the body) → output disposition + the publish guard.
+        A node-own raise becomes a typed fault on the success rail (P1 — no silent drop); a
+        ``NodeFaultError`` is the mint gesture (bypasses ``on_node_error``, §6.5); a failed terminal
+        publish faults the caller (scenario 42). Returns a broadcast-mirror :class:`Response` whose
+        ``x-calf-kind`` is the hop's kind. Observers (``ConsumerNode``) override this with the
+        observe-only path — they never enter the fault pipeline (§6.6).
+
+        TODO(fault rail PR-6): the ``_DECLINED`` → ``calf.delivery.rejected`` auto-fault (step D);
+        the mid-batch ``_in_batch_work`` → ``_publish_abort`` arms (land with the fold, step 4).
+        """
+        emitter, emitter_kind = self._decode_emitter(headers, correlation_id)
         # ── stage-0 guard: no user code may run before a context exists (§6.8 / R1) ──
         # A raise in classify/context-build is handled BELOW the seams (no ctx yet): a
         # call-kind ingress faults the caller where the stack is readable, a return/fault
@@ -1113,6 +1185,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
             ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
             seam_ctx = self._build_seam_context(ctx, envelope, headers, kind)
+            stray = self._stray_check(kind, envelope)  # kind ↔ slot agreement, BEFORE the seams (§6.7)
+            if stray is not None:
+                return self._floor_stray(stray, envelope, correlation_id)
         except Exception as exc:
             return await self._floor_stage0(exc, envelope, headers, correlation_id, broker)
 

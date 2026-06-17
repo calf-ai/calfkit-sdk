@@ -16,7 +16,7 @@ import pytest
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from pydantic import TypeAdapter
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
 from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -390,6 +390,22 @@ async def test_cancelled_error_always_propagates():
     node = ConsumerNode(node_id="cancel_sink", subscribe_topics="t", consume_fn=cancels)
     with pytest.raises(asyncio.CancelledError):
         await _handle(node, _envelope(_text_reply("hi")))
+
+
+async def test_observer_observes_every_kind_even_a_caller_capable_stray_shape(caplog):
+    """§6.6 / Option C: an observer sees EVERY kind as an observation. A kind/reply combination
+    that a *caller-capable* node would floor as a stray (here x-calf-kind=fault carrying an
+    ordinary ReturnMessage) still reaches the consume body — observers bypass the caller-capable
+    stray-check / fault pipeline entirely and never fault or floor a peer's observed traffic."""
+    captured: list[ConsumerContext] = []
+    node = ConsumerNode(node_id="obs_sink", subscribe_topics="t", consume_fn=captured.append)
+
+    with caplog.at_level(logging.WARNING, logger=BASE_LOGGER):
+        await _handle(node, _envelope(_text_reply("observed")), headers={**_HEADERS, HDR_KIND: b"fault"})
+
+    assert len(captured) == 1  # the consume body ran — nothing was floored as a stray
+    assert captured[0].output == "observed"
+    assert not any("stray" in r.getMessage().lower() for r in caplog.records)  # no caller-capable stray handling
 
 
 async def test_callable_class_generator_detected_at_call_site(caplog):
