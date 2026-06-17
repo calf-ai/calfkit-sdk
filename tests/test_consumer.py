@@ -441,62 +441,25 @@ async def test_function_returning_async_generator_object_detected(caplog):
 
 
 # ---------------------------------------------------------------------------
-# Gates
+# Consumer self-filtering (gates retired in PR-6; consumers have no seams, §6.6/§10,
+# so a consumer drops intermediate hops by early-returning from its own body)
 # ---------------------------------------------------------------------------
 
 
-async def test_gate_rejection_skips_consume_fn(container):
-    invocations: list[str] = []
-
-    @consumer(subscribe_topics="consumer_test_agent.output", gates=[lambda ctx: False])
-    def sink(ctx: ConsumerContext) -> None:
-        invocations.append("ran")
-
-    agent = _wire_agent_with_consumer(container, sink)
-    broker = container.get(KafkaBroker)
-    client = container.get(Client)
-
-    async with TestKafkaBroker(broker):
-        result = await client.execute("hi", agent.subscribe_topics[0], timeout=5)
-        assert result.output == "done"
-
-    assert invocations == []
-
-
-async def test_gate_acceptance_runs_consume_fn(container):
-    gate_calls: list[str] = []
-    invocations: list[str] = []
-
-    def accept(ctx: SessionRunContext) -> bool:
-        gate_calls.append("g")
-        return True
-
-    @consumer(subscribe_topics="consumer_test_agent.output", gates=[accept])
-    def sink(ctx: ConsumerContext) -> None:
-        invocations.append("ran")
-
-    agent = _wire_agent_with_consumer(container, sink)
-    broker = container.get(KafkaBroker)
-    client = container.get(Client)
-
-    async with TestKafkaBroker(broker):
-        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
-
-    assert gate_calls
-    assert invocations
-
-
-async def test_final_only_gate_idiom_filters_intermediate():
-    """Documented idiom: a gate keyed off the reply slot drops intermediate hops."""
+async def test_final_only_consumer_idiom_filters_intermediate():
+    """Documented idiom (§10): a consumer keeps only terminal deliveries by
+    early-returning from its own body when there is no reply-slot output."""
     received: list[ConsumerContext] = []
 
-    def has_final_output(ctx: SessionRunContext) -> bool:
-        return bool(ctx.output_parts)
+    def consume(ctx: ConsumerContext) -> None:
+        if not ctx.output_parts:
+            return  # intermediate hop — skip
+        received.append(ctx)
 
-    node = ConsumerNode(node_id="filtered", subscribe_topics="t", consume_fn=received.append, gates=[has_final_output])
+    node = ConsumerNode(node_id="filtered", subscribe_topics="t", consume_fn=consume)
 
-    await _handle(node, _envelope(), correlation_id="cid-int")  # intermediate → rejected
-    await _handle(node, _envelope(_text_reply("final!")), correlation_id="cid-final")  # terminal → accepted
+    await _handle(node, _envelope(), correlation_id="cid-int")  # intermediate → skipped
+    await _handle(node, _envelope(_text_reply("final!")), correlation_id="cid-final")  # terminal → kept
 
     assert len(received) == 1
     assert received[0].output == "final!"

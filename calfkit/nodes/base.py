@@ -1,6 +1,6 @@
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, TypeVar, cast
@@ -97,15 +97,6 @@ def _stuck_level(awaiting_reply: bool) -> int:
     """``WARNING`` when a caller is awaiting a reply (an unmatched/malformed/declined
     route stalls that workflow), else ``DEBUG`` (a fire-and-forget no-op)."""
     return logging.WARNING if awaiting_reply else logging.DEBUG
-
-
-GateFunction = Callable[[SessionRunContext], bool | Awaitable[bool]]
-"""A predicate evaluated in ``handler()`` before ``run()``. Sync or async; must return ``bool``.
-
-Returning ``False`` (or raising, or returning a non-bool) skips ``run()`` and returns the
-envelope unchanged. Gates stack with AND semantics in registration order and short-circuit
-on the first rejection.
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +200,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         node_id: str,
         subscribe_topics: list[str],
         publish_topic: str | None = None,
-        gates: list[GateFunction] | None = None,
         before_node: _SeamArg = None,
         after_node: _SeamArg = None,
         on_node_error: _SeamArg = None,
@@ -227,11 +217,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 fix), so the node would "register" successfully while being
                 functionally unreachable from the outside.
             publish_topic: Optional default topic to publish results to.
-            gates: Optional list of predicates evaluated in ``handler()`` before
-                ``run()``. Stack with AND semantics in registration order;
-                short-circuits on the first ``False``, exception, or non-bool.
-                Returning anything other than ``True`` rejects the message:
-                ``run()`` is skipped and the envelope is returned unchanged.
+            before_node, after_node, on_node_error, on_callee_error: Optional policy-seam
+                handlers — a single callable or a list (spec §6.1). Constructor entries
+                precede any decorator-registered handlers in the same chain.
 
         Raises:
             ValueError: If ``subscribe_topics`` is empty. Enforced uniformly
@@ -242,7 +230,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             subscribe_topics=subscribe_topics,
             publish_topic=publish_topic,
         )
-        self.gates: list[GateFunction] = list(gates) if gates else []
         # The constructor seam params register first (decorator entries append after, §6.1
         # chain-order). The chains themselves are lazily created by the ``_chains`` property.
         self._register_seam_params(BEFORE_NODE, before_node)
@@ -317,46 +304,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         """Register an ``on_callee_error`` handler (instance decorator; repeatable; see :meth:`before_node`)."""
         self._register_seam(ON_CALLEE_ERROR, fn)
         return fn
-
-    def gate(self, fn: GateFunction) -> GateFunction:
-        """Register a gate predicate. Usable as a decorator. Repeatable.
-
-        Multiple gates evaluate in registration order with AND semantics
-        (short-circuit on the first ``False``, exception, or non-bool return).
-        Returns ``fn`` unchanged so it remains callable.
-        """
-        self.gates.append(fn)
-        return fn
-
-    async def _evaluate_gates(self, ctx: SessionRunContext, correlation_id: str) -> bool:
-        for i, gate in enumerate(self.gates):
-            try:
-                result = gate(ctx)
-                if inspect.isawaitable(result):
-                    result = await result
-                if not isinstance(result, bool):
-                    raise TypeError(
-                        f"gate[{i}] {getattr(gate, '__name__', repr(gate))} for node={self.node_id} returned {type(result).__name__}; expected bool"
-                    )
-                if not result:
-                    logger.debug(
-                        "[%s] gate[%d]=%s rejected node=%s",
-                        correlation_id[:8],
-                        i,
-                        getattr(gate, "__name__", "?"),
-                        self.node_id,
-                    )
-                    return False
-            except Exception:
-                logger.exception(
-                    "[%s] gate[%d]=%s raised for node=%s; treating as reject",
-                    correlation_id[:8],
-                    i,
-                    getattr(gate, "__name__", "?"),
-                    self.node_id,
-                )
-                return False
-        return True
 
     @handler("*")
     async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Next | None:
@@ -1073,18 +1020,18 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         headers: Annotated[dict[str, Any], Context("message.headers")],
         broker: BrokerAnnotation,
     ) -> Response:
-        """The closed per-delivery pipeline (fault-rail §6.8) — return-only subset.
+        """The closed per-delivery pipeline (fault-rail §6.8).
 
-        stage-0 (emitter decode → :meth:`_classify` → :meth:`prepare_context`) → gates →
-        :meth:`_execute` (stage-2 :meth:`_aggregate` + stage-4 the body) → output disposition.
+        stage-0 (emitter decode → :meth:`_classify` → :meth:`prepare_context` →
+        :meth:`_build_seam_context`) → the fault boundary around :meth:`_execute` (the seam stages
+        + the body) → output disposition + the publish guard. A node-own raise becomes a typed
+        fault on the success rail (P1 — no silent drop); a ``NodeFaultError`` is the mint gesture
+        (bypasses ``on_node_error``, §6.5); a failed terminal publish faults the caller (scenario 42).
         Returns a broadcast-mirror :class:`Response` whose ``x-calf-kind`` is the hop's kind.
 
-        TODO(fault rail PR-6): stage-0 ``_stray_check``/``_floor_stray`` (return-only has no
-        stage-0 strays — fan-out strays floor inside :meth:`_aggregate`, closure-recognition is in
-        :meth:`_classify_fanout`); the fault boundary wrapping ``_execute`` (try/except →
-        ``on_node_error``/``_publish_fault``) — pre-rail, body exceptions propagate (dropped under
-        ACK_FIRST → the caller strands, preserving today's at-most-once behavior); ``before_node``
-        replaces the gate block below. All need the seam machinery + the fault wire model.
+        TODO(fault rail PR-6): stage-0 ``_stray_check``/``_floor_stray`` + the ``_classify``
+        kind/slot-disagreement arm; the ``_DECLINED`` → ``calf.delivery.rejected`` auto-fault;
+        the mid-batch ``_in_batch_work`` → ``_publish_abort`` arms (land with the fold, step 4).
         """
         raw_emitter = headers.get(HDR_EMITTER)
         emitter = decode_header_str(raw_emitter)
@@ -1101,10 +1048,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
         ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
         seam_ctx = self._build_seam_context(ctx, envelope, headers, kind)
-
-        if not await self._evaluate_gates(ctx, correlation_id):
-            envelope.reply = None  # no-reply mirror (gate rejected): don't re-broadcast an inbound reply (I3)
-            return Response(envelope, headers=self._headers("call"))
 
         frame = envelope.internal_workflow_state.current_frame_or_none
         payload = frame.payload if frame is not None else None

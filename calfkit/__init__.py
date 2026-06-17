@@ -3,7 +3,7 @@ from importlib.metadata import version
 from calfkit.client import Client, InvocationHandle, InvocationResult
 from calfkit.exceptions import DeserializationError, LifecycleConfigError, NodeFaultError, ToolExecutionError
 from calfkit.models import ErrorReport, FaultTypes, ToolContext
-from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, GateFunction, NodeDef, ToolNodeDef, agent_tool, consumer
+from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, agent_tool, consumer
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.worker import LifecycleContext, ResourceSetupContext, ServingContext, Worker
@@ -24,7 +24,6 @@ __all__ = [
     "BaseNodeDef",
     "ConsumerFn",
     "ConsumerNode",
-    "GateFunction",
     "NodeDef",
     "ToolNodeDef",
     "agent_tool",

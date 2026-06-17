@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import KW_ONLY, dataclass
 from typing import Any, ClassVar
 
 import pydantic_core
@@ -17,7 +17,7 @@ from calfkit.models import SessionRunContext, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
 from calfkit.models.state import FailedToolCall
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
-from calfkit.nodes.base import BaseNodeDef, GateFunction
+from calfkit.nodes.base import BaseNodeDef
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,6 @@ class BaseToolNodeDef(BaseNodeDef):
     _tool: Tool
     _: KW_ONLY
     tool_schema: ToolDefinition
-    gates: list[GateFunction] = field(default_factory=list)
 
     def tool_bindings(self) -> list[ToolBinding]:
         """This node's single binding — satisfies the ``ToolProvider`` protocol.
@@ -67,7 +66,6 @@ class ToolNodeDef(BaseToolNodeDef):
         func: Callable[..., Any],
         subscribe_topics: str | list[str],
         publish_topic: str,
-        gates: list[GateFunction] | None = None,
     ) -> Self:
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
@@ -78,7 +76,6 @@ class ToolNodeDef(BaseToolNodeDef):
             subscribe_topics=subscribe_topics,
             publish_topic=publish_topic,
             _tool=tool,
-            gates=list(gates) if gates else [],
         )
 
     @handler("*", schema=ToolCallRef)

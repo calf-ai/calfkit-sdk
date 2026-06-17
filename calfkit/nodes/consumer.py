@@ -12,7 +12,7 @@ from calfkit.exceptions import DeserializationError
 from calfkit.models.consumer_context import ConsumerContext
 from calfkit.models.node_result import _UNSET
 from calfkit.models.session_context import SessionRunContext
-from calfkit.nodes.base import BaseNodeDef, GateFunction
+from calfkit.nodes.base import BaseNodeDef
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +47,12 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
         node_id: str,
         consume_fn: ConsumerFn[OutputT],
         subscribe_topics: str | list[str],
-        gates: list[GateFunction] | None = None,
         agent_output_type: type[OutputT] = _UNSET,
     ) -> None:
         _validate_consume_fn(consume_fn)
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
-        super().__init__(node_id=node_id, subscribe_topics=list(subscribe_topics), gates=gates)
+        super().__init__(node_id=node_id, subscribe_topics=list(subscribe_topics))
         self._func: ConsumerFn[OutputT] = consume_fn
         self._output_type = agent_output_type
 
@@ -112,7 +111,6 @@ def consumer(
     subscribe_topics: str | list[str],
     agent_output_type: type[OutputT] = _UNSET,
     node_id: str | None = None,
-    gates: list[GateFunction] | None = None,
 ) -> Callable[[ConsumerFn[OutputT]], ConsumerNode[OutputT]]:
     """Decorator turning a function into a deployable consumer node.
 
@@ -135,7 +133,6 @@ def consumer(
             subscribe_topics=subscribe_topics,
             consume_fn=fn,
             agent_output_type=agent_output_type,
-            gates=gates,
         )
 
     return _wrap

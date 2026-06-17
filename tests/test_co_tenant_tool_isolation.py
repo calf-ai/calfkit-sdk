@@ -122,18 +122,20 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
 
     @consumer(
         subscribe_topics="alpha_agent.out",
-        gates=[lambda ctx: bool(ctx.output_parts)],
         node_id="alpha_final_sink",
     )
     def alpha_sink(ctx: ConsumerContext) -> None:
+        if not ctx.output_parts:
+            return  # intermediate hop — keep only terminal outputs (self-filter, gates retired)
         alpha_finals.append(ctx)
 
     @consumer(
         subscribe_topics="bravo_agent.out",
-        gates=[lambda ctx: bool(ctx.output_parts)],
         node_id="bravo_final_sink",
     )
     def bravo_sink(ctx: ConsumerContext) -> None:
+        if not ctx.output_parts:
+            return  # intermediate hop — keep only terminal outputs (self-filter, gates retired)
         bravo_finals.append(ctx)
 
     # ``shared_tool`` is added to the worker once even though both agents

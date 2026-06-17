@@ -1,14 +1,12 @@
 """End-to-end tests for the x-calf-emitter Kafka header propagation.
 
 Follows the project pattern: TestKafkaBroker for in-memory broker, FunctionModel
-for offline deterministic agent runs, gate closures to capture per-hop ctx state,
-and client.execute / start for real message dispatch.
+for offline deterministic agent runs, before_node closures to capture per-hop ctx
+state, and client.execute / start for real message dispatch.
 """
 
-import asyncio
 from typing import Annotated, Any
 
-import pytest
 from faststream import Context
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
@@ -23,7 +21,7 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
-from calfkit.models import SessionRunContext
+from calfkit.models.seam_context import SeamContext
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, BaseToolNodeDef, agent_tool
 from calfkit.worker import Worker
@@ -83,9 +81,9 @@ def _function_model_calls_then_summarizes_named(tool_name: str | None = None):
 async def test_agent_receives_client_emitter(container):
     seen: list[str | None] = []
 
-    def capture_emitter(ctx: SessionRunContext) -> bool:
+    def capture_emitter(ctx: SeamContext) -> None:
         seen.append(ctx.emitter_node_id)
-        return True
+        return None
 
     worker = container.get(Worker)
     agent = Agent(
@@ -93,7 +91,7 @@ async def test_agent_receives_client_emitter(container):
         system_prompt="x",
         subscribe_topics="test_emitter_client_hop.input",
         model_client=FunctionModel(_function_model_calls_then_summarizes_named()),
-        gates=[capture_emitter],
+        before_node=[capture_emitter],
     )
     worker.add_nodes(agent)
     prepare_worker(container)
@@ -162,9 +160,9 @@ def _silent_tool() -> str:
 async def test_agent_receives_tool_emitter_on_return(container):
     seen: list[str | None] = []
 
-    def capture_emitter(ctx: SessionRunContext) -> bool:
+    def capture_emitter(ctx: SeamContext) -> None:
         seen.append(ctx.emitter_node_id)
-        return True
+        return None
 
     worker = container.get(Worker)
     agent = Agent(
@@ -173,7 +171,7 @@ async def test_agent_receives_tool_emitter_on_return(container):
         subscribe_topics="test_emitter_return_hop.input",
         model_client=FunctionModel(_function_model_calls_then_summarizes_named("_silent_tool")),
         tools=[_silent_tool],
-        gates=[capture_emitter],
+        before_node=[capture_emitter],
     )
     worker.add_nodes(agent, _silent_tool)
     prepare_worker(container)
@@ -191,53 +189,15 @@ async def test_agent_receives_tool_emitter_on_return(container):
 
 
 # ---------------------------------------------------------------------------
-# Flow 4: gate rejection. When a gate rejects, the handler returns
-# ``Response(envelope, headers=...)``; FastStream's ``@broker.publisher``
-# auto-forwards that body to ``publish_topic`` and honors the headers, so the
-# observer on ``publish_topic`` must still see ``x-calf-emitter``.
-# ---------------------------------------------------------------------------
-
-
-async def test_gate_reject_auto_publish_carries_emitter_header(container, deploy_gated_function_agent):
-    """Gate rejection still publishes to ``publish_topic`` with the emitter header
-    attached via the handler's ``Response(headers=...)`` return."""
-
-    def reject(ctx: SessionRunContext) -> bool:
-        return False
-
-    agent = deploy_gated_function_agent(gates=[reject])
-    broker = container.get(KafkaBroker)
-    client = container.get(Client)
-
-    received_headers: list[dict[str, Any]] = []
-
-    @broker.subscriber(agent.publish_topic, group_id="gate_reject_observer")
-    async def _observer(body: Any, headers: Annotated[dict[str, Any], Context("message.headers")]):
-        received_headers.append(dict(headers))
-
-    prepare_worker(container)
-
-    async with TestKafkaBroker(broker):
-        handle = await client.start("hi", agent.subscribe_topics[0])
-        with pytest.raises(asyncio.TimeoutError):
-            await handle.result(timeout=2)
-
-    assert len(received_headers) >= 1
-    emitter = _decode_header(received_headers[0].get(HDR_EMITTER))
-    kind = _decode_header(received_headers[0].get(HDR_EMITTER_KIND))
-    assert emitter == agent.node_id
-    assert kind == "agent"
-
-
-# ---------------------------------------------------------------------------
-# Success-path counterpart to the gate-reject test: a normal run on a node
-# with ``publish_topic`` must also stamp the emitter header on the auto-publish.
-# Catches regressions that drop ``headers=`` from the success-path Response.
+# A normal run on a node with ``publish_topic`` must stamp the emitter header on
+# the auto-publish. Catches regressions that drop ``headers=`` from the Response.
+# (The gate-reject counterpart was removed with gates in PR-6; a no-output
+# delivery's mirror still carries the emitter via the _DECLINED path.)
 # ---------------------------------------------------------------------------
 
 
 async def test_success_path_publish_topic_carries_emitter_header(container, deploy_gated_function_agent):
-    agent = deploy_gated_function_agent(gates=None)
+    agent = deploy_gated_function_agent(before_node=None)
     broker = container.get(KafkaBroker)
     client = container.get(Client)
 
@@ -325,7 +285,7 @@ async def test_parallel_fan_out_carries_emitter_per_call(container):
 
 
 async def test_client_node_result_carries_reply_emitter(container, deploy_gated_function_agent):
-    agent = deploy_gated_function_agent(gates=None)
+    agent = deploy_gated_function_agent(before_node=None)
     prepare_worker(container)
 
     broker = container.get(KafkaBroker)

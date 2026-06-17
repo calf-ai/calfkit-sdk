@@ -122,14 +122,14 @@ def deploy_gated_function_agent(container) -> Callable[..., Agent]:
     worker = container.get(Worker)
     model = container.get(FunctionModel)
 
-    def _factory(*, gates: list | None = None) -> Agent:
+    def _factory(*, before_node: list | None = None) -> Agent:
         agent = Agent(
             "test_gated_agent",
             system_prompt="You are a helpful AI assistant.",
             subscribe_topics="test_gated_agent.input",
             publish_topic="test_gated_agent.output",
             model_client=model,
-            gates=gates,
+            before_node=before_node,
         )
         worker.add_nodes(agent)
         return agent

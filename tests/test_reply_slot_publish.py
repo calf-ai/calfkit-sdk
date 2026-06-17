@@ -208,18 +208,6 @@ class TestNoReplyMirrorClearsInboundReply:
         resp = await _run(_SilentNode(node_id="n", subscribe_topics=["t"]), _envelope(reply=leak), broker)
         assert resp.body.reply is None
 
-    async def test_gate_reject_mirror_clears_inbound_reply(self) -> None:
-        # The handler-level gate-reject path mirrors kind=call with reply cleared.
-        class _GatedNode(NodeDef[Any]):
-            async def run(self, ctx: SessionRunContext) -> Any:
-                return Silent()
-
-        node = _GatedNode(node_id="n", subscribe_topics=["t"], gates=[lambda ctx: False])
-        leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
-        resp = await _run(node, _envelope(reply=leak), _CaptureBroker())
-        assert resp.body.reply is None
-        assert resp.headers[HDR_KIND] == "call"
-
     async def test_no_result_mirror_clears_inbound_reply(self) -> None:
         # The handler-level no-result/all-declined path mirrors kind=call, reply cleared.
         class _DeclineNode(NodeDef[Any]):

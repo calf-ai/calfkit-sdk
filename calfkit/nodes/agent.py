@@ -22,7 +22,7 @@ from calfkit.models.state import FailedToolCall
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, structured_output_preamble
-from calfkit.nodes.base import BaseNodeDef, GateFunction
+from calfkit.nodes.base import BaseNodeDef, _SeamArg
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
@@ -42,7 +42,10 @@ class BaseAgentNodeDef(
         system_prompt: str = "You are a helpful AI assistant.",
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
-        gates: list[GateFunction] | None = None,
+        before_node: _SeamArg = None,
+        after_node: _SeamArg = None,
+        on_node_error: _SeamArg = None,
+        on_callee_error: _SeamArg = None,
         tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
@@ -57,7 +60,15 @@ class BaseAgentNodeDef(
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
 
-        super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic, gates=gates)
+        super().__init__(
+            node_id=node_id,
+            subscribe_topics=subscribe_topics,
+            publish_topic=publish_topic,
+            before_node=before_node,
+            after_node=after_node,
+            on_node_error=on_node_error,
+            on_callee_error=on_callee_error,
+        )
 
         self._agent_loop: InternalAgentLoop[dict[str, Any], AgentOutputT | DeferredToolRequests] = InternalAgentLoop(
             model_client,
