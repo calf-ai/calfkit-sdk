@@ -121,7 +121,7 @@ class ErrorReport(BaseModel):
     arg, ``NodeFaultError.report``, ``ConsumerContext.fault``, the broadcast
     mirror) and — once the rail escalates it — passes up a frame chain untouched.
     Freezing makes the "stable across hops" promise on ``report_id`` real and
-    matches the codebase's frozen wire values (``FailedToolCall``, ``CallFrame``).
+    matches the codebase's frozen wire values (e.g. ``CallFrame``).
     The freeze is **shallow** — field *reassignment* is blocked, but the
     ``causes``/``details``/``frame_chain`` containers remain mutable in place, so
     transform a report you've handed off with ``model_copy(update=...)``, never by
@@ -166,7 +166,7 @@ class ErrorReport(BaseModel):
 
         A rejecting constraint would poison inbound decode of an otherwise-valid
         report; a BEFORE-mode clamp keeps construction total on every path,
-        including deserialization. Mirrors ``FailedToolCall``'s clamp discipline.
+        including deserialization. The clamp-don't-reject discipline keeps the error path total.
         """
         if isinstance(v, str) and len(v) > _MAX_MESSAGE_CHARS:
             return v[:_MAX_MESSAGE_CHARS]
@@ -234,8 +234,8 @@ class ErrorReport(BaseModel):
         """Synthesize a report that **never raises** (spec §4.3).
 
         The fault path must never itself raise — a fault that throws while being
-        built re-opens the silent-drop hole this feature closes (mirrors
-        ``FailedToolCall.build_safe``). Applies the per-field carriage bounds
+        built re-opens the silent-drop hole this feature closes (the same
+        build-safe discipline). Applies the per-field carriage bounds
         (``causes`` depth/total, ``frame_chain`` head+tail, ``details`` size),
         recording any elision under ``details[FaultTypes.ELIDED]`` so nothing is
         dropped silently. On any unexpected construction error, falls back to a

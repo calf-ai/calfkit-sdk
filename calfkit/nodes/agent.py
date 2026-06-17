@@ -333,8 +333,8 @@ class BaseAgentNodeDef(
 
                 # Parse args from the LLM's emission. Applies to ALL dispatch
                 # paths so that malformed-JSON args from override (schema-only)
-                # tools are also surfaced as RetryPromptPart instead of escaping
-                # to the worker's hard FailedToolCall path.
+                # tools are also surfaced as an LLM-visible RetryPromptPart at the
+                # agent, instead of dispatching unparseable args across the wire.
                 #
                 # ``args_as_dict()`` can raise more than just ValueError /
                 # AssertionError: ``pydantic_core.from_json`` raises TypeError

@@ -1,13 +1,14 @@
-"""Unit-scope contracts for the ``FailedToolCall`` / ``ToolExecutionError``
-flow. Tests bypass ``TestKafkaBroker`` and ``Client`` and call ``run()``
-directly so the marker/exception contracts are isolated from the messaging
-layer.
+"""Unit-scope contracts for the tool body + the agent's in-process tool-call handling.
+
+Tests bypass ``TestKafkaBroker`` and ``Client`` and call ``run()`` directly so the carriage
+(tool result on the reply slot) and the agent's arg-validation / dispatch contracts are isolated
+from the messaging layer. The ``FailedToolCall``/``ToolExecutionError`` blob-carriage retired with
+the fault rail's carriage switch.
 """
 
 from __future__ import annotations
 
 import asyncio
-import pickle  # nosec B403 - used in test for regression coverage of ToolExecutionError picklability
 from typing import Annotated
 
 import pytest
@@ -26,16 +27,10 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
-from calfkit.exceptions import ToolExecutionError
 from calfkit.models import SessionRunContext, ToolCallRef, ToolContext
 from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.payload import TextPart, is_retry
-from calfkit.models.state import (
-    FailedToolCall,
-    OverridesState,
-    State,
-    _calf_tool_result_discriminator,
-)
+from calfkit.models.state import OverridesState, State
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef
 
@@ -202,42 +197,13 @@ async def test_agent_success_path_unchanged():
 
 
 # ---------------------------------------------------------------------------
-# Wire-compatibility: marker survives JSON round-trip
+# Wire-compatibility: CalfToolResult types survive JSON round-trip
 # ---------------------------------------------------------------------------
 
 
-def test_marker_survives_json_round_trip_in_state():
-    # Regression guard: without _calf_tool_result_discriminator the marker
-    # arrives as a plain dict and the agent's isinstance check silently fails.
-    state = State()
-    tool_call_id = "tc-roundtrip-001"
-    tool_name = "buggy_tool"
-    _register_tool_call(state, tool_name=tool_name, tool_call_id=tool_call_id)
-    state.add_tool_result(
-        tool_call_id,
-        FailedToolCall(
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            exc_type="ValueError",
-            exc_message="bad",
-        ),
-    )
-
-    restored = State.model_validate_json(state.model_dump_json())
-
-    result = restored.tool_results[tool_call_id]
-    assert isinstance(result, FailedToolCall)
-    assert result.tool_name == tool_name
-    assert result.tool_call_id == tool_call_id
-    assert result.exc_type == "ValueError"
-    assert result.exc_message == "bad"
-    assert result.marker_kind == "calfkit-tool-error"
-
-
 def test_existing_tool_result_types_survive_json_round_trip():
-    # Regression for the union flatten: pydantic-ai's tagged types must still
-    # round-trip. ModelRetry isn't checked here because it never reaches state
-    # — when a tool raises it, the worker stores a RetryPromptPart instead.
+    # Regression for the union flatten: pydantic-ai's tagged types (the agent's PRIVATE
+    # tool_results bookkeeping post-carriage-switch) must still round-trip through State JSON.
     state = State()
 
     success_id = "tc-rt-success"
@@ -574,49 +540,6 @@ async def test_agent_handles_non_dict_json_args_as_retry_prompt():
 
 
 # ---------------------------------------------------------------------------
-# Discriminator: direct unit coverage of _calf_tool_result_discriminator
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "payload,expected",
-    [
-        ({"marker_kind": "calfkit-tool-error"}, "calfkit-tool-error"),
-        ({"kind": "tool-return"}, "tool-return"),
-        ({"kind": "model-retry"}, "model-retry"),
-        ({"part_kind": "retry-prompt"}, "retry-prompt"),
-        # marker_kind takes precedence over kind / part_kind
-        ({"marker_kind": "calfkit-tool-error", "kind": "tool-return"}, "calfkit-tool-error"),
-        # Non-string tag values are ignored (returns None, falls through to Any arm)
-        ({"kind": 42}, None),
-        ({"kind": None}, None),
-        ({"marker_kind": ["x"]}, None),
-        # Unknown shapes return None
-        ({}, None),
-        ({"unknown": "shape"}, None),
-        # Non-dict, non-object inputs return None
-        ("hello", None),
-        (None, None),
-        (42, None),
-    ],
-)
-def test_calf_tool_result_discriminator_tags_dict_payloads(payload, expected):
-    assert _calf_tool_result_discriminator(payload) == expected
-
-
-def test_calf_tool_result_discriminator_reads_object_attributes():
-    # Object inputs (already-constructed model instances) must resolve via
-    # attribute lookup, not just dict key lookup.
-    marker = FailedToolCall(
-        tool_name="t",
-        tool_call_id="id1",
-        exc_type="V",
-        exc_message="m",
-    )
-    assert _calf_tool_result_discriminator(marker) == "calfkit-tool-error"
-
-
-# ---------------------------------------------------------------------------
 # BaseToolNodeDef.validate_call_args: direct coverage
 # ---------------------------------------------------------------------------
 
@@ -662,54 +585,6 @@ def test_validate_call_args_raises_on_missing_required_arg():
 
     with pytest.raises(ValidationError):
         tool_node.validate_call_args({"x": 5})  # missing y
-
-
-# ---------------------------------------------------------------------------
-# ToolExecutionError picklability and FailedToolCall frozen/validation
-# ---------------------------------------------------------------------------
-
-
-def test_tool_execution_error_is_picklable():
-    # Regression: keyword-only __init__ broke pickle. Override __reduce__/__setstate__
-    # to restore picklability so the exception can cross worker boundaries (process
-    # pools, multiprocessing, etc.).
-    err = ToolExecutionError(
-        tool_name="t",
-        tool_call_id="id-1",
-        exc_type="ValueError",
-        exc_message="something",
-    )
-
-    restored = pickle.loads(pickle.dumps(err))
-    assert isinstance(restored, ToolExecutionError)
-    assert restored.tool_name == "t"
-    assert restored.tool_call_id == "id-1"
-    assert restored.exc_type == "ValueError"
-    assert restored.exc_message == "something"
-    assert str(restored) == str(err)
-
-
-def test_failed_tool_call_is_frozen():
-    f = FailedToolCall(
-        tool_name="t",
-        tool_call_id="id-1",
-        exc_type="V",
-        exc_message="m",
-    )
-    with pytest.raises(Exception):
-        f.tool_name = "mutated"  # frozen=True should reject
-
-
-def test_failed_tool_call_rejects_empty_tool_call_id():
-    # tool_call_id is the correlation key; empty values are invalid and must be
-    # rejected at construction.
-    with pytest.raises(ValidationError):
-        FailedToolCall(
-            tool_name="t",
-            tool_call_id="",
-            exc_type="V",
-            exc_message="m",
-        )
 
 
 # ---------------------------------------------------------------------------

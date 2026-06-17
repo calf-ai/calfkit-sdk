@@ -1,7 +1,7 @@
 from importlib.metadata import version
 
 from calfkit.client import Client, InvocationHandle, InvocationResult
-from calfkit.exceptions import DeserializationError, LifecycleConfigError, NodeFaultError, ToolExecutionError
+from calfkit.exceptions import DeserializationError, LifecycleConfigError, NodeFaultError
 from calfkit.models import ErrorReport, FaultTypes, ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, agent_tool, consumer
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
@@ -43,5 +43,4 @@ __all__ = [
     "DeserializationError",
     "LifecycleConfigError",
     "NodeFaultError",
-    "ToolExecutionError",
 ]

@@ -158,10 +158,10 @@ class ToolCallRef(BaseModel):
     handler route is the universal ``'*'``, the schema is the only discriminator
     that stops a foreign routeless body from being mis-consumed by a tool node.
 
-    Note: ``tool_call_id`` is intentionally **not** ``min_length``-constrained. An
-    empty id is a defended-against edge case (the tool node falls back to a sentinel
-    ``FailedToolCall`` marker, see ``ToolNodeDef.run``); constraining it here would
-    make that defensive path unreachable via this channel.
+    Note: ``tool_call_id`` is intentionally **not** ``min_length``-constrained — a
+    rejecting constraint here would poison inbound decode of an otherwise-routable body
+    (the same reason the reply models clamp rather than reject). An empty id is a
+    tolerated edge; the agent mints non-empty ``tool_call_id``s in practice.
     """
 
     model_config = ConfigDict(extra="forbid")

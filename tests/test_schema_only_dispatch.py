@@ -9,9 +9,9 @@ validator-less ``ToolBinding`` instances passed through the
      ``calfkit/nodes/agent.py`` is False for a validator-less binding, so the
      validation block is skipped entirely.
 
-  2. Malformed JSON args from the LLM still become a ``RetryPromptPart`` (not a
-     hard ``FailedToolCall``), via the ``args_as_dict()`` try/except which runs
-     on *all* dispatch paths regardless of the validation gate.
+  2. Malformed JSON args from the LLM still become a ``RetryPromptPart`` (an
+     LLM-visible recoverable, not an escalating fault), via the ``args_as_dict()``
+     try/except which runs on *all* dispatch paths regardless of the validation gate.
 
 The override-mode tests in ``test_tool_errors.py`` cover the same two
 properties via the ``state.overrides.override_agent_tools`` path; this test
