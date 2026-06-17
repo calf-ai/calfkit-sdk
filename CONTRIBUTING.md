@@ -23,7 +23,7 @@ Before opening a PR, make sure these pass — CI runs the same checks:
 ```console
 $ make fix     # auto-fix lint + formatting (ruff)
 $ make check   # lint, format, and type checks (ruff + mypy)
-$ make test    # run the test suite (real-broker tests excluded)
+$ make test    # run the test suite (real-broker and live-LLM lanes excluded)
 ```
 
 `make help` lists every target. New features and fixes should come with tests
@@ -50,12 +50,12 @@ opt-in, so `make test` stays fast and needs no Docker, network, or credentials.
 
 ### Test taxonomy
 
-| Kind | Needs | Gate | In `make test`? |
+| Kind | Needs | Gate | How to run |
 |---|---|---|---|
-| Unit / component | nothing — `FunctionModel` + in-memory `TestKafkaBroker` | — | yes |
-| Real broker | a Kafka-protocol broker (Redpanda) | `@pytest.mark.kafka` | no — use `make test-kafka` |
-| Topic provisioning | a broker with topic auto-create **disabled** | `CALF_TEST_KAFKA` env var | no — separate lane |
-| Real LLM | a live model API | `@pytest.mark.live` (skips without `OPENAI_API_KEY` + `TEST_LLM_MODEL_NAME`) | no — use `make test-live` |
+| Unit / component | nothing — `FunctionModel` + in-memory `TestKafkaBroker` | — | `make test` (the default lane) |
+| Real broker | a Kafka-protocol broker (Redpanda) | `@pytest.mark.kafka` | `make test-kafka` |
+| Topic provisioning | a broker with topic auto-create **disabled** | `CALF_TEST_KAFKA` env var | own CI lane, no `make` target ([see below](#the-topic-provisioning-lane)) |
+| Real LLM | a live model API | `@pytest.mark.live` | `make test-live` |
 
 Default to **offline** tests: a scripted `FunctionModel` stands in for the LLM
 and FastStream's `TestKafkaBroker` stands in for Kafka, so the tests are
