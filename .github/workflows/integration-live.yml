@@ -1,0 +1,57 @@
+name: "Integration: live LLM"
+
+# Runs the live-LLM lane: every test marked `@pytest.mark.live` (selected with
+# `-m live`) -- real model-API round-trips proving our provider integration
+# holds. These tests use FastStream's in-memory `TestKafkaBroker`, so the lane
+# needs NO Docker or broker -- only model-API credentials.
+#
+# These tests are deselected from the default suite (see `addopts` in
+# pyproject.toml, ADR 0007), so `test.yml` never needs credentials. This lane
+# runs ONLY on push-to-main (a post-merge check) and on manual dispatch -- never
+# on pull requests. That keeps the paid, non-deterministic model calls off every
+# PR, and means the provider secret is never exposed to PR (incl. fork) runs, so
+# it can be read unconditionally below.
+#
+# Uses no untrusted-input context vars in run: steps; only static commands.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # manual, maintainer-triggered (e.g. validate agent behavior on a branch)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-llm:
+    name: Live LLM (real model API)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # No `integration` group: the live tests use the in-memory TestKafkaBroker,
+        # not a real broker, so testcontainers/Docker are not needed.
+        run: uv sync --group dev
+
+      - name: Run live-LLM tests
+        # `-m live` overrides the default `-m "not kafka and not live"` deselection.
+        run: uv run pytest -m live -v --tb=short --timeout=300
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TEST_LLM_MODEL_NAME: ${{ vars.TEST_LLM_MODEL_NAME }}
+          TEST_REASONING_EFFORT: ${{ vars.TEST_REASONING_EFFORT }}

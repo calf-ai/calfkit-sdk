@@ -1,4 +1,4 @@
-.PHONY: help check lint-check lint-fix format-check format-fix type-check test test-kafka fix build build-wheel clean publish-test
+.PHONY: help check lint-check lint-fix format-check format-fix type-check test test-kafka test-live fix build build-wheel clean publish-test
 
 # Default target
 help:
@@ -9,8 +9,9 @@ help:
 	@echo "    make lint-check   - Run linter (ruff check)"
 	@echo "    make format-check - Check code formatting (ruff format --check)"
 	@echo "    make type-check   - Run type checker (mypy)"
-	@echo "    make test         - Run tests (pytest; real-broker tests deselected)"
+	@echo "    make test         - Run tests (pytest; opt-in kafka + live lanes deselected)"
 	@echo "    make test-kafka   - Run real-broker tests only (needs Docker; -m kafka)"
+	@echo "    make test-live    - Run live model-API tests only (needs OPENAI_API_KEY + TEST_LLM_MODEL_NAME; -m live)"
 	@echo ""
 	@echo "  Fixes:"
 	@echo "    make fix          - Fix all auto-fixable issues (lint + format)"
@@ -46,12 +47,16 @@ type-check:
 	@echo "✓ Type check passed"
 
 test:
-	@echo "Running tests (real-broker 'kafka' tests deselected by default)..."
+	@echo "Running tests (opt-in 'kafka' and 'live' lanes deselected by default)..."
 	@uv run pytest tests/ -v
 
 test-kafka:
 	@echo "Running real-broker (Redpanda) tests... (requires Docker)"
 	@uv run --group integration pytest -m kafka -v --timeout=120
+
+test-live:
+	@echo "Running live model-API tests... (requires OPENAI_API_KEY + TEST_LLM_MODEL_NAME)"
+	@uv run pytest -m live -v --timeout=300
 
 # === Fixes ===
 
