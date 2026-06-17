@@ -4,7 +4,6 @@
 [![PyPI version](https://img.shields.io/pypi/v/calfkit)](https://pypi.org/project/calfkit/)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/calfkit?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/calfkit)
 [![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
-[![CI](https://github.com/calf-ai/calfkit-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/calf-ai/calfkit-sdk/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/calf-ai/calfkit-sdk/graph/badge.svg?token=ZUP383PSK7)](https://codecov.io/gh/calf-ai/calfkit-sdk)
 [![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
 
