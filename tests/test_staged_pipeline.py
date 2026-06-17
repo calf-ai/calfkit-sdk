@@ -125,6 +125,14 @@ class TestClassify:
         # Over the wire header values arrive as bytes; _classify must decode them.
         assert _node()._classify({HDR_KIND: b"return"}) == "return"
 
+    def test_fault_kind_header_is_fault(self) -> None:
+        assert _node()._classify({HDR_KIND: "fault"}) == "fault"
+
+    def test_unknown_kind_header_is_ignored(self) -> None:
+        # An unrecognized value is not classified as work — None signals ignore (§4.1 rule 2):
+        # a node must not execute a delivery it cannot classify.
+        assert _node()._classify({HDR_KIND: "bogus"}) is None
+
 
 class TestAggregate:
     """``_aggregate`` is the durable fold/close stage (§6.8 stage-2). It returns

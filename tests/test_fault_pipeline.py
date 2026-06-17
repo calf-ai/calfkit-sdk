@@ -364,3 +364,23 @@ class TestStage0Guard:
         assert resp.body.reply is None  # cleared no-reply mirror
         assert resp.headers[HDR_KIND] == "call"
         assert "upstream.boom" in caplog.text  # the readable inbound report floored in full
+
+
+class TestUnknownKind:
+    async def test_unknown_kind_delivery_is_ignored_not_run_as_work(self, caplog: pytest.LogCaptureFixture) -> None:
+        # §4.1 rule 2: an unrecognized x-calf-kind is ERROR-logged + ignored — the body never
+        # runs (no publish), and the cleared no-reply mirror is returned. A readable inbound
+        # FaultMessage is floored in full before ignoring.
+        node = _ReturningNode(node_id="n", subscribe_topics=["in"])  # body WOULD publish a ReturnCall
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="f", tag="t", error=ErrorReport(error_type="upstream.boom"))
+        broker = _CaptureBroker()
+
+        with caplog.at_level(logging.ERROR):
+            resp = await node.handler(inbound, "cid", {HDR_KIND: "bogus"}, broker)
+
+        assert broker.published == []  # the body did NOT run — no work on an unclassifiable delivery
+        assert resp.body.reply is None  # cleared no-reply mirror
+        assert resp.headers[HDR_KIND] == "call"
+        assert "bogus" in caplog.text  # the unrecognized value is logged
+        assert "upstream.boom" in caplog.text  # the readable inbound report floored in full

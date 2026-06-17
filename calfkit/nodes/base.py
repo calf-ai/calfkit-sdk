@@ -638,6 +638,23 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         envelope.reply = None  # cleared no-reply mirror (I3)
         return Response(envelope, headers=self._headers("call"))
 
+    def _floor_unknown_kind(self, envelope: Envelope, headers: dict[str, Any], correlation_id: str) -> Response:
+        """Floor + drop an unclassifiable delivery (§4.1 rule 2): an unrecognized ``x-calf-kind`` is
+        ERROR-logged (with the inbound :class:`FaultMessage` report in full, when one is readable)
+        and the delivery is ignored — a node must not run work it cannot classify. Returns the
+        cleared no-reply mirror (I3); never faults a live invocation (no callback publish)."""
+        raw = decode_header_str(headers.get(HDR_KIND))
+        inbound_report = envelope.reply.error.model_dump_json() if isinstance(envelope.reply, FaultMessage) else None
+        logger.error(
+            "[%s] unrecognized x-calf-kind=%r node=%s; ignoring the delivery (a node must not run unclassifiable work) inbound_report=%s",
+            correlation_id[:8],
+            raw,
+            self.node_id,
+            inbound_report,
+        )
+        envelope.reply = None  # cleared no-reply mirror (I3)
+        return Response(envelope, headers=self._headers("call"))
+
     @property
     def _is_fanout_capable(self) -> bool:
         """Whether this node folds durable fan-out batches in-node. ``False`` for every
@@ -744,19 +761,27 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             raise SeamContractError("after_node returns a value, not an action; use before_node/on_node_error for actions.")
         return self._coerce_output(ctx, post)
 
-    def _classify(self, headers: dict[str, Any]) -> MessageKind:
-        """Classify the inbound delivery kind from the ``x-calf-kind`` header (§6.8 stage-0).
+    def _classify(self, headers: dict[str, Any]) -> MessageKind | None:
+        """Classify the inbound delivery kind from the ``x-calf-kind`` header (§4.1 / §6.8 stage-0).
 
-        Missing ⇒ ``"call"`` (a producer that didn't stamp it / a fresh ingress). Return-only:
-        only ``call`` and ``return`` exist; an unrecognized value falls back to ``"call"``
-        (the pre-rail body path). The kind selects stage routing in :meth:`_execute`
-        (``return`` ⇒ the aggregation stage; ``call`` ⇒ straight to the body).
+        Trusts the header — a producer-side fact (§4.1). Missing ⇒ ``"call"`` (the raw-producer
+        ingress norm); ``"call"``/``"return"``/``"fault"`` map to themselves. An UNRECOGNIZED value
+        ⇒ ``None`` ("ignore"): a node must not execute work it cannot classify (the forward-compat
+        rule, §4.1 rule 2; the handler floors + drops it via :meth:`_floor_unknown_kind`). The kind
+        selects stage routing in :meth:`_execute` (``return`` ⇒ aggregation, ``fault`` ⇒ stage-1
+        escalation, ``call`` ⇒ the body).
 
-        TODO(fault rail PR-6): widen to ``"fault"`` (``MessageKind`` gains the arm) and add the
-        unknown-value→ERROR-and-ignore + the kind↔reply-slot disagreement→stray checks
-        (fault-rail spec §6.8 stage-0). Both need the fault wire model, not yet in tree.
+        A pure header→kind mapping by design: the kind↔reply-slot-shape *agreement* is a separate,
+        body-aware concern owned by :meth:`_stray_check` (run after the context build).
         """
-        return "return" if decode_header_str(headers.get(HDR_KIND)) == "return" else "call"
+        raw = decode_header_str(headers.get(HDR_KIND))
+        if raw is None or raw == "call":
+            return "call"
+        if raw == "return":
+            return "return"
+        if raw == "fault":
+            return "fault"
+        return None
 
     def _classify_fanout(self, envelope: Envelope) -> Literal["sibling", "reentry"] | None:
         """Recognize a fan-out continuation on a fan-out-capable node.
@@ -1083,6 +1108,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         # delivery floors only (junk must not fault a live invocation, §4.1). Never escapes.
         try:
             kind = self._classify(headers)
+            if kind is None:  # unrecognized x-calf-kind → ERROR-log + ignore (§4.1 rule 2)
+                return self._floor_unknown_kind(envelope, headers, correlation_id)
             logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
             ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
             seam_ctx = self._build_seam_context(ctx, envelope, headers, kind)
