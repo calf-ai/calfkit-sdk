@@ -18,5 +18,8 @@ class Envelope(BaseModel):
     internal_workflow_state: WorkflowState = Field(description="The internal, framework-level state tracking workflow")
     reply: ReturnMessage | None = None
     """Per-delivery response carriage (spec §4). ``None`` on call-kind deliveries;
-    a :class:`~calfkit.models.reply.ReturnMessage` on return-kind deliveries. PR-C
-    widens this to ``ReturnMessage | FaultMessage`` with a ``kind`` discriminator."""
+    a :class:`~calfkit.models.reply.ReturnMessage` on return-kind deliveries. The
+    :class:`~calfkit.models.reply.FaultMessage` shape exists; this slot widens to
+    ``ReturnMessage | FaultMessage`` (with a ``kind`` discriminator) when the rail
+    starts producing faults, together with the projection/dispatch side that gives
+    a fault its behavior."""
