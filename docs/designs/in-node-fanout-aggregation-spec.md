@@ -94,14 +94,17 @@ class SlotRef(BaseModel):
     tag: str | None                     # the caller's domain token (tool_call_id)
 
 class FanoutOpen(BaseModel):            # SMALL registration metadata (snapshot lives in basestate)
-    kind: Literal["open"] = "open"
     fanout_id: str                      # = the node's own inbound frame_id; the batch key
     node_id: str
-    publish_topic: str | None           # the node's broadcast topic — fault-mirroring (§7)
     expected: list[SlotRef]             # the full slot set, fixed at open (no dynamic fan-out)
     # NOTE: correlation_id REMOVED (round-3) — sweep-only. caller_callback REMOVED (round-4) — both
     #       abort paths reach the caller without it: dispatch-abort uses D's in-memory inbound frame,
     #       fold/close-abort reads basestate[X].snapshot.stack. A derivable denormalized field is a smell.
+    #       kind REMOVED + publish_topic REMOVED (PR-6 / 2026-06-17, same rationale) — the shipped model
+    #       (calfkit/models/fanout.py) carries ONLY fanout_id/node_id/expected. `publish_topic` is the
+    #       node's STATIC @publisher config used by the worker to mirror the fault (§4.4/§7), never read
+    #       from the record; `kind` is a no-op discriminator — these two tables hold only FanoutOpen, no
+    #       on-topic union needs it. A derivable/static-config denormalized field is the same smell.
 
 class FanoutOutcome(BaseModel):         # one resolved slot — a sub-value of FanoutState.outcomes
     slot: str                           # SlotRef.frame_id
@@ -213,7 +216,8 @@ Satisfies fault-rail scenarios #4/#5 (unhandled → group, no body), #6 (handled
 
 ### 4.4 Abort (node-own fault, or a permanent re-entry-publish failure)
 
-A node-own terminal fault while a batch is open can't be recovered (fault-rail §6.8 forbids mid-batch `on_node_error`). Not the §4.3 callee-fault-group; the node's *own* machinery failing. Fail to the caller exactly once (tombstone-first + single-writer ⇒ escalate-once):
+A node-own terminal fault while a batch is open can't be recovered (fault-rail §6.8 forbids mid-batch `on_node_error`). Not the §4.3 callee-fault-group; the node's *own* machinery failing. Fail to the caller exactly once (tombstone-first + single-writer ⇒ escalate-once) **— under a *writable* store**:
+> **⚠️ CORRECTION (PR-6 / 2026-06-17):** the "exactly once" invariant holds **only under a writable store**. If the durable store is **unavailable** (a terminal reader death — `barrier()==False` with `status=='failed'`, the §5.1 abort trigger), the abort's tombstone write also fails, so each still-pending sibling that arrives during the outage independently fails-fast → aborts → escalates. With N pending siblings the caller can receive up to **N** `calf.fanout.aborted` faults for one batch. This is an **accepted operational residual** (v1 = at-most-once): the in-node design deliberately holds **zero in-process batch state**, so there is no cheap in-process dedup of the escalation. Recorded in fault-rail §13's residual-loss-windows enumeration.
 - **At dispatch:** registration durable but the batch can't complete (a sibling publish failed, or D's own code raised after step 2) → D **tombstones both, then escalates** to the caller (using D's **in-memory inbound frame** — no record field needed), mirrored on `publish_topic`. Published siblings later stray-floor at O.
 - **During a fold:** a *permanent* batch-store write failure (transient ⇒ block-and-retry; a degraded broker is operational, §7) → O reads the caller from `basestate[X].snapshot.stack`, tombstones both, escalates.
 - **(round-4) A permanent re-entry-publish failure** (after a successful completing fold; the `acks=all`+idempotent producer has exhausted retries on a non-retriable error — not a crash) → the same close-side discipline: read the caller from `basestate[X].snapshot.stack`, **tombstone both, escalate once.** This keeps a fully-folded batch from leaking a complete-but-unclosed corpse that only #220 could reap.
