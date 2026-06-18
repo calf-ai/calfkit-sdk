@@ -420,6 +420,68 @@ class TestSeamPrecision:
 
         assert seen == [None]  # exception cleared once on_node_error recovered
 
+    async def test_before_node_mint_bypasses_on_node_error(self) -> None:
+        # §6.5 mint rule from a BOUNDARY seam: a NodeFaultError raised in before_node propagates
+        # verbatim (NOT wrapped _SeamAccidentError, NOT routed to on_node_error).
+        node = _node()
+        consulted: list[bool] = []
+
+        @node.before_node
+        def mint(ctx: object) -> None:
+            raise NodeFaultError("billing.quota_exceeded", message="minted in before_node")
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            consulted.append(True)
+            return "would-recover-if-consulted"
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "billing.quota_exceeded"  # minted verbatim
+        assert consulted == []  # bypassed on_node_error, even from before_node
+
+    async def test_after_node_mint_bypasses_on_node_error(self) -> None:
+        # §6.5 mint rule from after_node: same — verbatim, bypassing on_node_error.
+        node = _BodyNode(node_id="n", subscribe_topics=["in"])
+        consulted: list[bool] = []
+
+        @node.after_node
+        def mint(ctx: SeamContext[State], output: object) -> None:
+            raise NodeFaultError("billing.quota_exceeded", message="minted in after_node")
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            consulted.append(True)
+            return "would-recover-if-consulted"
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "billing.quota_exceeded"  # minted verbatim
+        assert consulted == []  # bypassed on_node_error, even from after_node
+
+    async def test_after_node_accident_faults_calf_unhandled(self) -> None:
+        # §6.7: a non-NodeFaultError raise in after_node is a node-own accident → on_node_error (here
+        # absent) → escalate calf.unhandled. On a call-kind ingress there is no inbound fault to chain.
+        node = _BodyNode(node_id="n", subscribe_topics=["in"])
+
+        @node.after_node
+        def boom(ctx: SeamContext[State], output: object) -> None:
+            raise RuntimeError("after_node boom")
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.unhandled"
+        assert env.reply.error.causes == []  # call-kind ingress: nothing to chain
+
 
 class TestSeamFailureBranches:
     """§6.5/§6.8 stage-5 seam-failure arms: a NodeFaultError minted INSIDE on_node_error publishes
