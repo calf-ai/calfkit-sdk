@@ -44,11 +44,11 @@ class ReturnMessage(_ReplyBase):
 class FaultMessage(_ReplyBase):
     """A terminal failure, carried in the per-delivery reply slot (spec §4.2).
 
-    The same :class:`~calfkit.models.error_report.ErrorReport` reaches every
-    fault-aware surface this PR produces — a caller's seam (the ``fault``
-    argument) and the client (``NodeFaultError.report``). The consumer
-    fault-reception surface (a ``ConsumerContext`` fault/``delivery_kind``
-    field) is DEFERRED to the reception PR and is not present here.
+    In PR-6 the same :class:`~calfkit.models.error_report.ErrorReport` reaches a
+    caller's seam (the ``fault`` argument) and the broadcast mirror. Both
+    fault-RECEPTION surfaces — the client raising ``NodeFaultError(report)`` on a
+    ``kind=fault`` reply, and the consumer ``ConsumerContext`` fault/``delivery_kind``
+    field — are DEFERRED to the reception PR and are not present here.
     """
 
     kind: Literal["fault"] = "fault"
