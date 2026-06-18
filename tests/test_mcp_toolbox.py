@@ -82,7 +82,7 @@ class TestMintingAndParity:
 
         ref = make_toolbox().select(include=["search"], strict=True)
         assert isinstance(ref, MCPToolbox)
-        assert ref.toolbox_id == "github" and ref.include == ("search",) and ref.strict
+        assert ref.name == "github" and ref.include == ("search",) and ref.strict
 
     def test_toolbox_resolution_delegates_to_its_ref(self) -> None:
         from calfkit.mcp import MCPToolbox

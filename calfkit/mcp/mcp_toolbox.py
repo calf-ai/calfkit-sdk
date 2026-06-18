@@ -53,13 +53,13 @@ class MCPToolboxNode(BaseNodeDef):
 
     def __init__(
         self,
-        server_name: str,
+        name: str,
         connection_params: StreamableHttpParameters | StdioServerParameters,
     ):
-        super().__init__(node_id=server_name, subscribe_topics=[f"mcp_server.{server_name}"])
+        super().__init__(node_id=name, subscribe_topics=[f"mcp_server.{name}"])
         self._connection_params = connection_params
-        self._session_resource_key = f"mcp_session.{server_name}"
-        self._writer_resource_key = f"mcp_writer.{server_name}"
+        self._session_resource_key = f"mcp_session.{name}"
+        self._writer_resource_key = f"mcp_writer.{name}"
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._relist_tasks: set[asyncio.Task[None]] = set()
         self._shutting_down = False
@@ -102,7 +102,7 @@ class MCPToolboxNode(BaseNodeDef):
         warning.
         """
         return MCPToolbox(
-            toolbox_id=self.node_id,
+            name=self.node_id,
             include=tuple(include) if include is not None else None,
             strict=strict,
         )
@@ -282,15 +282,15 @@ class MCPToolbox:
     compare and hash equal.
     """
 
-    toolbox_id: str
+    name: str
     include: tuple[str, ...] | None = None
     strict: bool = False
 
     def __post_init__(self) -> None:
-        if not self.toolbox_id:
-            raise ValueError("toolbox_id must be non-empty")
+        if not self.name:
+            raise ValueError("name must be non-empty")
         if self.include is not None and not isinstance(self.include, tuple):
             object.__setattr__(self, "include", tuple(self.include))
 
     def resolve_tools(self, view: Mapping[str, CapabilityRecord]) -> SelectorResult:
-        return resolve_capability(view, self.toolbox_id, include=self.include, strict=self.strict)
+        return resolve_capability(view, self.name, include=self.include, strict=self.strict)
