@@ -14,10 +14,11 @@ class _ReplyBase(BaseModel):
     failure, an :class:`~calfkit.models.error_report.ErrorReport`) — ``result``
     XOR ``error``, the JSON-RPC split.
 
-    The ``Envelope.reply`` slot still carries only ``ReturnMessage | None`` today;
-    it widens to ``ReturnMessage | FaultMessage`` with ``Field(discriminator="kind")``
-    when the rail starts producing faults (the projection/dispatch side of that
-    widening is where fault behavior lives, so it lands together there).
+    The ``Envelope.reply`` slot now carries ``ReturnMessage | FaultMessage | None``,
+    discriminated on ``kind`` (``Field(default=None, discriminator="kind")``). This PR
+    is the rail that produces faults, so a fault shape rides the slot directly — the
+    projection/dispatch side floors a fault at its producing hop rather than re-deriving
+    it at a reader.
     """
 
     in_reply_to: str | None

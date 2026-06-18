@@ -214,9 +214,12 @@ async def test_handle_fanout_open_writes_open_and_publishes_marked_siblings() ->
 
 def test_fanout_open_rejects_singleton_expected() -> None:
     # The N>=2 fan-out invariant is enforced at the record type: a single-slot batch is
-    # unrepresentable, so a batch-of-one can never be registered.
-    with pytest.raises(ValidationError):
-        FanoutOpen(fanout_id="x", node_id="a", expected=[SlotRef(frame_id="f1", tag="tc1")])
+    # unrepresentable, so a batch-of-one can never be registered. The SlotRef carries its
+    # required `target_topic` so the ValidationError comes from `expected`'s min_length=2 gate
+    # (not from a missing SlotRef field) — `loc == ("expected",)` locks that we hit the real gate.
+    with pytest.raises(ValidationError) as exc_info:
+        FanoutOpen(fanout_id="x", node_id="a", expected=[SlotRef(frame_id="f1", tag="tc1", target_topic="tool.a")])
+    assert exc_info.value.errors()[0]["loc"] == ("expected",)
 
 
 class _CaptureBroker:
