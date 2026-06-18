@@ -12,7 +12,7 @@ import logging
 from typing import Any
 
 import pytest
-from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
+from aiokafka.errors import KafkaError, MessageSizeTooLargeError  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
 from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
@@ -37,6 +37,21 @@ class _CaptureBroker:
         self.published: list[tuple[str, Any, dict[str, str]]] = []
 
     async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        self.published.append((topic, envelope, headers))
+
+
+class _FailThenCaptureBroker:
+    """Raises on the FIRST publish (a size-class failure), captures the rest — exercises the §4.3
+    strip-and-retry: the minimal fault must reach the caller on the retry."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, Any, dict[str, str]]] = []
+        self._calls = 0
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        self._calls += 1
+        if self._calls == 1:
+            raise MessageSizeTooLargeError("simulated message-too-large on the full fault")
         self.published.append((topic, envelope, headers))
 
 
@@ -139,6 +154,42 @@ class TestPublishFault:
         assert published_report.report_id == report.report_id
         assert published_report.error_type == report.error_type
         assert published_report.causes == []  # not wrapped
+
+    async def test_oversized_fault_strips_to_minimal_and_retries(self) -> None:
+        # §4.3: a fault publish that fails (commonly the report exceeding the carriage budget) must NOT
+        # strand the caller — strip to the minimal report (identity only) and retry ONCE before flooring.
+        # Pre-fix _publish_fault log-floored the failure and the caller received nothing.
+        node = _node()
+        report = ErrorReport(
+            error_type="calf.unhandled",
+            message="boom",
+            origin_node_id="orchestrator",
+            details={"big": "x" * 100},  # non-empty ⇒ to_minimal() strips it
+            causes=[ErrorReport(error_type="calf.inner", message="inner")],
+        )
+        inbound = _framed_envelope(callback_topic="caller.return")
+        broker = _FailThenCaptureBroker()
+
+        mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+
+        assert kind == "fault"
+        assert len(broker.published) == 1  # the retry delivered (the first, full publish raised)
+        _topic, env, headers = broker.published[0]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.unhandled"  # identity preserved
+        assert env.reply.error.causes == [] and env.reply.error.details == {}  # stripped to minimal
+        assert headers[HDR_ERROR_TYPE] == "calf.unhandled"
+        assert mirror.reply.error.causes == []  # the returned broadcast mirror is the minimal one too
+
+    async def test_fault_response_mirror_carries_error_type_header(self) -> None:
+        # §4.2/§13: the broadcast mirror (the handler Response) must carry x-calf-error-type so faults
+        # are broker-filterable on the broadcast rail too, matching the point-to-point publish.
+        node = _node()
+        report = ErrorReport(error_type="calf.model.context_window_exceeded")
+        inbound = _framed_envelope(callback_topic="caller.return")
+        resp = await node._fault_response(report, node._stack_snapshot(inbound), inbound, "cid", _CaptureBroker())
+        assert resp.headers[HDR_KIND] == "fault"
+        assert resp.headers[HDR_ERROR_TYPE] == "calf.model.context_window_exceeded"
 
 
 class _RaisingNode(BaseNodeDef):

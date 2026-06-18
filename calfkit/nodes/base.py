@@ -6,7 +6,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, TypeVar, cast
 
 import uuid_utils
-from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
+from aiokafka.errors import KafkaError, MessageSizeTooLargeError  # type: ignore[import-untyped]
 from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
@@ -615,20 +615,23 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         carry the inbound ``context`` UNCHANGED (handler mutations die with the faulted turn,
         §4.2), and publish to the popped ``callback_topic`` with ``x-calf-kind=fault`` +
         ``x-calf-error-type``. A frameless / fire-and-forget terminal (no callback) is floored
-        (ERROR + full report JSON, §13). The point-to-point publish is log-only-guarded — a
-        failed delivery never re-enters the fault path; the broadcast mirror still fires.
-        Escalation NEVER wraps (§4.4): the same ``report`` is re-addressed each hop.
+        (ERROR + full report JSON, §13). A failed point-to-point publish strips to the minimal report
+        and retries once before flooring (§4.3 — an oversized fault must not become a new silent drop);
+        it never re-enters the fault path, and the broadcast mirror still fires. Escalation NEVER wraps
+        (§4.4): the same ``report`` is re-addressed each hop.
         """
         frame = snapshot.current_frame_or_none
         callback_topic = frame.callback_topic if frame is not None else None
-        fault = FaultMessage(
-            in_reply_to=frame.frame_id if frame is not None else None,
-            tag=frame.tag if frame is not None else None,
-            error=report,
-        )
+        in_reply_to = frame.frame_id if frame is not None else None
+        tag = frame.tag if frame is not None else None
         if frame is not None:
             snapshot.unwind_frame()  # pop the answered frame; the remaining stack travels for the next hop
-        mirror = Envelope(context=inbound.context, internal_workflow_state=snapshot, reply=fault)
+
+        def _mirror(r: ErrorReport) -> Envelope:
+            # The inbound context is carried UNCHANGED (handler mutations die with the faulted turn, §4.2).
+            return Envelope(context=inbound.context, internal_workflow_state=snapshot, reply=FaultMessage(in_reply_to=in_reply_to, tag=tag, error=r))
+
+        mirror = _mirror(report)
         if callback_topic is None:
             # Frameless / fire-and-forget terminal: no caller to answer → floor (§13). The
             # broadcast mirror still fires where a publish_topic exists (the returned envelope).
@@ -639,25 +642,59 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 report.error_type,
                 report.model_dump_json(),
             )
-        else:
+            return mirror, "fault"
+        try:
+            await broker.publish(
+                mirror,
+                topic=callback_topic,
+                correlation_id=correlation_id,
+                key=correlation_id.encode(),
+                headers=self._headers("fault") | {HDR_ERROR_TYPE: report.error_type},
+            )
+            return mirror, "fault"
+        except MessageSizeTooLargeError:
+            # §4.3 strip-and-retry-then-floor: an OVERSIZED fault (the report exceeding the carriage
+            # budget despite build_safe's per-field bounds) must NOT become a new silent-drop class.
+            # Retry ONCE with the minimal report (identity only: no causes/details/frame_chain), and
+            # return THAT minimal mirror so the broadcast @publisher does not re-drop the oversized one;
+            # only a second failure floors. Escalation still never wraps (§4.4): to_minimal preserves
+            # report_id/error_type/origin.
+            minimal = report.to_minimal()
+            logger.warning(
+                "[%s] fault to callback_topic=%s exceeded the carriage budget node=%s; retrying with the minimal report (§4.3)",
+                correlation_id[:8],
+                callback_topic,
+                self.node_id,
+            )
+            minimal_mirror = _mirror(minimal)
             try:
                 await broker.publish(
-                    mirror,
+                    minimal_mirror,
                     topic=callback_topic,
                     correlation_id=correlation_id,
                     key=correlation_id.encode(),
-                    headers=self._headers("fault") | {HDR_ERROR_TYPE: report.error_type},
+                    headers=self._headers("fault") | {HDR_ERROR_TYPE: minimal.error_type},
                 )
             except Exception:
-                # Log-only-guarded (§6.8): a failed fault delivery must not re-enter the fault
-                # path; the broadcast mirror below still carries it for ops taps.
                 logger.exception(
-                    "[%s] fault delivery to callback_topic=%s failed node=%s; the fault still broadcasts on publish_topic",
+                    "[%s] fault delivery to callback_topic=%s failed even after the minimal strip node=%s; flooring report=%s",
                     correlation_id[:8],
                     callback_topic,
                     self.node_id,
+                    minimal.model_dump_json(),
                 )
-        return mirror, "fault"
+            return minimal_mirror, "fault"
+        except Exception:
+            # A non-size publish failure (e.g. a dead/unreachable broker): you cannot publish your way
+            # out of it, so floor (§6.8 log-only-guarded — never re-enter the fault path). The broadcast
+            # mirror still carries the FULL fault for ops taps.
+            logger.exception(
+                "[%s] fault delivery to callback_topic=%s failed node=%s; the fault still broadcasts on publish_topic",
+                correlation_id[:8],
+                callback_topic,
+                self.node_id,
+            )
+            return mirror, "fault"
 
     async def _fault_response(
         self, report: ErrorReport, snapshot: WorkflowState, inbound: Envelope, correlation_id: str, broker: BrokerAnnotation
@@ -665,7 +702,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         """Publish a fault and wrap its broadcast mirror as the handler's :class:`Response`
         (so the worker's ``@publisher`` mirrors the fault on ``publish_topic``, §13)."""
         mirror, fkind = await self._publish_fault(report, snapshot, inbound, correlation_id, broker)
-        return Response(mirror, headers=self._headers(fkind))
+        headers = self._headers(fkind)
+        if isinstance(mirror.reply, FaultMessage):
+            # Stamp x-calf-error-type on the broadcast mirror too (§4.2/§13) so faults are broker-
+            # filterable on the broadcast rail, matching the point-to-point publish. Source it from the
+            # SENT report (mirror.reply), which is the minimal report if _publish_fault stripped (§4.3).
+            headers = headers | {HDR_ERROR_TYPE: mirror.reply.error.error_type}
+        return Response(mirror, headers=headers)
 
     async def _floor_stage0(
         self, exc: Exception, envelope: Envelope, headers: dict[str, Any], correlation_id: str, broker: BrokerAnnotation
