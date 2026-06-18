@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from calfkit.client.client import Client
-from calfkit.mcp.mcp_toolbox import MCPToolbox
+from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -32,8 +32,8 @@ class FakeModel(PydanticModelClient):
         raise NotImplementedError
 
 
-def make_toolbox() -> MCPToolbox:
-    return MCPToolbox("docs_server", connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
+def make_toolbox() -> MCPToolboxNode:
+    return MCPToolboxNode("docs_server", connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
 
 
 def make_agent(*tools: object):

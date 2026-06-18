@@ -42,7 +42,7 @@ The presence *view* is the easy, transferable part. The hard problems (request/r
 From a source-grounded read of the shipped capability plane:
 
 - **Transport works.** ktables (`>=0.2.0`) gives a groupless **broadcast** view (`group_id=None`, all partitions, replay from offset 0) — every worker sees every key, the GlobalKTable model. Writes are `acks=all` + idempotent. Tombstone = `delete(key)` (null value). `barrier()` gives read-your-own-writes. `status`/`failure` expose reader death.
-- **Lifecycle seams exist.** `after_startup` (broker live — spawn a loop) and `on_shutdown` (broker still live — cancel + tombstone) are inherited by **both** `Worker` and every `BaseNodeDef` (`calfkit/worker/lifecycle.py`). `MCPToolbox` already runs a heartbeat loop and an ordered tombstone via these.
+- **Lifecycle seams exist.** `after_startup` (broker live — spawn a loop) and `on_shutdown` (broker still live — cancel + tombstone) are inherited by **both** `Worker` and every `BaseNodeDef` (`calfkit/worker/lifecycle.py`). `MCPToolboxNode` already runs a heartbeat loop and an ordered tombstone via these.
 - **Known sharp edges to fix while generalising** (confirmed live on `main`):
   - **CRITICAL-1 — replica flap:** records keyed per-node (`toolbox_id`) mean one replica's clean tombstone blanks the record cluster-wide. Fixed here by instance-keying.
   - **CRITICAL-3 — heartbeat masks content staleness:** re-stamping a single `published_at` hides stale content. Fixed by the liveness/content timestamp split (relevant once content-bearing records migrate — see the migration spec).
@@ -98,7 +98,7 @@ A node can't be "down" while its worker is "up" (there is no per-node crash inde
 Lifecycle wiring (reusing the proven seams):
 - `after_startup` (broker live): publish each node's record once, then spawn the heartbeat loop.
 - Heartbeat tick: for each hosted node, refresh `last_heartbeat_at` and `set(group=node_id, member=worker_id, value=record)`.
-- `on_shutdown` (broker still live): set a shutdown flag synchronously first, cancel-and-await the loop, then tombstone every `(node_id, worker_id)` key the worker owns. This ordering (copied from `MCPToolbox._tombstone_on_shutdown`) prevents a straggler `set()` from resurrecting a tombstoned record.
+- `on_shutdown` (broker still live): set a shutdown flag synchronously first, cancel-and-await the loop, then tombstone every `(node_id, worker_id)` key the worker owns. This ordering (copied from `MCPToolboxNode._tombstone_on_shutdown`) prevents a straggler `set()` from resurrecting a tombstoned record.
 
 Crash behaviour is unchanged from the precedent and accepted: a hard crash skips `on_shutdown`, so the record is **not** tombstoned and instead goes stale (§7).
 

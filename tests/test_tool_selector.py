@@ -1,4 +1,4 @@
-"""PR C: ToolSelector protocol, MCPToolbox-as-selector, and agent resolution.
+"""PR C: ToolSelector protocol, MCPToolboxNode-as-selector, and agent resolution.
 
 Spec §8.4: the toolbox instance is passed to agents like a tool node
 (``tools=[docs]``); resolution happens per turn against the Capability View,
@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from calfkit.exceptions import MCPToolResolutionError
-from calfkit.mcp.mcp_toolbox import MCPToolbox
+from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
 from calfkit.models.capability import (
     CAPABILITY_SCHEMA_VERSION,
@@ -26,8 +26,8 @@ from calfkit.models.capability import (
 from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, ToolSelector, split_tool_declarations
 
 
-def make_toolbox(name: str = "docs_server") -> MCPToolbox:
-    return MCPToolbox(name, connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
+def make_toolbox(name: str = "docs_server") -> MCPToolboxNode:
+    return MCPToolboxNode(name, connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
 
 
 def make_record(toolbox_id: str = "docs_server", *, tool_names: tuple[str, ...] = ("search", "fetch"), **overrides: Any) -> CapabilityRecord:

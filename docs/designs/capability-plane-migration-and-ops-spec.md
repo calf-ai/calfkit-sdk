@@ -47,7 +47,7 @@ The shipped plane (`calfkit/mcp/mcp_toolbox.py`, `calfkit/models/capability.py`)
 
 ### 4.1 Writer: toolbox becomes a content contributor
 
-`MCPToolbox` stops owning its own `KafkaTableWriter`, heartbeat loop, and tombstone. Instead it registers a `current_record()` contributor with the worker's `ControlPlanePublisher`:
+`MCPToolboxNode` stops owning its own `KafkaTableWriter`, heartbeat loop, and tombstone. Instead it registers a `current_record()` contributor with the worker's `ControlPlanePublisher`:
 
 - The toolbox still owns its tool list (the MCP session). On startup and on each MCP `tools/list_changed`, it updates its cached `CapabilityRecord` content and bumps `content_updated_at`.
 - The worker's single heartbeat loop pulls that cached record each tick, refreshes `last_heartbeat_at`, and publishes it instance-keyed (`group=toolbox_id`, `member=worker_id`) to `calf.capabilities`.

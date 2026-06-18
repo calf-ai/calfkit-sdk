@@ -1,4 +1,4 @@
-"""Integration: MCPToolbox publishes real CapabilityRecords a KafkaTable can read.
+"""Integration: MCPToolboxNode publishes real CapabilityRecords a KafkaTable can read.
 
 Real Kafka writer + reader (ktables) against a live broker supplied by the
 ``kafka_bootstrap`` fixture (testcontainers-managed Redpanda, or an external
@@ -16,7 +16,7 @@ from aiokafka.admin import AIOKafkaAdminClient
 from ktables import KafkaTable
 from mcp.types import ListToolsResult, Tool
 
-from calfkit.mcp.mcp_toolbox import MCPToolbox
+from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
 from calfkit.models.capability import CapabilityRecord
 from calfkit.worker.lifecycle import ServingContext
@@ -49,7 +49,7 @@ async def capability_topic(kafka_bootstrap: str):
 
 
 async def test_publish_heartbeat_and_tombstone_roundtrip(capability_topic: str, kafka_bootstrap: str) -> None:
-    toolbox = MCPToolbox(
+    toolbox = MCPToolboxNode(
         "docs_server",
         connection_params=StreamableHttpParameters(url="http://unused.local/mcp"),
     )
@@ -132,7 +132,7 @@ async def test_end_to_end_toolbox_to_agent_resolution(capability_topic: str, kaf
     # Toolbox side (as if hosted in another worker): real writer, real publish.
     from types import SimpleNamespace
 
-    toolbox = MCPToolbox("docs_server", connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
+    toolbox = MCPToolboxNode("docs_server", connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
     toolbox._worker = SimpleNamespace(_mcp_discovery=discovery, _client=None)
     writer_gen = toolbox._capability_writer(None)  # type: ignore[arg-type]
     writer = await anext(writer_gen)

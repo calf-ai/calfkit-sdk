@@ -249,7 +249,7 @@ The top-level package re-exports the symbols above. A few public capabilities li
 | Import from | Provides |
 | --- | --- |
 | `calfkit.models` | `ConsumerContext` — the value passed to a `@consumer` function (`output`, `correlation_id`, `deps`, `resources`) — plus the wire/state models (`State`, `Envelope`, `ToolBinding`, …). |
-| `calfkit.mcp` | `MCPToolbox`, `MCPToolboxRef`, `StdioServerParameters`, `StreamableHttpParameters` — host an MCP server's tools as a node. |
+| `calfkit.mcp` | `MCPToolboxNode`, `MCPToolbox`, `StdioServerParameters`, `StreamableHttpParameters` — `MCPToolboxNode` hosts an MCP server's tools as a deployable node; `MCPToolbox` is the name-only handle agents put in `tools=[...]`. |
 | `calfkit.provisioning` | The full topic-provisioning surface: `TopicProvisioner`, `provision_topics`, `topics_for_nodes`, `ProvisionReport`, `StartupTopicEnsurer`, `MissingTopicsError`. |
 | `calfkit.exceptions` | The complete exception set, including `ReplyExpiredError` (raised by `execute` / `start` when a `reply_ttl` elapses), `RegistryConfigError`, and `MissingTopicsError`. |
 
