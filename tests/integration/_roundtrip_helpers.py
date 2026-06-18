@@ -1,6 +1,8 @@
-"""Offline test model + history helpers for the MCP roundtrip integration tests.
+"""Offline test model + history helpers for the real-broker roundtrip integration tests.
 
-This is the *single* module that imports the vendored pydantic-ai model and
+Shared by the MCP-toolbox and tool-node roundtrip suites; nothing here is
+specific to either. This is the *single* module that imports the vendored
+pydantic-ai model and
 message types. The agent's model contract IS the vendored ``Model``
 (``calfkit``'s ``PydanticModelClient`` is an empty marker over it, and the model
 is handed verbatim into the vendored agent loop, which calls ``.request()`` and
@@ -11,6 +13,8 @@ confining those imports here keeps the rest of the suite off the
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
@@ -58,13 +62,38 @@ def scripted_model(tool_calls: list[ToolCallPart]) -> FunctionModel:
     return FunctionModel(_fn)
 
 
+def reactive_model(decide: Callable[[dict[str, object]], list[ToolCallPart] | None]) -> FunctionModel:
+    """A multi-turn model driven by the tool returns seen so far.
+
+    Each turn, ``decide`` receives ``{tool_name: return_content}`` accumulated
+    across the conversation and returns the next turn's tool calls, or ``None``
+    to finalize with :data:`FINAL_OUTPUT`. Lets a test chain calls where a later
+    call's args depend on an earlier call's result — without the test importing
+    any vendored message types (it only builds ``ToolCallPart``s).
+    """
+
+    def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        returns: dict[str, object] = {}
+        for msg in messages:
+            if isinstance(msg, ModelRequest):
+                for part in msg.parts:
+                    if isinstance(part, ToolReturnPart):
+                        returns[part.tool_name] = part.content
+        calls = decide(returns)
+        if not calls:
+            return ModelResponse(parts=[TextPart(FINAL_OUTPUT)])
+        return ModelResponse(parts=list(calls))
+
+    return FunctionModel(_fn)
+
+
 def tool_returns(history: list[ModelMessage]) -> dict[str, object]:
     """Map ``tool_name -> return content`` over every ToolReturnPart in history.
 
-    For an MCP tool the content is whatever the toolbox materialized from the
-    server's ``CallToolResult`` (wrapped in a ``ToolReturn``), so callers should
-    assert against its serialized form rather than a bare scalar. When the same
-    tool is called more than once, prefer :func:`returns_by_call_id`.
+    For a tool node the content is the function's raw return value (assert exact
+    equality). For an MCP tool it is the server's ``CallToolResult`` (assert on
+    its serialized form). When the same tool is called more than once, prefer
+    :func:`returns_by_call_id`.
     """
     returns: dict[str, object] = {}
     for msg in history:

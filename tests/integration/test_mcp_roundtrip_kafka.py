@@ -24,7 +24,7 @@ the full roundtrip completed.
 
 The MCP servers (``_mcp_roundtrip_server*.py``) are built on the real ``mcp``
 package and spawned over stdio by the toolbox; the model
-(``_mcp_roundtrip_helpers.scripted_model``) is offline. Only the broker and the
+(``_roundtrip_helpers.scripted_model``) is offline. Only the broker and the
 MCP servers are real — no live LLM, so the only gate is ``kafka``.
 
 Opt-in (``-m kafka`` / ``make test-kafka``); skips cleanly without Docker. Run
@@ -52,7 +52,7 @@ from calfkit.models.capability import CapabilityRecord
 from calfkit.nodes import Agent
 from calfkit.worker import Worker
 from calfkit.worker.worker_config import MCPDiscoveryConfig
-from tests.integration._mcp_roundtrip_helpers import (
+from tests.integration._roundtrip_helpers import (
     FINAL_OUTPUT,
     retry_prompt_texts,
     returns_by_call_id,
