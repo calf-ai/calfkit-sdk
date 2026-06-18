@@ -16,6 +16,7 @@ from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
+from calfkit.controlplane.advert import AdvertRegistryMixin
 from calfkit.exceptions import NodeFaultError, RegistryConfigError, SeamContractError, safe_exc_message
 from calfkit.models import (
     Call,
@@ -217,7 +218,7 @@ class _SlotFailed:
 # ---------------------------------------------------------------------------
 
 
-class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
+class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegistryMixin):
     _worker: "Worker | None" = None
     """Back-reference to the owning worker, set by ``Worker._add_node``. ``None``
     for a node not attached to a worker. Used by :meth:`_effective_resources` to
