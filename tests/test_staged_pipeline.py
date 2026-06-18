@@ -480,3 +480,58 @@ class TestExecute:
         seam = node._build_seam_context(ctx, env, {}, "call")
         result = await node._execute(ctx, seam, "call", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
         assert isinstance(result, _Declined) and result.reason == "all_declined"
+
+
+class TestClosureSeams:
+    """§6.4 / scenario 38: ``before_node`` fires exactly ONCE at fan-out closure (NOT on mid-batch
+    sibling folds), and there it observes the RESTORED snapshot state — the load-bearing
+    ``_resync_seam_context`` wiring (``_restore_from_snapshot`` swaps in a fresh snapshot ``state``
+    object, so without the re-sync the closure seams would see the cleared re-entry state)."""
+
+    async def test_closure_fires_before_node_once_on_restored_state(self) -> None:
+        node = _BodyNode(node_id="fan", subscribe_topics=["fan.in"])  # fan-out-capable + a body
+        before_states: list[Any] = []
+        after_fired: list[int] = []
+
+        @node.before_node
+        def record(ctx: Any) -> None:
+            before_states.append(ctx.state.metadata)  # a marker baked into the OPEN-time snapshot state
+            return None
+
+        @node.after_node
+        def count(ctx: Any, output: Any) -> None:
+            after_fired.append(1)
+            return None
+
+        store = FakeFanoutBatchStore()
+        await _open(store, snap_state=State(metadata={"marker": "restored"}), deps={"k": "v"})
+        await record_outcome(store, "A", _resolved_outcome("f1", "tc1", "r1"))
+        await record_outcome(store, "A", _resolved_outcome("f2", "tc2", "r2"))
+        env = _marked_env(in_reply_to="A", tag=None)  # in_reply_to == frame_id "A" → the re-entry close
+        ctx = _store_ctx(store)
+        seam = node._build_seam_context(ctx, env, {}, "return")
+
+        await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+
+        assert before_states == [{"marker": "restored"}]  # fired ONCE, observing the RESTORED snapshot state
+        assert after_fired == [1]  # after_node also fired exactly once at closure
+
+    async def test_midbatch_sibling_fold_does_not_fire_before_node(self) -> None:
+        node = _BodyNode(node_id="fan", subscribe_topics=["fan.in"])
+        fired: list[int] = []
+
+        @node.before_node
+        def record(ctx: Any) -> None:
+            fired.append(1)
+            return None
+
+        store = FakeFanoutBatchStore()
+        await _open(store)  # expects f1 + f2
+        env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])  # 1 of 2 → parks
+        ctx = _store_ctx(store)
+        seam = node._build_seam_context(ctx, env, {}, "return")
+
+        result = await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+
+        assert result is _CONSUMED  # the fold parked (incomplete batch)
+        assert fired == []  # before_node did NOT fire on a mid-batch sibling (§6.4)

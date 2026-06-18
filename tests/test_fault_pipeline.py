@@ -421,6 +421,49 @@ class TestSeamPrecision:
         assert seen == [None]  # exception cleared once on_node_error recovered
 
 
+class TestSeamFailureBranches:
+    """§6.5/§6.8 stage-5 seam-failure arms: a NodeFaultError minted INSIDE on_node_error publishes
+    verbatim (original chained), and a recovery value that then fails in after_node chains the original."""
+
+    async def test_on_node_error_mint_publishes_verbatim_with_original_chained(self) -> None:
+        # §6.5: a NodeFaultError raised inside the on_node_error chain is the mint gesture — the chain
+        # stops and the minted fault is published verbatim, with the original synthesized fault chained.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])  # body raises → calf.unhandled
+
+        @node.on_node_error
+        def mint(ctx: object, fault: ErrorReport) -> None:
+            raise NodeFaultError("billing.quota_exceeded", message="minted inside the error seam")
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "billing.quota_exceeded"  # the minted fault, verbatim
+        assert any(c.error_type == "calf.unhandled" for c in env.reply.error.causes)  # original chained (§6.5)
+
+    async def test_recovery_then_failure_chains_the_original(self) -> None:
+        # §6.8 single-shot: on_node_error recovers a value, but processing it (here after_node) then
+        # raises — a terminal fault that chains the ORIGINAL on_node_error report as a cause.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])  # body raises RuntimeError("body boom")
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            return "recovered-value"
+
+        @node.after_node
+        def boom(ctx: SeamContext[State], output: object) -> None:
+            raise RuntimeError("after_node on the recovery boom")
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.unhandled"  # report2 — the after_node failure
+        assert any("body boom" in c.message for c in env.reply.error.causes)  # the ORIGINAL chained (§6.8)
+
+
 class TestBeforeNode:
     async def test_before_node_value_short_circuits_the_body(self) -> None:
         # §6.2/§6.4: a before_node returning a value becomes the node's output; the body never runs.
