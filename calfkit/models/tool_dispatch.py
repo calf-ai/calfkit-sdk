@@ -90,11 +90,12 @@ class SelectorResult:
 class ToolSelector(Protocol):
     """Deferred tool declaration, resolved per turn against the Capability View.
 
-    Implemented by :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` (and its
-    ``select()`` results): passing the toolbox object to an agent extracts only
-    a lookup key — no session contact, no deployment. The ``view`` is a plain
-    ``Mapping`` so the agent layer needs no ktables import and tests can use
-    dicts.
+    Implemented by :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` (the handle
+    agents hold, including ``select()`` results) and by the hosting
+    :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode`, which delegates to it:
+    passing either to an agent extracts only a lookup key — no session contact,
+    no deployment. The ``view`` is a plain ``Mapping`` so the agent layer needs
+    no ktables import and tests can use dicts.
     """
 
     def resolve_tools(self, view: Mapping[str, Any]) -> SelectorResult: ...

@@ -3,7 +3,7 @@
 Built on the *real* ``mcp`` package (``mcp.server.fastmcp.FastMCP``) and
 deliberately free of any ``calfkit`` or vendored-pydantic-ai imports, so the
 test exercises a genuine external MCP server rather than a stub. The
-:class:`~calfkit.mcp.MCPToolbox` spawns this module as a subprocess over stdio
+:class:`~calfkit.mcp.MCPToolboxNode` spawns this module as a subprocess over stdio
 via ``StdioServerParameters(command=sys.executable, args=[<this file>])`` and
 talks the MCP protocol to it.
 

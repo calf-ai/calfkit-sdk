@@ -1,8 +1,8 @@
 # How to give agents MCP tools
 
-To let agents call tools served by an MCP server, deploy one `MCPToolbox` node
-per server and pass that toolbox object to each agent's `tools=[...]` — like a
-tool node. Discovery is automatic and cross-process: the toolbox advertises
+To let agents call tools served by an MCP server, deploy one `MCPToolboxNode`
+per server and give each agent a name-only `MCPToolbox` handle in `tools=[...]`
+— like a tool node. Discovery is automatic and cross-process: the toolbox advertises
 its tools on a control-plane topic, and each agent's worker keeps a local view
 of it. There is no discovery configuration in the happy path. (For why it
 works this way, see the
@@ -12,11 +12,11 @@ works this way, see the
 
 ```python
 from calfkit.client.client import Client
-from calfkit.mcp.mcp_toolbox import MCPToolbox
+from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
 from calfkit.worker.worker import Worker
 
-docs = MCPToolbox(
+docs = MCPToolboxNode(
     "docs_server",
     connection_params=StreamableHttpParameters(url="https://docs.example.com/mcp"),
 )
@@ -55,19 +55,19 @@ its connection config at all (secrets stay on the toolbox host) — reference
 the toolbox **by name** instead:
 
 ```python
-from calfkit.mcp import MCPToolboxRef
+from calfkit.mcp import MCPToolbox
 
 agent = Agent(
     "researcher",
     subscribe_topics="researcher.input",
     model_client=model,
-    tools=[MCPToolboxRef("docs_server", include=("search",))],
+    tools=[MCPToolbox("docs_server", include=("search",))],
 )
 ```
 
-A ref is a frozen, identity-only handle: it can never carry connection
+An `MCPToolbox` is a frozen, identity-only handle: it can never carry connection
 params, and deploying one fails immediately with a pointer to the hosting
-form. (`toolbox.select(...)` returns the same type.)
+form. (`MCPToolboxNode.select(...)` returns the same type.)
 
 The agent's worker detects the declaration and maintains the local capability
 view, gated at boot so the first turn already sees it. Selections re-resolve

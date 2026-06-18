@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _TransportCM = AbstractAsyncContextManager[tuple[object, object]]
 
 
-class MCPToolbox(BaseNodeDef):
+class MCPToolboxNode(BaseNodeDef):
     _node_kind: ClassVar[NodeKind] = "toolbox"
 
     async def _mcp_session(self, ctx: ResourceSetupContext) -> AsyncIterator[ClientSession]:
@@ -43,7 +43,7 @@ class MCPToolbox(BaseNodeDef):
             transport = stdio_client(params)
         else:
             raise LifecycleConfigError(
-                f"MCPToolbox {self.node_id!r}: unsupported connection_params type {type(params).__name__}; "
+                f"MCPToolboxNode {self.node_id!r}: unsupported connection_params type {type(params).__name__}; "
                 "expected StreamableHttpParameters or StdioServerParameters"
             )
         async with transport as (read_stream, write_stream):
@@ -86,14 +86,13 @@ class MCPToolbox(BaseNodeDef):
     def resolve_tools(self, view: Mapping[str, CapabilityRecord]) -> SelectorResult:
         """All advertised tools, resolved against the Capability View.
 
-        Implements ``ToolSelector`` by delegating to this toolbox's ref —
-        passing the toolbox in ``tools=[...]`` and passing
-        ``MCPToolboxRef(name)`` resolve identically; the ref is the canonical
-        resolution path.
+        Implements ``ToolSelector`` by delegating to this node's handle —
+        passing the node in ``tools=[...]`` and passing ``MCPToolbox(name)``
+        resolve identically; the handle is the canonical resolution path.
         """
-        return MCPToolboxRef(self.node_id).resolve_tools(view)
+        return MCPToolbox(self.node_id).resolve_tools(view)
 
-    def select(self, *, include: Sequence[str] | None = None, strict: bool = False) -> "MCPToolboxRef":
+    def select(self, *, include: Sequence[str] | None = None, strict: bool = False) -> "MCPToolbox":
         """A scoped/strict selector for this toolbox's tools.
 
         ``include`` pins the exact tool names the agent may see (the trust
@@ -102,7 +101,7 @@ class MCPToolbox(BaseNodeDef):
         selection cannot be fully satisfied; the default degrades with a
         warning.
         """
-        return MCPToolboxRef(
+        return MCPToolbox(
             toolbox_id=self.node_id,
             include=tuple(include) if include is not None else None,
             strict=strict,
@@ -127,7 +126,7 @@ class MCPToolbox(BaseNodeDef):
         if servers:
             return servers if isinstance(servers, str) else ",".join(servers)
         raise RuntimeError(
-            f"MCPToolbox {self.node_id!r}: cannot derive Kafka bootstrap servers for the "
+            f"MCPToolboxNode {self.node_id!r}: cannot derive Kafka bootstrap servers for the "
             "capability topic (no worker/client attached). Host this node via Worker, or set "
             "MCPDiscoveryConfig(bootstrap_servers=...) explicitly."
         )
@@ -158,7 +157,7 @@ class MCPToolbox(BaseNodeDef):
             published_at=datetime.now(tz=timezone.utc),
         )
 
-    async def _publish_on_startup(self, ctx: ServingContext["MCPToolbox"]) -> None:
+    async def _publish_on_startup(self, ctx: ServingContext["MCPToolboxNode"]) -> None:
         """Connect-time advertisement + heartbeat start. Raising here aborts
         worker startup — a toolbox that cannot advertise must fail loudly."""
         session = ctx.resources[self._session_resource_key]
@@ -219,7 +218,7 @@ class MCPToolbox(BaseNodeDef):
             self._relist_tasks.add(task)
             task.add_done_callback(self._on_relist_done)
 
-    async def _tombstone_on_shutdown(self, ctx: ServingContext["MCPToolbox"]) -> None:
+    async def _tombstone_on_shutdown(self, ctx: ServingContext["MCPToolboxNode"]) -> None:
         # Flag FIRST, synchronously (no await above this line): after it is
         # set, _mcp_message_handler can never create a new re-list task, so
         # the snapshot below is complete. Then cancel heartbeat AND in-flight
@@ -267,10 +266,10 @@ class MCPToolbox(BaseNodeDef):
 
 
 @dataclass(frozen=True)
-class MCPToolboxRef:
+class MCPToolbox:
     """The identity-only, deployment-free handle to an MCP toolbox (#212).
 
-    The call-side counterpart to the hosting :class:`MCPToolbox` (the
+    The call-side counterpart to the hosting :class:`MCPToolboxNode` (the
     peer-node pattern's reference/servant split): constructible anywhere with
     just the toolbox's name — no connection params, no secrets — and resolved
     per agent turn against the Capability View. At the MCP protocol layer the
@@ -279,8 +278,8 @@ class MCPToolboxRef:
 
     ``include`` pins the exact tool names the agent may see; ``strict=True``
     fails the turn when the selection cannot be fully satisfied (default
-    degrades with a warning). Frozen with value semantics: equal refs compare
-    and hash equal.
+    degrades with a warning). Frozen with value semantics: equal handles
+    compare and hash equal.
     """
 
     toolbox_id: str

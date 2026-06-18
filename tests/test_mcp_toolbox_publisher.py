@@ -1,4 +1,4 @@
-"""PR B: MCPToolbox advertises its tools on the capability control plane.
+"""PR B: MCPToolboxNode advertises its tools on the capability control plane.
 
 Spec §3.3/§8.5: publish on connect (after_startup), re-publish on
 ``tools/list_changed`` and as a heartbeat, tombstone on clean shutdown
@@ -23,7 +23,7 @@ from calfkit.worker.lifecycle import ServingContext
 from calfkit.worker.worker_config import MCPDiscoveryConfig
 
 mcp_toolbox = pytest.importorskip("calfkit.mcp.mcp_toolbox")
-MCPToolbox = mcp_toolbox.MCPToolbox
+MCPToolboxNode = mcp_toolbox.MCPToolboxNode
 
 from calfkit.mcp.mcp_transport import StreamableHttpParameters  # noqa: E402
 
@@ -60,7 +60,7 @@ def make_tools() -> list[Tool]:
 
 
 def make_toolbox(discovery: MCPDiscoveryConfig | None = None) -> Any:
-    toolbox = MCPToolbox(
+    toolbox = MCPToolboxNode(
         "docs_server",
         connection_params=StreamableHttpParameters(url="http://unused.local/mcp"),
     )

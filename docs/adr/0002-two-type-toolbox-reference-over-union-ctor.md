@@ -1,5 +1,10 @@
 # Two types for MCP toolbox host vs reference, not an ADK-style union constructor
 
+> **Naming updated (2026-06-17, [ADR-0009](0009-call-side-handle-takes-the-bare-name.md)).**
+> The two types were later renamed: the reference is now `MCPToolbox` and the
+> host is `MCPToolboxNode` (was `MCPToolboxRef` / `MCPToolbox`). The two-type
+> decision recorded below is unchanged — read the original names accordingly.
+
 Agents on distributed hosts must reference an MCP toolbox by name without
 holding its connection params (issue #212). We added a public frozen
 `MCPToolboxRef(name, include, strict)` beside the hosting `MCPToolbox` rather

@@ -6,7 +6,7 @@ distributed loop over a live broker —
 
     the model emits a tool call
       -> the agent resolves the MCP binding from the Capability View
-      -> the agent dispatches a ToolCallRef over Kafka to the MCPToolbox node
+      -> the agent dispatches a ToolCallRef over Kafka to the MCPToolboxNode
       -> the toolbox calls the tool on the REAL MCP server (a stdio subprocess)
       -> the result returns over Kafka
       -> the agent re-enters the model loop and finalizes.
@@ -47,7 +47,7 @@ from ktables import KafkaTable
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
-from calfkit.mcp import MCPToolbox, StdioServerParameters
+from calfkit.mcp import MCPToolboxNode, StdioServerParameters
 from calfkit.models.capability import CapabilityRecord
 from calfkit.nodes import Agent
 from calfkit.worker import Worker
@@ -170,7 +170,7 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    toolbox = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call the add tool",
@@ -207,7 +207,7 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    toolbox = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call both tools",
@@ -256,7 +256,7 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    toolbox = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="add two pairs",
@@ -299,7 +299,7 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    toolbox = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call both tools sequentially",
@@ -346,8 +346,8 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    box_a = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
-    box_b = MCPToolbox(_SERVER_B_NAME, connection_params=_server_params(_SERVER_B_SCRIPT))
+    box_a = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    box_b = MCPToolboxNode(_SERVER_B_NAME, connection_params=_server_params(_SERVER_B_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="use a tool from each server",
@@ -393,7 +393,7 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    toolbox = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
     agent1 = Agent(
         a1_id,
         system_prompt="add",
@@ -444,7 +444,7 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    toolbox = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="try to call danger",
@@ -485,7 +485,7 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     cap_topic = f"{topic_namespace}.capabilities"
     discovery = _discovery(cap_topic, kafka_bootstrap)
 
-    toolbox = MCPToolbox(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
     enable_agent = Agent(
         enable_id,
         system_prompt="enable the bonus tool",

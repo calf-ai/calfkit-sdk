@@ -5,12 +5,12 @@
 
 ## 1. Problem
 
-An `MCPToolbox` node fronts one MCP server and services tool calls sent to its
+An `MCPToolboxNode` node fronts one MCP server and services tool calls sent to its
 dispatch topic (`mcp_server.<name>`). Its tools, however, are only knowable at
 runtime: `list_tools` is an async RPC against a live MCP session that exists
 only after the toolbox's resource phase. Agents declare tools at construction
 time, synchronously, and may run in a **different worker process** than the
-toolbox. `MCPToolbox.tool_bindings()` therefore raises `NotImplementedError`
+toolbox. `MCPToolboxNode.tool_bindings()` therefore raises `NotImplementedError`
 today.
 
 This spec defines how runtime-discovered MCP tools become `ToolBinding`s
@@ -23,7 +23,7 @@ available to any agent in the cluster.
 | 1 | Topology | Cross-process from day one: toolbox and consuming agent may live in different workers |
 | 2 | Mechanism | A single cluster-wide **compacted capability topic**; toolboxes publish their tool list keyed by toolbox id (control plane). Live per-turn queries rejected (§7) |
 | 3 | Reader | One subscriber + one materialized dict (**Capability View**) per agent-hosting worker, stored in the worker resource bag; agents read it per turn |
-| 4 | Agent declaration | Pass the `MCPToolbox` instance itself in `tools=[...]` (same object that gets deployed via `add_nodes` — the tool-node pattern); `toolbox.select(include=[...], strict=True)` for scoped/strict. Resolved per turn as a deferred selector |
+| 4 | Agent declaration | Pass the `MCPToolboxNode` instance itself in `tools=[...]` (same object that gets deployed via `add_nodes` — the tool-node pattern); `toolbox.select(include=[...], strict=True)` for scoped/strict. Resolved per turn as a deferred selector |
 | 5 | Boot ordering | Worker gates serving on view catch-up (bounded wait ~30s; on timeout, serve + loud log) |
 | 6 | Unresolved selector | Warn + run the turn degraded; `strict=True` fails the turn before the model runs |
 | 7 | Wire format | Calfkit-owned versioned pydantic model; never the vendored `ToolDefinition` |
@@ -264,7 +264,7 @@ on. Revisit if deploy-window tool gaps hurt in practice.
 | Wire models | `calfkit/models/capability.py` | `CapabilityToolDef`, `CapabilityRecord` (§3.2), `CAPABILITY_SCHEMA_VERSION` |
 | Table + writer | **`ktables` (PyPI dependency, >=0.1.1)** | `KafkaTable[CapabilityRecord]` (the Capability View) + `KafkaTableWriter` (toolbox publisher transport) |
 | Selector protocol | `calfkit/models/tool_dispatch.py` | `ToolSelector` protocol (deferred per-turn resolution) — keeps `nodes/agent.py` free of any `calfkit.mcp` import |
-| MCP selector | `calfkit/mcp/mcp_toolbox.py` | `MCPToolbox` itself implements `ToolSelector`; `.select(include=..., strict=...)` returns a frozen internal scoped selector (no user-facing selector class) |
+| MCP selector | `calfkit/mcp/mcp_toolbox.py` | `MCPToolboxNode` itself implements `ToolSelector`; `.select(include=..., strict=...)` returns a frozen internal scoped selector (no user-facing selector class) |
 | Toolbox publisher | `calfkit/mcp/mcp_toolbox.py` | record publish on connect, `tools/list_changed` handler, heartbeat task, shutdown tombstone |
 | Worker wiring | `calfkit/worker/worker.py` (+ config) | auto-registered worker `@resource` when any hosted agent declares selectors |
 
@@ -305,7 +305,7 @@ Wiring sequence:
 1. **Agent ctor**: `_normalize_tools` returns `(bindings, selectors)`;
    selectors (objects implementing `ToolSelector`) are stored on
    `agent._tool_selectors`. Checked BEFORE the `ToolProvider` structural
-   check, so an `MCPToolbox` in `tools=[...]` is never mistaken for a
+   check, so an `MCPToolboxNode` in `tools=[...]` is never mistaken for a
    sync provider.
 2. **`Worker.register_handlers`**: scan hosted nodes for non-empty
    `_tool_selectors`. If any (and the resource isn't already registered —
@@ -397,8 +397,8 @@ works because the agent's worker imports the toolbox *definition* (shared
 codebase) without deploying it — the same way tool-node objects travel today.
 **Reference type (added for #212, adjudicated 2026-06-10):** distributed
 agent hosts reference a toolbox by name via the public frozen
-`MCPToolboxRef(toolbox_id, include=None, strict=False)` (exported beside
-`MCPToolbox`; `select()` returns it; the toolbox's own resolution delegates
+`MCPToolbox(toolbox_id, include=None, strict=False)` (exported beside
+`MCPToolboxNode`; `select()` returns it; the toolbox's own resolution delegates
 to it). A one-class union ctor (ADK-style `connection_params` accepting an
 identity arm) was considered and rejected: ADK's union arms are
 capability-invariant transports, while ours would be capability-variant
@@ -408,7 +408,7 @@ type boundary; `add_nodes(ref)` is rejected eagerly with a teaching error.
 From the union position we kept: co-located `tools=[toolbox]` stays primary,
 one docs page for both types, ADK-shaped host params, intuitive error text.
 
-The standalone `MCPTools` class is dropped; `MCPToolbox.tool_bindings()`
+The standalone `MCPTools` class is dropped; `MCPToolboxNode.tool_bindings()`
 (which raised `NotImplementedError`) is deleted in favor of implementing
 `ToolSelector`. `_normalize_tools` checks selector-ness BEFORE provider-ness
 and sets selectors aside in `self._tool_selectors`.
@@ -421,7 +421,7 @@ class ToolSelector(Protocol):
     def resolve_tools(self, view: Mapping[str, "CapabilityRecord"]) -> "SelectorResult": ...
 ```
 
-`MCPToolbox.resolve_tools` looks up `view.get(self.node_id)`;
+`MCPToolboxNode.resolve_tools` looks up `view.get(self.node_id)`;
 `toolbox.select(include=..., strict=...)` returns a small frozen
 `_ScopedSelector(toolbox_id, include, strict)` delegating to the same code.
 `SelectorResult` carries `bindings` plus structured diagnostics
@@ -473,13 +473,13 @@ resource-phase errors abort worker startup.
 1. **PR A — wire model + config**: `calfkit/models/capability.py`
    (`CapabilityRecord`, `CapabilityToolDef`), `MCPDiscoveryConfig`; pure unit
    tests (round-trip, version tolerance policy helper).
-2. **PR B — toolbox publisher**: `KafkaTableWriter` resource on `MCPToolbox`,
+2. **PR B — toolbox publisher**: `KafkaTableWriter` resource on `MCPToolboxNode`,
    connect/`list_changed`/heartbeat/tombstone hooks; tests with a fake writer
    (publish assertions) + one real-broker integration test.
 3. **PR C — worker view + selector + agent resolution**: worker `@resource`
    opening `KafkaTable.json(model=CapabilityRecord)` (auto-registered when a
    hosted agent declares selectors), `ToolSelector` protocol, `MCPTools`,
-   `run()` resolution/merge/strict; fixes `MCPToolbox.tool_bindings()`'s error
+   `run()` resolution/merge/strict; fixes `MCPToolboxNode.tool_bindings()`'s error
    message to point at `MCPTools`. Closes the loop; PR #207 leaves draft.
    (Formerly PRs C+D; merged because the view wiring is now ~20 lines.)
 
@@ -508,7 +508,7 @@ partition at creation (recommended: yes; total order per key is free).
 
 ## 9. Implementation notes (non-normative)
 
-- `MCPToolbox.tool_bindings()` currently raises `NotImplementedError`; once
+- `MCPToolboxNode.tool_bindings()` currently raises `NotImplementedError`; once
   selectors exist it should keep raising (a toolbox is not a sync provider) and
   the error message should point at `MCPTools`.
 - The catch-up gate needs consumer end-offset access; FastStream exposes the

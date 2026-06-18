@@ -147,7 +147,7 @@ class Worker(LifecycleHookMixin):
             if isinstance(node, ToolSelector):
                 raise TypeError(
                     f"{type(node).__name__} is a name-only reference and can't host — construct the "
-                    "hosting node instead (e.g. MCPToolbox(name, connection_params=...)) to deploy. "
+                    "hosting node instead (e.g. MCPToolboxNode(name, connection_params=...)) to deploy. "
                     "References belong in Agent(tools=[...])."
                 )
             raise TypeError(f"add_nodes expects BaseNodeDef instances, got {type(node).__name__}: {node!r}")

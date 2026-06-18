@@ -89,8 +89,8 @@ def resolve_capability(
 ) -> SelectorResult:
     """Resolve ``toolbox_id`` (optionally filtered) against the view.
 
-    Public API: this is the resolution kernel behind ``MCPToolboxRef`` and
-    ``MCPToolbox.resolve_tools``; custom ``ToolSelector`` implementations may
+    Public API: this is the resolution kernel behind ``MCPToolbox`` and
+    ``MCPToolboxNode.resolve_tools``; custom ``ToolSelector`` implementations may
     call it directly.
 
     Never raises on bad records: the tolerant reader admits shapes that fail
