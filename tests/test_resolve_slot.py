@@ -129,3 +129,15 @@ class TestAgentResolveSlot:
         result = ctx.state.get_tool_result("t1")
         assert isinstance(result, RetryPromptPart)
         assert isinstance(result.content, str)  # str-only contract holds in the no-TextPart edge
+
+    def test_retry_content_picks_the_marked_text_not_an_unmarked_preamble(self) -> None:
+        # ``is_retry`` keys on the calf.retry MARKER (any part), so ``_retry_content`` must extract the
+        # MARKED part's text — not merely the first TextPart. When an unmarked TextPart precedes the
+        # marked one (``[TextPart("preamble"), retry_text_part("the real error")]``), the model must
+        # receive the real retry message in ``RetryPromptPart.content``, not the unmarked preamble.
+        ctx = _seam_ctx()
+        parts = [TextPart(text="preamble"), retry_text_part("the real error")]
+        _agent()._resolve_slot(ctx, _SlotResolved(frame_id="f1", tag="t1", target_topic="tool.in", parts=parts, handled=False))
+        result = ctx.state.get_tool_result("t1")
+        assert isinstance(result, RetryPromptPart)
+        assert result.content == "the real error"  # the MARKED text, never the unmarked "preamble"

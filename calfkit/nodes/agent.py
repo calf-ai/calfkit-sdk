@@ -18,7 +18,7 @@ from calfkit.exceptions import DeserializationError, MCPToolResolutionError, saf
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.node_result import _extract_text, extract_lenient
-from calfkit.models.payload import ContentPart, is_retry
+from calfkit.models.payload import RETRY_MARKER, ContentPart, is_retry
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
@@ -175,12 +175,18 @@ class BaseAgentNodeDef(
         """STR-only extraction for ``RetryPromptPart.content`` (spec §6.9 ``_text(p)``).
 
         ``RetryPromptPart.content`` is ``list[ErrorDetails] | str``, so the retry branch must NOT use
-        ``extract_lenient`` (which returns ``DataPart.data`` FIRST — an arbitrary non-str). The sole
-        marker producer (``retry_text_part``) always emits a marked ``TextPart``, so ``_extract_text``
-        (the first ``TextPart.text``) is the right projection. A hypothetical future producer that marks
-        a non-``TextPart`` part (``is_retry`` reads only the open ``metadata`` slot, so it is total over
-        the vocabulary) degrades to a defensive ``str()`` of the lenient value rather than crashing —
-        the contract that ``content`` is always a ``str`` holds either way."""
+        ``extract_lenient`` (which returns ``DataPart.data`` FIRST — an arbitrary non-str). The branch
+        fires on ``is_retry`` (which keys on the ``calf.retry`` MARKER, scanning any part), so the text
+        must come from the MARKED ``TextPart`` — not merely the first ``TextPart`` — or an unmarked
+        preamble preceding the marked text would be returned instead of the actual retry message.
+        Fall back to the first ``TextPart.text`` (``_extract_text``) when no marked ``TextPart`` is
+        present, then to a defensive ``str()`` of the lenient value — a hypothetical future producer
+        marking a non-``TextPart`` part (``is_retry`` reads only the open ``metadata`` slot, so it is
+        total over the vocabulary) degrades there rather than crashing. The contract that ``content``
+        is always a ``str`` holds in every case."""
+        for part in parts or []:
+            if isinstance(part, TextPart) and (part.metadata or {}).get(RETRY_MARKER):
+                return part.text
         try:
             return _extract_text(parts or [])
         except DeserializationError:
