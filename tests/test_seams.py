@@ -8,6 +8,10 @@ notes/pr6-fault-rail-implementation-plan.md §3 step 1 / §4 layer 1.
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.nodes._seams import _Minted, run_chain, run_chain_guarded
@@ -102,6 +106,24 @@ class TestRunChainGuarded:
         result = await run_chain_guarded([boom, recovers], object(), report)
 
         assert result == "recovered-after-boom"
+
+    async def test_cancelled_error_propagates_not_swallowed_as_decline(self) -> None:
+        # §6.5: the decline-on-raise rule catches ``Exception``, NOT ``BaseException``. A
+        # ``CancelledError`` (cooperative cancellation) must propagate OUT of the guarded
+        # chain — never be mistaken for an accidental decline and swallowed — and a later
+        # handler that WOULD recover must not run (the cancellation wins).
+        report = ErrorReport(error_type="calf.unhandled")
+
+        def cancels(ctx: object, fault: ErrorReport) -> str:
+            raise asyncio.CancelledError()
+
+        def never_runs(ctx: object, fault: ErrorReport) -> str:
+            return "should-not-recover"
+
+        with pytest.raises(asyncio.CancelledError):
+            await run_chain_guarded([cancels, never_runs], object(), report)
+        # the cancellation is NOT recorded as a seam-error decline breadcrumb
+        assert FaultTypes.SEAM_ERRORS not in report.details
 
     async def test_node_fault_error_mints_and_stops_chain(self) -> None:
         # §6.5 mint rule (inside the error seam): a NodeFaultError raised in a

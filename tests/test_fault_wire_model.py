@@ -531,6 +531,22 @@ class TestFromException:
         assert report.error_type == FaultTypes.UNHANDLED
         assert report.details[FaultTypes.EXCEPTION_TYPE] == "HostileError"
 
+    def test_is_total_when_both_str_and_repr_raise(self) -> None:
+        # The innermost fallback of ``_safe_exc_str``: reached only when BOTH ``str(exc)``
+        # AND ``repr(exc)`` raise. The message degrades to the bounded sentinel — and NO
+        # exception escapes (the error path's totality contract, §6.7/§4.3).
+        class TotallyUnprintableError(Exception):
+            def __str__(self) -> str:
+                raise RuntimeError("no str")
+
+            def __repr__(self) -> str:
+                raise RuntimeError("no repr")
+
+        report = ErrorReport.from_exception(TotallyUnprintableError())
+        assert report.message == "<unprintable TotallyUnprintableError>"
+        assert report.error_type == FaultTypes.UNHANDLED
+        assert report.details[FaultTypes.EXCEPTION_TYPE] == "TotallyUnprintableError"
+
     def test_chains_a_cause(self) -> None:
         # The §6.8 recovery-then-failure case: the second error chains the original.
         prior = ErrorReport(error_type="upstream")

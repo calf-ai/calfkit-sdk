@@ -122,11 +122,30 @@ class TestOutputPositionValidation:
         assert isinstance(result, ReturnCall) and result.value == {"title": "ok"}
 
 
+class _TypedIntNode(BaseNodeDef):
+    """A node whose declared seam output type is ``int`` — bool subclasses int, so this
+    pins that the §6.2 bool guard runs BEFORE the int-accepting output-position validation."""
+
+    @property
+    def _seam_output_type(self) -> Any:
+        return int
+
+
 class TestCoerceGuards:
     def test_rejects_bool(self) -> None:
         # §6.2: a bool is never a node output — the predictable port of a gate's
         # `return True` must not short-circuit the happy path with True as the answer.
         node = _node()
+        with pytest.raises(SeamContractError):
+            node._coerce_output(_ctx(State()), True)
+
+    def test_bool_guard_precedes_int_output_type_path(self) -> None:
+        # §6.2 ordering: bool subclasses int, so on an int-typed node a `True` substitute
+        # WOULD validate as int=1 if the output-position validation ran first. The bool guard
+        # must fire BEFORE it — `return True` is caught as "never a node output", not silently
+        # accepted as the integer 1.
+        node = _TypedIntNode(node_id="i", subscribe_topics=["in"])
+        node._coerce_output(_ctx(State()), 1)  # a real int still validates and coerces
         with pytest.raises(SeamContractError):
             node._coerce_output(_ctx(State()), True)
 
