@@ -63,6 +63,8 @@ class FaultTypes:
     # (in-node spec §4.4). ``details.reason`` ∈ {store_unavailable, basestate_missing, reentry_failed,
     # dispatch_failed}; a node-own raise mid-batch escalates the exception itself (``calf.unhandled``).
     FANOUT_ABORTED = "calf.fanout.aborted"
+    REASON_STORE_UNAVAILABLE = "store_unavailable"
+    REASON_BASESTATE_MISSING = "basestate_missing"
     REASON_REENTRY_FAILED = "reentry_failed"
     REASON_DISPATCH_FAILED = "dispatch_failed"
 
@@ -170,14 +172,34 @@ class ErrorReport(BaseModel):
     @field_validator("message", mode="before")
     @classmethod
     def _clamp_message(cls, v: Any) -> Any:
-        """Clamp an over-long ``message`` rather than reject it.
+        """Coerce a non-str ``message`` to str, then clamp it — never reject.
 
         A rejecting constraint would poison inbound decode of an otherwise-valid
         report; a BEFORE-mode clamp keeps construction total on every path,
         including deserialization. The clamp-don't-reject discipline keeps the error path total.
+        A non-str scalar (e.g. an int the rail passed by mistake) is coerced via ``str(v)``
+        instead of falling through to the ``message: str`` constraint, whose rejection would
+        otherwise drop the WHOLE ``build_safe`` into its last-resort fallback — discarding the
+        report's causes and frame_chain. Only the offending scalar is normalized.
         """
-        if isinstance(v, str) and len(v) > _MAX_MESSAGE_CHARS:
+        if not isinstance(v, str):
+            v = str(v)
+        if len(v) > _MAX_MESSAGE_CHARS:
             return v[:_MAX_MESSAGE_CHARS]
+        return v
+
+    @field_validator("error_type", mode="before")
+    @classmethod
+    def _coerce_error_type(cls, v: Any) -> Any:
+        """Coerce a non-str ``error_type`` to str rather than reject it.
+
+        Mirrors :meth:`_clamp_message`: a non-str ``error_type`` would otherwise hit the
+        ``error_type: str`` constraint and collapse ``build_safe`` into its last-resort
+        fallback, which rewrites ``error_type`` to ``calf.unhandled`` and drops causes and
+        frame_chain. Coercing the offending scalar keeps the primary build path total and
+        preserves the original code's string form."""
+        if not isinstance(v, str):
+            return str(v)
         return v
 
     def walk(self) -> Iterator[ErrorReport]:

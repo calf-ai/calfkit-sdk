@@ -101,6 +101,43 @@ class TestBuildSafe:
         r = ErrorReport.build_safe(error_type="x", message="m", retryable=True, origin_node_id="n1")
         assert (r.error_type, r.message, r.retryable, r.origin_node_id) == ("x", "m", True, "n1")
 
+    def test_non_str_message_coerced_keeps_causes_and_frame_chain(self) -> None:
+        # round 1: a non-str ``message`` must NOT collapse the whole build into the
+        # last-resort fallback (which drops causes/frame_chain). The offending scalar
+        # is coerced to str on the primary path; everything else survives.
+        child = ErrorReport(error_type="calf.child")
+        frame = FrameRef(frame_id="f1", target_topic="t")
+        r = ErrorReport.build_safe(
+            error_type="calf.parent",
+            message=99999,  # type: ignore[arg-type]
+            causes=[child],
+            frame_chain=[frame],
+        )
+        assert r.error_type == "calf.parent"  # primary path survived (no fallback rewrite)
+        assert isinstance(r.message, str) and r.message == "99999"
+        assert [c.error_type for c in r.causes] == ["calf.child"]  # cause kept
+        assert r.frame_chain == [frame]  # topology kept
+        assert "fallback" not in r.details.get(FaultTypes.ELIDED, {})  # not the last-resort arm
+
+    def test_non_str_error_type_coerced_keeps_causes_and_frame_chain(self) -> None:
+        # round 1: a non-str ``error_type`` must likewise survive the primary path —
+        # coerced to str, NOT rewritten to calf.unhandled by the fallback arm, and not
+        # dropping causes/frame_chain.
+        child = ErrorReport(error_type="calf.child")
+        frame = FrameRef(frame_id="f1", target_topic="t")
+        r = ErrorReport.build_safe(
+            error_type=12345,  # type: ignore[arg-type]
+            message="keep",
+            causes=[child],
+            frame_chain=[frame],
+        )
+        assert isinstance(r.error_type, str) and r.error_type == "12345"
+        assert r.error_type != FaultTypes.UNHANDLED  # not collapsed into the fallback
+        assert r.message == "keep"
+        assert [c.error_type for c in r.causes] == ["calf.child"]  # cause kept
+        assert r.frame_chain == [frame]  # topology kept
+        assert "fallback" not in r.details.get(FaultTypes.ELIDED, {})
+
     def test_never_raises_on_malformed_input(self) -> None:
         # A cause that is neither an ErrorReport nor a valid dict would make the
         # plain constructor raise; build_safe must still return a report so the

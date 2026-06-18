@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from calfkit.models.error_report import FaultTypes
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutBaseState, FanoutOpen, FanoutOutcome, FanoutState, SlotRef
 
 if TYPE_CHECKING:
@@ -147,7 +148,9 @@ class CloseSpurious:
 @dataclass(frozen=True)
 class CloseAbort:
     """The close cannot complete — tombstone (where possible) and strand. ``reason`` is
-    ``basestate_missing`` | ``materialization_failed`` | ``store_unavailable``."""
+    ``basestate_missing`` | ``store_unavailable`` (materialization moved UP to
+    ``_aggregate``/``_resolve_slot``, so a close-time materialization failure surfaces as the
+    slot-level ``calf.slot.materialization_failed``, never a ``CloseAbort.reason``)."""
 
     reason: str
 
@@ -175,7 +178,7 @@ async def classify_sibling(store: FanoutBatchStore, fanout_id: str, slot: str) -
         return SiblingPending(by_slot[slot])
     except FanoutStoreUnavailableError:
         await abort_batch(store, fanout_id)
-        return FoldAbort("store_unavailable")
+        return FoldAbort(FaultTypes.REASON_STORE_UNAVAILABLE)
 
 
 async def record_outcome(store: FanoutBatchStore, fanout_id: str, outcome: FanoutOutcome) -> RecordResult:
@@ -193,7 +196,7 @@ async def record_outcome(store: FanoutBatchStore, fanout_id: str, outcome: Fanou
         return FoldParked()
     except FanoutStoreUnavailableError:
         await abort_batch(store, fanout_id)
-        return FoldAbort("store_unavailable")
+        return FoldAbort(FaultTypes.REASON_STORE_UNAVAILABLE)
 
 
 async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
@@ -215,7 +218,7 @@ async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
             # Impossible by §4.1's basestate-first ordering, but defended: tombstone the orphan state
             # record (tombstone-first, §4.3) so the abort doesn't leak a corpse, then escalate.
             await abort_batch(store, fanout_id)
-            return CloseAbort("basestate_missing")
+            return CloseAbort(FaultTypes.REASON_BASESTATE_MISSING)
         expected = {s.frame_id for s in state.open.expected}
         if set(state.outcomes) != expected:
             return CloseSpurious()
@@ -225,7 +228,7 @@ async def close_batch(store: FanoutBatchStore, fanout_id: str) -> CloseResult:
         return CloseResume(snapshot, outcomes)
     except FanoutStoreUnavailableError:
         await abort_batch(store, fanout_id)
-        return CloseAbort("store_unavailable")
+        return CloseAbort(FaultTypes.REASON_STORE_UNAVAILABLE)
 
 
 async def abort_batch(store: FanoutBatchStore, fanout_id: str) -> None:
