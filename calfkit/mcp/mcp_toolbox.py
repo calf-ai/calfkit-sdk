@@ -103,7 +103,7 @@ class MCPToolbox(BaseNodeDef):
         warning.
         """
         return MCPToolboxRef(
-            toolbox_id=self.node_id,
+            name=self.node_id,
             include=tuple(include) if include is not None else None,
             strict=strict,
         )
@@ -150,7 +150,7 @@ class MCPToolbox(BaseNodeDef):
     async def _build_record(self, session: Any) -> CapabilityRecord:
         listing = await session.list_tools()
         return CapabilityRecord(
-            toolbox_id=self.node_id,
+            name=self.node_id,
             dispatch_topic=self.subscribe_topics[0],
             tools=[
                 CapabilityToolDef(name=tool.name, description=tool.description, parameters_json_schema=tool.inputSchema) for tool in listing.tools
@@ -283,15 +283,15 @@ class MCPToolboxRef:
     and hash equal.
     """
 
-    toolbox_id: str
+    name: str
     include: tuple[str, ...] | None = None
     strict: bool = False
 
     def __post_init__(self) -> None:
-        if not self.toolbox_id:
-            raise ValueError("toolbox_id must be non-empty")
+        if not self.name:
+            raise ValueError("name must be non-empty")
         if self.include is not None and not isinstance(self.include, tuple):
             object.__setattr__(self, "include", tuple(self.include))
 
     def resolve_tools(self, view: Mapping[str, CapabilityRecord]) -> SelectorResult:
-        return resolve_capability(view, self.toolbox_id, include=self.include, strict=self.strict)
+        return resolve_capability(view, self.name, include=self.include, strict=self.strict)
