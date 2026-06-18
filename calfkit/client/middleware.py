@@ -7,6 +7,7 @@ from faststream.message import StreamMessage
 from faststream.types import AsyncFuncAny
 from pydantic import ValidationError
 
+from calfkit.exceptions import safe_exc_message
 from calfkit.models.error_report import ErrorReport, FaultTypes
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ class DecodeFloorMiddleware(BaseMiddleware):
             report = ErrorReport.build_safe(
                 error_type=FaultTypes.DELIVERY_UNDECODABLE,
                 message="inbound delivery body failed to decode/validate",
-                details={"correlation_id": correlation_id, "decode_error": str(exc)[:_MAX_DECODE_ERROR_CHARS]},
+                details={"correlation_id": correlation_id, "decode_error": safe_exc_message(exc)[:_MAX_DECODE_ERROR_CHARS]},
             )
             logger.error(
                 "[%s] inbound delivery floored (undecodable body); error_type=%s report=%s",
