@@ -15,7 +15,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelResponse, RetryPromptPart,
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.models.error_report import ErrorReport
-from calfkit.models.payload import DataPart, TextPart, retry_text_part
+from calfkit.models.payload import RETRY_MARKER, DataPart, TextPart, retry_text_part
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.state import State
 from calfkit.nodes import Agent
@@ -105,3 +105,27 @@ class TestAgentResolveSlot:
         _agent()._resolve_slot(ctx, _SlotFailed(frame_id="f1", tag="t1", target_topic="tool.in", report=ErrorReport(error_type="callee.boom")))
         assert ctx.state.get_tool_result("t1") is None  # the fault escalates; it never reaches the model
         assert len(ctx.callee_results) == 1 and ctx.callee_results[0].fault.error_type == "callee.boom"
+
+    def test_retry_content_is_str_when_a_data_part_precedes_the_marked_text(self) -> None:
+        # The retry branch must extract STR content only (spec §6.9 ``_text(p)``), NOT ``extract_lenient``
+        # (which returns ``DataPart.data`` FIRST — an arbitrary non-str). A wire that carries both a
+        # DataPart and the calf.retry-marked TextPart must still materialize the TEXT into
+        # ``RetryPromptPart.content`` (typed ``list[ErrorDetails] | str``), never the dict.
+        ctx = _seam_ctx()
+        parts = [DataPart(data={"unrelated": "blob"}), retry_text_part("retry me")]
+        _agent()._resolve_slot(ctx, _SlotResolved(frame_id="f1", tag="t1", target_topic="tool.in", parts=parts, handled=False))
+        result = ctx.state.get_tool_result("t1")
+        assert isinstance(result, RetryPromptPart)
+        assert isinstance(result.content, str)  # never the DataPart's dict
+        assert result.content == "retry me"
+
+    def test_retry_content_is_str_even_without_a_text_part(self) -> None:
+        # A future producer could mark a non-TextPart (``is_retry`` reads only the open ``metadata`` slot,
+        # so it is total over the part vocabulary). The retry branch must still yield a ``str`` for
+        # ``RetryPromptPart.content`` — a scalar/dict would misbehave in ``model_response()``.
+        ctx = _seam_ctx()
+        marked_data = DataPart(data={"k": "v"}, metadata={RETRY_MARKER: True})
+        _agent()._resolve_slot(ctx, _SlotResolved(frame_id="f1", tag="t1", target_topic="tool.in", parts=[marked_data], handled=False))
+        result = ctx.state.get_tool_result("t1")
+        assert isinstance(result, RetryPromptPart)
+        assert isinstance(result.content, str)  # str-only contract holds in the no-TextPart edge

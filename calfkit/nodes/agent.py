@@ -14,10 +14,10 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.exceptions import MCPToolResolutionError, safe_exc_message
+from calfkit.exceptions import DeserializationError, MCPToolResolutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
-from calfkit.models.node_result import extract_lenient
+from calfkit.models.node_result import _extract_text, extract_lenient
 from calfkit.models.payload import ContentPart, is_retry
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
@@ -137,9 +137,15 @@ class BaseAgentNodeDef(
         - a ``calf.retry``-marked part → ``RetryPromptPart`` (Anthropic ``is_error=True`` fidelity).
           The wire carries the RAW message; the agent HYDRATES the richer retry — ``tool_name`` from
           its own ``tool_calls`` (it issued the call) and the fix-and-retry suffix via the provider's
-          ``model_response()`` (so it is rendered exactly once, not doubled).
-        - a plain return / handled substitute → ``ToolReturn`` (eager ``to_json`` wire-safety on
-          substitutes too — a wire-unsafe value must fail here, not at the next publish).
+          ``model_response()`` (so it is rendered exactly once, not doubled). ``content`` is extracted
+          STR-only (spec §6.9 ``_text(p)``), since ``RetryPromptPart.content`` is ``list[ErrorDetails]
+          | str`` — never the lenient ``DataPart.data`` (an arbitrary non-str).
+        - a plain return / handled substitute → ``ToolReturn``. The value's wire-safety is already
+          enforced upstream (a handled ``on_callee_error`` substitute is eager-``to_json``-checked in
+          ``_resolve_callee``/``_coerce_to_parts`` and becomes ``calf.slot.materialization_failed``
+          before it can reach here; a plain return's parts came off the wire and are definitionally
+          serializable). The ``to_json`` below is defensive belt-and-suspenders (spec §6.9-aligned),
+          not the primary guard.
 
         A ``_SlotFailed`` is NOT materialized — the unhandled fault escalates at closure and never
         reaches the model (``ErrorReport`` stays off ``tool_results``)."""
@@ -154,13 +160,31 @@ class BaseAgentNodeDef(
             return
         if is_retry(outcome.parts):
             call = ctx.state.tool_calls.get(tag)
-            ctx.state.add_tool_result(
-                tag, RetryPromptPart(content=extract_lenient(outcome.parts), tool_name=call.tool_name if call is not None else None, tool_call_id=tag)
+            retry = RetryPromptPart(
+                content=self._retry_content(outcome.parts), tool_name=call.tool_name if call is not None else None, tool_call_id=tag
             )
+            ctx.state.add_tool_result(tag, retry)
             return
         tool_return = ToolReturn(return_value=extract_lenient(outcome.parts), metadata={"tool_call_id": tag})
-        pydantic_core.to_json(tool_return)  # eager wire-safety on substitutes too (I4)
+        # defensive belt-and-suspenders (I4); wire-safety already enforced upstream in _resolve_callee/_coerce_to_parts
+        pydantic_core.to_json(tool_return)
         ctx.state.add_tool_result(tag, tool_return)
+
+    @staticmethod
+    def _retry_content(parts: list[ContentPart] | None) -> str:
+        """STR-only extraction for ``RetryPromptPart.content`` (spec §6.9 ``_text(p)``).
+
+        ``RetryPromptPart.content`` is ``list[ErrorDetails] | str``, so the retry branch must NOT use
+        ``extract_lenient`` (which returns ``DataPart.data`` FIRST — an arbitrary non-str). The sole
+        marker producer (``retry_text_part``) always emits a marked ``TextPart``, so ``_extract_text``
+        (the first ``TextPart.text``) is the right projection. A hypothetical future producer that marks
+        a non-``TextPart`` part (``is_retry`` reads only the open ``metadata`` slot, so it is total over
+        the vocabulary) degrades to a defensive ``str()`` of the lenient value rather than crashing —
+        the contract that ``content`` is always a ``str`` holds either way."""
+        try:
+            return _extract_text(parts or [])
+        except DeserializationError:
+            return str(extract_lenient(parts))
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool
