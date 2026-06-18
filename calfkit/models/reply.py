@@ -45,8 +45,10 @@ class FaultMessage(_ReplyBase):
     """A terminal failure, carried in the per-delivery reply slot (spec §4.2).
 
     The same :class:`~calfkit.models.error_report.ErrorReport` reaches every
-    fault-aware surface — a caller's seam (the ``fault`` argument), the client
-    (``NodeFaultError.report``), and sinks (``ConsumerContext.fault``).
+    fault-aware surface this PR produces — a caller's seam (the ``fault``
+    argument) and the client (``NodeFaultError.report``). The consumer
+    fault-reception surface (a ``ConsumerContext`` fault/``delivery_kind``
+    field) is DEFERRED to the reception PR and is not present here.
     """
 
     kind: Literal["fault"] = "fault"

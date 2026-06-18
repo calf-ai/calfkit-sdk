@@ -123,13 +123,17 @@ class ErrorReport(BaseModel):
     """A terminal failure as a typed wire value (spec §4.3).
 
     Travels on the reply slot inside a ``FaultMessage``; the same value reaches
-    seams (the ``fault`` argument), the client (``NodeFaultError.report``) and
-    sinks (``ConsumerContext.fault``). Exception identity never crosses the wire —
-    ``error_type`` (a dotted string code) is the contract, not a class name.
+    the fault-aware surfaces this PR produces — seams (the ``fault`` argument)
+    and the client (``NodeFaultError.report``). The consumer fault-reception
+    surface (a ``ConsumerContext`` fault/``delivery_kind`` field) is DEFERRED to
+    the reception PR and is not present here. Exception identity never crosses
+    the wire — ``error_type`` (a dotted string code) is the contract, not a
+    class name.
 
     Frozen: the report travels and is read at many surfaces (a seam's ``fault``
-    arg, ``NodeFaultError.report``, ``ConsumerContext.fault``, the broadcast
-    mirror) and — once the rail escalates it — passes up a frame chain untouched.
+    arg, ``NodeFaultError.report``, the future consumer fault-reception surface,
+    the broadcast mirror) and — once the rail escalates it — passes up a frame
+    chain untouched.
     Freezing makes the "stable across hops" promise on ``report_id`` real and
     matches the codebase's frozen wire values (e.g. ``CallFrame``).
     The freeze is **shallow** — field *reassignment* is blocked, but the
