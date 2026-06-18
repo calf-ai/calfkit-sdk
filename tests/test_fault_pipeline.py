@@ -350,6 +350,77 @@ class TestStructuredLogging:
         assert any("recover" in r.getMessage() for r in infos), "expected an INFO when on_node_error handled"
 
 
+class TestSeamPrecision:
+    """§6.3/§6.5 seam-context precision: ctx.exception is set during on_node_error ONLY, and a
+    before_node/after_node accident chains the handled inbound fault (a body raise does not)."""
+
+    async def test_before_node_accident_chains_the_handled_inbound_fault(self) -> None:
+        # §6.5: a non-NodeFaultError raise inside before_node/after_node is a node-own accident routed
+        # to on_node_error WITH the original inbound fault (here handled by on_callee_error) chained.
+        node = _node()
+        inbound_report = ErrorReport(error_type="callee.boom", message="downstream failed")
+
+        @node.on_callee_error
+        def handle(ctx: object, fault: ErrorReport) -> str:
+            return "handled-substitute"  # resolves the slot → the body would run → before_node fires
+
+        @node.before_node
+        def boom(ctx: object) -> None:
+            raise RuntimeError("before_node boom")
+
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="callee-frame", tag="tc", error=inbound_report)
+        broker = _CaptureBroker()
+
+        await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.unhandled"  # the before_node accident
+        assert inbound_report.report_id in [c.report_id for c in env.reply.error.causes]  # handled inbound chained
+
+    async def test_body_raise_does_not_chain_the_inbound_fault(self) -> None:
+        # §6.7 (the precise scope): a BODY raise on the same handled-fault delivery is calf.unhandled
+        # with NOTHING chained — the handled inbound fault is not a cause of the body's own failure.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])  # body raises
+        inbound_report = ErrorReport(error_type="callee.boom")
+
+        @node.on_callee_error
+        def handle(ctx: object, fault: ErrorReport) -> str:
+            return "handled-substitute"  # resolves the slot → the body runs → raises
+
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="cf", tag="tc", error=inbound_report)
+        broker = _CaptureBroker()
+
+        await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "calf.unhandled"  # the body raise
+        assert env.reply.error.causes == []  # NOT the before/after-node arm → no inbound chaining
+
+    async def test_recovery_path_after_node_does_not_see_the_exception(self) -> None:
+        # §6.3: ctx.exception is set during on_node_error ONLY. After a recovery, the recovery value
+        # passes after_node — which must observe ctx.exception cleared (None), not the live exception.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])
+        seen: list[object] = []
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            return "recovered"
+
+        @node.after_node
+        def observe(ctx: SeamContext[State], output: object) -> None:
+            seen.append(ctx.exception)
+            return None  # keep the recovered output
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        assert seen == [None]  # exception cleared once on_node_error recovered
+
+
 class TestBeforeNode:
     async def test_before_node_value_short_circuits_the_body(self) -> None:
         # §6.2/§6.4: a before_node returning a value becomes the node's output; the body never runs.

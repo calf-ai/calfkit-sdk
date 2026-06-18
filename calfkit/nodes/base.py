@@ -168,6 +168,19 @@ class _Stray:
     kind: MessageKind
 
 
+class _SeamAccidentError(Exception):
+    """An accidental (non-``NodeFaultError``) raise from a BOUNDARY seam — ``before_node`` or
+    ``after_node`` (§6.5). :meth:`BaseNodeDef._execute` wraps it so the stage-5 arm can distinguish
+    it from a BODY raise (§6.7): a boundary-seam accident routes to ``on_node_error`` WITH the handled
+    inbound fault, if any, chained in ``causes``; a body raise chains nothing. The mint rule still
+    holds — a ``NodeFaultError`` from a seam is NOT wrapped (it propagates verbatim). Carries the
+    original exception so synthesis sees the true error_type/traceback."""
+
+    def __init__(self, original: Exception) -> None:
+        super().__init__(repr(original))
+        self.original = original
+
+
 # ── slot-outcome vocabulary (what a callee slot resolves to in stage 1 / the fan-out fold, §6.9) ──
 @dataclass(frozen=True)
 class _SlotResolved:
@@ -1421,13 +1434,27 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                     # A fan-out close restored run_ctx + the stack; re-sync the shared seam_ctx so
                     # before_node (fires at closure, §6.4) and after_node see the resumed state.
                     self._resync_seam_context(seam_ctx, run_ctx, envelope)
-        pre = await run_chain(self._chains[BEFORE_NODE], seam_ctx)  # ── stage 3: before_node ──
-        if pre is not None:
-            return await self._apply_after(seam_ctx, self._interpret(seam_ctx, pre))
-        result = await self._dispatch_routed(run_ctx, route, payload, awaiting_reply=awaiting_reply, correlation_id=correlation_id)  # stage 4
+        # ── stage 3: before_node ── (+ its short-circuit after_node). A non-NodeFaultError raise from a
+        # BOUNDARY seam is wrapped _SeamAccidentError so the stage-5 arm chains the handled inbound fault
+        # (§6.5); a NodeFaultError propagates verbatim (the mint rule). The body (stage 4) is NOT
+        # wrapped — a body raise is §6.7 calf.unhandled with nothing chained.
+        try:
+            pre = await run_chain(self._chains[BEFORE_NODE], seam_ctx)
+            if pre is not None:
+                return await self._apply_after(seam_ctx, self._interpret(seam_ctx, pre))
+        except NodeFaultError:
+            raise
+        except Exception as exc:
+            raise _SeamAccidentError(exc) from exc
+        result = await self._dispatch_routed(run_ctx, route, payload, awaiting_reply=awaiting_reply, correlation_id=correlation_id)  # stage 4: body
         if isinstance(result, _Declined):
             return result  # propagate the decline + its reason to the §10 auto-fault disposition
-        return await self._apply_after(seam_ctx, result)  # ── stage 6: after_node ──
+        try:
+            return await self._apply_after(seam_ctx, result)  # ── stage 6: after_node ──
+        except NodeFaultError:
+            raise
+        except Exception as exc:
+            raise _SeamAccidentError(exc) from exc
 
     async def _dispatch_routed(
         self,
@@ -1567,6 +1594,10 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         route = decode_header_str(headers.get(HDR_ROUTE))
         # The pre-mutation caller address every _publish_fault below addresses (§6.8 / scenario 42).
         snapshot = self._stack_snapshot(envelope)
+        # §6.5: a fault-kind delivery's inbound fault — chained in causes ONLY if a before_node/after_node
+        # accident later routes to on_node_error (captured pre-mutation; it is the fault on_callee_error
+        # handled, since an UNHANDLED fault escalates before the seams ever run).
+        inbound_fault = envelope.reply.error if isinstance(envelope.reply, FaultMessage) else None
         try:
             output = await self._execute(
                 ctx,
@@ -1582,24 +1613,32 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         except NodeFaultError as nfe:
             # The mint rule (§6.5): a deliberate typed fault converts verbatim, BYPASSING on_node_error.
             return await self._fault_response(nfe.report, snapshot, envelope, correlation_id, broker)
-        except Exception as exc:
+        except Exception as caught:
             # ── stage 5: on_node_error — the node's own work raised uncaught ──
+            # §6.5: a before_node/after_node accident (wrapped _SeamAccidentError) chains the handled inbound
+            # fault, if any; a BODY raise (§6.7) chains nothing. Unwrap to the true exception for synthesis.
+            if isinstance(caught, _SeamAccidentError):
+                node_exc, inbound_cause = caught.original, inbound_fault
+            else:
+                node_exc, inbound_cause = caught, None
             if self._in_batch_work(envelope):
                 # Mid-batch (a marked sibling delivery): recovery is FORBIDDEN — the still-pending
                 # siblings owe the output, so on_node_error → _publish_fault would double-reply. Abort
                 # (tombstone + escalate ONCE) instead (spec §6.8 / R4 / R5). _in_batch_work is False once
                 # the close has restored the unmarked frame, so a body raise at close recovers normally.
-                report = self._fault_from_exception(exc, seam_ctx, snapshot, correlation_id)
+                report = self._fault_from_exception(node_exc, seam_ctx, snapshot, correlation_id)
                 return await self._publish_abort(report, snapshot, envelope, ctx, correlation_id, broker)
-            seam_ctx.exception = exc
-            report = self._fault_from_exception(exc, seam_ctx, snapshot, correlation_id)
+            seam_ctx.exception = node_exc
+            report = self._fault_from_exception(node_exc, seam_ctx, snapshot, correlation_id, cause=inbound_cause)
             recovery = await run_chain_guarded(self._chains[ON_NODE_ERROR], seam_ctx, report)
             if isinstance(recovery, _Minted):  # a NodeFaultError raised inside the chain (§6.5)
                 return await self._fault_response(recovery.report, snapshot, envelope, correlation_id, broker)
             if recovery is None:  # all handlers declined → the original fault escalates
                 return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
-            # Recovered: the value still passes after_node (ADK parity); SINGLE-SHOT — a raise while
-            # processing the recovery is terminal, chaining the original as a cause (§6.8).
+            # Recovered: on_node_error is done, so clear ctx.exception (set during on_node_error ONLY,
+            # §6.3) before the recovery value passes after_node. SINGLE-SHOT — a raise while processing
+            # the recovery is terminal, chaining the original as a cause (§6.8).
+            seam_ctx.exception = None
             try:
                 output = await self._apply_after(seam_ctx, self._interpret(seam_ctx, recovery))
             except Exception as exc2:
