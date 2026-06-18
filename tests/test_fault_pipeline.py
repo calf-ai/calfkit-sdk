@@ -219,6 +219,20 @@ class TestFaultBoundary:
         assert headers[HDR_KIND] == "fault"
         assert resp.body.reply is env.reply  # the broadcast mirror carries the same fault
 
+    async def test_node_own_fault_captures_frame_chain_and_origin_frame_id(self) -> None:
+        # §4.3/§4.4 + ADR-0003 + scenarios 3/24: a node-own fault captures the call-stack topology
+        # (frame_chain — the traceback analog) and origin_frame_id AT SYNTHESIS, not an empty chain.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])
+        inbound = _framed_envelope(callback_topic="caller.return")
+        frame = inbound.internal_workflow_state.current_frame
+        broker = _CaptureBroker()
+
+        await node.handler(inbound, "cid", {}, broker)
+
+        report = broker.published[0][1].reply.error
+        assert report.origin_frame_id == frame.frame_id
+        assert [(f.frame_id, f.target_topic) for f in report.frame_chain] == [(frame.frame_id, frame.target_topic)]
+
     async def test_node_fault_error_mints_verbatim_and_bypasses_on_node_error(self) -> None:
         # §6.5 mint rule: a deliberate NodeFaultError converts verbatim and does NOT consult
         # on_node_error (an unrelated recovery must not convert a deliberate fault into success).

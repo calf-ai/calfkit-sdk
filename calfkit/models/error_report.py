@@ -305,6 +305,8 @@ class ErrorReport(BaseModel):
         node: Any = None,
         ctx: Any = None,
         cause: ErrorReport | None = None,
+        frame_chain: list[FrameRef] | None = None,
+        origin_frame_id: str | None = None,
     ) -> ErrorReport:
         """Synthesize a fault from an arbitrary exception (spec §6.7).
 
@@ -312,9 +314,12 @@ class ErrorReport(BaseModel):
         exception's class name (``details[FaultTypes.EXCEPTION_TYPE]``) and a clamped
         message; ``build_safe`` keeps it total — the error path must never itself raise.
         ``node``/``ctx`` (optional, keyword) source the origin breadcrumb when present
-        (``node.node_id`` / ``ctx.frame_id``); ``cause`` chains a prior report (the §6.8
-        recovery-then-failure case). They are typed ``Any`` to keep this module
-        calfkit-import-free (the same reason ``build_safe`` inlines its own coercions).
+        (``node.node_id`` / ``ctx.frame_id``); ``frame_chain`` and ``origin_frame_id`` capture the
+        call-stack topology at synthesis (§4.3/§4.4, ADR-0003 — the traceback analog), passed
+        explicitly by the rail from the pre-mutation stack snapshot since ``ctx`` carries no stack;
+        ``cause`` chains a prior report (the §6.8 recovery-then-failure case). ``node``/``ctx`` are
+        typed ``Any`` to keep this module calfkit-import-free (the same reason ``build_safe`` inlines
+        its own coercions).
 
         A ``NodeFaultError`` is NOT routed here — the chokepoint converts it verbatim,
         bypassing ``on_node_error`` (the mint rule, §6.5).
@@ -323,7 +328,8 @@ class ErrorReport(BaseModel):
             error_type=FaultTypes.UNHANDLED,
             message=_safe_exc_str(exc),
             origin_node_id=getattr(node, "node_id", None),
-            origin_frame_id=getattr(ctx, "frame_id", None),
+            origin_frame_id=origin_frame_id if origin_frame_id is not None else getattr(ctx, "frame_id", None),
+            frame_chain=frame_chain,
             causes=[cause] if cause is not None else None,
         )
         # The exception-class breadcrumb is a framework-reserved calf.* details key, so it

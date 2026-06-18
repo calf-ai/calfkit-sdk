@@ -27,7 +27,7 @@ from calfkit.models import (
 )
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.envelope import Envelope
-from calfkit.models.error_report import ErrorReport, FaultTypes
+from calfkit.models.error_report import ErrorReport, FaultTypes, FrameRef
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
 from calfkit.models.node_result import _UNSET, _extract_output, extract_lenient
 from calfkit.models.node_schema import BaseNodeSchema
@@ -604,6 +604,25 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         so ``_publish_fault`` addresses the pre-mutation caller (spec §6.8 / scenario 42)."""
         return envelope.internal_workflow_state.model_copy(deep=True)
 
+    def _fault_from_exception(
+        self, exc: Exception, ctx: SeamContext[State] | None, snapshot: WorkflowState, *, cause: ErrorReport | None = None
+    ) -> ErrorReport:
+        """Synthesize a node-own ``calf.unhandled`` fault, capturing the call-stack topology from the
+        PRE-mutation ``snapshot`` (spec §4.3/§4.4 / ADR-0003): ``frame_chain`` is the traceback analog
+        (one ``FrameRef`` per pending frame) and ``origin_frame_id`` is the node's own answering frame.
+        The seam ``ctx`` carries no stack, so the snapshot is the sole source. ``cause`` chains the §6.8
+        recovery-then-failure prior report."""
+        frame_chain = [FrameRef(frame_id=f.frame_id, target_topic=f.target_topic) for f in snapshot.call_stack._internal_list]
+        origin = snapshot.current_frame_or_none
+        return ErrorReport.from_exception(
+            exc,
+            node=self,
+            ctx=ctx,
+            cause=cause,
+            frame_chain=frame_chain,
+            origin_frame_id=origin.frame_id if origin is not None else None,
+        )
+
     async def _publish_fault(
         self, report: ErrorReport, snapshot: WorkflowState, inbound: Envelope, correlation_id: str, broker: BrokerAnnotation
     ) -> tuple[Envelope, MessageKind]:
@@ -729,8 +748,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         """
         hdr_kind = decode_header_str(headers.get(HDR_KIND))
         if hdr_kind is None or hdr_kind == "call":
-            report = ErrorReport.from_exception(exc, node=self)
-            return await self._fault_response(report, self._stack_snapshot(envelope), envelope, correlation_id, broker)
+            snapshot = self._stack_snapshot(envelope)
+            report = self._fault_from_exception(exc, None, snapshot)
+            return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
         inbound_report = envelope.reply.error.model_dump_json() if isinstance(envelope.reply, FaultMessage) else None
         logger.error(
             "[%s] stage-0 failure on a %s delivery node=%s; flooring (a live invocation is not faulted): %r inbound_report=%s",
@@ -1549,10 +1569,10 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 # siblings owe the output, so on_node_error → _publish_fault would double-reply. Abort
                 # (tombstone + escalate ONCE) instead (spec §6.8 / R4 / R5). _in_batch_work is False once
                 # the close has restored the unmarked frame, so a body raise at close recovers normally.
-                report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+                report = self._fault_from_exception(exc, seam_ctx, snapshot)
                 return await self._publish_abort(report, snapshot, envelope, ctx, correlation_id, broker)
             seam_ctx.exception = exc
-            report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+            report = self._fault_from_exception(exc, seam_ctx, snapshot)
             recovery = await run_chain_guarded(self._chains[ON_NODE_ERROR], seam_ctx, report)
             if isinstance(recovery, _Minted):  # a NodeFaultError raised inside the chain (§6.5)
                 return await self._fault_response(recovery.report, snapshot, envelope, correlation_id, broker)
@@ -1563,7 +1583,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             try:
                 output = await self._apply_after(seam_ctx, self._interpret(seam_ctx, recovery))
             except Exception as exc2:
-                report2 = ErrorReport.from_exception(exc2, node=self, ctx=seam_ctx, cause=report)
+                report2 = self._fault_from_exception(exc2, seam_ctx, snapshot, cause=report)
                 return await self._fault_response(report2, snapshot, envelope, correlation_id, broker)
 
         if output is _CONSUMED:
@@ -1626,7 +1646,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             try:
                 return await self._handle_fanout_open(ctx, output, envelope, correlation_id, broker)
             except Exception as exc:
-                report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+                report = self._fault_from_exception(exc, seam_ctx, snapshot)
                 return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
 
         logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
@@ -1639,7 +1659,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         try:
             body, pubkind = await self._publish_action(output, envelope, correlation_id, broker)
         except Exception as exc:
-            report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+            report = self._fault_from_exception(exc, seam_ctx, snapshot)
             return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
         return Response(body, headers=self._headers(pubkind))
 
