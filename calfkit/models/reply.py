@@ -14,10 +14,11 @@ class _ReplyBase(BaseModel):
     failure, an :class:`~calfkit.models.error_report.ErrorReport`) — ``result``
     XOR ``error``, the JSON-RPC split.
 
-    The ``Envelope.reply`` slot still carries only ``ReturnMessage | None`` today;
-    it widens to ``ReturnMessage | FaultMessage`` with ``Field(discriminator="kind")``
-    when the rail starts producing faults (the projection/dispatch side of that
-    widening is where fault behavior lives, so it lands together there).
+    The ``Envelope.reply`` slot now carries ``ReturnMessage | FaultMessage | None``,
+    discriminated on ``kind`` (``Field(default=None, discriminator="kind")``). This PR
+    is the rail that produces faults, so a fault shape rides the slot directly — the
+    projection/dispatch side floors a fault at its producing hop rather than re-deriving
+    it at a reader.
     """
 
     in_reply_to: str | None
@@ -43,9 +44,11 @@ class ReturnMessage(_ReplyBase):
 class FaultMessage(_ReplyBase):
     """A terminal failure, carried in the per-delivery reply slot (spec §4.2).
 
-    The same :class:`~calfkit.models.error_report.ErrorReport` reaches every
-    fault-aware surface — a caller's seam (the ``fault`` argument), the client
-    (``NodeFaultError.report``), and sinks (``ConsumerContext.fault``).
+    In PR-6 the same :class:`~calfkit.models.error_report.ErrorReport` reaches a
+    caller's seam (the ``fault`` argument) and the broadcast mirror. Both
+    fault-RECEPTION surfaces — the client raising ``NodeFaultError(report)`` on a
+    ``kind=fault`` reply, and the consumer ``ConsumerContext`` fault/``delivery_kind``
+    field — are DEFERRED to the reception PR and are not present here.
     """
 
     kind: Literal["fault"] = "fault"

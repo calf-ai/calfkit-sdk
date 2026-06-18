@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
 from calfkit.models.payload import ContentPart
-from calfkit.models.reply import ReturnMessage
+from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.state import OverridesState, State
 
 _EMPTY_RESOURCES: Mapping[str, Any] = MappingProxyType({})
@@ -51,10 +51,11 @@ class CallFrame:
     node validating a ``ToolCallRef``). ``None`` when the producer sent no body."""
     tag: str | None = field(default=None)
     """Caller-set opaque correlation token, echoed verbatim on the reply
-    (``ReturnMessage.tag``) when this frame unwinds. The agent sets it to ``tool_call_id`` on
-    fan-out tool ``Call``s so a sibling reply is self-describing — the durable fold reads that
-    sibling's result from ``state.tool_results[reply.tag]``. Transport metadata, never content.
-    ``None`` on frames whose producer set no ``Call.tag`` (single/sequential calls, escalation hops)."""
+    (``ReturnMessage``/``FaultMessage`` ``.tag``) when this frame unwinds. The agent sets it to
+    ``tool_call_id`` on EVERY tool ``Call`` — single AND fan-out — so the reply is self-describing
+    (§4.2): stage-1 (``_resolve_callee``) resolves the slot and the agent materializes the result into
+    ``tool_results[reply.tag]`` with no in-process correlation map. Transport metadata, never content.
+    ``None`` on frames whose producer set no ``Call.tag`` (e.g. escalation hops; ``TailCall``)."""
     fanout_id: str | None = field(default=None)
     """Fan-out batch marker (= the fan-out node's OWN inbound ``frame_id``, which is
     also the batch key for the durable tables). At fan-out dispatch it is stamped on the
@@ -142,7 +143,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     _emitter_node_kind: str | None = PrivateAttr(default=None)
     _frame_id: str | None = PrivateAttr(default=None)
     _resources: Mapping[str, Any] | None = PrivateAttr(default=None)
-    _reply: ReturnMessage | None = PrivateAttr(default=None)
+    _reply: ReturnMessage | FaultMessage | None = PrivateAttr(default=None)
 
     @property
     def correlation_id(self) -> str:
@@ -237,7 +238,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         ``bool(ctx.output_parts)``. Backed by ``_reply`` (stamped by ``prepare_context``
         / the client reply dispatcher), so it never rides the wire.
         """
-        return self._reply.parts if self._reply is not None else []
+        return self._reply.parts if isinstance(self._reply, ReturnMessage) else []
 
     def _stamp_transport(self, *, correlation_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None) -> None:
         """Stamp transport-sourced identity onto this context.

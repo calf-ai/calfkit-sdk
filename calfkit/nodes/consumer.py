@@ -1,18 +1,20 @@
-import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar, Generic
 
+from faststream import Response
+from faststream.kafka.annotations import KafkaBroker as BrokerAnnotation
 from pydantic import TypeAdapter, ValidationError
 
 from calfkit._protocol import NodeKind
 from calfkit._types import OutputT
 from calfkit.exceptions import DeserializationError
 from calfkit.models.consumer_context import ConsumerContext
+from calfkit.models.envelope import Envelope
 from calfkit.models.node_result import _UNSET
 from calfkit.models.session_context import SessionRunContext
-from calfkit.nodes.base import BaseNodeDef, GateFunction
+from calfkit.nodes.base import BaseNodeDef
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +49,12 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
         node_id: str,
         consume_fn: ConsumerFn[OutputT],
         subscribe_topics: str | list[str],
-        gates: list[GateFunction] | None = None,
         agent_output_type: type[OutputT] = _UNSET,
     ) -> None:
         _validate_consume_fn(consume_fn)
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
-        super().__init__(node_id=node_id, subscribe_topics=list(subscribe_topics), gates=gates)
+        super().__init__(node_id=node_id, subscribe_topics=list(subscribe_topics))
         self._func: ConsumerFn[OutputT] = consume_fn
         self._output_type = agent_output_type
 
@@ -84,27 +85,47 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
             )
             return
 
-        try:
-            ret = self._func(cctx)
+        # A consume_fn raise is NOT swallowed here: it propagates to :meth:`_handle_delivery`'s
+        # single observer floor (§6.6) — the old run-level blanket catch is deleted. A
+        # ``CancelledError`` (a ``BaseException``) propagates through that floor's ``except Exception``,
+        # so cooperative cancellation is never swallowed.
+        ret = self._func(cctx)
+        if inspect.isgenerator(ret) or inspect.isasyncgen(ret):
+            raise TypeError(
+                f"consume_fn returned a {type(ret).__name__} object; the function body would never execute. "
+                f"Iterate inside the function or refactor to a coroutine."
+            )
+        if inspect.isawaitable(ret):
+            await ret
 
-            if inspect.isgenerator(ret) or inspect.isasyncgen(ret):
-                raise TypeError(
-                    f"consume_fn returned a {type(ret).__name__} object; the function body would never execute. "
-                    f"Iterate inside the function or refactor to a coroutine."
-                )
-            if inspect.isawaitable(ret):
-                await ret
-        except asyncio.CancelledError:
-            # Never swallow cooperative cancellation — let the event loop unwind.
-            raise
+    async def _handle_delivery(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any], broker: BrokerAnnotation) -> Response:
+        """The observer delivery path (§6.6 / §6.7), overriding the caller-capable fault pipeline.
+
+        Every kind reaches the consume body as an observation — there are **no** seams, no
+        stray-check, no fault boundary, no auto-fault, and no escalation: an observer never produces
+        on the workflow's rails. Decode the emitter, build the context, run the consume body, and
+        return the no-reply mirror.
+
+        This is the observer's **single floor** (§6.6): a failure anywhere in delivery handling —
+        a projection error in :meth:`prepare_context` OR the user's ``consume_fn`` raising (the old
+        ``run``-level blanket catch is deleted) — floor-logs at ERROR here rather than faulting. A
+        ``CancelledError``, being a ``BaseException``, still propagates through the ``except Exception``
+        so cooperative cancellation is never swallowed.
+        """
+        emitter, emitter_kind = self._decode_emitter(headers, correlation_id)
+        try:
+            ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
+            await self.run(ctx)
         except Exception:
             logger.exception(
-                "[%s] consumer=%s consume_fn raised (emitter=%s kind=%s)",
-                ctx.correlation_id[:8],
+                "[%s] observer=%s delivery handling failed; floored (observers never reach the rails) emitter=%s kind=%s",
+                correlation_id[:8],
                 self.node_id,
-                ctx.emitter_node_id,
-                ctx.emitter_node_kind,
+                emitter,
+                emitter_kind,
             )
+        envelope.reply = None  # observers never produce on the workflow's rails (§6.6)
+        return Response(envelope, headers=self._headers("call"))
 
 
 def consumer(
@@ -112,7 +133,6 @@ def consumer(
     subscribe_topics: str | list[str],
     agent_output_type: type[OutputT] = _UNSET,
     node_id: str | None = None,
-    gates: list[GateFunction] | None = None,
 ) -> Callable[[ConsumerFn[OutputT]], ConsumerNode[OutputT]]:
     """Decorator turning a function into a deployable consumer node.
 
@@ -135,7 +155,6 @@ def consumer(
             subscribe_topics=subscribe_topics,
             consume_fn=fn,
             agent_output_type=agent_output_type,
-            gates=gates,
         )
 
     return _wrap

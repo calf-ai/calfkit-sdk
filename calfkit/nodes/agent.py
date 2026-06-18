@@ -2,27 +2,29 @@ import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Generic, cast
 
+import pydantic_core
 from pydantic import ValidationError
 
 from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
-from calfkit._vendor.pydantic_ai.messages import RetryPromptPart
+from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolReturn
 from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.exceptions import MCPToolResolutionError, ToolExecutionError, safe_exc_message
+from calfkit.exceptions import DeserializationError, MCPToolResolutionError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
-from calfkit.models.payload import ContentPart
+from calfkit.models.node_result import _extract_text, extract_lenient
+from calfkit.models.payload import RETRY_MARKER, ContentPart, is_retry
+from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.state import FailedToolCall
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, structured_output_preamble
-from calfkit.nodes.base import BaseNodeDef, GateFunction
+from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
@@ -42,7 +44,10 @@ class BaseAgentNodeDef(
         system_prompt: str = "You are a helpful AI assistant.",
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
-        gates: list[GateFunction] | None = None,
+        before_node: _SeamArg = None,
+        after_node: _SeamArg = None,
+        on_node_error: _SeamArg = None,
+        on_callee_error: _SeamArg = None,
         tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
@@ -57,7 +62,15 @@ class BaseAgentNodeDef(
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
 
-        super().__init__(node_id=node_id, subscribe_topics=subscribe_topics, publish_topic=publish_topic, gates=gates)
+        super().__init__(
+            node_id=node_id,
+            subscribe_topics=subscribe_topics,
+            publish_topic=publish_topic,
+            before_node=before_node,
+            after_node=after_node,
+            on_node_error=on_node_error,
+            on_callee_error=on_callee_error,
+        )
 
         self._agent_loop: InternalAgentLoop[dict[str, Any], AgentOutputT | DeferredToolRequests] = InternalAgentLoop(
             model_client,
@@ -103,6 +116,81 @@ class BaseAgentNodeDef(
         """A non-sequential agent folds durable fan-out batches in-node; a
         ``sequential_only_mode`` agent issues only single calls and never fans out."""
         return not self.sequential_only_mode
+
+    @property
+    def _seam_output_type(self) -> Any:
+        """The agent's declared output type, so its OUTPUT-position seam substitutes (``before_node``
+        short-circuit, ``on_node_error`` recovery, ``after_node`` replacement) are validated against it
+        at coercion (scenario 44 / §6.3) — a structured-output agent's contract is machine-projected by
+        its callers, so a type-breaking substitute must fail at the seam, not as a ``DeserializationError``
+        downstream. ``on_callee_error`` substitutes are EXEMPT (slot position — they materialize via
+        ``_resolve_slot``, never ``_coerce_output``). An exotic ``OutputSpec`` ``TypeAdapter`` cannot
+        schematize degrades to a lenient skip (in the base ``_coerce_output``/``_output_view``)."""
+        return self.final_output_type
+
+    def _resolve_slot(self, ctx: SeamContext[State], outcome: _SlotResolved | _SlotFailed) -> None:
+        """The agent's slot materialization (spec §6.9) — the SDK's single per-type codec. After the
+        base records the ``CalleeResult``, a RESOLVED slot is materialized into the agent's private
+        ``tool_results`` bookkeeping (I4), keyed by the echoed ``tag`` (the ``tool_call_id``), so the
+        unchanged ``DeferredToolResults`` consumer feeds it to the next model turn:
+
+        - a ``calf.retry``-marked part → ``RetryPromptPart`` (Anthropic ``is_error=True`` fidelity).
+          The wire carries the RAW message; the agent HYDRATES the richer retry — ``tool_name`` from
+          its own ``tool_calls`` (it issued the call) and the fix-and-retry suffix via the provider's
+          ``model_response()`` (so it is rendered exactly once, not doubled). ``content`` is extracted
+          STR-only (spec §6.9 ``_text(p)``), since ``RetryPromptPart.content`` is ``list[ErrorDetails]
+          | str`` — never the lenient ``DataPart.data`` (an arbitrary non-str).
+        - a plain return / handled substitute → ``ToolReturn``. The value's wire-safety is already
+          enforced upstream (a handled ``on_callee_error`` substitute is eager-``to_json``-checked in
+          ``_resolve_callee``/``_coerce_to_parts`` and becomes ``calf.slot.materialization_failed``
+          before it can reach here; a plain return's parts came off the wire and are definitionally
+          serializable). The ``to_json`` below is defensive belt-and-suspenders (spec §6.9-aligned),
+          not the primary guard.
+
+        A ``_SlotFailed`` is NOT materialized — the unhandled fault escalates at closure and never
+        reaches the model (``ErrorReport`` stays off ``tool_results``)."""
+        super()._resolve_slot(ctx, outcome)
+        if not isinstance(outcome, _SlotResolved):
+            return  # _SlotFailed: the fault escalates; it never reaches the model
+        tag = outcome.tag
+        if tag is None:  # impossible from a calfkit producer (the agent sets the tool_call_id as the tag)
+            logger.error(
+                "[%s] agent=%s resolved slot has no tag; cannot materialize into the model conversation", ctx.correlation_id[:8], self.node_id
+            )
+            return
+        if is_retry(outcome.parts):
+            call = ctx.state.tool_calls.get(tag)
+            retry = RetryPromptPart(
+                content=self._retry_content(outcome.parts), tool_name=call.tool_name if call is not None else None, tool_call_id=tag
+            )
+            ctx.state.add_tool_result(tag, retry)
+            return
+        tool_return = ToolReturn(return_value=extract_lenient(outcome.parts), metadata={"tool_call_id": tag})
+        # defensive belt-and-suspenders (I4); wire-safety already enforced upstream in _resolve_callee/_coerce_to_parts
+        pydantic_core.to_json(tool_return)
+        ctx.state.add_tool_result(tag, tool_return)
+
+    @staticmethod
+    def _retry_content(parts: list[ContentPart] | None) -> str:
+        """STR-only extraction for ``RetryPromptPart.content`` (spec §6.9 ``_text(p)``).
+
+        ``RetryPromptPart.content`` is ``list[ErrorDetails] | str``, so the retry branch must NOT use
+        ``extract_lenient`` (which returns ``DataPart.data`` FIRST — an arbitrary non-str). The branch
+        fires on ``is_retry`` (which keys on the ``calf.retry`` MARKER, scanning any part), so the text
+        must come from the MARKED ``TextPart`` — not merely the first ``TextPart`` — or an unmarked
+        preamble preceding the marked text would be returned instead of the actual retry message.
+        Fall back to the first ``TextPart.text`` (``_extract_text``) when no marked ``TextPart`` is
+        present, then to a defensive ``str()`` of the lenient value — a hypothetical future producer
+        marking a non-``TextPart`` part (``is_retry`` reads only the open ``metadata`` slot, so it is
+        total over the vocabulary) degrades there rather than crashing. The contract that ``content``
+        is always a ``str`` holds in every case."""
+        for part in parts or []:
+            if isinstance(part, TextPart) and (part.metadata or {}).get(RETRY_MARKER):
+                return part.text
+        try:
+            return _extract_text(parts or [])
+        except DeserializationError:
+            return str(extract_lenient(parts))
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool
@@ -201,61 +289,12 @@ class BaseAgentNodeDef(
         # sibling replies are folded in the handler and never reach run(); run() is re-entered
         # (with all tool results materialized) only at the batch's durable close. There is no
         # in-process park here — incomplete batches park in the handler, not run().
-
-        # Collect all FailedToolCall results in this turn so operators see every
-        # failure in a parallel batch; raise on the first after logging all.
-        # Also defend against corrupt marker dicts: a payload with the calfkit
-        # marker tag that fails ``FailedToolCall`` validation (e.g. schema drift
-        # during rolling deploy, a required field added without default, a
-        # tampered wire payload) round-trips through the union's ``| Any`` arm
-        # as a plain ``dict``. Synthesize a typed marker so the silent-failure
-        # path closes — operators still see the raise and the corrupt-keys
-        # context.
-        failed_tool_calls: list[FailedToolCall] = []
-        for tc in latest_tool_calls:
-            result = ctx.state.tool_results.get(tc.tool_call_id)
-            if isinstance(result, FailedToolCall):
-                failed_tool_calls.append(result)
-            elif isinstance(result, dict) and result.get("marker_kind") == "calfkit-tool-error":
-                logger.error(
-                    "[%s] corrupt FailedToolCall marker detected node=%s tool_call_id=%s raw_keys=%s; "
-                    "likely schema drift or version skew across the Kafka boundary",
-                    ctx.correlation_id[:8],
-                    self.name,
-                    tc.tool_call_id,
-                    sorted(result.keys()),
-                )
-                # Synthesize a typed marker with sentinel fields known to pass
-                # FailedToolCall's validators. tc.tool_call_id is the LLM-emitted
-                # correlation key; fall back to "<missing>" if it's empty so
-                # ``min_length=1`` doesn't itself raise.
-                raw_tool_name = result.get("tool_name")
-                failed_tool_calls.append(
-                    FailedToolCall(
-                        tool_name=raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "<unknown>",
-                        tool_call_id=tc.tool_call_id or "<missing>",
-                        exc_type="CorruptFailedToolCallMarker",
-                        exc_message=f"Marker dict failed validation as FailedToolCall (likely schema drift); raw_keys={sorted(result.keys())}",
-                    )
-                )
-        if failed_tool_calls:
-            for failure in failed_tool_calls:
-                logger.error(
-                    "[%s] tool execution error detected node=%s tool=%s tool_call_id=%s exc_type=%s exc_message=%s",
-                    ctx.correlation_id[:8],
-                    self.name,
-                    failure.tool_name,
-                    failure.tool_call_id,
-                    failure.exc_type,
-                    failure.exc_message,
-                )
-            first = failed_tool_calls[0]
-            raise ToolExecutionError(
-                tool_name=first.tool_name,
-                tool_call_id=first.tool_call_id,
-                exc_type=first.exc_type,
-                exc_message=first.exc_message,
-            )
+        #
+        # A faulting tool no longer lands a FailedToolCall in tool_results — its exception escalates via
+        # the rail (the handler's stage-1 on_callee_error / the closing batch's fault group, §6.9), so
+        # everything materialized into tool_results is a ToolReturn / RetryPromptPart. The agent's old
+        # FailedToolCall scan → ToolExecutionError is gone (the carriage switch, 4.4); nothing
+        # un-materializable reaches the DeferredToolResults consumer below.
 
         tool_results = None
 
@@ -274,6 +313,9 @@ class BaseAgentNodeDef(
                         tools_registry[target_tool_call.tool_name].dispatch_topic,
                         ctx.state,
                         body=ToolCallRef.from_tool_call_part(target_tool_call),
+                        # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
+                        # echoes it on reply.tag and the agent materializes the result at that slot.
+                        tag=target_tool_call.tool_call_id,
                     )
                 else:
                     remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
@@ -332,8 +374,8 @@ class BaseAgentNodeDef(
 
                 # Parse args from the LLM's emission. Applies to ALL dispatch
                 # paths so that malformed-JSON args from override (schema-only)
-                # tools are also surfaced as RetryPromptPart instead of escaping
-                # to the worker's hard FailedToolCall path.
+                # tools are also surfaced as an LLM-visible RetryPromptPart at the
+                # agent, instead of dispatching unparseable args across the wire.
                 #
                 # ``args_as_dict()`` can raise more than just ValueError /
                 # AssertionError: ``pydantic_core.from_json`` raises TypeError
@@ -432,11 +474,14 @@ class BaseAgentNodeDef(
                     tools_registry[target_tool_call.tool_name].dispatch_topic,
                     ctx.state,
                     body=ToolCallRef.from_tool_call_part(target_tool_call),
+                    # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
+                    # echoes it on reply.tag and the agent materializes the result at that slot.
+                    tag=target_tool_call.tool_call_id,
                 )
             else:
-                # Parallel fan-out: each sibling Call carries its tool_call_id as ``tag`` so the
-                # callee echoes it on its reply, letting the durable fold read the result from
-                # ``state.tool_results[tag]``. The handler's _handle_fanout_open opens the durable
+                # Parallel fan-out: each sibling Call carries its tool_call_id as ``tag`` so the callee
+                # echoes it on its reply (reply.tag); stage-1 resolves the slot and the durable fold
+                # records the outcome under it. The handler's _handle_fanout_open opens the durable
                 # batch from this list — replacing the old in-process _pending_batches registration.
                 parallel_tool_calls = [
                     Call[State](

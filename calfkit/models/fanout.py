@@ -18,8 +18,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from calfkit.models.error_report import ErrorReport
+from calfkit.models.payload import ContentPart
 from calfkit.models.session_context import WorkflowState
-from calfkit.models.state import CalfToolResult, State
+from calfkit.models.state import State
 
 
 class SlotRef(BaseModel):
@@ -29,6 +31,10 @@ class SlotRef(BaseModel):
     """The callee frame id the framework minted for this sibling Call."""
     tag: str | None
     """The caller's correlation token echoed on the reply (the agent's tool_call_id)."""
+    target_topic: str
+    """The sibling callee's topic, captured at OPEN from ``Call.target_topic``. Sourced onto the
+    matched outcome's :attr:`FanoutOutcome.target_topic` at fold so the fault group's per-slot
+    topology has it without the reply carrying it (the reply echoes only ``in_reply_to``/``tag``)."""
 
 
 class FanoutOpen(BaseModel):
@@ -50,20 +56,34 @@ class FanoutOpen(BaseModel):
 
 
 class FanoutOutcome(BaseModel):
-    """One resolved slot — a sub-value of :attr:`FanoutState.outcomes`.
+    """One resolved slot — a sub-value of :attr:`FanoutState.outcomes` (fault-rail §6.9 / §7).
 
-    ``result`` mirrors ``State.tool_results``' value type so a ``CalfToolResult``
-    (including a ``FailedToolCall`` marker) round-trips through JSON as a TYPED
-    instance via the same discriminator, not as a bare ``dict``. Return-only for now;
-    the fault rail widens this field (a ``fault`` arm) without touching the carriage
-    of resolved returns.
+    Carries the callee's outcome on the reply-slot carriage: a RESOLVED slot (a plain return, or an
+    ``on_callee_error`` substitute) sets :attr:`parts` (the typed ``ContentPart`` vocabulary, decoded
+    TYPED via the discriminator); a FAILED slot (an unhandled callee fault, or a slot whose
+    materialization failed) sets :attr:`fault` (a typed ``ErrorReport``). ``parts`` XOR ``fault`` by
+    construction. The agent materializes a resolved outcome into ``tool_results`` at close
+    (``_resolve_slot``); an unhandled fault escalates as the batch's fault group and never materializes.
     """
 
     slot: str
     """The resolved slot's frame id (== :attr:`SlotRef.frame_id`); the idempotent fold key."""
     tag: str | None
-    result: CalfToolResult | Any
-    """The captured ``state.tool_results[tag]`` entry for this sibling."""
+    """The caller's correlation token (the agent's ``tool_call_id``); the materialization key at close."""
+    target_topic: str
+    """The sibling callee's topic (sourced from the matched :class:`SlotRef` at fold). Carried on every
+    outcome; consumed only on the fault arm (the §7.3 fault-group per-slot ``{tag, target_topic, ok|failed}``
+    topology). Write-only until the deferred reception/budget PRs read it."""
+    handled: bool
+    """True ⇒ ``on_callee_error`` returned a substitute (a handled fault; counts as that tool's FAILURE
+    for the deferred §7.6 budget). False ⇒ a fault-free return. A substitute and a return both carry
+    ``parts``, so this flag (the fault-rail ``CalleeResult.handled``) is the discriminator the tally needs.
+    Write-only until the deferred budget PR reads it."""
+    parts: list[ContentPart] | None = None
+    """A resolved slot's content (a return, or a handled substitute) — XOR :attr:`fault`."""
+    fault: ErrorReport | None = None
+    """A failed slot's typed fault (unhandled ``on_callee_error`` decline, or a materialization failure)
+    — XOR :attr:`parts`. Recorded so the closure builds the batch's fault group from the failed slots."""
 
 
 class FanoutState(BaseModel):

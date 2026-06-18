@@ -1,12 +1,14 @@
-"""PR-4 step 4: the pure fold/close/abort state machine over a FanoutBatchStore.
+"""PR-4 + PR-6 4.4/4.6: the pure fold/close/abort state machine over a FanoutBatchStore.
 
-These are the durable analog of the agent's in-process _parallel_state_aggregation —
-store- and caller-agnostic pure fns (no broker, no envelope), exercised exhaustively
-over the in-memory fake so wiring them into the staged handler (step 6) is no re-home:
+Store- and caller-agnostic pure fns (no broker, no envelope), exercised over the in-memory fake:
 
-- fold_sibling  : one marked sibling reply → park / complete / stray / abort
-- close_batch   : the re-entry → resume (materialized) / abandon / spurious / abort
-- abort_batch   : best-effort tombstone of both records (the §4.4 abort cleanup)
+- classify_sibling : read the confirmed-fresh state and classify a marked sibling slot BEFORE the
+  seams run (decision 10 / fault-rail §6.7) → pending (the matched SlotRef) / stray / abort. The
+  caller runs ``on_callee_error`` only on a live pending slot, then records.
+- record_outcome   : persist one resolved outcome (parts XOR fault) → park / complete / abort.
+- close_batch      : the re-entry → resume (the snapshot + the un-materialized outcomes; the agent
+  materializes at ``_resolve_slot``) / abandon / spurious / abort. NO materialization here anymore.
+- abort_batch      : best-effort tombstone of both records (the §4.4 abort cleanup).
 """
 
 import logging
@@ -14,10 +16,11 @@ import logging
 import pytest
 from aiokafka.errors import KafkaError  # type: ignore[import-untyped]
 
-from calfkit._vendor.pydantic_ai.messages import ToolReturn
+from calfkit.models.error_report import ErrorReport
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome, SlotRef
+from calfkit.models.payload import TextPart
 from calfkit.models.session_context import CallFrame, Stack, WorkflowState
-from calfkit.models.state import FailedToolCall, State
+from calfkit.models.state import State
 from calfkit.nodes._fanout_store import (
     CloseAbandon,
     CloseAbort,
@@ -27,15 +30,17 @@ from calfkit.nodes._fanout_store import (
     FoldComplete,
     FoldParked,
     FoldStray,
+    SiblingPending,
     abort_batch,
+    classify_sibling,
     close_batch,
-    fold_sibling,
+    record_outcome,
 )
 from tests._fanout_fakes import FakeFanoutBatchStore
 
 
 def _open(fanout_id: str = "X", slots: tuple[tuple[str, str | None], ...] = (("f1", "tc1"), ("f2", "tc2"))) -> FanoutOpen:
-    return FanoutOpen(fanout_id=fanout_id, node_id="agent", expected=[SlotRef(frame_id=f, tag=t) for f, t in slots])
+    return FanoutOpen(fanout_id=fanout_id, node_id="agent", expected=[SlotRef(frame_id=f, tag=t, target_topic=f"tool.{f}") for f, t in slots])
 
 
 def _snapshot() -> EnvelopeSnapshot:
@@ -43,8 +48,12 @@ def _snapshot() -> EnvelopeSnapshot:
     return EnvelopeSnapshot(state=State(), stack=stack, deps={})
 
 
-def _outcome(slot: str = "f1", tag: str | None = "tc1", value: str = "ok") -> FanoutOutcome:
-    return FanoutOutcome(slot=slot, tag=tag, result=ToolReturn(return_value=value))
+def _resolved(slot: str = "f1", tag: str | None = "tc1", value: str = "ok") -> FanoutOutcome:
+    return FanoutOutcome(slot=slot, tag=tag, target_topic=f"tool.{slot}", handled=False, parts=[TextPart(text=value)])
+
+
+def _failed(slot: str = "f1", tag: str | None = "tc1", error_type: str = "callee.boom") -> FanoutOutcome:
+    return FanoutOutcome(slot=slot, tag=tag, target_topic=f"tool.{slot}", handled=False, fault=ErrorReport(error_type=error_type))
 
 
 @pytest.fixture
@@ -52,106 +61,108 @@ def store() -> FakeFanoutBatchStore:
     return FakeFanoutBatchStore()
 
 
-# ── fold_sibling ─────────────────────────────────────────────────────────────
+# ── classify_sibling (stray-check BEFORE the seams, decision 10) ──────────────────
 
 
-async def test_fold_first_sibling_parks(store: FakeFanoutBatchStore) -> None:
+async def test_classify_live_slot_returns_pending_with_matched_slot_ref(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    result = await fold_sibling(store, "X", _outcome("f1", "tc1"))
+    result = await classify_sibling(store, "X", "f1")
+    assert isinstance(result, SiblingPending)
+    assert result.slot_ref.frame_id == "f1" and result.slot_ref.target_topic == "tool.f1"
+
+
+async def test_classify_foreign_slot_is_stray(store: FakeFanoutBatchStore) -> None:
+    await store.open("X", _open(), _snapshot())
+    result = await classify_sibling(store, "X", "f99")
+    assert isinstance(result, FoldStray) and result.reason == "foreign"
+
+
+async def test_classify_after_tombstone_is_post_closure_stray(store: FakeFanoutBatchStore) -> None:
+    await store.open("X", _open(), _snapshot())
+    await store.tombstone("X")
+    result = await classify_sibling(store, "X", "f1")
+    assert isinstance(result, FoldStray) and result.reason == "post_closure"
+
+
+async def test_classify_already_recorded_slot_is_duplicate_stray(store: FakeFanoutBatchStore) -> None:
+    await store.open("X", _open(), _snapshot())
+    await record_outcome(store, "X", _resolved("f1", "tc1"))
+    result = await classify_sibling(store, "X", "f1")
+    assert isinstance(result, FoldStray) and result.reason == "duplicate"
+
+
+async def test_classify_unavailable_store_aborts(store: FakeFanoutBatchStore) -> None:
+    await store.open("X", _open(), _snapshot())
+    store.make_unavailable()
+    result = await classify_sibling(store, "X", "f1")
+    assert isinstance(result, FoldAbort) and result.reason == "store_unavailable"
+
+
+# ── record_outcome ───────────────────────────────────────────────────────────────
+
+
+async def test_record_first_outcome_parks(store: FakeFanoutBatchStore) -> None:
+    await store.open("X", _open(), _snapshot())
+    result = await record_outcome(store, "X", _resolved("f1", "tc1"))
     assert isinstance(result, FoldParked)
     state = await store.read_state("X")
-    assert state is not None
-    assert set(state.outcomes) == {"f1"}
+    assert state is not None and set(state.outcomes) == {"f1"}
 
 
-async def test_fold_last_sibling_completes(store: FakeFanoutBatchStore) -> None:
+async def test_record_last_outcome_completes(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    result = await fold_sibling(store, "X", _outcome("f2", "tc2"))
+    await record_outcome(store, "X", _resolved("f1", "tc1"))
+    result = await record_outcome(store, "X", _resolved("f2", "tc2"))
     assert isinstance(result, FoldComplete)
 
 
-async def test_fold_foreign_slot_is_stray_and_leaves_state_untouched(store: FakeFanoutBatchStore) -> None:
+async def test_record_a_failed_outcome_persists_the_fault(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    result = await fold_sibling(store, "X", _outcome("f99", "tcX"))
-    assert isinstance(result, FoldStray)
-    assert result.reason == "foreign"
+    await record_outcome(store, "X", _failed("f1", "tc1"))
     state = await store.read_state("X")
     assert state is not None
-    assert state.outcomes == {}
+    assert state.outcomes["f1"].fault is not None and state.outcomes["f1"].fault.error_type == "callee.boom"
 
 
-async def test_fold_after_tombstone_is_post_closure_stray(store: FakeFanoutBatchStore) -> None:
-    await store.open("X", _open(), _snapshot())
-    await store.tombstone("X")
-    result = await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    assert isinstance(result, FoldStray)
-    assert result.reason == "post_closure"
-
-
-async def test_fold_duplicate_slot_is_idempotent_stray(store: FakeFanoutBatchStore) -> None:
-    await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    result = await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    assert isinstance(result, FoldStray)
-    assert result.reason == "duplicate"
-    state = await store.read_state("X")
-    assert state is not None
-    assert set(state.outcomes) == {"f1"}
-
-
-async def test_fold_duplicate_after_complete_does_not_recomplete(store: FakeFanoutBatchStore) -> None:
-    await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    await fold_sibling(store, "X", _outcome("f2", "tc2"))  # completes
-    result = await fold_sibling(store, "X", _outcome("f1", "tc1"))  # dup after complete
-    assert isinstance(result, FoldStray)
-    assert result.reason == "duplicate"
-
-
-async def test_fold_unavailable_store_aborts(store: FakeFanoutBatchStore) -> None:
+async def test_record_unavailable_store_aborts(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
     store.make_unavailable()
-    result = await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    assert isinstance(result, FoldAbort)
-    assert result.reason == "store_unavailable"
+    result = await record_outcome(store, "X", _resolved("f1", "tc1"))
+    assert isinstance(result, FoldAbort) and result.reason == "store_unavailable"
 
 
-# ── close_batch ──────────────────────────────────────────────────────────────
+# ── close_batch (no materialization — returns the snapshot + the outcomes) ────────
 
 
-async def test_close_complete_batch_resumes_materialized_and_tombstones(store: FakeFanoutBatchStore) -> None:
+async def test_close_complete_batch_returns_outcomes_and_tombstones(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1", value="r1"))
-    await fold_sibling(store, "X", _outcome("f2", "tc2", value="r2"))
+    await record_outcome(store, "X", _resolved("f1", "tc1", value="r1"))
+    await record_outcome(store, "X", _resolved("f2", "tc2", value="r2"))
     result = await close_batch(store, "X")
     assert isinstance(result, CloseResume)
-    assert result.snapshot.state.get_tool_result("tc1") is not None
-    assert result.snapshot.state.get_tool_result("tc2") is not None
+    # The snapshot is NOT materialized here (materialization moved to _aggregate/_resolve_slot)...
+    assert result.snapshot.state.tool_results == {}
+    # ...the un-materialized outcomes ride alongside, in fold order.
+    assert [o.slot for o in result.outcomes] == ["f1", "f2"]
     # tombstone-first: both records gone
     assert await store.read_state("X") is None
     assert await store.read_basestate("X") is None
 
 
-async def test_close_materializes_failed_tool_call_as_typed_marker(store: FakeFanoutBatchStore) -> None:
-    # (coverage a) A return-only tool failure folds as a FailedToolCall outcome; on close it must
-    # materialize into the snapshot's State as a TYPED FailedToolCall (via the discriminator), not a
-    # bare dict or None — so the resumed agent body sees the marker and strands the caller.
-    marker = FailedToolCall.build_safe(tool_name="t", tool_call_id="tc1", exc_type="ValueError", exc_message="boom")
+async def test_close_carries_both_resolved_and_failed_outcomes(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", FanoutOutcome(slot="f1", tag="tc1", result=marker))
-    await fold_sibling(store, "X", _outcome("f2", "tc2", value="ok"))  # completes
+    await record_outcome(store, "X", _resolved("f1", "tc1"))
+    await record_outcome(store, "X", _failed("f2", "tc2"))  # completes
     result = await close_batch(store, "X")
     assert isinstance(result, CloseResume)
-    materialized = result.snapshot.state.get_tool_result("tc1")
-    assert isinstance(materialized, FailedToolCall)
-    assert materialized.exc_type == "ValueError"
-    assert materialized.tool_call_id == "tc1"
+    by_slot = {o.slot: o for o in result.outcomes}
+    assert by_slot["f1"].parts is not None and by_slot["f1"].fault is None
+    assert by_slot["f2"].fault is not None and by_slot["f2"].parts is None
 
 
 async def test_close_incomplete_batch_is_spurious_and_keeps_state(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))  # only 1 of 2
+    await record_outcome(store, "X", _resolved("f1", "tc1"))  # only 1 of 2
     result = await close_batch(store, "X")
     assert isinstance(result, CloseSpurious)
     assert await store.read_state("X") is not None  # NOT tombstoned
@@ -164,66 +175,23 @@ async def test_close_absent_batch_abandons(store: FakeFanoutBatchStore) -> None:
 
 async def test_close_basestate_missing_aborts(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    await fold_sibling(store, "X", _outcome("f2", "tc2"))  # completes
+    await record_outcome(store, "X", _resolved("f1", "tc1"))
+    await record_outcome(store, "X", _resolved("f2", "tc2"))  # completes
     store._basestate.pop("X")  # white-box: simulate the impossible-by-ordering miss
     result = await close_batch(store, "X")
-    assert isinstance(result, CloseAbort)
-    assert result.reason == "basestate_missing"
+    assert isinstance(result, CloseAbort) and result.reason == "basestate_missing"
 
 
 async def test_close_unavailable_store_aborts(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    await fold_sibling(store, "X", _outcome("f2", "tc2"))
+    await record_outcome(store, "X", _resolved("f1", "tc1"))
+    await record_outcome(store, "X", _resolved("f2", "tc2"))
     store.make_unavailable()
     result = await close_batch(store, "X")
-    assert isinstance(result, CloseAbort)
-    assert result.reason == "store_unavailable"
+    assert isinstance(result, CloseAbort) and result.reason == "store_unavailable"
 
 
-async def test_close_materialization_failure_on_missing_tag_aborts(store: FakeFanoutBatchStore) -> None:
-    await store.open("X", _open(), _snapshot())  # 2-slot batch (the N>=2 invariant)
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    await fold_sibling(store, "X", _outcome("f2", tag=None))  # no tag → can't materialize → completes the batch
-    result = await close_batch(store, "X")
-    assert isinstance(result, CloseAbort)
-    assert result.reason == "materialization_failed"
-    assert await store.read_state("X") is None  # the un-closable batch is tombstoned
-
-
-async def test_close_duplicate_tag_materializes_last_write_wins(store: FakeFanoutBatchStore) -> None:
-    # Two DISTINCT slots carrying the SAME tag (an anomaly — the agent mints distinct tool_call_ids,
-    # so nothing produces this in practice; the types do not enforce tag-uniqueness across slots)
-    # materialize into one tool_results[tag] key: close does a last-write-wins overwrite and still
-    # resumes cleanly. Pinned so PR-6 (which re-homes the materialization loop onto parts/fault) is
-    # aware of the behavior before touching it.
-    reg = FanoutOpen(fanout_id="X", node_id="agent", expected=[SlotRef(frame_id="f1", tag="dup"), SlotRef(frame_id="f2", tag="dup")])
-    await store.open("X", reg, _snapshot())
-    await fold_sibling(store, "X", FanoutOutcome(slot="f1", tag="dup", result=ToolReturn(return_value="first")))
-    await fold_sibling(store, "X", FanoutOutcome(slot="f2", tag="dup", result=ToolReturn(return_value="second")))
-    result = await close_batch(store, "X")
-    assert isinstance(result, CloseResume)
-    # outcomes is insertion-ordered, so the second fold (f2) wins the last-write-wins overwrite.
-    assert result.snapshot.state.get_tool_result("dup") == ToolReturn(return_value="second")
-
-
-async def test_close_tag_present_result_none_resumes_without_crashing(store: FakeFanoutBatchStore) -> None:
-    # A folded outcome with a tag but result=None — a marked sibling whose tag had no
-    # state.tool_results entry (base.py reads tool_results.get(tag), which can be None) — is
-    # materialized as add_tool_result(tag, None). This is a return-only anomaly; pin that close
-    # RESUMES (does not crash or abort) and the None lands, so the batch never hangs. The semantics of
-    # a None result are revisited by the rail (FanoutOutcome gains parts/fault).
-    await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", FanoutOutcome(slot="f1", tag="tc1", result=None))
-    await fold_sibling(store, "X", _outcome("f2", "tc2", value="ok"))
-    result = await close_batch(store, "X")
-    assert isinstance(result, CloseResume)
-    assert result.snapshot.state.get_tool_result("tc1") is None
-    assert await store.read_state("X") is None  # closed + tombstoned
-
-
-# ── abort_batch + sequential re-fan-out ──────────────────────────────────────
+# ── abort_batch + sequential re-fan-out ──────────────────────────────────────────
 
 
 async def test_abort_batch_tombstones_both(store: FakeFanoutBatchStore) -> None:
@@ -257,10 +225,9 @@ async def test_abort_batch_swallows_non_store_unavailable_tombstone_failure(capl
 
 async def test_reopen_after_close_starts_fresh_batch(store: FakeFanoutBatchStore) -> None:
     await store.open("X", _open(), _snapshot())
-    await fold_sibling(store, "X", _outcome("f1", "tc1"))
-    await fold_sibling(store, "X", _outcome("f2", "tc2"))
+    await record_outcome(store, "X", _resolved("f1", "tc1"))
+    await record_outcome(store, "X", _resolved("f2", "tc2"))
     await close_batch(store, "X")  # tombstones
     await store.open("X", _open(), _snapshot())  # sequential re-fan-out, same key
     state = await store.read_state("X")
-    assert state is not None
-    assert state.outcomes == {}  # fresh registration, never the stale tombstone
+    assert state is not None and state.outcomes == {}  # fresh registration, never the stale tombstone

@@ -76,11 +76,6 @@ class ReturnCall(Generic[StateT]):
 
 
 @dataclass
-class Silent:
-    """Silent end of node execution, no explicit publish. End of event stream."""
-
-
-@dataclass
 class Next:
     """Routing control returned by a route handler that *declines* to handle the
     message: advance the Chain of Responsibility to the next, more-general matching
@@ -93,7 +88,7 @@ _T = TypeVar("_T")
 
 NodeResult = TypeAliasType(
     "NodeResult",
-    Silent | Call[_T] | list[Call[_T]] | ReturnCall[_T] | TailCall[_T],
+    Call[_T] | list[Call[_T]] | ReturnCall[_T] | TailCall[_T],
     type_params=(_T,),
 )
 """All possible return types from a node's ``run`` method."""

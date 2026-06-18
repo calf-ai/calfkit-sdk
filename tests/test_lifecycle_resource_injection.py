@@ -19,7 +19,7 @@ from typing import Any
 from faststream.kafka import KafkaBroker
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND
-from calfkit.models import ToolCallRef, ToolContext
+from calfkit.models import Next, ToolCallRef, ToolContext
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import (
     CallFrame,
@@ -41,9 +41,7 @@ class _ProbeNode(BaseNodeDef):
 
     async def run(self, ctx: SessionRunContext) -> Any:
         self.seen_ctx = ctx
-        from calfkit.models import Silent
-
-        return Silent()
+        return Next()
 
 
 def _envelope_with_frame() -> Envelope:

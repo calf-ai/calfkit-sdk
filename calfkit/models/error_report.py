@@ -57,6 +57,16 @@ class FaultTypes:
     DELIVERY_UNDECODABLE = "calf.delivery.undecodable"
     SLOT_MATERIALIZATION_FAILED = "calf.slot.materialization_failed"
     AGENT_SELF_RETRY_EXHAUSTED = "calf.agent.self_retry_exhausted"
+    # A fan-out batch could not complete (a node-own infra failure mid-batch, not a callee fault): the
+    # durable store died, its basestate was missing, a sibling/re-entry publish failed, or the node's
+    # own work raised while slots were outstanding. The batch is tombstoned and the caller faulted ONCE
+    # (in-node spec §4.4). ``details.reason`` ∈ {store_unavailable, basestate_missing, reentry_failed,
+    # dispatch_failed}; a node-own raise mid-batch escalates the exception itself (``calf.unhandled``).
+    FANOUT_ABORTED = "calf.fanout.aborted"
+    REASON_STORE_UNAVAILABLE = "store_unavailable"
+    REASON_BASESTATE_MISSING = "basestate_missing"
+    REASON_REENTRY_FAILED = "reentry_failed"
+    REASON_DISPATCH_FAILED = "dispatch_failed"
 
     # details key: a non-silent breadcrumb recording what build_safe elided to stay
     # within the carriage budget. Maps to a small dict carrying only the parts that
@@ -65,6 +75,34 @@ class FaultTypes:
     # and ``fallback`` (the exception class name, when build_safe's last-resort arm
     # dropped causes/frame_chain/details after an unexpected construction error).
     ELIDED = "calf.elided"
+
+    # details key: the breadcrumb the on_node_error chain runner records when a
+    # recovery handler *accidentally* raises (spec §6.5 / scenario 9). The handler
+    # is treated as declining, but its failure is noted here — a list of
+    # ``{"handler", "exc_type", "exc_message"}`` dicts — so the escalating original
+    # fault carries the trace of every recovery attempt that itself broke.
+    SEAM_ERRORS = "calf.seam_errors"
+
+    # details key: the exception class name :meth:`ErrorReport.from_exception` records
+    # when synthesizing a ``calf.unhandled`` fault from an arbitrary exception (spec
+    # §6.7) — exception identity does not cross the wire, but the class name is a useful
+    # forensic breadcrumb in ``details``.
+    EXCEPTION_TYPE = "calf.exception_type"
+
+    # details key + values: why a reply-owing delivery declined its body, written by the route
+    # dispatcher (§10) and carried on the ``DELIVERY_REJECTED`` auto-fault so a consumer can branch
+    # without typing a magic string. ``REASON`` is a plain (non-``calf.``) key by design — it is the
+    # framework's own field on a framework-minted report (the spec writes ``details.reason``).
+    REASON = "reason"
+    REASON_SCHEMA_REJECTED = "schema_rejected"
+    REASON_ALL_DECLINED = "all_declined"
+
+    # details key: the per-slot fan-out topology a closing batch's fault group carries (spec §4.4/§7) —
+    # a list of ``{tag, target_topic, status}`` plus ``ok``/``failed`` counts, so partial-success
+    # visibility survives without shipping the success VALUES (lean faults, §4.3 leak posture). On a
+    # SINGLETON-flattened group it is copied onto the bare child's ``details``. Framework-written, so it
+    # is a reserved ``calf.`` key (set after ``build_safe``, which strips caller-supplied ``calf.*``).
+    FANOUT_TOPOLOGY = "calf.fanout_topology"
 
 
 class FrameRef(BaseModel):
@@ -84,16 +122,20 @@ class FrameRef(BaseModel):
 class ErrorReport(BaseModel):
     """A terminal failure as a typed wire value (spec §4.3).
 
-    Travels on the reply slot inside a ``FaultMessage``; the same value reaches
-    seams (the ``fault`` argument), the client (``NodeFaultError.report``) and
-    sinks (``ConsumerContext.fault``). Exception identity never crosses the wire —
+    Travels on the reply slot inside a ``FaultMessage``; in PR-6 the value reaches
+    the seam ``fault`` argument and the broadcast mirror, and is read at a *mint*
+    via ``NodeFaultError.report``. Both fault-RECEPTION surfaces — the client
+    raising ``NodeFaultError(report)`` on a ``kind=fault`` reply, and the consumer
+    ``ConsumerContext`` fault/``delivery_kind`` field — are DEFERRED to the reception
+    PR and are not present here. Exception identity never crosses the wire —
     ``error_type`` (a dotted string code) is the contract, not a class name.
 
     Frozen: the report travels and is read at many surfaces (a seam's ``fault``
-    arg, ``NodeFaultError.report``, ``ConsumerContext.fault``, the broadcast
-    mirror) and — once the rail escalates it — passes up a frame chain untouched.
+    arg, a mint's ``NodeFaultError.report``, the broadcast mirror, and — once the
+    deferred reception surfaces land — the client/consumer reads) and, once the
+    rail escalates it, passes up a frame chain untouched.
     Freezing makes the "stable across hops" promise on ``report_id`` real and
-    matches the codebase's frozen wire values (``FailedToolCall``, ``CallFrame``).
+    matches the codebase's frozen wire values (e.g. ``CallFrame``).
     The freeze is **shallow** — field *reassignment* is blocked, but the
     ``causes``/``details``/``frame_chain`` containers remain mutable in place, so
     transform a report you've handed off with ``model_copy(update=...)``, never by
@@ -134,14 +176,34 @@ class ErrorReport(BaseModel):
     @field_validator("message", mode="before")
     @classmethod
     def _clamp_message(cls, v: Any) -> Any:
-        """Clamp an over-long ``message`` rather than reject it.
+        """Coerce a non-str ``message`` to str, then clamp it — never reject.
 
         A rejecting constraint would poison inbound decode of an otherwise-valid
         report; a BEFORE-mode clamp keeps construction total on every path,
-        including deserialization. Mirrors ``FailedToolCall``'s clamp discipline.
+        including deserialization. The clamp-don't-reject discipline keeps the error path total.
+        A non-str scalar (e.g. an int the rail passed by mistake) is coerced via ``str(v)``
+        instead of falling through to the ``message: str`` constraint, whose rejection would
+        otherwise drop the WHOLE ``build_safe`` into its last-resort fallback — discarding the
+        report's causes and frame_chain. Only the offending scalar is normalized.
         """
-        if isinstance(v, str) and len(v) > _MAX_MESSAGE_CHARS:
+        if not isinstance(v, str):
+            v = str(v)
+        if len(v) > _MAX_MESSAGE_CHARS:
             return v[:_MAX_MESSAGE_CHARS]
+        return v
+
+    @field_validator("error_type", mode="before")
+    @classmethod
+    def _coerce_error_type(cls, v: Any) -> Any:
+        """Coerce a non-str ``error_type`` to str rather than reject it.
+
+        Mirrors :meth:`_clamp_message`: a non-str ``error_type`` would otherwise hit the
+        ``error_type: str`` constraint and collapse ``build_safe`` into its last-resort
+        fallback, which rewrites ``error_type`` to ``calf.unhandled`` and drops causes and
+        frame_chain. Coercing the offending scalar keeps the primary build path total and
+        preserves the original code's string form."""
+        if not isinstance(v, str):
+            return str(v)
         return v
 
     def walk(self) -> Iterator[ErrorReport]:
@@ -206,8 +268,8 @@ class ErrorReport(BaseModel):
         """Synthesize a report that **never raises** (spec §4.3).
 
         The fault path must never itself raise — a fault that throws while being
-        built re-opens the silent-drop hole this feature closes (mirrors
-        ``FailedToolCall.build_safe``). Applies the per-field carriage bounds
+        built re-opens the silent-drop hole this feature closes (the same
+        build-safe discipline). Applies the per-field carriage bounds
         (``causes`` depth/total, ``frame_chain`` head+tail, ``details`` size),
         recording any elision under ``details[FaultTypes.ELIDED]`` so nothing is
         dropped silently. On any unexpected construction error, falls back to a
@@ -260,6 +322,47 @@ class ErrorReport(BaseModel):
                 origin_frame_id=origin_frame_id if type(origin_frame_id) is str else None,
                 details={FaultTypes.ELIDED: {"fallback": type(exc).__name__[:200]}},
             )
+
+    @classmethod
+    def from_exception(
+        cls,
+        exc: BaseException,
+        *,
+        node: Any = None,
+        ctx: Any = None,
+        cause: ErrorReport | None = None,
+        frame_chain: list[FrameRef] | None = None,
+        origin_frame_id: str | None = None,
+    ) -> ErrorReport:
+        """Synthesize a fault from an arbitrary exception (spec §6.7).
+
+        A non-``NodeFaultError`` maps to ``error_type="calf.unhandled"`` with the
+        exception's class name (``details[FaultTypes.EXCEPTION_TYPE]``) and a clamped
+        message; ``build_safe`` keeps it total — the error path must never itself raise.
+        ``node``/``ctx`` (optional, keyword) source the origin breadcrumb when present
+        (``node.node_id`` / ``ctx.frame_id``); ``frame_chain`` and ``origin_frame_id`` capture the
+        call-stack topology at synthesis (§4.3/§4.4, ADR-0003 — the traceback analog), passed
+        explicitly by the rail from the pre-mutation stack snapshot since ``ctx`` carries no stack;
+        ``cause`` chains a prior report (the §6.8 recovery-then-failure case). ``node``/``ctx`` are
+        typed ``Any`` to keep this module calfkit-import-free (the same reason ``build_safe`` inlines
+        its own coercions).
+
+        A ``NodeFaultError`` is NOT routed here — the chokepoint converts it verbatim,
+        bypassing ``on_node_error`` (the mint rule, §6.5).
+        """
+        report = cls.build_safe(
+            error_type=FaultTypes.UNHANDLED,
+            message=_safe_exc_str(exc),
+            origin_node_id=getattr(node, "node_id", None),
+            origin_frame_id=origin_frame_id if origin_frame_id is not None else getattr(ctx, "frame_id", None),
+            frame_chain=frame_chain,
+            causes=[cause] if cause is not None else None,
+        )
+        # The exception-class breadcrumb is a framework-reserved calf.* details key, so it
+        # is set AFTER build_safe (which strips caller-supplied calf.* keys); the report is
+        # freshly built and owned here, so the in-place add is safe.
+        report.details[FaultTypes.EXCEPTION_TYPE] = type(exc).__name__[:200]
+        return report
 
 
 # ---------------------------------------------------------------------------
@@ -349,3 +452,20 @@ def _bound_details(details: dict[str, Any]) -> tuple[dict[str, Any], int | None]
     if size <= _MAX_DETAILS_BYTES - _ELIDED_RESERVE_BYTES:
         return dict(details), 0
     return {}, size
+
+
+def _safe_exc_str(exc: BaseException) -> str:
+    """Best-effort string of an exception, robust against a broken ``__str__``.
+
+    A local twin of ``calfkit.exceptions.safe_exc_message`` — duplicated deliberately
+    so this module stays calfkit-import-free (importing ``exceptions`` would be circular;
+    ``exceptions`` imports ``ErrorReport``). Used only by :meth:`ErrorReport.from_exception`,
+    whose contract is totality on the error path, so the ``str``/``repr`` calls are guarded.
+    """
+    try:
+        return str(exc)
+    except Exception:
+        try:
+            return repr(exc)
+        except Exception:
+            return f"<unprintable {type(exc).__name__}>"

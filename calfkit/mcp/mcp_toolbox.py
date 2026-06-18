@@ -15,13 +15,12 @@ from mcp.types import ToolListChangedNotification
 
 from calfkit._protocol import NodeKind
 from calfkit._registry import handler
-from calfkit._vendor.pydantic_ai.messages import ToolReturn
-from calfkit.exceptions import LifecycleConfigError, safe_exc_message
+from calfkit.exceptions import LifecycleConfigError
 from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParameters, http_client, stdio_client
 from calfkit.models.actions import NodeResult, ReturnCall
 from calfkit.models.capability import CapabilityRecord, CapabilityToolDef, SelectorResult, resolve_capability
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.state import FailedToolCall, State
+from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.worker.lifecycle import ResourceSetupContext, ServingContext
@@ -241,31 +240,14 @@ class MCPToolbox(BaseNodeDef):
             # here, so the record stands and goes stale instead.
             await writer.delete(self.node_id)
 
-    def _fail(self, ctx: SessionRunContext, payload: ToolCallRef, *, exc_type: str, exc_message: str) -> ReturnCall[State]:
-        """Record a :class:`FailedToolCall` for ``payload`` and return to the caller.
-
-        The agent reads the result under ``payload.tool_call_id`` and escalates any
-        ``FailedToolCall`` to a ``ToolExecutionError`` (it is *not* shown to the model),
-        so this is the toolbox's hard-failure channel: a dead session, a transport error,
-        or a non-wire-safe result. Replying (rather than raising) is what keeps the
-        awaiting agent from stalling on its reply-TTL.
-        """
-        marker = FailedToolCall.build_safe(
-            tool_name=payload.name,
-            tool_call_id=payload.tool_call_id,
-            exc_type=exc_type,
-            exc_message=exc_message,
-        )
-        ctx.state.add_tool_result(payload.tool_call_id, marker)
-        return ReturnCall(ctx.state)
-
     @handler("*", schema=ToolCallRef)
     async def run(self, ctx: SessionRunContext, payload: ToolCallRef) -> NodeResult[State]:  # type: ignore[override]
         session = ctx.resources.get(self._session_resource_key)
         if not isinstance(session, ClientSession):
-            # Resource setup failed or was torn down. Reply with a marker rather than
-            # raising, which would strand the awaiting agent on its reply-TTL instead
-            # of surfacing a ToolExecutionError.
+            # No live session (resource setup failed / torn down). RAISE so it escapes to the
+            # chokepoint → on_node_error → the fault rail carries a typed fault to the agent, exactly
+            # like any other terminal node failure (MCP is a tool-identical caller node — no special
+            # fault path, no FailedToolCall blob).
             logger.error(
                 "[%s] no live MCP session for toolbox=%s resource=%s tool=%s",
                 ctx.correlation_id[:8],
@@ -273,28 +255,15 @@ class MCPToolbox(BaseNodeDef):
                 self._session_resource_key,
                 payload.name,
             )
-            return self._fail(ctx, payload, exc_type="MCPSessionUnavailable", exc_message=f"no live MCP session for server {self.node_id!r}")
+            raise RuntimeError(f"no live MCP session for server {self.node_id!r}")
 
-        # Build and serialize the ToolReturn inside the try so a transport error OR a
-        # non-wire-safe result both surface as a FailedToolCall — never a handler crash
-        # after the point a reply can still be published (mirrors ToolNodeDef.run).
-        try:
-            tool_result: MCPCallToolResult = await session.call_tool(name=payload.name, arguments=payload.args)
-            tool_return = ToolReturn(return_value=tool_result)
-            pydantic_core.to_json(tool_return)
-        except Exception as e:
-            logger.exception(
-                "[%s] mcp tool=%s tool_call_id=%s on toolbox=%s raised %s; surfacing FailedToolCall",
-                ctx.correlation_id[:8],
-                payload.name,
-                payload.tool_call_id,
-                self.node_id,
-                type(e).__name__,
-            )
-            return self._fail(ctx, payload, exc_type=type(e).__name__, exc_message=safe_exc_message(e))
-
-        ctx.state.add_tool_result(tool_call_id=payload.tool_call_id, tool_result=tool_return)
-        return ReturnCall(ctx.state)
+        # A transport error escapes to the chokepoint (on_node_error → fault). The B1 eager wire-safety
+        # check (pydantic_core.to_json) likewise raises HERE on a non-wire-safe result, not mid-publish.
+        # ``isError=True`` results pass through TRANSPARENTLY (B2): the MCPCallToolResult rides the reply
+        # slot as an ordinary successful return — the agent/model sees it exactly as today.
+        tool_result: MCPCallToolResult = await session.call_tool(name=payload.name, arguments=payload.args)
+        pydantic_core.to_json(tool_result)
+        return ReturnCall[State](state=ctx.state, value=tool_result)
 
 
 @dataclass(frozen=True)

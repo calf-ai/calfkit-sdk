@@ -27,12 +27,13 @@ from calfkit.models import (
     WorkflowState,
 )
 from calfkit.models._coerce import _coerce_to_parts
+from calfkit.models.error_report import ErrorReport
 from calfkit.models.node_result import InvocationResult
-from calfkit.models.reply import ReturnMessage, _ReplyBase
+from calfkit.models.reply import FaultMessage, ReturnMessage, _ReplyBase
 from calfkit.models.state import State
 
 
-def _envelope(*, reply: ReturnMessage | None = None) -> Envelope:
+def _envelope(*, reply: ReturnMessage | FaultMessage | None = None) -> Envelope:
     stack = CallFrameStack()
     stack.push(CallFrame(target_topic="t", callback_topic="reply.topic"))
     return Envelope(
@@ -75,6 +76,16 @@ class TestEnvelopeReply:
     def test_none_reply_round_trips(self) -> None:
         back = Envelope.model_validate_json(_envelope().model_dump_json())
         assert back.reply is None
+
+    def test_carries_fault_reply_and_round_trips(self) -> None:
+        # The slot widens to ReturnMessage | FaultMessage (discriminated on kind) so a
+        # fault rides the same per-delivery reply carriage as a success (spec §4.2).
+        env = _envelope(reply=FaultMessage(in_reply_to="f1", tag="t1", error=ErrorReport(error_type="calf.unhandled", message="boom")))
+        back = Envelope.model_validate_json(env.model_dump_json())
+        assert isinstance(back.reply, FaultMessage)
+        assert back.reply.kind == "fault"
+        assert back.reply.error.error_type == "calf.unhandled"
+        assert back.reply.error.message == "boom"
 
 
 class TestCallFrameTag:
@@ -180,3 +191,42 @@ class TestProjectionFromReply:
         cc = ConsumerContext.from_run_context(_reply_env([]).context)  # strict=False
         assert cc.output is None
         assert cc.output_parts == []
+
+
+def _fault_env(report: ErrorReport) -> Envelope:
+    """A frameless envelope whose reply slot carries a FaultMessage, stamped as a
+    handler/dispatcher would. The success-only readers must tolerate it."""
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+        reply=FaultMessage(in_reply_to=None, tag=None, error=report),
+    )
+    env.context._stamp_transport(correlation_id="cid", emitter_node_id=None, emitter_node_kind=None)
+    env.context._reply = env.reply
+    return env
+
+
+class TestFaultReaderTolerance:
+    """Success-only readers never crash on a FaultMessage reply (spec §2 / §4.2): they
+    treat it as no-parts (→ []/None), never AttributeError on the missing .parts. The
+    fault is floored at the producing hop; the typed reception (NodeFaultError) is the
+    deferred reception PR's job."""
+
+    def test_output_parts_is_empty_on_a_fault(self) -> None:
+        env = _fault_env(ErrorReport(error_type="calf.unhandled"))
+        assert env.context.output_parts == []  # no AttributeError on FaultMessage.parts
+
+    def test_project_output_is_none_on_a_fault_when_lenient(self) -> None:
+        from calfkit.models.node_result import project_output
+
+        assert project_output(_fault_env(ErrorReport(error_type="x")).reply, strict=False) is None
+
+    def test_consumer_context_tolerates_a_fault(self) -> None:
+        cc = ConsumerContext.from_run_context(_fault_env(ErrorReport(error_type="x")).context)
+        assert cc.output is None
+        assert cc.output_parts == []
+
+    def test_invocation_result_tolerates_a_fault_when_lenient(self) -> None:
+        result = InvocationResult.from_context(_fault_env(ErrorReport(error_type="x")).context, strict=False)
+        assert result.output is None
+        assert result.output_parts == []

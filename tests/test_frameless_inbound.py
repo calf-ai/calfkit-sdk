@@ -11,8 +11,8 @@ from calfkit.models import (
     CallFrame,
     CallFrameStack,
     Envelope,
+    Next,
     SessionRunContext,
-    Silent,
     State,
     WorkflowState,
 )
@@ -94,7 +94,7 @@ async def test_handler_frameless_dispatches_to_overridden_run():
     class N(NodeDef[Any]):
         async def run(self, ctx: SessionRunContext) -> Any:
             ran.append("run")
-            return Silent()
+            return Next()
 
     node = N(node_id="n", subscribe_topics=["t"])
     resp = await node.handler(_frameless_envelope(), correlation_id=_CORR, headers={}, broker=cast(Any, None))

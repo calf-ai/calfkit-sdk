@@ -11,10 +11,9 @@ def safe_exc_message(e: BaseException) -> str:
     """Best-effort string of an exception, robust against a broken ``__str__``.
 
     A bare ``str(e)`` can itself raise (a broken ``__str__``, or args that don't
-    coerce). Inside a worker's ``except`` block that would propagate out and prevent
-    the failure reply (e.g. a ``FailedToolCall``) from ever being published — the
-    silent-hang failure mode the tool/toolbox nodes exist to prevent. Mirrors stdlib
-    ``traceback._some_str`` with a ``repr`` fallback.
+    coerce). On the fault path that would propagate out and re-open the silent-drop
+    hole the rail closes (e.g. while synthesizing an ``ErrorReport`` from a tool's
+    exception). Mirrors stdlib ``traceback._some_str`` with a ``repr`` fallback.
     """
     try:
         return str(e)
@@ -92,9 +91,29 @@ class NodeFaultError(Exception):
     def __reduce__(self) -> tuple[Any, tuple[ErrorReport]]:
         # Reconstruct from the report, not by replaying self.args (a message
         # string) through __init__, which would mis-route the string into the
-        # mint arm and rebuild a different report (cf. ReplyExpiredError /
-        # ToolExecutionError, which carry custom reductions for the same reason).
+        # mint arm and rebuild a different report (cf. ReplyExpiredError, which
+        # carries a custom reduction for the same reason).
         return (self.__class__, (self.report,))
+
+
+class SeamContractError(Exception):
+    """A policy seam violated its contract (spec §6.2 / §6.3 / §6.8).
+
+    Raised when a seam returns a value that can never be a node output:
+
+    - a ``bool``, the session ``State`` or the ``SeamContext`` itself, or
+      ``bytes`` — the §6.2 coercion guards;
+    - ``Next``, the route-dispatch decline sentinel, which is dispatch
+      vocabulary, not a seam output (§6.2);
+    - a substitute that fails a *typed* node's declared output-type validation
+      — the output-position guard (§6.3 / scenario 44), so a type-breaking
+      value faults at the seam rather than downstream;
+    - an action returned by ``after_node``, whose contract is values-only
+      (§6.8).
+
+    It faults loudly (P1) so a migration trap corrupts nothing silently; the
+    skeleton routes it to ``on_node_error`` like any other node-own raise.
+    """
 
 
 class DeserializationError(Exception):
@@ -160,61 +179,6 @@ class MissingTopicsError(RuntimeError):
             f"Topic provisioning was enabled but these topic(s) could not be created: {names}. "
             "Grant the client CreateTopics authorization, or pre-create the topic(s) out-of-band."
         )
-
-
-class ToolExecutionError(Exception):
-    """The original traceback is not preserved across the Kafka boundary; it is
-    logged at the worker that ran the tool. ``exc_type`` and ``exc_message`` are
-    the only forensic data available at the agent.
-    """
-
-    def __init__(self, *, tool_name: str, tool_call_id: str, exc_type: str, exc_message: str):
-        self.tool_name = tool_name
-        self.tool_call_id = tool_call_id
-        self.exc_type = exc_type
-        self.exc_message = exc_message
-        super().__init__(f"Tool {tool_name!r} (call_id={tool_call_id}) raised {exc_type}: {exc_message}")
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        # Bypass keyword-only ``__init__`` during reconstruction by routing
-        # through a module-level helper that uses ``__new__``. A naive
-        # ``(self.__class__, (), state)`` reduction would call ``__init__()``
-        # with no args and fail because the keyword arguments are required.
-        return (
-            _reconstruct_tool_execution_error,
-            (),
-            {
-                "tool_name": self.tool_name,
-                "tool_call_id": self.tool_call_id,
-                "exc_type": self.exc_type,
-                "exc_message": self.exc_message,
-            },
-        )
-
-    def __setstate__(self, state: dict[str, Any] | None) -> None:
-        # ``__reduce__`` above always provides a dict, but the supertype
-        # signature allows ``None`` (Liskov); treat ``None`` as a no-op so
-        # subclasses constructed without state don't crash.
-        if state is None:
-            return
-        self.tool_name = state["tool_name"]
-        self.tool_call_id = state["tool_call_id"]
-        self.exc_type = state["exc_type"]
-        self.exc_message = state["exc_message"]
-        Exception.__init__(
-            self,
-            f"Tool {self.tool_name!r} (call_id={self.tool_call_id}) raised {self.exc_type}: {self.exc_message}",
-        )
-
-
-def _reconstruct_tool_execution_error() -> "ToolExecutionError":
-    """Create a bare ``ToolExecutionError`` for reconstruction via ``__setstate__``.
-
-    Bypasses the keyword-only ``__init__`` so state restoration can populate
-    fields directly. Must be module-level (not a lambda or local closure) so
-    it can be located by fully-qualified name during deserialization.
-    """
-    return ToolExecutionError.__new__(ToolExecutionError)
 
 
 class MCPToolResolutionError(Exception):

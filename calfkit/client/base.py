@@ -11,7 +11,7 @@ from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KI
 from calfkit._routing import is_concrete_route_key
 from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client.invocation_handle import InvocationHandle
-from calfkit.client.middleware import ContextInjectionMiddleware
+from calfkit.client.middleware import ContextInjectionMiddleware, DecodeFloorMiddleware
 from calfkit.client.reply_dispatcher import _ReplyDispatcher
 from calfkit.models import State
 from calfkit.models.envelope import Envelope
@@ -209,7 +209,10 @@ class BaseClient:
         producer_posture = {"acks": "all", "enable_idempotence": True}
         broker_connection = _PreStartHookBroker(
             server_list,
-            middlewares=[ContextInjectionMiddleware],
+            # DecodeFloorMiddleware OUTERMOST so its consume_scope wraps the whole chain: an inbound
+            # body that fails to decode/validate is floored (calf.delivery.undecodable) + re-raised
+            # rather than ack-first silently dropped (the §6.7 pre-handler floor, broker-wide).
+            middlewares=[DecodeFloorMiddleware, ContextInjectionMiddleware],
             pre_start=ensurer.run,
             **{**producer_posture, **broker_kwargs},
         )

@@ -24,8 +24,9 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.models import Call
 from calfkit.models.envelope import Envelope
+from calfkit.models.error_report import FaultTypes
 from calfkit.models.fanout import FanoutOpen, SlotRef
-from calfkit.models.reply import ReturnMessage
+from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes import Agent
@@ -213,9 +214,12 @@ async def test_handle_fanout_open_writes_open_and_publishes_marked_siblings() ->
 
 def test_fanout_open_rejects_singleton_expected() -> None:
     # The N>=2 fan-out invariant is enforced at the record type: a single-slot batch is
-    # unrepresentable, so a batch-of-one can never be registered.
-    with pytest.raises(ValidationError):
-        FanoutOpen(fanout_id="x", node_id="a", expected=[SlotRef(frame_id="f1", tag="tc1")])
+    # unrepresentable, so a batch-of-one can never be registered. The SlotRef carries its
+    # required `target_topic` so the ValidationError comes from `expected`'s min_length=2 gate
+    # (not from a missing SlotRef field) — `loc == ("expected",)` locks that we hit the real gate.
+    with pytest.raises(ValidationError) as exc_info:
+        FanoutOpen(fanout_id="x", node_id="a", expected=[SlotRef(frame_id="f1", tag="tc1", target_topic="tool.a")])
+    assert exc_info.value.errors()[0]["loc"] == ("expected",)
 
 
 class _CaptureBroker:
@@ -277,11 +281,10 @@ async def test_single_call_list_does_not_open_durable_batch() -> None:
 # ── OPEN dispatch-abort path (§4.4) ──────────────────────────────────────────
 
 
-async def test_handle_fanout_open_sibling_publish_failure_aborts_and_tombstones() -> None:
-    # (§4.4 dispatch-abort) After the batch is registered, a sibling publish that raises must NOT
-    # propagate out of the handler: _handle_fanout_open tombstones both records (so the orphan open
-    # batch is not leaked to #220) and returns the no-reply mirror, stranding the caller. Any already-
-    # published sibling's later reply then post_closure-stray-floors against the tombstone.
+async def test_handle_fanout_open_sibling_publish_failure_aborts_and_escalates() -> None:
+    # (§4.4 dispatch-abort, 4.6) After the batch is registered, a sibling publish that raises must NOT
+    # propagate: _handle_fanout_open tombstones both records AND escalates a fault to the caller. The
+    # point-to-point fault publish also fails on the raising broker, but the broadcast mirror carries it.
     agent = _agent()
     fake = FakeFanoutBatchStore()
     ctx = _ctx_with_store(fake)
@@ -294,16 +297,17 @@ async def test_handle_fanout_open_sibling_publish_failure_aborts_and_tombstones(
 
     resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _RaisingBroker()))
 
-    assert resp is not None  # returned the no-reply mirror — did NOT propagate the KafkaError
+    assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the KafkaError
+    assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
+    assert resp.body.reply.error.details[FaultTypes.REASON] == FaultTypes.REASON_DISPATCH_FAILED
     assert await fake.read_state("A") is None  # aborted: both records tombstoned
     assert await fake.read_basestate("A") is None
 
 
-async def test_handle_fanout_open_store_failure_does_not_propagate(caplog: pytest.LogCaptureFixture) -> None:
-    # (§4.4 dispatch-abort) If the durable store fails at OPEN (terminal unavailability, or a writer
-    # error in the real store), _handle_fanout_open best-effort tombstones and returns rather than
-    # letting the exception escape the handler (which under ACK_FIRST would drop the message and leak
-    # any partial registration with no cleanup).
+async def test_handle_fanout_open_store_failure_aborts_and_escalates(caplog: pytest.LogCaptureFixture) -> None:
+    # (§4.4 dispatch-abort, 4.6) If the durable store fails at OPEN (terminal unavailability, or a
+    # writer error in the real store), _handle_fanout_open best-effort tombstones AND escalates a fault
+    # to the caller rather than letting the exception escape (which under ACK_FIRST would drop + strand).
     agent = _agent()
     fake = FakeFanoutBatchStore()
     fake.make_unavailable()  # store.open raises FanoutStoreUnavailableError
@@ -314,12 +318,76 @@ async def test_handle_fanout_open_store_failure_does_not_propagate(caplog: pytes
         internal_workflow_state=WorkflowState(call_stack=Stack([own])),
     )
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
+    broker = _CaptureBroker()
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-        resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _CaptureBroker()))
+        resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
 
-    assert resp is not None  # did not propagate
+    assert isinstance(resp.body.reply, FaultMessage)  # escalated, did not propagate
+    assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
+    # The fault was published point-to-point to the caller (kind=fault), addressed by the inbound stack.
+    assert any(headers.get(HDR_KIND) == "fault" for _, headers, _ in broker.published)
     assert any("fan-out OPEN failed" in r.getMessage() for r in caplog.records)
+
+
+class _NonKafkaRaisingBroker:
+    """``publish`` raises a NON-``KafkaError`` — the leg the narrow ``(KafkaError,
+    FanoutStoreUnavailableError)`` catch missed (the C1 escape). Pre-fix this escaped
+    ``_handle_fanout_open`` and ``_handle_delivery`` to FastStream = silent drop under ACK_FIRST."""
+
+    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        raise ValueError("simulated non-Kafka sibling publish failure")
+
+
+class _FanoutNode(NodeDef[Any]):
+    """A fan-out-capable node whose body returns a 2-element ``list[Call]`` (opens a durable batch)."""
+
+    @property
+    def _is_fanout_capable(self) -> bool:
+        return True
+
+    async def run(self, ctx: SessionRunContext) -> Any:
+        return [Call("tool.a", ctx.state, tag="tc1"), Call("tool.b", ctx.state, tag="tc2")]
+
+
+async def test_handle_fanout_open_non_kafka_publish_failure_aborts_and_escalates() -> None:
+    # C1: a NON-KafkaError raised during a sibling publish must abort + escalate exactly like the
+    # KafkaError leg — never escape. Pre-fix the narrow `except (KafkaError, FanoutStoreUnavailableError)`
+    # let this ValueError escape _handle_fanout_open (silent drop + hung caller under ACK_FIRST).
+    agent = _agent()
+    fake = FakeFanoutBatchStore()
+    ctx = _ctx_with_store(fake)
+    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
+
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _NonKafkaRaisingBroker()))
+
+    assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the ValueError
+    assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
+    assert await fake.read_state("A") is None  # aborted: both records tombstoned
+    assert await fake.read_basestate("A") is None
+
+
+async def test_fanout_open_missing_store_faults_caller_not_escape() -> None:
+    # C1: a fan-out through the FULL handler with NO durable store registered must fault the caller,
+    # NOT escape. _resolve_fanout_store raises RuntimeError; pre-fix it escaped the unguarded OPEN
+    # dispatch in _handle_delivery and reached FastStream (silent drop + hung caller under ACK_FIRST).
+    node = _FanoutNode(node_id="fan", subscribe_topics=["fan.in"])  # deliberately NO FANOUT_STORE_KEY resource
+    own = CallFrame(target_topic="fan.in", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    broker = _CaptureBroker()
+
+    resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+
+    assert isinstance(resp.body.reply, FaultMessage)  # faulted the caller, did NOT escape to FastStream
+    assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
 
 
 # ── @resource preconditions (coverage d) ─────────────────────────────────────

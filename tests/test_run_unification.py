@@ -19,7 +19,7 @@ from calfkit._protocol import HDR_ROUTE
 from calfkit._registry import handler
 from calfkit._routing import is_concrete_route_key, match_chain, route_matches
 from calfkit.exceptions import RegistryConfigError
-from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Silent, State, ToolContext, WorkflowState
+from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, State, ToolContext, WorkflowState
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.node import NodeDef
@@ -71,7 +71,7 @@ def test_run_may_be_redecorated_handler_star_with_schema() -> None:
     class N(NodeDef[Any]):
         @handler("*", schema=Body)
         async def run(self, ctx: SessionRunContext, payload: Body) -> Any:  # type: ignore[override]
-            return Silent()
+            return Next()
 
     assert "*" in N.routes()
 
@@ -86,7 +86,7 @@ async def test_run_star_handler_receives_routeless_payload() -> None:
         @handler("*", schema=Body)
         async def run(self, ctx: SessionRunContext, payload: Body) -> Any:  # type: ignore[override]
             seen["val"] = payload.val
-            return Silent()
+            return Next()
 
     await _handle(N(node_id="n", subscribe_topics=["t"]), {}, _envelope(payload={"val": "hi"}))
     assert seen["val"] == "hi"
@@ -98,7 +98,7 @@ async def test_plain_run_override_serves_routeless_message_as_star() -> None:
     class N(NodeDef[Any]):
         async def run(self, ctx: SessionRunContext) -> Any:
             seen.append("run")
-            return Silent()
+            return Next()
 
     await _handle(N(node_id="n", subscribe_topics=["t"]), {})
     assert seen == ["run"]
@@ -111,7 +111,7 @@ async def test_routes_only_node_skips_unmatched_via_declining_base_run() -> None
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             seen.append("created")
-            return Silent()
+            return Next()
 
     env = _envelope(callback_topic=None)
     resp = await _handle(N(node_id="n", subscribe_topics=["t"]), {HDR_ROUTE: "payment.x"}, env)
@@ -131,7 +131,7 @@ def test_extra_positional_run_without_schema_raises_at_class_def() -> None:
         # name intentionally-unused (CodeQL) while staying CapWords-valid (ruff N801).
         class _N(NodeDef[Any]):
             async def run(self, ctx: SessionRunContext, extra: Any) -> Any:  # type: ignore[override]
-                return Silent()
+                return Next()
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +156,13 @@ def test_routing_none_key_matches_only_star() -> None:
     assert match_chain(None, {"order.*": "x", "*": "run"}) == ["*"]
 
 
-async def test_malformed_toolcallref_body_to_tool_declines_and_logs_loud(caplog: pytest.LogCaptureFixture) -> None:
-    # Known limitation (ADR risk register): a tool dispatch whose body fails ToolCallRef
-    # validation is declined at the dispatcher — run() is never entered, so NO ReturnCall
-    # is published and an awaiting agent relies on its reply-TTL. Not reachable via the
-    # agent (which always sends a valid ToolCallRef); pinned here to assert the decline is
-    # LOUD (callback-aware WARNING), not silent, so a hung workflow is diagnosable.
+async def test_malformed_toolcallref_body_to_tool_auto_faults_and_logs_loud(caplog: pytest.LogCaptureFixture) -> None:
+    # A tool dispatch whose body fails ToolCallRef validation is declined at the dispatcher
+    # (run() never entered). On a reply-owing delivery this auto-faults calf.delivery.rejected
+    # (reason=schema_rejected, scenario 39 / §10 — #201 closed by construction: the agent no longer
+    # relies on its reply-TTL), and the decline stays LOUD (callback-aware WARNING). Not reachable
+    # via the agent (which always sends a valid ToolCallRef); pinned so a misbehaving producer gets
+    # a typed fault, not a silent strand.
     def _ok(ctx: ToolContext) -> str:
         return "ok"  # never invoked — validation fails first
 
@@ -169,31 +170,45 @@ async def test_malformed_toolcallref_body_to_tool_declines_and_logs_loud(caplog:
     published: list[Any] = []
 
     class _Broker:
-        async def publish(self, *a: Any, **k: Any) -> None:
-            published.append((a, k))
+        async def publish(self, envelope: Any, **k: Any) -> None:
+            published.append((envelope, k))
 
     env = _envelope(callback_topic="agent.return", payload={"surprise": "nope"})  # not a valid ToolCallRef
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        resp = await tool.handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, _Broker()))
+        await tool.handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, _Broker()))
 
-    assert published == []  # no ReturnCall — the documented gap
-    assert resp.body is env
+    assert len(published) == 1  # the auto-fault to the caller — the #201 strand is closed
+    fault_env, kw = published[0]
+    assert kw["topic"] == "agent.return"
+    assert fault_env.reply.error.error_type == "calf.delivery.rejected"
+    assert fault_env.reply.error.details["reason"] == "schema_rejected"
     validation_logs = [r for r in caplog.records if "validation" in r.message]
     assert validation_logs and validation_logs[0].levelno == logging.WARNING
 
 
-async def test_unconsumed_routeless_body_is_logged_callback_aware(caplog: pytest.LogCaptureFixture) -> None:
-    # F1b residual: a routeless body reaching a node whose '*'/run has no schema is
-    # dropped (base run declines) and surfaced at WARNING when a caller awaits a reply.
+async def test_unconsumed_routeless_body_auto_faults_callback_aware(caplog: pytest.LogCaptureFixture) -> None:
+    # A routeless body reaching a node whose '*'/run has no schema is unconsumed (base run
+    # declines). On a reply-owing delivery this auto-faults calf.delivery.rejected
+    # (reason=all_declined, scenario 15 / §10 — #201 closed) so the caller never hangs; the loud
+    # "body was not consumed" WARNING still surfaces the dropped payload.
     class N(NodeDef[Any]):
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
+
+    published: list[Any] = []
+
+    class _Broker:
+        async def publish(self, envelope: Any, **k: Any) -> None:
+            published.append((envelope, k))
 
     env = _envelope(callback_topic="reply.topic", payload={"unread": 1})
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        resp = await _handle(N(node_id="n", subscribe_topics=["t"]), {}, env)
+        await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, _Broker()))
 
-    assert resp.body is env  # nothing published; body dropped
+    assert len(published) == 1  # the auto-fault, not a strand
+    fault_env = published[0][0]
+    assert fault_env.reply.error.error_type == "calf.delivery.rejected"
+    assert fault_env.reply.error.details["reason"] == "all_declined"
     dropped = [r for r in caplog.records if "body was not consumed" in r.message]
     assert dropped and dropped[0].levelno == logging.WARNING

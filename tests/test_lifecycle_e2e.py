@@ -37,7 +37,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse, Te
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client, InvocationResult
 from calfkit.exceptions import LifecycleConfigError
-from calfkit.models import Silent
+from calfkit.models import ReturnCall
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart as PayloadTextPart
 from calfkit.models.reply import ReturnMessage
@@ -103,7 +103,7 @@ class _ProbeNode(BaseNodeDef):
 
     async def run(self, ctx: SessionRunContext) -> Any:
         self._captured["resources"] = dict(ctx.resources)
-        return Silent()
+        return ReturnCall(state=ctx.state)
 
 
 # ---------------------------------------------------------------------------
@@ -224,39 +224,6 @@ async def test_resources_reach_consumer_result() -> None:
 
     assert received, "consumer never ran"
     assert received[-1].resources["db"] is sentinel
-
-
-async def test_consumer_gate_reads_resources() -> None:
-    """A consumer's *gate* can read ``ctx.resources`` (parity with regular-node
-    gates), so a gate can branch on a lifecycle resource — not just the consumer
-    function via ``result.resources``."""
-    received: list[InvocationResult] = []
-    gate_saw: list[Any] = []
-
-    def gate(ctx: SessionRunContext) -> bool:
-        flag = ctx.resources.get("flag")
-        gate_saw.append(flag)
-        return flag == "ON"
-
-    worker = _make_worker()
-
-    @consumer(subscribe_topics="gate_res.in", gates=[gate])
-    def sink(result: InvocationResult) -> None:
-        received.append(result)
-
-    sink.resources["flag"] = "ON"
-
-    worker.add_nodes(sink)
-    broker = worker._client.broker
-
-    async with TestKafkaBroker(broker):
-        await worker.start()
-        await _publish(broker, _text_envelope("hi"), "gate_res.in", "cid-gate")
-        await worker.stop()
-
-    # The gate saw the resource and admitted the message.
-    assert gate_saw == ["ON"]
-    assert received, "consumer never ran (gate should have admitted on flag=ON)"
 
 
 def _tool_then_text(captured: dict[str, Any]) -> FunctionModel:

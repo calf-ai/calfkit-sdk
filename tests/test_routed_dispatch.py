@@ -10,7 +10,8 @@ from pydantic import BaseModel
 from calfkit._protocol import HDR_ROUTE
 from calfkit._registry import handler
 from calfkit.exceptions import RegistryConfigError
-from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, ReturnCall, SessionRunContext, Silent, State, TailCall, WorkflowState
+from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, ReturnCall, SessionRunContext, State, TailCall, WorkflowState
+from calfkit.nodes.base import _Declined
 from calfkit.nodes.node import NodeDef
 
 _CORR = "corr1234"
@@ -32,12 +33,6 @@ def _envelope(*, callback_topic: str | None = "reply.topic", payload: Any = None
 
 async def _handle(node: Any, headers: dict[str, Any], envelope: Envelope | None = None) -> Any:
     return await node.handler(envelope or _envelope(), correlation_id=_CORR, headers=headers, broker=cast(Any, None))
-
-
-def test_next_is_a_distinct_sentinel_from_silent() -> None:
-    assert isinstance(Next(), Next)
-    assert not isinstance(Next(), Silent)
-    assert not isinstance(Silent(), Next)
 
 
 def test_hdr_route_header_name() -> None:
@@ -110,9 +105,6 @@ async def test_specific_handler_short_circuits() -> None:
         async def on_any(self, ctx: SessionRunContext) -> Any:
             return Call("general", ctx.state)
 
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
-
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
     assert isinstance(out, Call) and out.target_topic == "specific"
 
@@ -129,9 +121,6 @@ async def test_none_return_advances_chain_like_next() -> None:
         async def on_any(self, ctx: SessionRunContext) -> Any:
             return Call("general", ctx.state)
 
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
-
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
     assert isinstance(out, Call) and out.target_topic == "general"
 
@@ -145,9 +134,6 @@ async def test_next_advances_to_more_general_handler() -> None:
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             return Call("general", ctx.state)
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
     assert isinstance(out, Call) and out.target_topic == "general"
@@ -166,14 +152,15 @@ async def test_falls_through_to_run_when_all_handlers_decline() -> None:
     assert isinstance(out, ReturnCall)
 
 
-async def test_no_match_and_no_run_fallback_returns_none() -> None:
+async def test_no_match_and_no_run_fallback_declines() -> None:
     class N(NodeDef[Any]):
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             return Call("x", ctx.state)
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "payment.created")
-    assert out is None
+    # No matched handler + no schema rejection → _Declined("all_declined") (§10 discriminator).
+    assert isinstance(out, _Declined) and out.reason == "all_declined"
 
 
 async def test_malformed_inbound_route_does_not_partial_match_and_falls_to_fallback() -> None:
@@ -185,11 +172,11 @@ async def test_malformed_inbound_route_does_not_partial_match_and_falls_to_fallb
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             seen.append("on_any")
-            return Silent()
+            return Next()
 
         async def run(self, ctx: SessionRunContext) -> Any:
             seen.append("run")
-            return Silent()
+            return Next()
 
     await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.")
     assert seen == ["run"]
@@ -206,9 +193,6 @@ async def test_valid_payload_is_validated_and_injected() -> None:
         async def on_created(self, ctx: SessionRunContext, payload: Body) -> Any:
             captured["payload"] = payload
             return Call("ok", ctx.state)
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created", payload={"amount": 5})
     assert isinstance(out, Call) and out.target_topic == "ok"
@@ -228,9 +212,6 @@ async def test_invalid_payload_skips_to_next_handler() -> None:
         async def on_any(self, ctx: SessionRunContext) -> Any:
             return Call("general", ctx.state)
 
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
-
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created", payload={"nope": True})
     assert isinstance(out, Call) and out.target_topic == "general"
 
@@ -247,8 +228,7 @@ def test_payload_param_without_schema_raises_at_class_definition() -> None:
             @handler("order.created")
             async def on_created(self, ctx: SessionRunContext, payload: Any) -> Any: ...
 
-            async def run(self, ctx: SessionRunContext) -> Any:
-                return Silent()
+            async def run(self, ctx: SessionRunContext) -> Any: ...
 
 
 def test_schema_without_payload_param_raises_at_class_definition() -> None:
@@ -261,8 +241,7 @@ def test_schema_without_payload_param_raises_at_class_definition() -> None:
             @handler("order.created", schema=Body)
             async def on_created(self, ctx: SessionRunContext) -> Any: ...
 
-            async def run(self, ctx: SessionRunContext) -> Any:
-                return Silent()
+            async def run(self, ctx: SessionRunContext) -> Any: ...
 
 
 def test_explicit_star_handler_with_overridden_run_raises() -> None:
@@ -270,11 +249,9 @@ def test_explicit_star_handler_with_overridden_run_raises() -> None:
 
         class N(NodeDef[Any]):
             @handler("*")
-            async def catch_all(self, ctx: SessionRunContext) -> Any:
-                return Silent()
+            async def catch_all(self, ctx: SessionRunContext) -> Any: ...
 
-            async def run(self, ctx: SessionRunContext) -> Any:
-                return Silent()
+            async def run(self, ctx: SessionRunContext) -> Any: ...
 
 
 # ---------------------------------------------------------------------------
@@ -289,16 +266,16 @@ async def test_handler_dispatches_by_route_header() -> None:
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             seen.append("created")
-            return Silent()
+            return ReturnCall(state=ctx.state)
 
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             seen.append("any")
-            return Silent()
+            return Next()
 
         async def run(self, ctx: SessionRunContext) -> Any:
             seen.append("run")
-            return Silent()
+            return Next()
 
     await _handle(N(node_id="n", subscribe_topics=["t"]), {HDR_ROUTE: "order.created"})
     assert seen == ["created"]  # specific handler only (short-circuit), not run()
@@ -311,11 +288,11 @@ async def test_handler_without_route_header_runs_legacy_run() -> None:
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             seen.append("created")
-            return Silent()
+            return Next()
 
         async def run(self, ctx: SessionRunContext) -> Any:
             seen.append("run")
-            return Silent()
+            return Next()
 
     await _handle(N(node_id="n", subscribe_topics=["t"]), {})
     assert seen == ["run"]
@@ -328,7 +305,7 @@ async def test_handler_no_match_runs_nothing_and_returns_envelope_unchanged() ->
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             seen.append("created")
-            return Silent()
+            return Next()
 
     env = _envelope(callback_topic=None)
     resp = await _handle(N(node_id="n", subscribe_topics=["t"]), {HDR_ROUTE: "payment.x"}, env)
@@ -347,9 +324,6 @@ async def test_call_with_route_stamps_header_and_frame_payload() -> None:
         @handler("trigger")
         async def go(self, ctx: SessionRunContext) -> Any:
             return Call("downstream", ctx.state, route="order.created", body={"amount": 7})
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
 
     node = N(node_id="n", subscribe_topics=["t"])
     await node.handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, StubBroker()))
@@ -475,30 +449,26 @@ async def test_explicit_star_handler_on_agent_raises() -> None:
 
         class MyAgent(BaseAgentNodeDef):  # type: ignore[misc]
             @handler("*")
-            async def catch_all(self, ctx: SessionRunContext) -> Any:
-                return Silent()
+            async def catch_all(self, ctx: SessionRunContext) -> Any: ...
 
 
-async def test_silent_from_handler_is_terminal_and_does_not_advance() -> None:
+async def test_terminal_from_handler_short_circuits_and_does_not_advance() -> None:
     seen: list[str] = []
 
     class N(NodeDef[Any]):
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
             seen.append("created")
-            return Silent()
+            return ReturnCall(state=ctx.state)
 
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             seen.append("any")
             return Call("nope", ctx.state)
 
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
-
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
-    assert isinstance(out, Silent)
-    assert seen == ["created"]  # Silent short-circuited; on_any never ran
+    assert isinstance(out, ReturnCall)
+    assert seen == ["created"]  # the terminal short-circuited; on_any never ran
 
 
 async def test_handler_exception_propagates_and_aborts_chain() -> None:
@@ -514,10 +484,7 @@ async def test_handler_exception_propagates_and_aborts_chain() -> None:
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             seen.append("any")
-            return Silent()
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
 
     with pytest.raises(BoomError):
         await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
@@ -531,10 +498,7 @@ async def test_subclass_specific_route_intercepts_before_inherited_general() -> 
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             order.append("base.general")
-            return Silent()
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
 
     class Child(Base):
         @handler("order.created")
@@ -556,15 +520,12 @@ async def test_schema_handler_with_no_body_skips_to_next() -> None:
         @handler("order.created", schema=Body)
         async def on_created(self, ctx: SessionRunContext, payload: Body) -> Any:
             seen.append("schema")
-            return Silent()
+            return Next()
 
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             seen.append("general")
-            return Silent()
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
 
     await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created", payload=None)
     assert seen == ["general"]  # None body fails schema → skip to general
@@ -576,15 +537,12 @@ def test_valid_schema_pairings_do_not_raise() -> None:
 
     class N(NodeDef[Any]):
         @handler("order.created", schema=Body)
-        async def typed(self, ctx: SessionRunContext, payload: Body) -> Any:
-            return Silent()
+        async def typed(self, ctx: SessionRunContext, payload: Body) -> Any: ...
 
         @handler("order.*")
-        async def plain(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+        async def plain(self, ctx: SessionRunContext) -> Any: ...
 
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+        async def run(self, ctx: SessionRunContext) -> Any: ...
 
     assert set(N.routes()) == {"order.created", "order.*", "*"}  # '*' is the inherited run()
 
@@ -597,9 +555,6 @@ async def test_parallel_fanout_stamps_per_call_route_and_body() -> None:
                 Call("a", ctx.state, route="order.created", body={"i": 0}),
                 Call("b", ctx.state),  # no route
             ]
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
 
     broker = _CaptureBroker()
     await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
@@ -615,9 +570,6 @@ async def test_tailcall_publish_carries_no_route_header() -> None:
         @handler("trigger")
         async def go(self, ctx: SessionRunContext) -> Any:
             return TailCall("downstream", ctx.state)
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
 
     broker = _CaptureBroker()
     await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
@@ -645,7 +597,7 @@ async def test_no_match_log_level_keys_on_callback_presence(callback_topic: str 
     class N(NodeDef[Any]):
         @handler("order.created")
         async def on_created(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
 
     env = _envelope(callback_topic=callback_topic)
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
@@ -670,14 +622,14 @@ async def test_malformed_key_still_reaches_star_run_handler(bad_key: str) -> Non
     assert isinstance(out, Call) and out.target_topic == "star"
 
 
-async def test_all_matched_handlers_decline_with_no_run_returns_none() -> None:
+async def test_all_matched_handlers_decline_with_no_run_declines() -> None:
     class N(NodeDef[Any]):
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
             return None  # decline, and there is no run() fallback
 
     out = await _dispatch(N(node_id="n", subscribe_topics=["t"]), "order.created")
-    assert out is None
+    assert isinstance(out, _Declined) and out.reason == "all_declined"
 
 
 @pytest.mark.parametrize("awaiting,expected", [(True, logging.WARNING), (False, logging.DEBUG)])
@@ -688,14 +640,11 @@ async def test_schema_skip_log_level_keys_on_awaiting_reply(awaiting: bool, expe
     class N(NodeDef[Any]):
         @handler("order.created", schema=Body)
         async def typed(self, ctx: SessionRunContext, payload: Body) -> Any:
-            return Silent()
+            return Next()
 
         @handler("order.*")
         async def general(self, ctx: SessionRunContext) -> Any:
-            return Silent()
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
 
     node = N(node_id="n", subscribe_topics=["t"])
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
@@ -709,10 +658,7 @@ async def test_malformed_route_log_level_keys_on_awaiting_reply(awaiting: bool, 
     class N(NodeDef[Any]):
         @handler("order.*")
         async def on_any(self, ctx: SessionRunContext) -> Any:
-            return Silent()
-
-        async def run(self, ctx: SessionRunContext) -> Any:
-            return Silent()
+            return Next()
 
     node = N(node_id="n", subscribe_topics=["t"])
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
