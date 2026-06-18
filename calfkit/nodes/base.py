@@ -6,7 +6,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, TypeVar, cast
 
 import uuid_utils
-from aiokafka.errors import KafkaError, MessageSizeTooLargeError  # type: ignore[import-untyped]
+from aiokafka.errors import MessageSizeTooLargeError  # type: ignore[import-untyped]
 from faststream import Context, Response
 from faststream.kafka.annotations import (
     KafkaBroker as BrokerAnnotation,
@@ -177,7 +177,10 @@ class _SeamAccidentError(Exception):
     original exception so synthesis sees the true error_type/traceback."""
 
     def __init__(self, original: Exception) -> None:
-        super().__init__(repr(original))
+        # No args message: the fault path must never itself raise, and repr(original) on a hostile
+        # __repr__ could. The unwrap reads .original; synthesis re-derives the human message via the
+        # guarded _safe_exc_str. (Round-2: drop the unguarded, never-read repr.)
+        super().__init__()
         self.original = original
 
 
@@ -481,6 +484,14 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             h[HDR_ROUTE] = route
         return h
 
+    def _no_reply_mirror(self, envelope: Envelope) -> Response:
+        """The broadcast mirror for a hop that produces NO reply this delivery: clear the inbound
+        reply (I3 — a no-reply hop must not re-broadcast the inbound reply under this node's emitter
+        to its observers) and return the call-kind ``Response``. Shared by the floor paths, the
+        parked/``_CONSUMED`` fan-out fold, and the fire-and-forget no-output arms."""
+        envelope.reply = None
+        return Response(envelope, headers=self._headers("call"))
+
     async def _publish_action(
         self, output: NodeResult[State], envelope: Envelope, correlation_id: str, broker: BrokerAnnotation
     ) -> tuple[Envelope, MessageKind]:
@@ -727,6 +738,16 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                     key=correlation_id.encode(),
                     headers=self._headers("fault") | {HDR_ERROR_TYPE: minimal.error_type},
                 )
+                # §13: a stripped fault still escalated one hop — emit the canonical per-hop WARNING
+                # (uniform with the non-stripped success path), atop the strip notice above.
+                logger.warning(
+                    "[%s] fault escalated one hop node=%s error_type=%s origin=%s remaining_depth=%d",
+                    correlation_id[:8],
+                    self.node_id,
+                    minimal.error_type,
+                    minimal.origin_node_id,
+                    len(snapshot.call_stack._internal_list),
+                )
             except Exception:
                 logger.exception(
                     "[%s] fault delivery to callback_topic=%s failed even after the minimal strip node=%s; flooring report=%s",
@@ -793,8 +814,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             exc,
             inbound_report,
         )
-        envelope.reply = None  # cleared no-reply mirror (I3)
-        return Response(envelope, headers=self._headers("call"))
+        return self._no_reply_mirror(envelope)
 
     def _floor_unknown_kind(self, envelope: Envelope, headers: dict[str, Any], correlation_id: str) -> Response:
         """Floor + drop an unclassifiable delivery (§4.1 rule 2): an unrecognized ``x-calf-kind`` is
@@ -810,8 +830,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             self.node_id,
             inbound_report,
         )
-        envelope.reply = None  # cleared no-reply mirror (I3)
-        return Response(envelope, headers=self._headers("call"))
+        return self._no_reply_mirror(envelope)
 
     @property
     def _is_fanout_capable(self) -> bool:
@@ -949,7 +968,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         view = self._output_view(ctx, output)
         if view is None:
             return output  # non-terminal / empty output → nothing to guard
-        post = await run_chain(self._chains[AFTER_NODE], ctx, view)
+        post = await run_chain(self._chains[AFTER_NODE], ctx, view, seam_name=AFTER_NODE)
         if post is None:
             return output
         if _is_action(post):
@@ -995,7 +1014,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         report = reply.error
         seam_ctx.failing_call = CalleeResult(frame_id=frame_id, tag=tag, target_topic=target_topic, fault=report)
         try:
-            handled = await run_chain(self._chains[ON_CALLEE_ERROR], seam_ctx, report)
+            handled = await run_chain(self._chains[ON_CALLEE_ERROR], seam_ctx, report, seam_name=ON_CALLEE_ERROR)
         except NodeFaultError as nfe:
             # The per-slot transformation gesture (§6.5): the minted fault is honored verbatim, the
             # inbound chained via causes — the `raise ... from` analog, done at the slot.
@@ -1090,8 +1109,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             stray.kind,
             self.node_id,
         )
-        envelope.reply = None  # cleared no-reply mirror (I3)
-        return Response(envelope, headers=self._headers("call"))
+        return self._no_reply_mirror(envelope)
 
     def _classify_fanout(self, envelope: Envelope) -> Literal["sibling", "reentry"] | None:
         """Recognize a fan-out continuation on a fan-out-capable node.
@@ -1162,8 +1180,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 await abort_batch(store, fanout_id)
             report = self._fanout_abort_report(FaultTypes.REASON_DISPATCH_FAILED)
             return await self._fault_response(report, self._stack_snapshot(envelope), envelope, correlation_id, broker)
-        envelope.reply = None  # success path: no-reply mirror (I3) — the siblings owe the output this hop
-        return Response(envelope, headers=self._headers("call"))
+        return self._no_reply_mirror(envelope)  # success path — the siblings owe the output this hop
 
     async def _aggregate(
         self,
@@ -1247,9 +1264,12 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 try:
                     await self._publish_reentry(envelope, correlation_id, broker)
                     return _BatchOpen()  # parked — the re-entry is a fresh delivery that resumes the body
-                except KafkaError:
+                except Exception:
                     # A permanent re-entry-publish failure (round-4 §4.4): tombstone + escalate ONCE,
-                    # so a fully-folded batch never leaks a complete-but-unclosed corpse.
+                    # so a fully-folded batch never leaks a complete-but-unclosed corpse. Catch is broad
+                    # (matching the C1 OPEN-dispatch posture) so a NON-Kafka raise (e.g. a serialization
+                    # error on the re-entry envelope) gets the precise FANOUT_ABORTED(reentry_failed)
+                    # attribution here rather than the generic calf.unhandled via the boundary backstop.
                     logger.error("[%s] fan-out re-entry publish failed batch=%s node=%s; escalating", correlation_id[:8], fanout_id, self.node_id)
                     await abort_batch(store, fanout_id)
                     return _BatchFaulted(self._fanout_abort_report(FaultTypes.REASON_REENTRY_FAILED))
@@ -1439,7 +1459,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         # (§6.5); a NodeFaultError propagates verbatim (the mint rule). The body (stage 4) is NOT
         # wrapped — a body raise is §6.7 calf.unhandled with nothing chained.
         try:
-            pre = await run_chain(self._chains[BEFORE_NODE], seam_ctx)
+            pre = await run_chain(self._chains[BEFORE_NODE], seam_ctx, seam_name=BEFORE_NODE)
             if pre is not None:
                 return await self._apply_after(seam_ctx, self._interpret(seam_ctx, pre))
         except NodeFaultError:
@@ -1638,6 +1658,12 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             seam_ctx.exception = None
             try:
                 output = await self._apply_after(seam_ctx, self._interpret(seam_ctx, recovery))
+            except NodeFaultError as nfe:
+                # §6.5 mint rule is ABSOLUTE ("anywhere — any seam, any body"): a deliberate fault from the
+                # recovery-path after_node converts VERBATIM, NOT downgraded. The §6.8 single-shot sketch's
+                # bare except predates the rule; a mint is the node's typed decision, not the accident that
+                # arm chains-the-original for.
+                return await self._fault_response(nfe.report, snapshot, envelope, correlation_id, broker)
             except Exception as exc2:
                 report2 = self._fault_from_exception(exc2, seam_ctx, snapshot, correlation_id, cause=report)
                 return await self._fault_response(report2, snapshot, envelope, correlation_id, broker)
@@ -1645,8 +1671,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if output is _CONSUMED:
             # A parked fan-out fold or a self-published re-entry: no publishable action this hop,
             # the output is still owed by the pending siblings.
-            envelope.reply = None  # no-reply mirror (I3)
-            return Response(envelope, headers=self._headers("call"))
+            return self._no_reply_mirror(envelope)
         if isinstance(output, _Declined):
             # No matched handler produced a terminal result: every match declined, or a schema
             # rejected the body (``output.reason`` discriminates). On a REPLY-OWING delivery this
@@ -1682,8 +1707,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                 tuple(type(self)._handlers),
                 body_note,
             )
-            envelope.reply = None  # no-reply mirror (no result): don't re-broadcast an inbound reply (I3)
-            return Response(envelope, headers=self._headers("call"))
+            return self._no_reply_mirror(envelope)  # no result to publish: don't re-broadcast the inbound reply
 
         if isinstance(output, _BatchFaulted):
             # A callee fault escalating up this node's rail (§6.8): RETURNED from _execute, never

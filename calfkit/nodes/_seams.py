@@ -43,7 +43,7 @@ class _Minted:
     report: ErrorReport
 
 
-async def run_chain(handlers: Sequence[Callable[..., Any]], *args: Any) -> Any:
+async def run_chain(handlers: Sequence[Callable[..., Any]], *args: Any, seam_name: str | None = None) -> Any:
     """Run a seam chain in registration order; the first non-``None`` return wins.
 
     Each handler is invoked with the seam-specific ``*args`` (``ctx``; or
@@ -51,15 +51,17 @@ async def run_chain(handlers: Sequence[Callable[..., Any]], *args: Any) -> Any:
     returning ``None`` *declines* and the chain advances to the next; the first
     non-``None`` return is the result and short-circuits the remaining handlers
     (pluggy ``firstresult`` semantics, spec §6.8). An empty / all-declining
-    chain returns ``None``.
+    chain returns ``None``. ``seam_name`` (optional) names the seam in the §13
+    INFO so an operator can tell a before_node short-circuit from an after_node
+    replacement from an on_callee_error substitution.
     """
     for handler in handlers:
         result = handler(*args)
         if inspect.isawaitable(result):
             result = await result
         if result is not None:
-            # §13: seam handling is logged at INFO (the handler that fired / why a delivery was shaped).
-            logger.info("seam handler %s resolved (returned a value)", getattr(handler, "__name__", repr(handler)))
+            # §13: seam handling is logged at INFO (which seam fired + the handler / why a delivery was shaped).
+            logger.info("%s handler %s resolved (returned a value)", seam_name or "seam", getattr(handler, "__name__", repr(handler)))
             return result
     return None
 

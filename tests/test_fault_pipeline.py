@@ -55,6 +55,17 @@ class _FailThenCaptureBroker:
         self.published.append((topic, envelope, headers))
 
 
+class _AlwaysFailBroker:
+    """Every publish raises the given error — exercises _publish_fault's floor arms (the fault
+    delivery itself fails and cannot be published-around, so it floors without silently dropping)."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        raise self._exc
+
+
 def _framed_envelope(*, payload: object = None, callback_topic: str | None = "cb") -> Envelope:
     stack = CallFrameStack()
     stack.push(CallFrame(target_topic="orchestrator.in", callback_topic=callback_topic, payload=payload, tag="t1"))
@@ -190,6 +201,34 @@ class TestPublishFault:
         resp = await node._fault_response(report, node._stack_snapshot(inbound), inbound, "cid", _CaptureBroker())
         assert resp.headers[HDR_KIND] == "fault"
         assert resp.headers[HDR_ERROR_TYPE] == "calf.model.context_window_exceeded"
+
+    async def test_non_size_publish_failure_floors_with_the_full_mirror(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A NON-size publish failure (e.g. a dead/unreachable broker) cannot be published-around → floor
+        # (ERROR) and return the FULL mirror (no strip — stripping only helps a size failure). No silent drop.
+        node = _node()
+        report = ErrorReport(error_type="calf.unhandled", message="boom", causes=[ErrorReport(error_type="calf.inner")])
+        inbound = _framed_envelope(callback_topic="caller.return")
+        broker = _AlwaysFailBroker(KafkaError("broker down"))
+        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        assert kind == "fault"
+        assert isinstance(mirror.reply, FaultMessage)
+        assert mirror.reply.error.causes != []  # the FULL mirror — a non-size failure is not stripped
+        assert any(r.levelno == logging.ERROR and "failed" in r.getMessage() for r in caplog.records)  # floored, not dropped
+
+    async def test_oversized_then_minimal_also_fails_floors_with_the_minimal_mirror(self, caplog: pytest.LogCaptureFixture) -> None:
+        # §4.3 deepest fallback: the full publish fails on size → strip to minimal → the minimal ALSO fails
+        # → floor (ERROR) and return the MINIMAL mirror. The last layer of the silent-drop-prevention feature.
+        node = _node()
+        report = ErrorReport(error_type="calf.unhandled", message="boom", details={"big": "x" * 100}, causes=[ErrorReport(error_type="calf.inner")])
+        inbound = _framed_envelope(callback_topic="caller.return")
+        broker = _AlwaysFailBroker(MessageSizeTooLargeError("too big even minimal"))
+        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        assert kind == "fault"
+        assert isinstance(mirror.reply, FaultMessage)
+        assert mirror.reply.error.causes == [] and mirror.reply.error.details == {}  # the MINIMAL mirror
+        assert any(r.levelno == logging.ERROR and "even after the minimal strip" in r.getMessage() for r in caplog.records)
 
 
 class _RaisingNode(BaseNodeDef):
@@ -524,6 +563,27 @@ class TestSeamFailureBranches:
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.unhandled"  # report2 — the after_node failure
         assert any("body boom" in c.message for c in env.reply.error.causes)  # the ORIGINAL chained (§6.8)
+
+    async def test_recovery_path_after_node_mint_converts_verbatim(self) -> None:
+        # §6.5 mint rule is ABSOLUTE ("anywhere — any seam, any body"): a NodeFaultError raised by a
+        # recovery-path after_node (after on_node_error recovered) converts VERBATIM — it must NOT be
+        # downgraded to calf.unhandled by the recovery-then-failure single-shot arm.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])  # body raises → on_node_error recovers
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            return "recovered-value"
+
+        @node.after_node
+        def mint(ctx: SeamContext[State], output: object) -> None:
+            raise NodeFaultError("billing.quota_exceeded", message="minted in the recovery-path after_node")
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.error.error_type == "billing.quota_exceeded"  # verbatim, NOT downgraded to calf.unhandled
 
 
 class TestBeforeNode:
