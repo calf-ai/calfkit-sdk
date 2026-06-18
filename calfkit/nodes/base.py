@@ -42,7 +42,6 @@ from calfkit.nodes._fanout_store import (
     CloseResume,
     CloseSpurious,
     FanoutBatchStore,
-    FanoutStoreUnavailableError,
     FoldAbort,
     FoldComplete,
     FoldParked,
@@ -1013,16 +1012,17 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         then publish each sibling on its pre-minted id, with the node's OWN frame marked so
         the marker survives the callee's return-pop. Returns the no-reply mirror — the
         output is owed by the pending siblings."""
-        store = self._resolve_fanout_store(ctx)
         fanout_id = envelope.internal_workflow_state.current_frame.frame_id
-        slot_ids = [uuid_utils.uuid7().hex for _ in calls]
-        reg = FanoutOpen(
-            fanout_id=fanout_id,
-            node_id=self.node_id,
-            expected=[SlotRef(frame_id=fid, tag=call.tag, target_topic=call.target_topic) for fid, call in zip(slot_ids, calls)],
-        )
-        snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
+        store: FanoutBatchStore | None = None
         try:
+            store = self._resolve_fanout_store(ctx)
+            slot_ids = [uuid_utils.uuid7().hex for _ in calls]
+            reg = FanoutOpen(
+                fanout_id=fanout_id,
+                node_id=self.node_id,
+                expected=[SlotRef(frame_id=fid, tag=call.tag, target_topic=call.target_topic) for fid, call in zip(slot_ids, calls)],
+            )
+            snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
             await store.open(fanout_id, reg, snapshot)
             for call, slot_id in zip(calls, slot_ids):
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
@@ -1039,15 +1039,18 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
                     key=correlation_id.encode(),
                     headers=self._headers("call", route=call.route),
                 )
-        except (KafkaError, FanoutStoreUnavailableError) as exc:
-            # §4.4 dispatch-abort: the batch may be durably registered (basestate+state written) but
-            # cannot complete — a sibling publish failed, or the store failed at OPEN. Tombstone both
-            # records so the orphan open batch is not leaked (reclaimed otherwise only by #220), AND
-            # escalate a fault ONCE to the caller — the inbound stack (D's own fan-out frame on top)
-            # addresses it, so no basestate read is needed. Any sibling already published then
-            # post_closure-stray-floors against the tombstone at its fold.
+        except Exception as exc:
+            # §4.4 dispatch-abort (C1): ANY failure here — a missing/dead store (``_resolve_fanout_store``
+            # raises), a ``store.open`` error, or a sibling publish raise (Kafka OR not, e.g. a
+            # ``PydanticSerializationError`` serializing the sibling state) — must NOT escape. The OPEN
+            # dispatch is a terminal-publish path the §6.8 fault boundary must enclose (P1): an escape
+            # under ACK_FIRST drops the message and strands the caller forever. Tombstone if the batch may
+            # be registered (``store`` resolved ⇒ ``open`` may have written records), and escalate a fault
+            # ONCE to the caller — the inbound stack (D's own fan-out frame on top) addresses it, so no
+            # basestate read is needed. Any sibling already published then post_closure-stray-floors at its fold.
             logger.error("[%s] fan-out OPEN failed batch=%s node=%s; aborting + escalating: %r", correlation_id[:8], fanout_id, self.node_id, exc)
-            await abort_batch(store, fanout_id)
+            if store is not None:
+                await abort_batch(store, fanout_id)
             report = self._fanout_abort_report(FaultTypes.REASON_DISPATCH_FAILED)
             return await self._fault_response(report, self._stack_snapshot(envelope), envelope, correlation_id, broker)
         envelope.reply = None  # success path: no-reply mirror (I3) — the siblings owe the output this hop
@@ -1223,7 +1226,20 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         read the store)."""
         frame = snapshot.current_frame_or_none
         if frame is not None and frame.fanout_id is not None:
-            await abort_batch(self._resolve_fanout_store(ctx), frame.fanout_id)  # frame_id == fanout_id == batch key
+            # Guard the store resolution: _publish_abort runs from INSIDE the boundary's except handler,
+            # so a raise here (e.g. the store resource absent) is an exception-in-except that would escape
+            # to FastStream (C1). Best-effort tombstone; escalate the fault to the caller regardless.
+            try:
+                store = self._resolve_fanout_store(ctx)
+            except Exception:
+                logger.exception(
+                    "[%s] fan-out abort could not resolve the store batch=%s node=%s; escalating without tombstone",
+                    correlation_id[:8],
+                    frame.fanout_id,
+                    self.node_id,
+                )
+            else:
+                await abort_batch(store, frame.fanout_id)  # frame_id == fanout_id == batch key
         return await self._fault_response(report, snapshot, inbound, correlation_id, broker)
 
     def _build_fault_group(self, outcomes: list[FanoutOutcome], failed: list[FanoutOutcome]) -> ErrorReport:
@@ -1548,7 +1564,14 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         # list[Call] stays the plain parallel publish in _publish_action; a 1-element list is a
         # single stateless continuation (not a durable batch) and reroutes there too.
         if self._is_fanout_capable and isinstance(output, list) and len(output) >= 2 and all(isinstance(c, Call) for c in output):
-            return await self._handle_fanout_open(ctx, output, envelope, correlation_id, broker)
+            # The OPEN dispatch is a terminal-publish path; guard it like the publish guard below so a
+            # raise that _handle_fanout_open's own abort somehow missed still faults the caller on the
+            # pre-mutation snapshot, never escapes to FastStream (C1 / P1 — defense-in-depth).
+            try:
+                return await self._handle_fanout_open(ctx, output, envelope, correlation_id, broker)
+            except Exception as exc:
+                report = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx)
+                return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
 
         logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
         # ── publish guard: a transport/size failure on the success rail NEVER re-enters

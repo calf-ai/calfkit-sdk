@@ -327,6 +327,66 @@ async def test_handle_fanout_open_store_failure_aborts_and_escalates(caplog: pyt
     assert any("fan-out OPEN failed" in r.getMessage() for r in caplog.records)
 
 
+class _NonKafkaRaisingBroker:
+    """``publish`` raises a NON-``KafkaError`` — the leg the narrow ``(KafkaError,
+    FanoutStoreUnavailableError)`` catch missed (the C1 escape). Pre-fix this escaped
+    ``_handle_fanout_open`` and ``_handle_delivery`` to FastStream = silent drop under ACK_FIRST."""
+
+    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        raise ValueError("simulated non-Kafka sibling publish failure")
+
+
+class _FanoutNode(NodeDef[Any]):
+    """A fan-out-capable node whose body returns a 2-element ``list[Call]`` (opens a durable batch)."""
+
+    @property
+    def _is_fanout_capable(self) -> bool:
+        return True
+
+    async def run(self, ctx: SessionRunContext) -> Any:
+        return [Call("tool.a", ctx.state, tag="tc1"), Call("tool.b", ctx.state, tag="tc2")]
+
+
+async def test_handle_fanout_open_non_kafka_publish_failure_aborts_and_escalates() -> None:
+    # C1: a NON-KafkaError raised during a sibling publish must abort + escalate exactly like the
+    # KafkaError leg — never escape. Pre-fix the narrow `except (KafkaError, FanoutStoreUnavailableError)`
+    # let this ValueError escape _handle_fanout_open (silent drop + hung caller under ACK_FIRST).
+    agent = _agent()
+    fake = FakeFanoutBatchStore()
+    ctx = _ctx_with_store(fake)
+    own = CallFrame(target_topic="a", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
+
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _NonKafkaRaisingBroker()))
+
+    assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the ValueError
+    assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
+    assert await fake.read_state("A") is None  # aborted: both records tombstoned
+    assert await fake.read_basestate("A") is None
+
+
+async def test_fanout_open_missing_store_faults_caller_not_escape() -> None:
+    # C1: a fan-out through the FULL handler with NO durable store registered must fault the caller,
+    # NOT escape. _resolve_fanout_store raises RuntimeError; pre-fix it escaped the unguarded OPEN
+    # dispatch in _handle_delivery and reached FastStream (silent drop + hung caller under ACK_FIRST).
+    node = _FanoutNode(node_id="fan", subscribe_topics=["fan.in"])  # deliberately NO FANOUT_STORE_KEY resource
+    own = CallFrame(target_topic="fan.in", callback_topic="caller", frame_id="A")
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=Stack([own])),
+    )
+    broker = _CaptureBroker()
+
+    resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+
+    assert isinstance(resp.body.reply, FaultMessage)  # faulted the caller, did NOT escape to FastStream
+    assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
+
+
 # ── @resource preconditions (coverage d) ─────────────────────────────────────
 
 
