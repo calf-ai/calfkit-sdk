@@ -58,6 +58,8 @@ async def run_chain(handlers: Sequence[Callable[..., Any]], *args: Any) -> Any:
         if inspect.isawaitable(result):
             result = await result
         if result is not None:
+            # §13: seam handling is logged at INFO (the handler that fired / why a delivery was shaped).
+            logger.info("seam handler %s resolved (returned a value)", getattr(handler, "__name__", repr(handler)))
             return result
     return None
 
@@ -107,5 +109,7 @@ async def run_chain_guarded(handlers: Sequence[Callable[..., Any]], ctx: Any, re
             )
             continue
         if result is not None:
+            # §13: a successful recovery is logged at INFO (the on_node_error handler that fired).
+            logger.info("on_node_error handler %s recovered the node", getattr(handler, "__name__", repr(handler)))
             return result
     return None

@@ -300,6 +300,56 @@ class _BodyNode(BaseNodeDef):
         return ReturnCall(state=ctx.state, value="from-body")
 
 
+class TestStructuredLogging:
+    """§13: one log line per fault event — synthesis (ERROR + traceback, at origin), each escalation hop
+    (WARNING: error_type / origin / remaining stack depth), seam handling (INFO). The escalation logs
+    carry the teaching load for 'why didn't my handler fire.'"""
+
+    async def test_synthesis_logs_error_with_traceback(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A node-own raise synthesizes the fault AT ORIGIN with an ERROR carrying the traceback.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])
+        broker = _CaptureBroker()
+        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+            await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+        synth = [r for r in caplog.records if r.levelno == logging.ERROR and r.exc_info is not None]
+        assert synth, "expected a synthesis ERROR carrying the traceback (exc_info)"
+        assert synth[0].exc_info is not None and synth[0].exc_info[0] is RuntimeError  # the originating body exception
+        msg = synth[0].getMessage()
+        assert "calf.unhandled" in msg and "n" in msg  # error_type + origin node
+
+    async def test_escalation_hop_logs_warning_with_origin_and_remaining_depth(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Each escalation hop (a successful fault publish to a callback) logs a WARNING carrying the
+        # error_type, origin, and the stack depth REMAINING after the answered frame is popped.
+        node = _node()
+        stack = CallFrameStack()
+        stack.push(CallFrame(target_topic="grandparent.in", callback_topic="gp.return", payload=None, tag="t0"))
+        stack.push(CallFrame(target_topic="orchestrator.in", callback_topic="caller.return", payload=None, tag="t1"))
+        inbound = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
+        report = ErrorReport(error_type="calf.unhandled", message="boom", origin_node_id="origin-node")
+        broker = _CaptureBroker()
+        with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
+            await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warns, "expected a per-hop escalation WARNING"
+        msg = warns[0].getMessage()
+        assert "calf.unhandled" in msg and "origin-node" in msg
+        assert "remaining_depth=1" in msg  # popped the answered top frame; one ancestor remains
+
+    async def test_seam_handling_logs_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A seam that HANDLES (here on_node_error recovers) logs an INFO naming the handler.
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            return "recovered-value"
+
+        broker = _CaptureBroker()
+        with caplog.at_level(logging.INFO, logger="calfkit.nodes._seams"):
+            await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("recover" in r.getMessage() for r in infos), "expected an INFO when on_node_error handled"
+
+
 class TestBeforeNode:
     async def test_before_node_value_short_circuits_the_body(self) -> None:
         # §6.2/§6.4: a before_node returning a value becomes the node's output; the body never runs.
