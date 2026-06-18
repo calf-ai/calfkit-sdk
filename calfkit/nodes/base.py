@@ -1566,9 +1566,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         publish faults the caller (scenario 42). Returns a broadcast-mirror :class:`Response` whose
         ``x-calf-kind`` is the hop's kind. Observers (``ConsumerNode``) override this with the
         observe-only path — they never enter the fault pipeline (§6.6).
-
-        TODO(fault rail PR-6 step 4): the mid-batch ``_in_batch_work`` → ``_publish_abort`` arms
-        (boundary + publish guard) land with the fold widen.
         """
         emitter, emitter_kind = self._decode_emitter(headers, correlation_id)
         # ── stage-0 guard: no user code may run before a context exists (§6.8 / R1) ──
