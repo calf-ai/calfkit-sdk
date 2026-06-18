@@ -1,11 +1,14 @@
 name: CI
 
 # Unified CI lane for the always-on checks that share the push-to-main / PR
-# trigger and need no special infrastructure: lint + type-check, the offline
-# test matrix, and a package build + cross-OS install verification. Lanes with
-# divergent triggers or infra stay in their own files: the real-broker, topic-
-# provisioning, and live-LLM integration lanes; security; release; pr-title.
-# Shared Python+uv setup is factored into .github/actions/setup.
+# trigger: lint + type-check, the test matrix, and a package build + cross-OS
+# install verification. The coverage entry (Python 3.10) additionally runs the
+# real-broker `kafka` lane via testcontainers Redpanda, so the uploaded coverage
+# is the union of the offline and real-broker tests — which is why that entry
+# needs the runner's Docker daemon. Lanes with divergent triggers or infra stay
+# in their own files: the topic-provisioning and live-LLM integration lanes;
+# security; release; pr-title. Shared Python+uv setup is factored into
+# .github/actions/setup.
 
 on:
   push:
@@ -59,15 +62,22 @@ jobs:
         uses: ./.github/actions/setup
         with:
           python-version: ${{ matrix.python-version }}
+          # `integration` adds testcontainers for the real-broker lane the
+          # coverage entry runs; unused (harmless) on the offline-only entries.
+          groups: "dev integration"
 
       - name: Run tests
-        # The default suite is fully offline (FunctionModel + in-memory
-        # TestKafkaBroker) and deselects the opt-in `kafka` and `live` lanes
-        # (ADR 0007), so it needs no Docker, network, or credentials. The live
-        # model-API lane runs separately on push-to-main (integration-live.yml).
+        # Non-coverage entries run the offline suite only (FunctionModel +
+        # in-memory TestKafkaBroker; the default `-m "not kafka and not live"`),
+        # needing no Docker, network, or credentials. The coverage entry (3.10)
+        # also runs the real-broker `kafka` lane in the SAME process —
+        # `-m "not live"` overrides the default deselection — so the uploaded
+        # coverage is the union of both; Redpanda comes from testcontainers
+        # (ADR 0007). The live model-API lane runs separately (integration-live.yml).
         run: |
           if [ "${{ matrix.python-version }}" = "3.10" ]; then
-            uv run pytest tests/ -v --tb=short --cov=calfkit --cov-report=term-missing --cov-report=xml
+            uv run pytest tests/ -v --tb=short --timeout=180 -m "not live" \
+              --cov=calfkit --cov-report=term-missing --cov-report=xml
           else
             uv run pytest tests/ -v --tb=short
           fi

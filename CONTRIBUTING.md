@@ -102,8 +102,11 @@ $ make test-kafka     # runs `-m kafka`; testcontainers starts/stops Redpanda
 
 This requires a running **Docker** daemon (the `integration` group, which `make
 test-kafka` installs, provides testcontainers). Without Docker the lane skips
-cleanly rather than failing. To run against an already-running broker instead —
-no Docker or `integration` group needed, since testcontainers is never imported:
+cleanly rather than failing. In CI this lane is not a separate workflow: it runs
+as part of the coverage build (`ci.yml`, the Python 3.10 entry), so a real
+broker is exercised on every push to `main` and every PR, and its code paths
+count toward coverage. To run against an already-running broker instead — no
+Docker or `integration` group needed, since testcontainers is never imported:
 
 ```console
 $ CALF_TEST_KAFKA_BOOTSTRAP=localhost:9092 uv run pytest -m kafka
