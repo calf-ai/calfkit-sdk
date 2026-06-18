@@ -811,6 +811,14 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         # bytes has no parts arm (§4.5) — reject rather than guess an encoding.
         if isinstance(value, bytes):
             raise SeamContractError("a seam returned bytes, which has no parts representation; return str, structured data, or a model.")
+        # Next is route-dispatch vocabulary (the CoR decline sentinel), not a seam output. It is not an
+        # action, so _is_action lets it through to here; reject it loudly rather than coerce a garbage
+        # empty DataPart (§6.2 — return None to proceed / substitute a real output / raise to reject).
+        if isinstance(value, Next):
+            raise SeamContractError(
+                "a seam returned Next, which is route-dispatch vocabulary, not a node output; "
+                "return None to proceed, substitute a real output, or raise to reject."
+            )
         # Output-position validation (scenario 44): a TYPED node validates the substitute against its
         # declared output type, so a type-breaking value fails HERE (→ a fault at the seam), not as a
         # DeserializationError in the caller's process. This is the ONE caller-capable exception to
@@ -822,7 +830,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         if output_type is not _UNSET:
             try:
                 TypeAdapter(output_type).validate_python(value)
-            except PydanticSchemaGenerationError:
+            except (PydanticSchemaGenerationError, AttributeError, TypeError):
+                # Unschematizable: a bare exotic class (PydanticSchemaGenerationError) OR a pydantic-ai
+                # OutputSpec WRAPPER INSTANCE — ToolOutput(M)/NativeOutput(M)/PromptedOutput(M), where
+                # TypeAdapter(<instance>) raises AttributeError ('no __mro__')/TypeError. Degrade to a
+                # lenient SKIP (the documented exotic-OutputSpec contract) — never a spurious seam fault.
                 logger.debug("node=%s seam output type is unschematizable; skipping output-position validation", self.node_id)
             except ValidationError as exc:
                 raise SeamContractError(
@@ -838,7 +850,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
         The base is untyped (``_UNSET`` → lenient auto-detect, never raises). A typed
         node — the agent — overrides this to its declared output type so the projection
         becomes strict: a type-breaking output then faults at the seam, not downstream
-        (the agent's override lands with its body migration, step 4)."""
+        (the agent overrides this to its declared ``final_output_type``)."""
         return _UNSET
 
     def _output_view(self, ctx: SeamContext[State], output: NodeResult[State]) -> Any:
@@ -859,10 +871,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin):
             return extract_lenient(parts)
         try:
             return _extract_output(parts, output_type)
-        except PydanticSchemaGenerationError:
-            # An unschematizable declared output type (an exotic OutputSpec) → fall back to the lenient
-            # view rather than crash; the strict projection a type-breaking VALUE fails (DeserializationError)
-            # still propagates as a fault.
+        except (PydanticSchemaGenerationError, AttributeError, TypeError):
+            # An unschematizable declared output type — a bare exotic class OR an OutputSpec wrapper
+            # instance (TypeAdapter raises AttributeError/TypeError: no __mro__) — falls back to the
+            # lenient view rather than crash; a type-breaking VALUE still fails (DeserializationError)
+            # and propagates as a fault.
             return extract_lenient(parts)
 
     def _interpret(self, ctx: SeamContext[State], value: Any) -> NodeResult[State]:

@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel
 
 from calfkit.exceptions import DeserializationError, SeamContractError
-from calfkit.models.actions import Call, ReturnCall, TailCall
+from calfkit.models.actions import Call, Next, ReturnCall, TailCall
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.payload import DataPart
 from calfkit.models.seam_context import SeamContext
@@ -105,6 +105,22 @@ class TestOutputPositionValidation:
         result = node._coerce_output(_ctx(State()), "anything")  # cannot schematize → skip, no raise
         assert isinstance(result, ReturnCall)
 
+    def test_wrapper_instance_output_type_skips_validation(self) -> None:
+        # The realistic exotic OutputSpec: a structured-output agent declared via ToolOutput(M) /
+        # NativeOutput(M) / PromptedOutput(M) — a wrapper INSTANCE, not a bare type. TypeAdapter(<wrapper
+        # instance>) raises AttributeError ('no __mro__'); that must degrade to the lenient SKIP, not
+        # escape and spuriously fault EVERY seam substitute for a common agent config (round-1 MAJOR).
+        from calfkit._vendor.pydantic_ai.output import ToolOutput
+
+        class _WrapperOutputNode(BaseNodeDef):
+            @property
+            def _seam_output_type(self) -> Any:
+                return ToolOutput(_Report)
+
+        node = _WrapperOutputNode(node_id="w", subscribe_topics=["in"])
+        result = node._coerce_output(_ctx(State()), {"title": "ok"})  # lenient skip — no AttributeError fault
+        assert isinstance(result, ReturnCall) and result.value == {"title": "ok"}
+
 
 class TestCoerceGuards:
     def test_rejects_bool(self) -> None:
@@ -133,6 +149,14 @@ class TestCoerceGuards:
         node = _node()
         with pytest.raises(SeamContractError):
             node._coerce_output(_ctx(State()), b"raw")
+
+    def test_rejects_next(self) -> None:
+        # §6.2: Next is route-dispatch vocabulary (the CoR decline sentinel), not a seam output. It slips
+        # past _is_action (Next is not an action), so without a guard a seam returning Next would coerce
+        # to a garbage empty DataPart — reject it loudly instead.
+        node = _node()
+        with pytest.raises(SeamContractError):
+            node._coerce_output(_ctx(State()), Next())
 
     def test_allows_a_plain_user_model_output(self) -> None:
         # A non-State pydantic model is a legitimate structured output (→ DataPart),
