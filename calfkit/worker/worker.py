@@ -10,7 +10,7 @@ from typing_extensions import Self
 
 from calfkit.client import Client
 from calfkit.controlplane.config import ControlPlaneConfig
-from calfkit.controlplane.publisher import ControlPlanePublisher
+from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
 from calfkit.models.tool_dispatch import ToolSelector
 from calfkit.nodes import BaseNodeDef
@@ -251,7 +251,7 @@ class Worker(LifecycleHookMixin):
         # Distinct topics => distinct writer keys, registered once; the publisher-set
         # guard above makes the whole method idempotent, so no per-key dedup is needed.
         for topic in {info.topic for _, info in adverts}:
-            self.resource(name=ControlPlanePublisher._writer_key(topic))(self._make_control_plane_writer_resource(topic))
+            self.resource(name=control_plane_writer_key(topic))(self._make_control_plane_writer_resource(topic))
         publisher = ControlPlanePublisher(worker_id=self.id, adverts=adverts, config=self._control_plane)
         self._control_plane_publisher = publisher
         self.after_startup(publisher.start)

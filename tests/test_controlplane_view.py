@@ -144,6 +144,50 @@ def test_schema_skip_excludes_newer_records() -> None:
     assert v.online_nodes() == set()
 
 
+def test_schema_skip_is_logged_once_per_member(caplog: pytest.LogCaptureFixture) -> None:
+    # spec §8: a newer-schema member is skipped AND logged (so a vanishing node is observable).
+    v = _view({"a": {"w1": _rec("w1", schema_version=2)}})
+    with caplog.at_level("WARNING"):
+        v.get("a")
+        v.get("a")  # second read must NOT re-log the same (node, worker, version)
+    skip_logs = [r for r in caplog.records if "schema" in r.getMessage().lower() and r.levelname == "WARNING"]
+    assert len(skip_logs) == 1
+    msg = skip_logs[0].getMessage()
+    assert "a" in msg and "w1" in msg
+
+
+def test_collapse_filters_stale_before_tiebreak() -> None:
+    # The member with the NEWEST heartbeat is stale (tiny cadence); the live member is
+    # older. filter-then-tie-break must return the older LIVE one — a tie-break-then-filter
+    # bug would pick the freshest, find it stale, and wrongly return None.
+    v = _view(
+        {
+            "a": {
+                "w_fresh_stale": _rec("w_fresh_stale", age_s=2.0, hb=0.1),  # newest hb, but stale (0.3s threshold)
+                "w_old_live": _rec("w_old_live", age_s=5.0, hb=100.0),  # older hb, but live (300s threshold)
+            }
+        }
+    )
+    rec = v.get("a")
+    assert rec is not None and rec.worker_id == "w_old_live"
+    assert v.online_nodes() == {"a"}
+
+
+def test_collapse_filters_newer_schema_before_tiebreak() -> None:
+    # The newest-heartbeat member is a newer (unsupported) schema; the live one is older+supported.
+    v = _view(
+        {
+            "a": {
+                "w_fresh_newschema": _rec("w_fresh_newschema", age_s=1.0, schema_version=2),
+                "w_old_live": _rec("w_old_live", age_s=5.0),
+            }
+        }
+    )
+    rec = v.get("a")
+    assert rec is not None and rec.worker_id == "w_old_live"
+    assert v.online_nodes() == {"a"}
+
+
 def test_snapshot_maps_online_nodes_to_collapsed_records() -> None:
     v = _view({"a": {"w1": _rec("w1", content="A")}, "b": {"w1": _rec("w1", content="B")}})
     snap = v.snapshot()

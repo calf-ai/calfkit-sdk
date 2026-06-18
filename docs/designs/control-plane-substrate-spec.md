@@ -116,7 +116,7 @@ One **worker-owned** publisher runs **one** heartbeat loop and **one** ordered t
 **Auto-registration, sequenced (zero user wiring).** The wiring follows the existing `_maybe_register_capability_view` pattern, stated explicitly because the substrate spans multiple topics:
 
 1. During `register_handlers` (pre-broker), the worker scans the hosted node **types** for `@advertises` bindings (available at class-definition time via `__init_subclass__`, like `_handlers`).
-2. If any exist, it computes the **union of advert topics** and — **synchronously here, before the resource phase** — registers the publisher plus one writer `@resource` per distinct topic (`self.resource(key)(...)`, idempotent by name). Registering the writer resources at this point is what guarantees they exist when the resource phase runs.
+2. If any exist, it computes the **union of advert topics** and — **synchronously here, before the resource phase** — registers the publisher plus one writer `@resource` per distinct topic — one per topic, and the whole step is guarded by the publisher being set once, so it never re-registers a name. Registering the writer resources at this point is what guarantees they exist when the resource phase runs.
 3. The resource phase opens each `GroupedKafkaTableWriter` (`.json(...)`, `ensure_topic` gated on provisioning), landing them in the worker bag.
 4. `after_startup` publishes each advert once, then spawns the single heartbeat loop.
 
@@ -159,6 +159,7 @@ class ControlPlaneView(Generic[R]):
     @property
     def is_caught_up(self) -> bool: ...
     async def barrier(self, timeout: float | None = None) -> bool: ...
+    async def wait_until_caught_up(self, timeout: float | None = None) -> bool: ...
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
 ```

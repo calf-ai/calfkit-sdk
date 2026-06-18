@@ -26,7 +26,7 @@ class ControlPlaneRecord(BaseModel):
     against the writer's interval rather than its own config (spec §9).
     """
 
-    model_config = ConfigDict(extra="ignore")  # tolerant reader (additive forward-compat)
+    model_config = ConfigDict(extra="ignore", frozen=True)  # tolerant reader; immutable value object
 
     schema_version: int
     node_id: str

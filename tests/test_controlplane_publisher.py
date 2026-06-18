@@ -10,7 +10,7 @@ from pydantic import AwareDatetime
 
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneIdentity, ControlPlaneRecord
 from calfkit.controlplane.advert import AdvertInfo
-from calfkit.controlplane.publisher import ControlPlanePublisher
+from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 
 
 class _Rec(ControlPlaneRecord):
@@ -82,7 +82,7 @@ class _Ctx:
 
 
 def _key(topic: str) -> str:
-    return ControlPlanePublisher._writer_key(topic)
+    return control_plane_writer_key(topic)
 
 
 # -- startup: one-shot publish + identity ------------------------------------
@@ -170,6 +170,7 @@ async def test_content_updated_at_fixed_across_ticks() -> None:
     r1, r2 = writer.sets[0][2], writer.sets[1][2]
     assert r1.content_updated_at == r2.content_updated_at == content_ts  # content currency fixed
     assert r2.last_heartbeat_at > r1.last_heartbeat_at  # liveness advanced
+    assert r1.started_at == r2.started_at == pub._started_at  # boot time fixed across ticks
 
 
 # -- loop resilience ---------------------------------------------------------
@@ -216,3 +217,52 @@ async def test_loop_cancellation_during_publish_propagates() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_start_partial_failure_publishes_first_and_spawns_no_loop() -> None:
+    # advert #1 publishes, advert #2's factory raises -> start() propagates (fail-loud),
+    # and NO heartbeat loop is spawned (the publish loop precedes create_task) -> no orphan task.
+    w_ok, w_bad = _Writer(), _Writer()
+    ok = _Node("ok", _rec_factory())
+    bad = _Node("bad", _boom_factory())
+    pub = ControlPlanePublisher(worker_id="wkr", adverts=[(ok, _advert("ok")), (bad, _advert("bad"))], config=ControlPlaneConfig())
+    ctx = _Ctx({_key("ok"): w_ok, _key("bad"): w_bad})
+    with pytest.raises(RuntimeError, match="factory boom"):
+        await pub.start(ctx)
+    assert len(w_ok.sets) == 1  # first advert published before the failure
+    assert pub._task is None  # no loop spawned -> no orphan task leaked
+
+
+async def test_loop_sleeps_at_the_configured_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Deterministic cadence check: the loop sleeps exactly heartbeat_interval each tick.
+    recorded: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded.append(delay)
+        raise asyncio.CancelledError  # stop the loop right after its first interval sleep
+
+    monkeypatch.setattr("calfkit.controlplane.publisher.asyncio.sleep", fake_sleep)
+    node = _Node("n1", _rec_factory())
+    pub = ControlPlanePublisher(worker_id="wkr", adverts=[(node, _advert("t"))], config=ControlPlaneConfig(heartbeat_interval=42.0))
+    ctx = _Ctx({_key("t"): _Writer()})
+    pub._started_at = datetime.now(tz=timezone.utc)
+    with pytest.raises(asyncio.CancelledError):
+        await pub._loop(ctx)
+    assert recorded == [42.0]
+
+
+async def test_started_at_shared_across_nodes() -> None:
+    # One boot time, shared by every hosted node's record (the restart-detection basis).
+    writer = _Writer()
+    n1, n2 = _Node("n1", _rec_factory()), _Node("n2", _rec_factory())
+    pub = ControlPlanePublisher(
+        worker_id="wkr",
+        adverts=[(n1, _advert("t")), (n2, _advert("t"))],
+        config=ControlPlaneConfig(heartbeat_interval=3600.0),
+    )
+    ctx = _Ctx({_key("t"): writer})
+    await pub.start(ctx)
+    try:
+        assert {record.started_at for _, _, record in writer.sets} == {pub._started_at}
+    finally:
+        await pub.stop(ctx)

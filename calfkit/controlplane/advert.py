@@ -45,6 +45,8 @@ class AdvertInfo:
             raise ValueError("AdvertInfo.topic must be non-empty")
         if not self.name:
             raise ValueError("AdvertInfo.name must be non-empty")
+        if not (isinstance(self.record, type) and issubclass(self.record, ControlPlaneRecord)):
+            raise ValueError(f"AdvertInfo.record must be a ControlPlaneRecord subclass, got {self.record!r}")
 
 
 def advertises(topic: str, *, record: type[ControlPlaneRecord]) -> Callable[[_MethodT], _MethodT]:
@@ -68,8 +70,9 @@ def advertises(topic: str, *, record: type[ControlPlaneRecord]) -> Callable[[_Me
     The ``(topic, record)`` binding is per node *type*: every instance advertises
     to the same topic with the same schema (a topic's view decodes exactly one
     record type). **One topic ⇒ one record schema** must also hold across *all*
-    node types (a deployment-time contract — a foreign schema on a topic is
-    poison-skipped by the reader); that cross-type case is not enforceable here.
+    node types (a deployment-time contract — a foreign payload that fails to decode is
+    dropped by ktables below the view, so that node silently vanishes); that cross-type
+    case is not enforceable here.
 
     Args:
         topic: The control-plane topic this type advertises to. Unique per class

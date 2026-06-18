@@ -14,6 +14,7 @@ imports the ``calfkit.controlplane`` package.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
@@ -25,6 +26,8 @@ from calfkit.exceptions import RegistryConfigError
 
 if TYPE_CHECKING:
     from ktables import TableStatus
+
+logger = logging.getLogger(__name__)
 
 R = TypeVar("R", bound=ControlPlaneRecord)
 
@@ -77,36 +80,68 @@ class ControlPlaneView(Generic[R]):
         self._record_type = record_type
         self._reader_version: int = field.default
         self._stale_after = stale_after
+        self._logged_skips: set[tuple[str, str, int]] = set()  # (node, worker, version) already warned about
 
     # -- collapsed, liveness-aware reads -------------------------------------
 
     def get(self, node_id: str) -> R | None:
         """The one live record for ``node_id`` (most-recent heartbeat), or ``None``."""
-        live = self._live_members(node_id)
-        if not live:
-            return None
-        return max(live.values(), key=lambda record: record.last_heartbeat_at)
+        live = self._live_members(node_id, datetime.now(tz=timezone.utc))
+        return max(live.values(), key=lambda record: record.last_heartbeat_at) if live else None
 
     def online_nodes(self) -> set[str]:
         """The node ids with at least one supported, non-stale instance."""
-        return {group for group in self._table.groups() if self._live_members(group)}
+        now = datetime.now(tz=timezone.utc)
+        return {group for group in self._table.groups() if self._live_members(group, now)}
 
     def snapshot(self) -> dict[str, R]:
-        """A ``node_id -> live record`` map for every online node."""
-        return {group: record for group in self.online_nodes() if (record := self.get(group)) is not None}
+        """A ``node_id -> live record`` map for every online node.
 
-    def _live_members(self, node_id: str) -> dict[str, R]:
-        """Members that are supported (schema) and live (staleness) — filter, no tie-break."""
+        Uses one ``now`` for the whole snapshot (consistent across groups) and
+        computes each group's live set exactly once — it never recomputes via
+        ``online_nodes()``/``get()`` nor samples the clock twice for one group.
+        """
         now = datetime.now(tz=timezone.utc)
+        out: dict[str, R] = {}
+        for group in self._table.groups():
+            live = self._live_members(group, now)
+            if live:
+                out[group] = max(live.values(), key=lambda record: record.last_heartbeat_at)
+        return out
+
+    def _live_members(self, node_id: str, now: datetime) -> dict[str, R]:
+        """Members that are supported (schema) and live (staleness) — filter, no tie-break."""
         live: dict[str, R] = {}
         for worker_id, record in self._table.members(node_id).items():
             if record.schema_version > self._reader_version:
-                continue  # skip records written by a newer schema major (spec §8)
+                self._log_schema_skip(node_id, worker_id, record.schema_version)
+                continue
             threshold = self._stale_after if self._stale_after is not None else STALE_MULTIPLIER * record.heartbeat_interval
             if (now - record.last_heartbeat_at).total_seconds() > threshold:
                 continue  # stale (spec §9)
             live[worker_id] = record
         return live
+
+    def _log_schema_skip(self, node_id: str, worker_id: str, schema_version: int) -> None:
+        """Warn once per ``(node, worker, version)`` that a newer-schema record is hidden (spec §8).
+
+        A record from a newer schema major decodes fine but is unsupported here, so it
+        is filtered out — which would otherwise make a live node silently vanish from the
+        view. Dedup keeps this off the read hot-path; a further major re-warns, and it
+        self-heals once the reader upgrades.
+        """
+        key = (node_id, worker_id, schema_version)
+        if key in self._logged_skips:
+            return
+        self._logged_skips.add(key)
+        logger.warning(
+            "control-plane view hiding node=%s worker=%s: record schema_version=%d > reader version=%d "
+            "(node invisible to this reader until it upgrades)",
+            node_id,
+            worker_id,
+            schema_version,
+            self._reader_version,
+        )
 
     # -- health passthrough (closes frozen-view blindness, spec §9) ----------
 

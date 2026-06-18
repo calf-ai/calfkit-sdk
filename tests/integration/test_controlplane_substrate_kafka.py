@@ -20,7 +20,7 @@ from ktables import GroupedKafkaTable, GroupedKafkaTableWriter
 
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneIdentity, ControlPlaneRecord, ControlPlaneView
 from calfkit.controlplane.advert import AdvertInfo, advertises
-from calfkit.controlplane.publisher import ControlPlanePublisher
+from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.nodes import BaseNodeDef
 
 pytestmark = pytest.mark.kafka
@@ -45,7 +45,7 @@ async def _start_publisher(
         adverts=[(node, _only_advert(node))],
         config=ControlPlaneConfig(heartbeat_interval=0.05, bootstrap_servers=bootstrap),
     )
-    ctx = SimpleNamespace(resources={ControlPlanePublisher._writer_key(topic): writer})
+    ctx = SimpleNamespace(resources={control_plane_writer_key(topic): writer})
     await pub.start(ctx)
     return writer, pub, ctx
 
@@ -154,3 +154,50 @@ async def test_unreachable_view_fails_loud(topic_namespace: str) -> None:
     finally:
         with contextlib.suppress(Exception):
             await view.stop()
+
+
+async def test_worker_wiring_round_trip(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """The worker's OWN auto-wired publisher + writer resource round-trip on a real broker.
+
+    Drives the worker-built `ControlPlanePublisher` against the worker-registered writer
+    `@resource` (looked up under `control_plane_writer_key`) — so the worker-registers ↔
+    publisher-looks-up key seam is exercised end-to-end, not via a hand-built publisher.
+    """
+    from calfkit.client.client import Client
+    from calfkit.provisioning import ProvisioningConfig
+    from calfkit.worker.worker import Worker
+
+    topic = f"{topic_namespace}.presence"
+
+    class _Node(BaseNodeDef):
+        @advertises(topic=topic, record=_Rec)
+        def _record(self, identity: ControlPlaneIdentity) -> _Rec:
+            return _Rec(**identity.model_dump(), kind="agent")
+
+    node = _Node(node_id="agent-1", subscribe_topics=["agent-1.in"])
+    client = Client.connect(kafka_bootstrap, provisioning=ProvisioningConfig(enabled=True))
+    worker = Worker(client, nodes=[node], control_plane=ControlPlaneConfig(heartbeat_interval=0.05, bootstrap_servers=kafka_bootstrap))
+    worker._maybe_register_control_plane()
+
+    key = control_plane_writer_key(topic)
+    [(_, genfn)] = [(n, g) for n, g in worker._resource_cms() if n == key]  # the worker-registered writer resource
+    writer_gen = genfn(None)  # type: ignore[arg-type]
+    writer = await anext(writer_gen)  # ensure_topic=True via provisioning creates the compacted topic
+    pub = worker._control_plane_publisher
+    assert pub is not None
+    ctx = SimpleNamespace(resources={key: writer})  # the bag the publisher reads under the same key
+    view: ControlPlaneView[_Rec] = ControlPlaneView.open(bootstrap_servers=kafka_bootstrap, topic=topic, record_type=_Rec, ensure_topic=False)
+    await view.start()
+    try:
+        await pub.start(ctx)  # looks up the writer under control_plane_writer_key — the key the worker registered
+        assert await _poll(view.barrier, lambda: view.get("agent-1") is not None)
+        rec = view.get("agent-1")
+        assert rec is not None and rec.kind == "agent"
+        await pub.stop(ctx)
+        assert await _poll(view.barrier, lambda: view.get("agent-1") is None)
+    finally:
+        if pub._task is not None:
+            await pub.stop(ctx)
+        await view.stop()
+        with pytest.raises(StopAsyncIteration):
+            await anext(writer_gen)

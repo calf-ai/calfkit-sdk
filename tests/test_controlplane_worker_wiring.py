@@ -13,7 +13,7 @@ import pytest
 
 from calfkit.client.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneIdentity, ControlPlaneRecord, advertises
-from calfkit.controlplane.publisher import ControlPlanePublisher
+from calfkit.controlplane.publisher import control_plane_writer_key
 from calfkit.nodes import BaseNodeDef
 from calfkit.worker.worker import Worker
 
@@ -58,7 +58,7 @@ def resource_names(worker: Worker) -> list[str]:
 
 
 def _wkey(topic: str) -> str:
-    return ControlPlanePublisher._writer_key(topic)
+    return control_plane_writer_key(topic)
 
 
 # -- registration mechanics --------------------------------------------------
@@ -194,3 +194,25 @@ async def test_writer_ensure_topic_follows_provisioning(fake_writer: type[_FakeW
     gen, writer = await _drive(worker, "calf.a")
     assert writer.kwargs["ensure_topic"] is True
     await _close(gen)
+
+
+# -- call-site + lifecycle boundary ------------------------------------------
+
+
+def test_register_handlers_wires_the_control_plane() -> None:
+    # the real call site: register_handlers() must invoke the control-plane wiring
+    client = Client.connect("kafka:9092")
+    worker = Worker(client, nodes=[_node(_OneTopic, "n1")])
+    worker.register_handlers()
+    assert _wkey("calf.a") in resource_names(worker)
+    assert worker._control_plane_publisher is not None
+
+
+def test_node_added_after_prepare_does_not_join_a_plane() -> None:
+    # _prepared latches at register_handlers; a node added afterward is not wired (documented boundary)
+    client = Client.connect("kafka:9092")
+    worker = Worker(client, nodes=[_node(_OneTopic, "n1")])
+    worker.register_handlers()  # latches _prepared
+    worker.add_nodes(_node(_TwoTopics, "n2"))  # advertises calf.a + calf.b
+    worker.register_handlers()  # guarded no-op
+    assert _wkey("calf.b") not in resource_names(worker)  # the late node's new topic never wired

@@ -10,6 +10,7 @@ it arrives on the record (spec §5, §9).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 STALE_MULTIPLIER = 3
@@ -39,9 +40,10 @@ class ControlPlaneConfig:
     bootstrap_servers: str | None = None
 
     def __post_init__(self) -> None:
-        if self.heartbeat_interval <= 0:
-            raise ValueError(f"heartbeat_interval must be > 0, got {self.heartbeat_interval}")
-        if self.catchup_timeout <= 0:
-            raise ValueError(f"catchup_timeout must be > 0, got {self.catchup_timeout}")
-        if self.stale_after is not None and self.stale_after <= 0:
-            raise ValueError(f"stale_after must be > 0 or None, got {self.stale_after}")
+        # `not isfinite(...)` guards NaN/inf, which slip past every `<= 0` comparison.
+        if not math.isfinite(self.heartbeat_interval) or self.heartbeat_interval <= 0:
+            raise ValueError(f"heartbeat_interval must be a finite number > 0, got {self.heartbeat_interval}")
+        if not math.isfinite(self.catchup_timeout) or self.catchup_timeout <= 0:
+            raise ValueError(f"catchup_timeout must be a finite number > 0, got {self.catchup_timeout}")
+        if self.stale_after is not None and (not math.isfinite(self.stale_after) or self.stale_after <= 0):
+            raise ValueError(f"stale_after must be a finite number > 0 or None, got {self.stale_after}")

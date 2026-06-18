@@ -28,6 +28,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def control_plane_writer_key(topic: str) -> str:
+    """The worker resource-bag key for the control-plane writer of ``topic``.
+
+    The single shared contract between the worker (which registers the writer
+    ``@resource`` under this key) and the publisher (which looks it up in
+    ``ctx.resources``). One public home for the key, so neither side reaches into
+    a private of the other.
+    """
+    return f"calfkit.controlplane.writer.{topic}"
+
+
 class ControlPlanePublisher:
     """Worker-owned heartbeat publisher + ordered tombstone (spec §7, ADR-0011)."""
 
@@ -42,6 +53,9 @@ class ControlPlanePublisher:
         self._adverts = adverts
         self._config = config
         self._task: asyncio.Task[None] | None = None
+        # Set in stop() before the loop is cancelled; the seam a future publish_now()
+        # will check. The tick loop's resurrection-safety is cancel-before-delete, NOT
+        # this flag (the loop never reads it).
         self._shutting_down = False
         self._started_at: AwareDatetime | None = None
 
@@ -74,7 +88,9 @@ class ControlPlanePublisher:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         for node, info in self._adverts:
-            writer = ctx.resources.get(self._writer_key(info.topic))
+            # Best-effort: a missing writer at shutdown (e.g. a resource that failed to
+            # open) must not raise mid-teardown and abort the remaining tombstones.
+            writer = ctx.resources.get(control_plane_writer_key(info.topic))
             if writer is not None:
                 await writer.delete(node.node_id, self._worker_id)
 
@@ -97,7 +113,7 @@ class ControlPlanePublisher:
 
     async def _publish_one(self, ctx: ServingContext, node: BaseNodeDef, info: AdvertInfo, now: AwareDatetime) -> None:
         assert self._started_at is not None  # set in start() before any publish
-        writer = ctx.resources[self._writer_key(info.topic)]  # KeyError => wiring bug (fail-loud at start)
+        writer = ctx.resources[control_plane_writer_key(info.topic)]  # KeyError => wiring bug (fail-loud at start)
         identity = ControlPlaneIdentity(
             node_id=node.node_id,
             worker_id=self._worker_id,
@@ -107,7 +123,3 @@ class ControlPlanePublisher:
         )
         record = getattr(node, info.name)(identity)  # opaque ControlPlaneRecord
         await writer.set(node.node_id, self._worker_id, record)
-
-    @staticmethod
-    def _writer_key(topic: str) -> str:
-        return f"calfkit.controlplane.writer.{topic}"

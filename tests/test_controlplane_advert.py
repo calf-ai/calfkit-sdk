@@ -164,3 +164,13 @@ def test_advert_info_rejects_empty_topic() -> None:
 def test_advert_info_rejects_empty_name() -> None:
     with pytest.raises(ValueError, match="name"):
         AdvertInfo(topic="t", record=_Rec, name="")
+
+
+def test_advert_info_rejects_non_record_type() -> None:
+    # AdvertInfo is public/constructible directly; self-validate the record type
+    # (parity with the @advertises decorator and HandlerInfo's self-validation).
+    class NotARecord:
+        pass
+
+    with pytest.raises(ValueError, match="ControlPlaneRecord"):
+        AdvertInfo(topic="t", record=NotARecord, name="x")  # type: ignore[arg-type]

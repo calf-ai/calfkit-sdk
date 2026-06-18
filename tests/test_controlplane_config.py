@@ -47,3 +47,15 @@ def test_is_frozen() -> None:
     cfg = ControlPlaneConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.heartbeat_interval = 10.0  # type: ignore[misc]
+
+
+def test_rejects_nonfinite_fields() -> None:
+    # NaN slips past every `> 0` / `<= 0` comparison, so guard finiteness explicitly:
+    # nan heartbeat => hot loop + poisoned staleness; nan stale_after => nothing ever stale.
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="heartbeat_interval"):
+            ControlPlaneConfig(heartbeat_interval=bad)
+        with pytest.raises(ValueError, match="catchup_timeout"):
+            ControlPlaneConfig(catchup_timeout=bad)
+        with pytest.raises(ValueError, match="stale_after"):
+            ControlPlaneConfig(stale_after=bad)

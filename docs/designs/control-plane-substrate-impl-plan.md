@@ -269,15 +269,15 @@ Notes:
 self._control_plane = control_plane if control_plane is not None else ControlPlaneConfig()
 
 def _maybe_register_control_plane(self) -> None:
+    if self._control_plane_publisher is not None:   # idempotent: only wire once
+        return
     adverts = [(node, info) for node in self._nodes for info in type(node)._adverts.values()]
     if not adverts:
         return
-    topics = {info.topic for _, info in adverts}
-    for topic in topics:
-        key = ControlPlanePublisher._writer_key(topic)
-        if any(name == key for name, _ in self._resource_cms()):
-            continue
-        self.resource(name=key)(self._make_control_plane_writer_resource(topic))
+    # distinct topics => distinct keys, registered once; the guard above makes the whole
+    # method idempotent, so no per-key dedup is needed.
+    for topic in {info.topic for _, info in adverts}:
+        self.resource(name=control_plane_writer_key(topic))(self._make_control_plane_writer_resource(topic))
     publisher = ControlPlanePublisher(worker_id=self.id, adverts=adverts, config=self._control_plane)
     self._control_plane_publisher = publisher
     self.after_startup(publisher.start)
