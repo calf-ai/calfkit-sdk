@@ -9,6 +9,8 @@ from faststream import FastStream
 from typing_extensions import Self
 
 from calfkit.client import Client
+from calfkit.controlplane.config import ControlPlaneConfig
+from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
 from calfkit.models.tool_dispatch import ToolSelector
 from calfkit.nodes import BaseNodeDef
@@ -17,6 +19,7 @@ from calfkit.worker.lifecycle import (
     PHASE_PAIRS,
     LifecycleContext,
     LifecycleHookMixin,
+    ResourceGenFn,
     ResourceSetupContext,
     ServingContext,
     SupportsLifecycleHooks,
@@ -66,6 +69,7 @@ class Worker(LifecycleHookMixin):
         id: str | None = None,
         name: str | None = None,
         mcp_discovery: MCPDiscoveryConfig | None = None,
+        control_plane: ControlPlaneConfig | None = None,
     ):
         """Initialize a worker.
 
@@ -90,6 +94,10 @@ class Worker(LifecycleHookMixin):
                 (topic, catch-up timeout, bootstrap override). Entirely
                 optional — the Capability View is auto-registered with
                 defaults whenever a hosted agent declares MCP tool selectors.
+            control_plane: Optional tuning for the control-plane substrate
+                (heartbeat interval, staleness, catch-up timeout, bootstrap
+                override). The publisher is auto-registered with defaults
+                whenever a hosted node declares an advert (``@advertises``).
         """
         if id is not None and not id.strip():
             raise ValueError("id must be a non-empty string or None")
@@ -97,6 +105,7 @@ class Worker(LifecycleHookMixin):
             raise ValueError("name must be a non-empty string or None")
         self._client = client
         self._mcp_discovery = mcp_discovery if mcp_discovery is not None else MCPDiscoveryConfig()
+        self._control_plane = control_plane if control_plane is not None else ControlPlaneConfig()
         self._max_workers = max_workers
         self._group_id = group_id
         self._extra_publish_kwargs = extra_publish_kwargs
@@ -105,6 +114,7 @@ class Worker(LifecycleHookMixin):
         self._id = id if id is not None else uuid_utils.uuid7().hex
         self._name = name if name is not None else self._id
         self._started = False
+        self._control_plane_publisher: ControlPlanePublisher | None = None
 
         # Lifecycle bracket stacks. ``resource`` brackets (callbacks + @resource)
         # are entered before the broker starts and torn down after it stops;
@@ -222,6 +232,55 @@ class Worker(LifecycleHookMixin):
             bootstrap = servers if isinstance(servers, str) else ",".join(servers) if servers else None
         return bootstrap
 
+    def _maybe_register_control_plane(self) -> None:
+        """Auto-register the control-plane publisher + per-topic writers (spec §7).
+
+        Zero user wiring: iff any hosted node declares an advert (``@advertises``),
+        register ONE ``GroupedKafkaTableWriter`` resource per distinct advert topic
+        and wire the worker-owned :class:`ControlPlanePublisher` into the serving
+        lifecycle (``after_startup`` publishes + heartbeats; ``on_shutdown``
+        tombstones). Done synchronously here, before the resource phase, so the
+        writers exist when the publisher starts. Idempotent (guarded by the
+        publisher being set once).
+        """
+        if self._control_plane_publisher is not None:
+            return
+        adverts = [(node, info) for node in self._nodes for info in type(node)._adverts.values()]
+        if not adverts:
+            return
+        # Distinct topics => distinct writer keys, registered once; the publisher-set
+        # guard above makes the whole method idempotent, so no per-key dedup is needed.
+        for topic in {info.topic for _, info in adverts}:
+            self.resource(name=control_plane_writer_key(topic))(self._make_control_plane_writer_resource(topic))
+        publisher = ControlPlanePublisher(worker_id=self.id, adverts=adverts, config=self._control_plane)
+        self._control_plane_publisher = publisher
+        self.after_startup(publisher.start)
+        self.on_shutdown(publisher.stop)
+
+    def _make_control_plane_writer_resource(self, topic: str) -> ResourceGenFn["Worker"]:
+        """Build the ``@resource`` genfn that opens a ``GroupedKafkaTableWriter`` for ``topic``."""
+
+        async def _resource(ctx: ResourceSetupContext["Worker"]) -> AsyncIterator[Any]:
+            from ktables import GroupedKafkaTableWriter  # ktables import stays in the worker layer
+
+            bootstrap = self._control_plane.bootstrap_servers or self._derive_bootstrap_servers()
+            if not bootstrap:
+                raise RuntimeError(
+                    f"cannot derive Kafka bootstrap servers for control-plane topic {topic!r} "
+                    "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
+                )
+            writer: GroupedKafkaTableWriter[Any] = GroupedKafkaTableWriter.json(
+                bootstrap_servers=bootstrap,
+                topic=topic,
+                # Writers ensure only in dev/CI; production topics are ops-governed.
+                ensure_topic=self._client._provisioning.enabled,
+            )
+            await writer.start()
+            yield writer
+            await writer.stop()
+
+        return _resource
+
     def register_handlers(self) -> None:
         """Register FastStream subscribers + publishers for every node.
 
@@ -233,6 +292,7 @@ class Worker(LifecycleHookMixin):
             logger.debug("register_handlers() called again; skipping (already prepared)")
             return
         self._maybe_register_capability_view()
+        self._maybe_register_control_plane()
         # Record the nodes we are about to register as the single source of
         # truth for ``_declare_startup_topics``. Snapshot (not alias) so later
         # ``add_nodes`` calls can't retroactively widen the provisioned set
