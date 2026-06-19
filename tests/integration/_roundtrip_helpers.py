@@ -62,6 +62,21 @@ def scripted_model(tool_calls: list[ToolCallPart]) -> FunctionModel:
     return FunctionModel(_fn)
 
 
+def final_model(text: str = FINAL_OUTPUT) -> FunctionModel:
+    """A model that finalizes immediately with *text* — no tool calls, ever.
+
+    For seam tests whose body must run and produce an output (e.g. an ``after_node``
+    replacement, or a ``before_node`` recorder that declines) without dispatching any
+    tools. Distinct from ``scripted_model([])`` (which would emit an empty tool-call
+    turn, not a finalization).
+    """
+
+    def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(text)])
+
+    return FunctionModel(_fn)
+
+
 def reactive_model(decide: Callable[[dict[str, object]], list[ToolCallPart] | None]) -> FunctionModel:
     """A multi-turn model driven by the tool returns seen so far.
 
