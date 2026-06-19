@@ -198,6 +198,47 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     await agent_worker._client.close()
 
 
+async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """An MCP ``isError=True`` result (a domain failure by MCP convention) rides the reply
+    slot as an ordinary, model-visible return — NOT the fault rail, and NOT ``calf.retry``-
+    marked (the temporary PR-6 passthrough; catalogue XC-5). The agent sees it and
+    finalizes normally, and the error content travels back in history."""
+    agent_id = f"{topic_namespace}-mcp-iserror"
+    agent_in = f"{topic_namespace}.mcp-iserror.input"
+    cap_topic = f"{topic_namespace}.capabilities"
+    discovery = _discovery(cap_topic, kafka_bootstrap)
+
+    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    agent = Agent(
+        agent_id,
+        system_prompt="call domain_error",
+        subscribe_topics=agent_in,
+        model_client=scripted_model([ToolCallPart("domain_error", {}, tool_call_id="call-err")]),
+        tools=[toolbox.select(include=["domain_error"])],
+    )
+
+    driver = Client.connect(kafka_bootstrap)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+
+    async with toolbox_worker:
+        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        async with agent_worker:
+            result = await driver.execute("trigger the error", agent_in, timeout=120)
+
+    # Finalized normally — the isError result was recoverable/model-visible, not a fault.
+    assert result.output is not None and FINAL_OUTPUT in result.output
+    # It arrived as an ORDINARY return (tool_returns collects ToolReturnParts only), carrying
+    # the isError result through transparently.
+    returns = tool_returns(result.message_history)
+    assert "domain_error" in returns
+    assert "isError" in _serialized(returns["domain_error"])
+
+    await driver.close()
+    await toolbox_worker._client.close()
+    await agent_worker._client.close()
+
+
 async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, topic_namespace: str) -> None:
     """Two distinct tool calls in one model turn drive the durable in-node
     fan-out path: both dispatch concurrently, execute on the real MCP server,

@@ -43,6 +43,14 @@ def danger() -> str:
     return "danger-result"
 
 
+@mcp.tool()
+def domain_error() -> str:
+    """Raise a domain error → FastMCP returns a ``CallToolResult`` with ``isError=True``
+    (a model-visible failure by MCP convention). calfkit passes this through transparently
+    as an ordinary return — NOT the fault rail (the temporary PR-6 behavior)."""
+    raise ValueError("domain failure")
+
+
 def _bonus_impl() -> str:
     """The tool registered at runtime by :func:`enable_bonus`."""
     return "bonus-result"
