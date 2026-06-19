@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # The worker owns the control-plane publisher; nodes contribute only record content

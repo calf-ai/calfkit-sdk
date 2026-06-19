@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Control-plane records are instance-keyed, but the view collapses to one record per node
