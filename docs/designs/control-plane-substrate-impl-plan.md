@@ -23,7 +23,7 @@ New package `calfkit/controlplane/`:
 | File | Contents | Imports ktables? |
 |---|---|---|
 | `calfkit/controlplane/__init__.py` | Public exports | no (re-exports only) |
-| `calfkit/controlplane/records.py` | `ControlPlaneRecord` base, `ControlPlaneIdentity` envelope | no |
+| `calfkit/controlplane/records.py` | `ControlPlaneStamp` envelope, `ControlPlaneRecord` base (extends it) | no |
 | `calfkit/controlplane/advert.py` | `advertises` decorator, `AdvertInfo`, `AdvertRegistryMixin`, `advert_info` | no |
 | `calfkit/controlplane/config.py` | `ControlPlaneConfig`, `STALE_MULTIPLIER` | no |
 | `calfkit/controlplane/view.py` | `ControlPlaneView[R]` (+ `GroupedTableReader` Protocol for fakes) | **yes** (`GroupedKafkaTable`) |
@@ -35,7 +35,7 @@ Touched existing files:
 |---|---|
 | `calfkit/nodes/base.py` | add `AdvertRegistryMixin` to `BaseNodeDef`'s bases (alongside `LifecycleHookMixin, RegistryMixin`); import from `calfkit.controlplane.advert` (the submodule, **not** the package `__init__`, to avoid pulling ktables into the node layer) |
 | `calfkit/worker/worker.py` | add `control_plane: ControlPlaneConfig` ctor param + `self._control_plane`; add `_maybe_register_control_plane()` (called from `register_handlers`); add `_make_control_plane_writer_resource(topic)` |
-| `calfkit/__init__.py` (or top-level exports) | export `ControlPlaneRecord`, `ControlPlaneIdentity`, `advertises`, `ControlPlaneView`, `ControlPlaneConfig` (per the existing top-level-export convention) |
+| `calfkit/__init__.py` (or top-level exports) | export `ControlPlaneRecord`, `ControlPlaneStamp`, `advertises`, `ControlPlaneView`, `ControlPlaneConfig` (per the existing top-level-export convention) |
 
 ## 3. Component designs (precise signatures)
 
@@ -44,26 +44,21 @@ Touched existing files:
 ```python
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
-class ControlPlaneRecord(BaseModel):
-    model_config = ConfigDict(extra="ignore")    # tolerant reader (additive forward-compat)
-    schema_version: int                          # NO default on the base; each subclass sets one
-    node_id: str
-    worker_id: str
+class ControlPlaneStamp(BaseModel):
+    model_config = ConfigDict(frozen=True)
     started_at: AwareDatetime
     last_heartbeat_at: AwareDatetime
     heartbeat_interval: float                    # the WRITER's cadence (seconds) — the C1 field
 
-class ControlPlaneIdentity(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    node_id: str
-    worker_id: str
-    started_at: AwareDatetime
-    last_heartbeat_at: AwareDatetime
-    heartbeat_interval: float
+class ControlPlaneRecord(ControlPlaneStamp):
+    model_config = ConfigDict(extra="ignore", frozen=True)  # tolerant reader (additive forward-compat)
+    schema_version: int                          # NO default on the base; each subclass sets one
 ```
 
-- The base intentionally has **no** `schema_version` default, so it is abstract-by-omission (a subclass *must* set one — `schema_version: int = N`). This is load-bearing: `ControlPlaneView` derives its reader version from that default and **rejects a record type without one** at construction (§3.4), so a missing default fails loud at view build, not as a `TypeError` on every read. Concrete records construct as `MyRecord(**identity.model_dump(), <content>)`.
-- `ControlPlaneIdentity` is what the publisher stamps and passes to factories; its 5 fields are exactly the base's non-`schema_version` fields, so `**identity.model_dump()` fills them.
+- **Identity is the wire key, not a value field (ADR-0010 Option D).** `node_id`/`worker_id` are the ktables composite key (group × member); they never live in the record value, so a value can never disagree with its key. The record carries only the worker stamp (boot + liveness + cadence) + `schema_version` + content.
+- `ControlPlaneRecord` **extends** `ControlPlaneStamp`, so the three worker-stamped fields are declared exactly once. A record *is-a* stamp-plus-`schema_version`-plus-content; `model_config` merges along the MRO (the record adds `extra="ignore"`; `frozen` is inherited).
+- The base intentionally has **no** `schema_version` default, so it is abstract-by-omission (a subclass *must* set one — `schema_version: int = N`). This is load-bearing: `ControlPlaneView` derives its reader version from that default and **rejects a record type without one** at construction (§3.4), so a missing default fails loud at view build, not as a `TypeError` on every read. Concrete records construct as `MyRecord(**stamp.model_dump(), <content>)`.
+- `ControlPlaneStamp` is what the publisher builds fresh each tick and passes to factories; its 3 fields are exactly the base's non-`schema_version` fields, so `**stamp.model_dump()` fills them.
 
 ### 3.2 `advert.py`
 
@@ -90,7 +85,7 @@ class AdvertRegistryMixin:
         # (most-derived wins, like _handlers); build {topic: info} with topic-uniqueness:
         #   duplicate topic across two attrs => RegistryConfigError at class definition.
         cls._adverts = ...
-    def control_plane_adverts(self) -> dict[str, Callable[[ControlPlaneIdentity], ControlPlaneRecord]]:
+    def control_plane_adverts(self) -> dict[str, Callable[[ControlPlaneStamp], ControlPlaneRecord]]:
         return {topic: getattr(self, info.name) for topic, info in type(self)._adverts.items()}
 ```
 
@@ -245,22 +240,22 @@ class ControlPlanePublisher:
 
     async def _publish_one(self, ctx, node, info, now) -> None:
         assert self._started_at is not None        # set in start() before any publish (also narrows for mypy)
-        writer = ctx.resources[self._writer_key(info.topic)]   # KeyError => wiring bug (fail-loud at start)
-        identity = ControlPlaneIdentity(
-            node_id=node.node_id, worker_id=self._worker_id, started_at=self._started_at,
-            last_heartbeat_at=now, heartbeat_interval=self._config.heartbeat_interval)
-        record = getattr(node, info.name)(identity)            # opaque ControlPlaneRecord
-        await writer.set(node.node_id, self._worker_id, record)
+        writer = ctx.resources[control_plane_writer_key(info.topic)]   # KeyError => wiring bug (fail-loud at start)
+        stamp = ControlPlaneStamp(
+            started_at=self._started_at,
+            last_heartbeat_at=now, heartbeat_interval=self._config.heartbeat_interval)   # NO identity (Option D)
+        record = getattr(node, info.name)(stamp)              # opaque ControlPlaneRecord
+        await writer.set(node.node_id, self._worker_id, record)   # identity is the wire key
 
-    @staticmethod
-    def _writer_key(topic: str) -> str:
-        return f"calfkit.controlplane.writer.{topic}"
+# module-level: the one shared writer-resource-key contract between worker and publisher
+def control_plane_writer_key(topic: str) -> str:
+    return f"calfkit.controlplane.writer.{topic}"
 ```
 
 Notes:
 - `_publish_one` pulls content from the factory each call (pull-only). **Startup is fail-loud:** `start` publishes each advert once and lets any failure propagate (aborting boot, like `MCPToolboxNode._publish_on_startup`; on such a failure the lifecycle runs no `on_shutdown`, so a partially-published record simply goes stale — crash-equivalent and accepted). **Loop ticks are resilient:** `_loop` catches per-advert (log-and-continue; re-raise `CancelledError`), mirroring `MCPToolboxNode._heartbeat_loop`.
 - **Resurrection safety:** `stop` cancels-and-`await`s the loop *before* any `delete`, so no in-flight `set` can land after a `delete` (after `await task`, the task — including any in-flight `set` — is fully resolved or cancelled; the subsequent `delete` therefore wins). The `_shutting_down` flag is set synchronously first; it is the seam a future `publish_now()` push will check.
-- The publisher never imports a concrete record type — `getattr(node, info.name)(identity)` returns an opaque `ControlPlaneRecord`.
+- The publisher never imports a concrete record type — `getattr(node, info.name)(stamp)` returns an opaque `ControlPlaneRecord`.
 
 ### 3.6 Worker wiring (`worker.py`)
 
@@ -312,7 +307,7 @@ Sequencing (verified against the lifecycle): `register_handlers` runs in `_on_st
 **Step 0 — package scaffold.** Create `calfkit/controlplane/__init__.py` (empty exports stub). No tests.
 
 **Step 1 — records (`records.py`).**
-- Tests (`tests/test_controlplane_records.py`): a test subclass `_Rec(ControlPlaneRecord)` with `schema_version=1` + a content field; construct via `_Rec(**identity.model_dump(), content=...)`; assert all base fields populate. Tolerant reader (extra field ignored). Base alone (no `schema_version`) → `ValidationError`. `ControlPlaneIdentity` is frozen.
+- Tests (`tests/test_controlplane_records.py`): a test subclass `_Rec(ControlPlaneRecord)` with `schema_version=1` + a content field; construct via `_Rec(**stamp.model_dump(), content=...)`; assert all base fields populate; assert identity (`node_id`/`worker_id`) is **not** a value field. Tolerant reader (extra field ignored). Base alone (no `schema_version`) → `ValidationError`. Both `ControlPlaneStamp` and `ControlPlaneRecord` are frozen.
 - Implement `records.py`.
 
 **Step 2 — advert decorator + mixin (`advert.py`) + attach to `BaseNodeDef`.**
@@ -336,7 +331,7 @@ Sequencing (verified against the lifecycle): `register_handlers` runs in `_on_st
 
 **Step 5 — publisher (`publisher.py`).**
 - Tests (`tests/test_controlplane_publisher.py`), offline against a **fake writer** (records `set`/`delete` calls) and a fake `ServingContext`:
-  - `start` captures `started_at`, publishes each advert once with a correct `ControlPlaneIdentity` (incl. `heartbeat_interval` from config), keyed `(node_id, worker_id)`, to the right topic's writer.
+  - `start` captures `started_at`, publishes each advert once with a correct `ControlPlaneStamp` (incl. `heartbeat_interval` from config), keyed `(node_id, worker_id)`, to the right topic's writer.
   - **Liveness/content split (the §6 contract):** with a content-bearing test record whose `content_updated_at` is a node-tracked field, two ticks without a content change leave `content_updated_at` fixed while `last_heartbeat_at` advances; a content change moves both. (Drive two publishes via `_publish_one` with an advancing `now`, or run `_loop` at a short interval.)
   - **Tombstone:** `stop` deletes the **declared cross-product** `(node_id, worker_id)` on every advert's topic writer; idempotent (delete of an unwritten key tolerated).
   - **Ordering:** `stop` sets `_shutting_down` and cancels+awaits the loop before any `delete` (assert no `set` recorded after the first `delete`).
@@ -358,7 +353,7 @@ Sequencing (verified against the lifecycle): `register_handlers` runs in `_on_st
   - **Frozen-view:** a view pointed at an unreachable broker (or after the table fails) surfaces via `status`/`failure` (CRITICAL-4) — best-effort; keep robust.
 
 **Step 8 — exports, docs, polish.**
-- Top-level exports (`calfkit/__init__.py`): `ControlPlaneRecord`, `ControlPlaneIdentity`, `advertises`, `ControlPlaneView`, `ControlPlaneConfig` (follow the existing export style + `__all__`).
+- Top-level exports (`calfkit/__init__.py`): `ControlPlaneRecord`, `ControlPlaneStamp`, `advertises`, `ControlPlaneView`, `ControlPlaneConfig` (follow the existing export style + `__all__`).
 - `calfkit/controlplane/__init__.py` exports all public symbols.
 - `/pytest-coverage` to 100% on the new modules; `make fix && make check` clean (offline lane) + `make test-kafka` green.
 - Flip ADR-0010 / ADR-0011 `status: proposed → accepted` at merge.

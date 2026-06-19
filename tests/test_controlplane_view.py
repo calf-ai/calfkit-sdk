@@ -154,6 +154,18 @@ def test_schema_skip_is_logged_once_per_member(caplog: pytest.LogCaptureFixture)
     assert "a" in msg and "w1" in msg
 
 
+def test_schema_skip_dedup_is_per_member_not_per_node(caplog: pytest.LogCaptureFixture) -> None:
+    # The dedup key includes worker_id, so a SECOND newer-schema member on the same node
+    # must still log — one suppressed warning must not hide another instance vanishing.
+    v = _view({"a": {"w1": _rec("w1", schema_version=2), "w2": _rec("w2", schema_version=2)}})
+    with caplog.at_level("WARNING"):
+        v.get("a")
+        v.get("a")  # repeat reads must not multiply the warnings
+    skip_logs = [r for r in caplog.records if "schema" in r.getMessage().lower() and r.levelname == "WARNING"]
+    assert len(skip_logs) == 2  # one per distinct member, deduped across reads
+    assert {"w1", "w2"} == {w for w in ("w1", "w2") if any(w in r.getMessage() for r in skip_logs)}
+
+
 def test_collapse_filters_stale_before_tiebreak() -> None:
     # The member with the NEWEST heartbeat is stale (tiny cadence); the live member is
     # older. filter-then-tie-break must return the older LIVE one — a tie-break-then-filter

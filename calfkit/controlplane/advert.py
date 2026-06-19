@@ -56,11 +56,16 @@ def advertises(topic: str, *, record: type[ControlPlaneRecord]) -> Callable[[_Me
     only effect is an :class:`AdvertInfo` marker read by
     :meth:`AdvertRegistryMixin.__init_subclass__` when the owning class is built.
 
-    The decorated method is a *content factory*: it takes a
-    :class:`~calfkit.controlplane.records.ControlPlaneStamp` (the worker-stamped
+    The decorated method is a *content factory*: it takes a **bare**
+    :class:`~calfkit.controlplane.records.ControlPlaneStamp` (the three worker-stamped
     boot/liveness fields) and returns a fully-formed ``record`` instance —
     typically ``record(**stamp.model_dump(), <content>)``. Node identity is the wire
     key, never in the record value, so there is nothing for the factory to get wrong.
+    Splat the stamp, never a full record: because ``ControlPlaneRecord`` *is-a*
+    ``ControlPlaneStamp``, splatting a record would smuggle in ``schema_version`` and
+    the record's own content keys (a duplicate-kwarg ``TypeError`` the type checker
+    cannot see). The publisher always passes a bare stamp, so this only bites a
+    hand-rolled caller.
 
     The publisher *pulls* this factory once per heartbeat tick, so any "content
     currency" timestamp the record carries (e.g. a ``content_updated_at``) must come

@@ -76,9 +76,9 @@ A node **type** declares what it advertises with a class-level marker decorator,
 class SomeNode(BaseNodeDef):
 
     @advertises(topic="calf.capabilities", record=CapabilityRecord)
-    def _capability_record(self, identity: ControlPlaneIdentity) -> CapabilityRecord:
+    def _capability_record(self, stamp: ControlPlaneStamp) -> CapabilityRecord:
         return CapabilityRecord(
-            **identity.model_dump(),                 # worker-stamped identity + liveness
+            **stamp.model_dump(),                    # worker-stamped boot + liveness + cadence
             dispatch_topic=self.subscribe_topics[0],
             tools=self._current_tools,               # per-instance, node-owned content
             content_updated_at=self._tools_changed_at,
@@ -92,7 +92,7 @@ Design properties (all locked):
 - **Per node type, structural.** The `(topic, record)` binding lives at class scope. Instances of one type therefore advertise to the *same* topic with the *same* schema — required, because a topic's view decodes exactly one `R`; instances differ only in content and identity. The binding is collected per subclass via `__init_subclass__` (the `@handler` pattern: marker-not-wrapper — the method is returned unchanged; MRO-merged so a subclass override wins; fail-fast at class-definition on a duplicate topic, raising `RegistryConfigError`).
 - **One topic ⇒ one record schema (a global, deployment-time invariant).** A topic's `ControlPlaneView` decodes exactly one `R`, so *every* advert on a given topic — across *all* node types, not only instances of one type — must use the same record schema. The per-class duplicate-topic check above cannot catch two *different* types colliding on one topic with different schemas; that is a deployment-time contract (documented, not policed, per the framework's "document, don't police" rule). The failure mode if violated is silent: a foreign-schema payload fails the view's decode and is poison-skipped one layer below, dropping that node from the view.
 - **Opt-in.** A node is on a plane **iff** it declares an `@advertises` method for it. A node with none contributes nothing. A type may declare more than one advert (one per plane it participates in).
-- **Content-only contributor.** The decorated method is a `factory(identity) -> R`: the worker builds and passes the identity envelope, the node composes a complete, valid record in one shot — no placeholder fields, no "these are ignored" contract.
+- **Content-only contributor.** The decorated method is a `factory(stamp) -> R`: the worker builds and passes the `ControlPlaneStamp` envelope (boot + liveness + cadence; identity is the wire key, never in the value — ADR-0010), the node composes a complete, valid record in one shot — no placeholder fields, no "these are ignored" contract.
 - **Worker is use-case-blind.** The worker calls the factory and publishes the result opaquely; it never imports any concrete record type.
 
 **Content propagation is pull-only.** The worker loop calls each advert factory once per heartbeat tick, so a content change (a node mutating its own cached content, e.g. on an MCP `tools/list_changed`) lands at the **next tick** (≤ `heartbeat_interval`). Pull is *correct* (the factory reads the node's current content) and supports the liveness/content split (the worker stamps `last_heartbeat_at` fresh every tick while the record's own `content_updated_at` only moves on a real change). All writes funnel through the publisher (§7), so a future `publish_now()` nudge for immediate propagation is a clean additive extension — deferred until a consumer proves it needs sub-tick latency (only content-mutating planes like capability would; agent cards are effectively static).
@@ -114,11 +114,13 @@ Adverts are bound at `register_handlers` and `_prepared` is latched there, so a 
 
 **One writer per distinct topic.** The publisher opens **one `GroupedKafkaTableWriter` per distinct advert topic** across all hosted nodes; the single loop routes each `(node, advert)` write to that advert's topic writer.
 
-**Instance-keyed publish.** Per tick, for each hosted node and each of its adverts, the publisher builds a fresh `ControlPlaneIdentity` (`node_id=node.node_id`, `worker_id=worker.id`, `started_at`, `last_heartbeat_at=now`, `heartbeat_interval` from config), calls the advert factory, and writes:
+**Instance-keyed publish.** Per tick, for each hosted node and each of its adverts, the publisher builds a fresh `ControlPlaneStamp` (`started_at`, `last_heartbeat_at=now`, `heartbeat_interval` from config — **no identity**, per ADR-0010 Option D), calls the advert factory, and writes the returned record keyed by identity:
 
 ```python
-writer.set(group=node_id, member=worker_id, value=record)
+writer.set(group=node.node_id, member=worker_id, value=record)
 ```
+
+Identity (`node_id × worker_id`) is the wire key alone; the publisher derives it from `node.node_id` and its own `worker_id`, never from the record value.
 
 **Lifecycle** (lifting the proven `MCPToolboxNode` structure to the worker, applied uniformly):
 
@@ -217,7 +219,7 @@ The substrate is deliberately generic so each adopter is mechanical: **define a 
 ## 14. Testing
 
 - **Unit (no broker):**
-  - `ControlPlaneRecord` / `ControlPlaneIdentity` schema versioning + tolerant reader.
+  - `ControlPlaneStamp` / `ControlPlaneRecord` structure (record extends stamp; identity is the wire key, not a value field), schema versioning + tolerant reader.
   - `@advertises` collection: per-type binding, MRO override, duplicate-topic → `RegistryConfigError`, marker-not-wrapper (the decorated method stays directly callable).
   - The view's collapse + staleness filter over a fake grouped table (a plain dict): stale exclusion, the filter-then-tie-break ordering, the `get(g) is not None ⟺ g ∈ online_nodes()` invariant, and skipping a member whose `schema_version` exceeds the reader's.
   - **Staleness derives from the record's `heartbeat_interval`** — a reader configured with a *different* `heartbeat_interval` still judges a writer's records correctly.
