@@ -51,30 +51,20 @@ Defined in `CONTEXT.md` (Control plane section): **Control plane**, **Control Pl
 
 ## 5. The shared record base
 
-A thin base carries identity + liveness so the view's staleness filter depends on exactly one contract and never on a concrete record type. Every concrete plane's record extends it.
+A thin base carries the worker's per-instance liveness so the view's staleness filter depends on exactly one contract and never on a concrete record type. **Node identity (`node_id` × `worker_id`) is the wire key, never carried in the value** — every reader derives it from the key (the `GroupedKafkaTable`'s group × member), so there is nothing to drift.
 
 ```python
-class ControlPlaneRecord(BaseModel):
+class ControlPlaneStamp(BaseModel):              # frozen; the worker stamps these each tick
+    started_at: AwareDatetime                    # this instance's boot time -> uptime / restart detection
+    last_heartbeat_at: AwareDatetime             # liveness basis; refreshed every heartbeat tick
+    heartbeat_interval: float                    # the WRITER's cadence; lets any reader judge staleness (§9)
+
+class ControlPlaneRecord(ControlPlaneStamp):     # the base advertisement
     model_config = ConfigDict(extra="ignore")    # tolerant reader (additive forward-compat)
     schema_version: int                          # default set per subclass; a major bump => old readers skip
-    node_id: str                                 # = group key (kept in the value: self-describing wire record)
-    worker_id: str                               # = member key (the instance; Worker.id)
-    started_at: AwareDatetime                    # this instance's boot time -> uptime + restart detection
-    last_heartbeat_at: AwareDatetime             # liveness basis; refreshed every heartbeat tick
-    heartbeat_interval: float                    # the WRITER's cadence (seconds); lets any reader judge
-                                                 # staleness without knowing the writer's config (§9)
 ```
 
-The worker stamps all five identity/liveness fields; a concrete record adds only its use-case content. Carrying `heartbeat_interval` **on the record** is deliberate (the C1 decision): staleness is judged on the read side, and a reader is routinely a *different* process than the writer — and may be a config-less out-of-process reader — so the staleness threshold cannot live only in the reader's config; it must travel on the wire (§9, §11). The worker hands the stamped fields to the content factory as an **identity envelope**:
-
-```python
-class ControlPlaneIdentity(BaseModel):           # frozen; built fresh by the worker each tick
-    node_id: str
-    worker_id: str
-    started_at: AwareDatetime
-    last_heartbeat_at: AwareDatetime
-    heartbeat_interval: float                    # from the publisher's ControlPlaneConfig
-```
+The record **extends the stamp** (tidy structural form), so the three worker-stamped fields are declared once. A concrete record adds only its use-case content; the factory composes it as `R(**stamp.model_dump(), <content>)` and the publisher writes it under the wire key `(node_id, worker_id)` — the factory never supplies identity, so a value can't disagree with its key. Carrying `heartbeat_interval` **on the record** is deliberate (the C1 decision): staleness is judged on the read side, and a reader is routinely a *different* process than the writer — and may be a config-less out-of-process reader — so the staleness threshold cannot live only in the reader's config; it must travel on the wire (§9, §11).
 
 Schema evolution follows the existing capability pattern: per-record `schema_version` + a tolerant reader for additive fields; a major bump makes old readers treat newer records as "node invisible" (skip + log) rather than crash. The base provides `last_heartbeat_at` (the liveness basis); a content-bearing record that needs to distinguish "alive but content unchanged" adds its own `content_updated_at` (e.g. capability — see the migration spec), refreshed only when content actually changes, never by the heartbeat.
 
@@ -137,6 +127,8 @@ writer.set(group=node_id, member=worker_id, value=record)
 - *`on_shutdown`* (broker live, before stop) — set the shutdown flag **synchronously first** (no await above it), cancel-and-await the loop, then run the tombstone pass. The tombstone target is the **declared cross-product** `{(node_id, topic) : node ∈ hosted, advert ∈ type(node)'s adverts}` — `writer.delete(group=node_id, member=worker_id)` on each, **idempotent** (deleting a key never written is a harmless no-op), so the publisher needs no per-key success bookkeeping that could drift from the loop's in-flight state. **Resurrection-safety invariant:** once the flag is set, no new `set()` may be issued by *either* the tick loop *or* a future `publish_now()`, and the flag is set synchronously before the loop is cancelled — generalising `MCPToolboxNode._tombstone_on_shutdown` so a straggler write can never land after its `delete()`.
 
 **Crash behaviour** (unchanged, accepted): a hard crash skips `on_shutdown`, so the record is **not** tombstoned and instead goes stale (§9).
+
+**Persistent advert failure** (accepted, §3): the heartbeat loop is per-advert resilient — a single failing advert is logged and the rest still publish. A *persistently* failing advert (e.g. a content factory that keeps raising) logs each tick and its node goes stale while alive; escalation/recovery is the SDK-wide error-propagation layer's concern, not this loop's.
 
 **Bootstrap & provisioning.** Bootstrap servers are derived via the existing chain (`worker._derive_bootstrap_servers()` → `client.server_urls` → broker connection kwargs → explicit `ControlPlaneConfig.bootstrap_servers`). Topic compaction (`cleanup.policy=compact`) is delegated to ktables `ensure_topic` in dev/CI (provisioning enabled) or to ops in production (provisioning off by default), consistent with how the capability topic is handled today — calfkit's own provisioner cannot set compaction on a single topic in isolation (its `topic_configs` apply flat to every data topic it creates), whereas ktables `ensure_topic` defaults to `cleanup.policy=compact` for exactly this topic.
 

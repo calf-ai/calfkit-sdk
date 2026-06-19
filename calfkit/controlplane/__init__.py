@@ -9,13 +9,13 @@ topic and read a live view of them. See
 
 from calfkit.controlplane.advert import advertises
 from calfkit.controlplane.config import ControlPlaneConfig
-from calfkit.controlplane.records import ControlPlaneIdentity, ControlPlaneRecord
+from calfkit.controlplane.records import ControlPlaneRecord, ControlPlaneStamp
 from calfkit.controlplane.view import ControlPlaneView
 
 __all__ = [
     "ControlPlaneConfig",
-    "ControlPlaneIdentity",
     "ControlPlaneRecord",
+    "ControlPlaneStamp",
     "ControlPlaneView",
     "advertises",
 ]

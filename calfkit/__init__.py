@@ -1,7 +1,7 @@
 from importlib.metadata import version
 
 from calfkit.client import Client, InvocationHandle, InvocationResult
-from calfkit.controlplane import ControlPlaneConfig, ControlPlaneIdentity, ControlPlaneRecord, ControlPlaneView, advertises
+from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView, advertises
 from calfkit.exceptions import DeserializationError, LifecycleConfigError, NodeFaultError
 from calfkit.models import ErrorReport, FaultTypes, ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, agent_tool, consumer
@@ -42,8 +42,8 @@ __all__ = [
     "ServingContext",
     # control plane
     "ControlPlaneConfig",
-    "ControlPlaneIdentity",
     "ControlPlaneRecord",
+    "ControlPlaneStamp",
     "ControlPlaneView",
     "advertises",
     # exceptions

@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from calfkit.controlplane.records import ControlPlaneIdentity
+from calfkit.controlplane.records import ControlPlaneStamp
 
 if TYPE_CHECKING:
     from pydantic import AwareDatetime
@@ -105,6 +105,9 @@ class ControlPlanePublisher:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    # Accepted (spec §3): a persistently-failing advert logs every tick and its node
+                    # goes stale (alive but unpublished). Escalation/recovery is the SDK-wide
+                    # error-propagation layer's concern, not this loop's.
                     logger.exception(
                         "control-plane publish failed node=%s topic=%s; retry next tick",
                         node.node_id,
@@ -114,12 +117,10 @@ class ControlPlanePublisher:
     async def _publish_one(self, ctx: ServingContext, node: BaseNodeDef, info: AdvertInfo, now: AwareDatetime) -> None:
         assert self._started_at is not None  # set in start() before any publish
         writer = ctx.resources[control_plane_writer_key(info.topic)]  # KeyError => wiring bug (fail-loud at start)
-        identity = ControlPlaneIdentity(
-            node_id=node.node_id,
-            worker_id=self._worker_id,
+        stamp = ControlPlaneStamp(
             started_at=self._started_at,
             last_heartbeat_at=now,
             heartbeat_interval=self._config.heartbeat_interval,
         )
-        record = getattr(node, info.name)(identity)  # opaque ControlPlaneRecord
+        record = getattr(node, info.name)(stamp)  # opaque ControlPlaneRecord; identity is the wire key
         await writer.set(node.node_id, self._worker_id, record)

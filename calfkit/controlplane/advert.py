@@ -57,9 +57,10 @@ def advertises(topic: str, *, record: type[ControlPlaneRecord]) -> Callable[[_Me
     :meth:`AdvertRegistryMixin.__init_subclass__` when the owning class is built.
 
     The decorated method is a *content factory*: it takes a
-    :class:`~calfkit.controlplane.records.ControlPlaneIdentity` (stamped by the
-    worker-owned publisher) and returns a fully-formed ``record`` instance —
-    typically ``record(**identity.model_dump(), <content>)``.
+    :class:`~calfkit.controlplane.records.ControlPlaneStamp` (the worker-stamped
+    boot/liveness fields) and returns a fully-formed ``record`` instance —
+    typically ``record(**stamp.model_dump(), <content>)``. Node identity is the wire
+    key, never in the record value, so there is nothing for the factory to get wrong.
 
     The publisher *pulls* this factory once per heartbeat tick, so any "content
     currency" timestamp the record carries (e.g. a ``content_updated_at``) must come

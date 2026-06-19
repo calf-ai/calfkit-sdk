@@ -34,6 +34,16 @@ Considered and rejected:
   avoids, and it still wouldn't detect crashes without a TTL. Rejected. Instance-keying with a
   read-side grouping is the lightweight, canonical secondary-index pattern.
 
+Identity lives **only in the key**, never in the record value. The value carries the worker stamp
+(boot time, last heartbeat, cadence) + `schema_version` + content; `node_id`/`worker_id` are the wire
+key (group × member) and every reader derives them from it. Duplicating them in the value would be
+redundant and — worse — *driftable* (a factory could return a value whose `node_id` disagreed with
+its key, and the collapsed view reads value and key from different sides). Keeping identity key-only
+makes that disagreement unrepresentable; the modest cost is that a raw value-only dump identifies a
+record by its key rather than a self-describing `node_id` field. The base `ControlPlaneRecord` then
+extends a small `ControlPlaneStamp` (boot + liveness + cadence) so those worker-stamped fields are
+declared once.
+
 A related record-shape decision, made for the same reason — correct reads across the read/write
 process boundary: **the writer's heartbeat cadence travels on the record.** Whether an instance is
 still alive ("staleness") is judged on the *read* side, but a reader is routinely a *different*

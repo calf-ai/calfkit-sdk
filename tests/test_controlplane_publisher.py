@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import AwareDatetime
 
-from calfkit.controlplane import ControlPlaneConfig, ControlPlaneIdentity, ControlPlaneRecord
+from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp
 from calfkit.controlplane.advert import AdvertInfo
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 
@@ -26,11 +26,11 @@ class _CapRec(ControlPlaneRecord):
 class _Node:
     """A node stand-in exposing a fixed factory method named ``make_record``."""
 
-    def __init__(self, node_id: str, factory: Callable[[ControlPlaneIdentity], ControlPlaneRecord]) -> None:
+    def __init__(self, node_id: str, factory: Callable[[ControlPlaneStamp], ControlPlaneRecord]) -> None:
         self.node_id = node_id
         self._factory = factory
 
-    def make_record(self, identity: ControlPlaneIdentity) -> ControlPlaneRecord:
+    def make_record(self, identity: ControlPlaneStamp) -> ControlPlaneRecord:
         return self._factory(identity)
 
 
@@ -38,22 +38,22 @@ def _advert(topic: str, record: type[ControlPlaneRecord] = _Rec) -> AdvertInfo:
     return AdvertInfo(topic=topic, record=record, name="make_record")
 
 
-def _rec_factory(content: str = "x") -> Callable[[ControlPlaneIdentity], ControlPlaneRecord]:
-    def factory(identity: ControlPlaneIdentity) -> ControlPlaneRecord:
+def _rec_factory(content: str = "x") -> Callable[[ControlPlaneStamp], ControlPlaneRecord]:
+    def factory(identity: ControlPlaneStamp) -> ControlPlaneRecord:
         return _Rec(**identity.model_dump(), content=content)
 
     return factory
 
 
-def _cap_factory(content_updated_at: datetime) -> Callable[[ControlPlaneIdentity], ControlPlaneRecord]:
-    def factory(identity: ControlPlaneIdentity) -> ControlPlaneRecord:
+def _cap_factory(content_updated_at: datetime) -> Callable[[ControlPlaneStamp], ControlPlaneRecord]:
+    def factory(identity: ControlPlaneStamp) -> ControlPlaneRecord:
         return _CapRec(**identity.model_dump(), content_updated_at=content_updated_at)
 
     return factory
 
 
-def _boom_factory() -> Callable[[ControlPlaneIdentity], ControlPlaneRecord]:
-    def factory(identity: ControlPlaneIdentity) -> ControlPlaneRecord:
+def _boom_factory() -> Callable[[ControlPlaneStamp], ControlPlaneRecord]:
+    def factory(identity: ControlPlaneStamp) -> ControlPlaneRecord:
         raise RuntimeError("factory boom")
 
     return factory
@@ -98,8 +98,7 @@ async def test_start_publishes_each_advert_once_with_identity() -> None:
     try:
         assert len(writer.sets) == 1
         group, member, record = writer.sets[0]
-        assert (group, member) == ("n1", "wkr")
-        assert record.node_id == "n1" and record.worker_id == "wkr"
+        assert (group, member) == ("n1", "wkr")  # identity is the wire key
         assert record.heartbeat_interval == 3600.0  # stamped from config
         assert record.started_at == pub._started_at
     finally:

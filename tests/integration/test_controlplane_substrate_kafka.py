@@ -18,7 +18,7 @@ import pytest
 from aiokafka.errors import KafkaConnectionError
 from ktables import GroupedKafkaTable, GroupedKafkaTableWriter
 
-from calfkit.controlplane import ControlPlaneConfig, ControlPlaneIdentity, ControlPlaneRecord, ControlPlaneView
+from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView
 from calfkit.controlplane.advert import AdvertInfo, advertises
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.nodes import BaseNodeDef
@@ -64,7 +64,7 @@ async def test_advertise_roundtrip_and_clean_tombstone(kafka_bootstrap: str, top
 
     class _Node(BaseNodeDef):
         @advertises(topic=topic, record=_Rec)
-        def _record(self, identity: ControlPlaneIdentity) -> _Rec:
+        def _record(self, identity: ControlPlaneStamp) -> _Rec:
             return _Rec(**identity.model_dump(), kind="agent")
 
     node = _Node(node_id="agent-1", subscribe_topics=["agent-1.in"])
@@ -96,7 +96,7 @@ async def test_two_worker_same_node_replica_regression(kafka_bootstrap: str, top
 
     class _Node(BaseNodeDef):
         @advertises(topic=topic, record=_Rec)
-        def _record(self, identity: ControlPlaneIdentity) -> _Rec:
+        def _record(self, identity: ControlPlaneStamp) -> _Rec:
             return _Rec(**identity.model_dump(), kind="agent")
 
     # Two instances of the SAME node_id, hosted by two workers (members w-a, w-b).
@@ -171,7 +171,7 @@ async def test_worker_wiring_round_trip(kafka_bootstrap: str, topic_namespace: s
 
     class _Node(BaseNodeDef):
         @advertises(topic=topic, record=_Rec)
-        def _record(self, identity: ControlPlaneIdentity) -> _Rec:
+        def _record(self, identity: ControlPlaneStamp) -> _Rec:
             return _Rec(**identity.model_dump(), kind="agent")
 
     node = _Node(node_id="agent-1", subscribe_topics=["agent-1.in"])

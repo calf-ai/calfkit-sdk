@@ -14,16 +14,14 @@ class _Rec(ControlPlaneRecord):
     content: str
 
 
-def _rec(worker_id: str, *, age_s: float = 0.0, hb: float = 30.0, schema_version: int = 1, content: str = "x") -> _Rec:
+def _rec(worker_id: str, *, age_s: float = 0.0, hb: float = 30.0, schema_version: int = 1, content: str | None = None) -> _Rec:
     now = datetime.now(tz=timezone.utc)
     return _Rec(
         schema_version=schema_version,
-        node_id="n",
-        worker_id=worker_id,
         started_at=now,
         last_heartbeat_at=now - timedelta(seconds=age_s),
         heartbeat_interval=hb,
-        content=content,
+        content=content if content is not None else worker_id,  # default content = the instance label (identity is the key)
     )
 
 
@@ -84,7 +82,7 @@ def _view(data: dict[str, dict[str, _Rec]], **kwargs: Any) -> ControlPlaneView[_
 def test_get_returns_live_record() -> None:
     v = _view({"a": {"w1": _rec("w1")}})
     rec = v.get("a")
-    assert rec is not None and rec.worker_id == "w1"
+    assert rec is not None and rec.content == "w1"
     assert v.online_nodes() == {"a"}
     assert set(v.snapshot()) == {"a"}
 
@@ -97,7 +95,7 @@ def test_get_none_for_unknown_node() -> None:
 def test_collapse_picks_most_recent_live_instance() -> None:
     v = _view({"a": {"w1": _rec("w1", age_s=20.0), "w2": _rec("w2", age_s=1.0)}})
     rec = v.get("a")
-    assert rec is not None and rec.worker_id == "w2"  # freshest heartbeat wins
+    assert rec is not None and rec.content == "w2"  # freshest heartbeat wins
 
 
 def test_stale_member_excluded() -> None:
@@ -169,7 +167,7 @@ def test_collapse_filters_stale_before_tiebreak() -> None:
         }
     )
     rec = v.get("a")
-    assert rec is not None and rec.worker_id == "w_old_live"
+    assert rec is not None and rec.content == "w_old_live"
     assert v.online_nodes() == {"a"}
 
 
@@ -184,7 +182,7 @@ def test_collapse_filters_newer_schema_before_tiebreak() -> None:
         }
     )
     rec = v.get("a")
-    assert rec is not None and rec.worker_id == "w_old_live"
+    assert rec is not None and rec.content == "w_old_live"
     assert v.online_nodes() == {"a"}
 
 

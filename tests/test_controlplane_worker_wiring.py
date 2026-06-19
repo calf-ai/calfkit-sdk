@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from calfkit.client.client import Client
-from calfkit.controlplane import ControlPlaneConfig, ControlPlaneIdentity, ControlPlaneRecord, advertises
+from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, advertises
 from calfkit.controlplane.publisher import control_plane_writer_key
 from calfkit.nodes import BaseNodeDef
 from calfkit.worker.worker import Worker
@@ -25,23 +25,23 @@ class _Rec(ControlPlaneRecord):
 
 class _OneTopic(BaseNodeDef):
     @advertises(topic="calf.a", record=_Rec)
-    def _ra(self, identity: ControlPlaneIdentity) -> _Rec:
+    def _ra(self, identity: ControlPlaneStamp) -> _Rec:
         return _Rec(**identity.model_dump(), content="a")
 
 
 class _AlsoTopicA(BaseNodeDef):
     @advertises(topic="calf.a", record=_Rec)
-    def _r(self, identity: ControlPlaneIdentity) -> _Rec:
+    def _r(self, identity: ControlPlaneStamp) -> _Rec:
         return _Rec(**identity.model_dump(), content="other")
 
 
 class _TwoTopics(BaseNodeDef):
     @advertises(topic="calf.a", record=_Rec)
-    def _ra(self, identity: ControlPlaneIdentity) -> _Rec:
+    def _ra(self, identity: ControlPlaneStamp) -> _Rec:
         return _Rec(**identity.model_dump(), content="a")
 
     @advertises(topic="calf.b", record=_Rec)
-    def _rb(self, identity: ControlPlaneIdentity) -> _Rec:
+    def _rb(self, identity: ControlPlaneStamp) -> _Rec:
         return _Rec(**identity.model_dump(), content="b")
 
 
