@@ -62,11 +62,13 @@ class FaultTap:
                 raise AssertionError("no FaultMessage observed on the tapped topic within the timeout")
             try:
                 envelope, headers = await self.next_envelope(timeout=remaining)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 # No message before the deadline — surface the single, predictable failure
                 # mode (AssertionError) on the next loop, so callers asserting "no fault
                 # arrived" can ``pytest.raises(AssertionError)`` rather than catch a raw
-                # asyncio TimeoutError.
+                # timeout. Catch ``asyncio.TimeoutError`` (what ``wait_for`` raises), NOT the
+                # builtin ``TimeoutError``: on Python <= 3.10 they are distinct classes, so
+                # ``except TimeoutError`` would miss it (it is only an alias on 3.11+).
                 continue
             if isinstance(envelope.reply, FaultMessage):
                 return envelope.reply, headers
