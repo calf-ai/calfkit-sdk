@@ -22,7 +22,7 @@ def test_resolve_specs_single_node() -> None:
 
     objs = resolve_specs([f"{_FIXTURE}:single"])
     assert len(objs) == 1
-    assert objs[0].node_id == "tool_echo"
+    assert objs[0].node_id == "echo"
 
 
 def test_resolve_specs_expands_iterable_attr() -> None:
@@ -30,7 +30,7 @@ def test_resolve_specs_expands_iterable_attr() -> None:
     from calfkit.cli._loader import resolve_specs
 
     objs = resolve_specs([f"{_FIXTURE}:nodes"])
-    assert [o.node_id for o in objs] == ["tool_alpha", "tool_beta"]
+    assert [o.node_id for o in objs] == ["alpha", "beta"]
 
 
 def test_resolve_specs_multiple_specs_concatenate_in_order() -> None:
@@ -38,7 +38,7 @@ def test_resolve_specs_multiple_specs_concatenate_in_order() -> None:
     from calfkit.cli._loader import resolve_specs
 
     objs = resolve_specs([f"{_FIXTURE}:single", f"{_FIXTURE}:nodes"])
-    assert [o.node_id for o in objs] == ["tool_echo", "tool_alpha", "tool_beta"]
+    assert [o.node_id for o in objs] == ["echo", "alpha", "beta"]
 
 
 def test_resolve_specs_bad_spec_exits_2() -> None:
@@ -88,7 +88,7 @@ def test_resolve_specs_app_dir_enables_nested_dotted_import(tmp_path: object, mo
             sys.modules.pop(name, None)
 
     assert len(objs) == 1
-    assert objs[0].node_id == "tool_my_tool"
+    assert objs[0].node_id == "my_tool"
 
 
 def test_validate_nodes_rejects_non_node_exits_2() -> None:
@@ -107,7 +107,7 @@ def test_dedupe_by_node_id_drops_repeats_preserving_order() -> None:
 
     objs = resolve_specs([f"{_FIXTURE}:single", f"{_FIXTURE}:single", f"{_FIXTURE}:nodes"])
     deduped = dedupe_by_node_id(objs)
-    assert [o.node_id for o in deduped] == ["tool_echo", "tool_alpha", "tool_beta"]
+    assert [o.node_id for o in deduped] == ["echo", "alpha", "beta"]
 
 
 def test_resolve_specs_later_bad_spec_exits_2() -> None:
@@ -135,7 +135,7 @@ def test_load_nodes_resolves_validates_and_dedupes() -> None:
     from calfkit.cli._loader import load_nodes
 
     nodes = load_nodes([f"{_FIXTURE}:single", f"{_FIXTURE}:single", f"{_FIXTURE}:nodes"])
-    assert [n.node_id for n in nodes] == ["tool_echo", "tool_alpha", "tool_beta"]
+    assert [n.node_id for n in nodes] == ["echo", "alpha", "beta"]
 
 
 def test_load_nodes_empty_resolution_exits_2() -> None:

@@ -64,12 +64,20 @@ class ToolNodeDef(BaseToolNodeDef):
         func: Callable[..., Any],
         subscribe_topics: str | list[str],
         publish_topic: str,
+        *,
+        name: str | None = None,
     ) -> Self:
+        # The tool name (``name`` if given, else the function name) IS the node id —
+        # the capability key an agent references — and the LLM-facing tool name. No
+        # prefix: one name everywhere. ``name`` disambiguates without renaming ``func``.
+        if name is not None and not name:
+            raise ValueError("name must be non-empty when given")
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
-        tool = Tool(func)
+        effective = name or func.__name__
+        tool = Tool(func, name=effective)
         return cls(
-            node_id=f"tool_{func.__name__}",
+            node_id=effective,
             tool_schema=tool.tool_def,
             subscribe_topics=subscribe_topics,
             publish_topic=publish_topic,
@@ -127,10 +135,17 @@ class ToolNodeDef(BaseToolNodeDef):
         return ReturnCall[State](state=ctx.state, value=result)
 
 
-def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]]) -> ToolNodeDef:
-    """Decorator to turn a function into a deployable tool node that agents can call"""
-    subscribe_topic = f"tool.{func.__name__}.input"
-    publish_topic = f"tool.{func.__name__}.output"
-    tool_node = ToolNodeDef.create_tool_node(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic)
+def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]], *, name: str | None = None) -> ToolNodeDef:
+    """Turn a function into a deployable tool node that agents can call.
 
-    return tool_node
+    Usable bare (``@agent_tool``) or as a call (``agent_tool(fn, name="x")``). The tool
+    name — ``name`` if given, else the function name — drives the node id (the capability
+    key an agent references), the LLM-facing tool name, and the ``tool.<name>.input`` /
+    ``.output`` topics, so one name is the only thing to reason about.
+    """
+    if name is not None and not name:
+        raise ValueError("name must be non-empty when given")
+    effective = name or func.__name__
+    subscribe_topic = f"tool.{effective}.input"
+    publish_topic = f"tool.{effective}.output"
+    return ToolNodeDef.create_tool_node(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic, name=effective)

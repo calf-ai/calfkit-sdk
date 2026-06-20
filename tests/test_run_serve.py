@@ -45,7 +45,7 @@ def test_serve_resolves_nodes_and_runs_worker(captured: dict) -> None:
 
     serve([f"{_FIXTURE}:nodes"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
 
-    assert [n.node_id for n in captured["nodes"]] == ["tool_alpha", "tool_beta"]
+    assert [n.node_id for n in captured["nodes"]] == ["alpha", "beta"]
     assert captured["ran"] is True
 
 
@@ -119,7 +119,7 @@ def test_serve_prints_banner_with_node_details(captured: dict, capsys: pytest.Ca
     monkeypatch.delenv("CALF_HOST_URL", raising=False)
     serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
     out = capsys.readouterr().out
-    assert "tool_echo" in out
+    assert "echo" in out
     assert "[tool]" in out
     assert "echo.in" in out  # subscribe topic
     assert "echo.out" in out  # publish topic
