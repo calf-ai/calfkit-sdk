@@ -20,6 +20,7 @@ def _stamp(**overrides: object) -> ControlPlaneStamp:
         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         last_heartbeat_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         heartbeat_interval=30.0,
+        node_kind="node",
     )
     base.update(overrides)
     return ControlPlaneStamp(**base)  # type: ignore[arg-type]
@@ -46,11 +47,26 @@ def test_identity_is_not_carried_in_the_value() -> None:
 def test_record_is_a_stamp_plus_schema_version() -> None:
     """Tidy structural form: the record extends the stamp, so worker fields are declared once."""
     assert issubclass(ControlPlaneRecord, ControlPlaneStamp)
-    assert set(ControlPlaneRecord.model_fields) == {"started_at", "last_heartbeat_at", "heartbeat_interval", "schema_version"}
+    assert set(ControlPlaneRecord.model_fields) == {"started_at", "last_heartbeat_at", "heartbeat_interval", "node_kind", "schema_version"}
 
 
 def test_stamp_carries_only_worker_owned_fields() -> None:
-    assert set(ControlPlaneStamp.model_fields) == {"started_at", "last_heartbeat_at", "heartbeat_interval"}
+    assert set(ControlPlaneStamp.model_fields) == {"started_at", "last_heartbeat_at", "heartbeat_interval", "node_kind"}
+
+
+def test_stamp_carries_node_kind() -> None:
+    """node_kind is worker-stamped onto every record (over-pull guard + mixed-kind observability)."""
+    assert _stamp(node_kind="agent").node_kind == "agent"
+
+
+def test_node_kind_is_required() -> None:
+    """node_kind has no default (a breaking wire change) — a stamp without it does not decode."""
+    with pytest.raises(ValidationError):
+        ControlPlaneStamp(  # type: ignore[call-arg]
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            last_heartbeat_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            heartbeat_interval=30.0,
+        )
 
 
 def test_tolerant_reader_ignores_unknown_fields() -> None:

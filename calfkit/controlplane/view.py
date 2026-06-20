@@ -81,6 +81,7 @@ class ControlPlaneView(Generic[R]):
         self._reader_version: int = field.default
         self._stale_after = stale_after
         self._logged_skips: set[tuple[str, str, int]] = set()  # (node, worker, version) already warned about
+        self._logged_mixed_kinds: set[tuple[str, frozenset[str]]] = set()  # (node, kind-set) already warned about
 
     # -- collapsed, liveness-aware reads -------------------------------------
 
@@ -120,6 +121,7 @@ class ControlPlaneView(Generic[R]):
             if (now - record.last_heartbeat_at).total_seconds() > threshold:
                 continue  # stale (spec §9)
             live[worker_id] = record
+        self._warn_if_mixed_kind(node_id, live)
         return live
 
     def _log_schema_skip(self, node_id: str, worker_id: str, schema_version: int) -> None:
@@ -141,6 +143,32 @@ class ControlPlaneView(Generic[R]):
             worker_id,
             schema_version,
             self._reader_version,
+        )
+
+    def _warn_if_mixed_kind(self, node_id: str, live: dict[str, R]) -> None:
+        """Warn once per ``(node, kind-set)`` when one node_id holds live members of differing kinds (spec C1/L14).
+
+        A heterogeneous-owner collision — two advertisers of *different* ``node_kind`` sharing a
+        ``node_id`` — would flap the collapsed view between owners tick to tick. It is a facet of
+        the global ``node_id``-uniqueness contract (documented, not policed), surfaced here for
+        observability. **Cross-kind only**: same-kind/different-content collisions are invisible to
+        the view (it does not compare content) and rely on that contract alone. Dedup keeps this off
+        the read hot-path; a changed kind-set re-warns and it self-clears once the collision resolves.
+        """
+        if len(live) < 2:
+            return  # the common case (single instance) — nothing to compare
+        kinds = frozenset(record.node_kind for record in live.values())
+        if len(kinds) < 2:
+            return  # same-kind (benign replicas)
+        key = (node_id, kinds)
+        if key in self._logged_mixed_kinds:
+            return
+        self._logged_mixed_kinds.add(key)
+        logger.warning(
+            "control-plane view: node=%s has live members of differing node_kind=%s "
+            "(duplicate node_id across owner kinds; resolve the identity collision)",
+            node_id,
+            sorted(kinds),
         )
 
     # -- health passthrough (closes frozen-view blindness, spec §9) ----------

@@ -52,7 +52,7 @@ def make_toolbox() -> Any:
 
 def make_stamp(*, hb: float = 30.0) -> ControlPlaneStamp:
     now = datetime.now(tz=timezone.utc)
-    return ControlPlaneStamp(started_at=now, last_heartbeat_at=now, heartbeat_interval=hb)
+    return ControlPlaneStamp(started_at=now, last_heartbeat_at=now, heartbeat_interval=hb, node_kind="toolbox")
 
 
 class TestAdvertDeclaration:

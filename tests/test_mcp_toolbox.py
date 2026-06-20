@@ -24,6 +24,7 @@ def make_record(toolbox_id: str = "github", tool_names: tuple[str, ...] = ("sear
         started_at=now,
         last_heartbeat_at=now,
         heartbeat_interval=30.0,
+        node_kind="toolbox",
         dispatch_topic=f"mcp_server.{toolbox_id}",
         tools=[CapabilityToolDef(name=n, parameters_json_schema={"type": "object", "properties": {}}) for n in tool_names],
         content_updated_at=now,

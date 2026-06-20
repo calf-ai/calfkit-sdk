@@ -121,6 +121,7 @@ class ControlPlanePublisher:
             started_at=self._started_at,
             last_heartbeat_at=now,
             heartbeat_interval=self._config.heartbeat_interval,
+            node_kind=node._node_kind,  # over-pull guard basis; the worker knows each hosted node's kind
         )
         record = getattr(node, info.name)(stamp)  # opaque ControlPlaneRecord; identity is the wire key
         await writer.set(node.node_id, self._worker_id, record)

@@ -38,6 +38,7 @@ def make_record(**overrides: Any) -> CapabilityRecord:
         started_at=now,
         last_heartbeat_at=now,
         heartbeat_interval=30.0,
+        node_kind="toolbox",
         dispatch_topic="mcp_server.docs_server",
         tools=[CapabilityToolDef(name=n, parameters_json_schema={"type": "object", "properties": {}}) for n in ("search", "fetch")],
         content_updated_at=now,
