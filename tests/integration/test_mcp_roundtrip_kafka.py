@@ -38,6 +38,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pydantic_core
 import pytest
@@ -53,6 +54,7 @@ from calfkit.nodes import Agent
 from calfkit.worker import Worker
 from tests.integration._roundtrip_helpers import (
     FINAL_OUTPUT,
+    capturing_model,
     retry_prompt_texts,
     returns_by_call_id,
     scripted_model,
@@ -577,3 +579,72 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     await toolbox_worker._client.close()
     await enable_worker._client.close()
     await bonus_worker._client.close()
+
+
+# ── Group C: the agent's point of view of its advertised tools ───────────────
+
+
+async def test_agent_pov_matches_advertised_capability_view(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """The agent's POV of its tools IS what the toolbox advertised on the Capability View.
+
+    Instead of hardcoding the available surface, this inspects what the agent actually
+    resolved from the view and handed the model (``AgentInfo.function_tools``), asserts it
+    matches the live ``CapabilityRecord`` on ``calf.capabilities`` by NAME and by SCHEMA,
+    and that a tool drawn from that POV round-trips — proving every advertised tool reaches
+    the model exactly as advertised and is callable on the turn.
+    """
+    agent_id = f"{topic_namespace}-pov-agent"
+    agent_in = f"{topic_namespace}.pov-agent.input"
+    control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
+
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
+    pov: dict[str, Any] = {}  # name -> ToolDefinition the agent presented to the model
+    agent = Agent(
+        agent_id,
+        system_prompt="call add",
+        subscribe_topics=agent_in,
+        model_client=capturing_model(pov, [ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="call-add")]),
+        tools=[toolbox],  # NO include: the agent sees the toolbox's full advertised set
+    )
+
+    advertised: dict[str, Any] = {}  # name -> parameters_json_schema, read straight from the view record
+
+    def _capture_advertised(view: ControlPlaneView[CapabilityRecord]) -> bool:
+        record = view.get(server_name)
+        if record is None:
+            return False
+        advertised.clear()
+        advertised.update({t.name: t.parameters_json_schema for t in record.tools})
+        return True
+
+    driver = Client.connect(kafka_bootstrap)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
+
+    async with toolbox_worker:
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
+        # The source of truth the agent reads: what the toolbox advertised on the view.
+        await _await_view(kafka_bootstrap, _capture_advertised, timeout=60, what=f"advertised tools for {server_name!r}")
+        async with agent_worker:
+            result = await driver.execute("add 2 and 3", agent_in, timeout=120)
+
+    # 1) the call drawn from the advertised set round-tripped to a finalized turn
+    assert result.output is not None and FINAL_OUTPUT in result.output
+    assert "5" in _serialized(tool_returns(result.message_history)["add"])
+
+    # 2) the toolbox advertised exactly the server's tool set — all advertised tools present
+    assert set(advertised) == {"add", "echo", "ping", "danger", "domain_error", "enable_bonus"}
+
+    # 3) the agent's POV == the advertised view record, by NAME and by SCHEMA. The agent
+    #    presented to the model exactly what the toolbox advertised — nothing added or dropped.
+    assert pov, "the model never captured the agent's tool POV"
+    assert set(pov) == set(advertised)
+    assert {name: td.parameters_json_schema for name, td in pov.items()} == advertised
+
+    # 4) the called tool reached the model as advertised — its schema carries its real args
+    assert {"a", "b"} <= set(pov["add"].parameters_json_schema.get("properties", {}))
+
+    await driver.close()
+    await toolbox_worker._client.close()
+    await agent_worker._client.close()

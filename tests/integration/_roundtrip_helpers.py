@@ -26,6 +26,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolReturnPart,
 )
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
+from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 
 #: The text the scripted model emits once it has acted. Reaching it proves the
 #: agent resumed past tool dispatch to a clean finalization.
@@ -57,6 +58,27 @@ def scripted_model(tool_calls: list[ToolCallPart]) -> FunctionModel:
     def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if _has_acted(messages):
             return ModelResponse(parts=[TextPart(FINAL_OUTPUT)])
+        return ModelResponse(parts=list(tool_calls))
+
+    return FunctionModel(_fn)
+
+
+def capturing_model(pov: dict[str, ToolDefinition], tool_calls: list[ToolCallPart]) -> FunctionModel:
+    """Like :func:`scripted_model`, but first records the agent's POV of its tools.
+
+    On the acting turn it captures ``info.function_tools`` — the exact
+    :class:`ToolDefinition`\\ s the agent resolved from the Capability View and presented
+    to the model — into ``pov`` (keyed by name), *then* emits ``tool_calls``. Lets a test
+    assert that what the agent advertised to the model matches what the toolbox advertised
+    on the view (names + schemas) and call one tool drawn from that POV, rather than
+    hardcoding the available surface and assuming the agent saw it.
+    """
+
+    def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if _has_acted(messages):
+            return ModelResponse(parts=[TextPart(FINAL_OUTPUT)])
+        pov.clear()
+        pov.update({tool.name: tool for tool in info.function_tools})
         return ModelResponse(parts=list(tool_calls))
 
     return FunctionModel(_fn)
