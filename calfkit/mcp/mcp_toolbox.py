@@ -244,4 +244,4 @@ class MCPToolbox:
             object.__setattr__(self, "include", tuple(self.include))
 
     def resolve_tools(self, view: CapabilityLookup) -> SelectorResult:
-        return resolve_capability(view, self.name, include=self.include)
+        return resolve_capability(view, self.name, include=self.include, expected_kind="toolbox")

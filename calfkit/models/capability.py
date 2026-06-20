@@ -1,11 +1,11 @@
 """Capability control-plane wire model (spec §3.2).
 
-A :class:`CapabilityRecord` is one MCP Toolbox instance's advertisement on the
-capability control-plane topic: dispatch topic and tool definitions, keyed on the
-wire by ``toolbox_id`` × ``worker_id`` (the control-plane instance key, held by the
-substrate — never in the value). Records are calfkit-owned models — never the
-vendored ``ToolDefinition`` — because compacted records outlive deploys, so the
-wire shape must not move when the vendored library does.
+A :class:`CapabilityRecord` is one advertiser instance's advertisement on the
+capability control-plane topic — an MCP toolbox or a function tool node: dispatch
+topic and tool definitions, keyed on the wire by ``node_id`` × ``worker_id`` (the
+control-plane instance key, held by the substrate — never in the value). Records are
+calfkit-owned models — never the vendored ``ToolDefinition`` — because compacted
+records outlive deploys, so the wire shape must not move when the vendored library does.
 
 Reader policy: tolerant (unknown fields ignored — a newer writer may add fields).
 Staleness and newer-``schema_version`` filtering are owned by the reader's
@@ -46,25 +46,25 @@ class CapabilityToolDef(BaseModel):
 
 
 class CapabilityRecord(ControlPlaneRecord):
-    """One toolbox instance's current advertisement on the capability control plane.
+    """One advertiser instance's current advertisement on the capability control plane.
 
-    A :class:`~calfkit.controlplane.ControlPlaneRecord` (identity ``toolbox_id`` ×
+    A :class:`~calfkit.controlplane.ControlPlaneRecord` (identity ``node_id`` ×
     ``worker_id`` is the wire key; the worker stamps ``started_at`` /
-    ``last_heartbeat_at`` / ``heartbeat_interval``) plus the capability content: the
-    dispatch topic and the tool list. ``content_updated_at`` advances only when
-    ``tools`` actually changes — separate from the liveness heartbeat — so liveness
+    ``last_heartbeat_at`` / ``heartbeat_interval`` / ``node_kind``) plus the capability
+    content: the dispatch topic and the tool list. ``content_updated_at`` advances only
+    when ``tools`` actually changes — separate from the liveness heartbeat — so liveness
     and content currency stay distinct. It is **advisory**: the substrate cannot
     enforce its monotonicity (the writing node owns the contract; a hand-rolled
     factory could pass ``now()``), and no production reader gates on it yet — it is
     wire surface for future ops/observability consumers.
 
-    **Precondition for the collapsed view:** all replicas of one toolbox (same
-    ``toolbox_id``) must advertise *equivalent* content. The view collapses replicas to
-    one record by most-recent heartbeat — it does not merge tool sets — so two replicas
-    with divergent tool lists would flap the agent's visible surface tick-to-tick. The
-    dispatch topic is name-derived and identical across replicas, so routing is never
-    wrong; only tool *visibility* would flap. Keep a toolbox's replicas pointed at the
-    same server / tool set.
+    **Precondition for the collapsed view:** all replicas of one advertiser (same
+    ``node_id``) must advertise *equivalent* content. The view collapses replicas to one
+    record by most-recent heartbeat — it does not merge tool sets — so two replicas with
+    divergent tool lists would flap the agent's visible surface tick-to-tick. The dispatch
+    topic is name-derived and identical across replicas, so routing is never wrong; only
+    tool *visibility* would flap. Keep an advertiser's replicas pointed at the same tool
+    set — trivially true for a function tool node (its schema is static).
 
     Inherits the base's tolerant, frozen ``model_config`` (``extra="ignore"``); the
     value object is rebuilt per heartbeat tick, never mutated.
@@ -79,8 +79,9 @@ class CapabilityRecord(ControlPlaneRecord):
 def record_to_bindings(record: CapabilityRecord) -> list[ToolBinding]:
     """Expand a record into validator-less :class:`ToolBinding`s.
 
-    Wire-crossing tools dispatch unvalidated (the schema-only carve-out): the
-    toolbox's MCP server is the argument validator of record.
+    Wire-crossing tools dispatch unvalidated (the schema-only carve-out): the advertiser
+    validates arguments on receipt — the toolbox's MCP server, or the tool node's own
+    function schema.
     """
     return [
         ToolBinding(
@@ -102,7 +103,7 @@ is published to hosted nodes."""
 
 
 class CapabilityLookup(Protocol):
-    """The minimal read surface the resolver needs: ``get(toolbox_id)``.
+    """The minimal read surface the resolver needs: ``get(target_id)``.
 
     Satisfied by a ``ControlPlaneView[CapabilityRecord]`` (production) and by a
     plain ``dict`` (tests), so the agent layer needs no ktables import. The view
@@ -110,40 +111,46 @@ class CapabilityLookup(Protocol):
     and supported.
     """
 
-    def get(self, toolbox_id: str) -> CapabilityRecord | None: ...
+    def get(self, target_id: str) -> CapabilityRecord | None: ...
 
 
 def resolve_capability(
     view: CapabilityLookup,
-    toolbox_id: str,
+    target_id: str,
     *,
     include: tuple[str, ...] | None = None,
+    expected_kind: str | None = None,
 ) -> SelectorResult:
-    """Resolve ``toolbox_id`` (optionally filtered) against the Capability View.
+    """Resolve ``target_id`` (optionally filtered) against the capability view.
 
-    Public API: this is the resolution kernel behind ``MCPToolbox`` and
-    ``MCPToolboxNode.resolve_tools``; custom ``ToolSelector`` implementations may
-    call it directly. The view owns staleness + schema-version filtering, so this
-    only maps a present record to bindings.
+    Public API: this is the resolution kernel behind ``MCPToolbox`` and ``Tools``;
+    custom ``ToolSelector`` implementations may call it directly. The view owns
+    staleness + schema-version filtering, so this only maps a present record to bindings.
 
-    Never raises on bad records: the tolerant reader admits shapes that fail
-    binding expansion (e.g. empty ``dispatch_topic``); those surface as
-    ``invalid_record`` so a poisoned advertisement cannot crash a turn.
+    ``expected_kind`` is the over-pull guard: when given, a present record whose
+    ``node_kind`` differs (e.g. a ``Tools`` selector hitting a toolbox record, or vice
+    versa) is rejected as ``wrong_kind_targets`` rather than bound.
+
+    Never raises on bad records: the tolerant reader admits shapes that fail binding
+    expansion (e.g. empty ``dispatch_topic``); those surface as ``invalid_targets`` so a
+    poisoned advertisement cannot crash a turn.
     """
-    record = view.get(toolbox_id)
+    record = view.get(target_id)
     if record is None:
-        return SelectorResult(toolbox_id=toolbox_id, missing_toolbox=True)
+        return SelectorResult(missing_targets=(target_id,))
+    if expected_kind is not None and record.node_kind != expected_kind:
+        return SelectorResult(wrong_kind_targets=(target_id,))
     try:
         bindings = record_to_bindings(record)
     except ValidationError:
         # The one tolerant-reader bad-data path: an empty dispatch_topic fails
-        # ToolBinding's min_length. A poisoned advert degrades (invalid_record),
+        # ToolBinding's min_length. A poisoned advert degrades (invalid_targets),
         # not crashes the turn. A NON-validation error here is a logic bug — let
         # it propagate (fail loud) rather than masking it as bad wire data.
-        return SelectorResult(toolbox_id=toolbox_id, invalid_record=True)
-    missing: tuple[str, ...] = ()
+        return SelectorResult(invalid_targets=(target_id,))
+    missing_tools: tuple[str, ...] = ()
     if include is not None:
         wanted = set(include)
         bindings = [b for b in bindings if b.name in wanted]
-        missing = tuple(name for name in include if name not in {b.name for b in bindings})
-    return SelectorResult(toolbox_id=toolbox_id, bindings=bindings, missing_tools=missing)
+        missing_tools = tuple(name for name in include if name not in {b.name for b in bindings})
+    return SelectorResult(bindings=tuple(bindings), missing_tools=missing_tools)
