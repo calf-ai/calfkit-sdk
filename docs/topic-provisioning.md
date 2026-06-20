@@ -145,9 +145,10 @@ subscriber's inbox exists before consumption begins). The topic set is `topics_f
 that were registered; each node's `_return_topic` is passed as a framework topic
 so `topic_configs` is never applied to it. A provisioning failure aborts startup.
 
-`Worker.provision_topics()` is also a public, idempotent method for the manual
-`register_handlers()`-without-`run()` path; it is a no-op when the client's
-config is disabled.
+For a manual `register_handlers()`-without-`run()` deployment (which bypasses the
+worker's startup hook), run an explicit provisioning pass out-of-band — the CLI
+(`calfkit topics provision`, §4.3) or the `calfkit.provisioning.provision_topics()`
+module function (§3) — both idempotent.
 
 ### 4.2 Client reply topic (lazy, once)
 
@@ -157,9 +158,10 @@ reply topic is a framework inbox, so it is passed in `framework_topics` to keep
 user `topic_configs` off it. This is gated on the same
 `client.provisioning.enabled`.
 
-The client also exposes read-only properties used by the worker to reach the same
-broker with the same credentials: `client.provisioning`, `client.server_urls`,
-and `client.security_kwargs`.
+The client also exposes read-only properties the worker reads to reach the same
+broker: `client.provisioning` and `client.server_urls`. (The broker credentials
+captured at `Client.connect(...)` are forwarded to the provisioner internally —
+see §5.3.)
 
 ### 4.3 CLI: `calfkit topics provision`
 
@@ -228,7 +230,7 @@ provisioning hits the same broker with the same credentials.
 - Disabled config -> no admin client constructed, `aiokafka.admin` never imported.
 - Empty topic set -> returns an empty `ProvisionReport` without contacting Kafka.
 - The client reply topic is provisioned at most once per client.
-- `Worker.provision_topics()` is safe to call directly and is idempotent.
+- An explicit `calfkit.provisioning.provision_topics()` pass (or the CLI) is safe to repeat and is idempotent.
 
 ## 6. Dev-safe / review-for-prod
 

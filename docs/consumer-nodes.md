@@ -43,17 +43,16 @@ $ python weather_sink.py
 
 An agent's `publish_topic` emits on **every** state transition — intermediate
 hops, tool completions, and terminals — so `ctx.output` is `None` on
-intermediate (call-kind) hops that carry no reply slot. Filter via a gate if you
-only want agent terminals (the gate predicate receives the inbound
-`SessionRunContext`, whose `output_parts` is empty on intermediate hops):
+intermediate (call-kind) hops that carry no reply slot. A consumer is an
+observer and handles every event; to act only on agent terminals, return early
+inside the body on the intermediate hops:
 
 ```python
-@consumer(
-    subscribe_topics="weather_agent.output",
-    gates=[lambda ctx: bool(ctx.output_parts)],
-)
+@consumer(subscribe_topics="weather_agent.output")
 async def save_final(ctx: ConsumerContext) -> None:
-    await db.save(ctx.output)  # always populated here
+    if ctx.output is None:
+        return  # intermediate hop — nothing final yet
+    await db.save(ctx.output)  # only terminals reach here
 ```
 
 ## Requirements & error policy
@@ -69,6 +68,6 @@ async def save_final(ctx: ConsumerContext) -> None:
   for fail-loud development; for true retry/DLQ, set the subscriber's `ack_policy`
   via the `Worker`'s `extra_subscribe_kwargs`.
 
-See also: [Gating](gating.md) for the gate predicate contract,
-[Client-side features](client-features.md) for the invocation patterns, and the
-[API reference](api.md#context-objects) for the `ConsumerContext` shape.
+See also: [Client-side features](client-features.md) for the invocation
+patterns, and the [API reference](api.md#context-objects) for the
+`ConsumerContext` shape.

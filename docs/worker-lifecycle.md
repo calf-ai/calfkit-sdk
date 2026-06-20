@@ -23,7 +23,15 @@ resource is a live, server-side object that handlers read via
 `ctx.resources["key"]`.
 
 The decorator surface — `resource`, `on_startup`, `after_startup`, `on_shutdown`,
-`after_shutdown` — is available on every node *and* on the `Worker`.
+`after_shutdown` — is available on every node *and* on the `Worker`. Each hook is
+a `fn(ctx)` callable (sync or async; its return value is ignored) and is
+repeatable — register as many per phase as you like.
+
+> These lifecycle hooks run **once per process**, at startup and shutdown. Don't
+> confuse them with a node's **policy seams** (`before_node` / `after_node` /
+> `on_node_error` / `on_callee_error`) — structurally identical `@node.<name>`
+> decorators that instead run **once per message**, to guard and shape each
+> invocation. See [How to guard and transform node invocations](policy-seams.md).
 
 ### Resources vs deps
 
