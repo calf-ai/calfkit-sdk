@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from calfkit.client.client import Client
 from calfkit.controlplane import ControlPlaneStamp
 from calfkit.controlplane.publisher import control_plane_writer_key
-from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
+from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord, record_to_bindings
 from calfkit.nodes.tool import ToolNodeDef, agent_tool
 from calfkit.worker.worker import Worker
 
@@ -84,3 +84,22 @@ class TestWorkerAutoRegistration:
         names = [name for name, _ in worker._resource_cms()]
         assert control_plane_writer_key(CAPABILITY_TOPIC) in names
         assert worker._control_plane_publisher is not None
+
+
+class TestEagerDiscoveredParity:
+    """§7 fidelity boundary: the ToolDefinition an agent sees is identical whether the tool
+    node is consumed eagerly (a live node passed in ``tools=``) or discovered (a ``Tools``
+    handle). The only intended difference is the validation locus. A future ``Tool`` knob
+    that breaks this parity must fail loudly here.
+    """
+
+    def test_eager_and_discovered_tool_def_are_identical(self) -> None:
+        node = make_node("add")
+        eager = node.tool_bindings()[0]  # live path: schema baked in, with a local validator
+        discovered = record_to_bindings(node._capability_advert(make_stamp()))[0]  # discovered path
+        # Same ToolDefinition — name, description, JSON schema, and every defaulted field.
+        assert discovered.tool_def == eager.tool_def
+        # The only difference is the validation locus: eager validates locally; the discovered
+        # binding has no validator (the tool node validates on receipt; bad args -> fault rail).
+        assert eager.validator is not None
+        assert discovered.validator is None
