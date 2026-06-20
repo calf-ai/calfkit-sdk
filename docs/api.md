@@ -6,6 +6,7 @@ The full public surface is re-exported from the top-level `calfkit` package:
 from calfkit import (
     Client, InvocationHandle, InvocationResult,          # client
     Agent, agent_tool, consumer,                         # node authoring
+    Tools,                                               # reference deployed tool nodes by name
     BaseNodeDef, NodeDef, ToolNodeDef, ConsumerNode,     # node types
     ConsumerFn,                                          # node typing helpers
     ToolContext,                                         # tool-side context
@@ -34,7 +35,8 @@ from calfkit import (
 | Symbol | Purpose |
 | --- | --- |
 | `Agent` | An agent node — an LLM-backed node that consumes prompts, calls tools, and publishes output. |
-| `agent_tool` | Decorator that turns a function into a deployable tool node. |
+| `agent_tool` | Decorator that turns a function into a deployable tool node (`agent_tool(func, name=...)` overrides its name). |
+| `Tools` | Identity-only handle that references deployed tool nodes by name; pass in `Agent(tools=[...])` to discover their schemas at runtime. |
 | `consumer` | Decorator that turns a function into a deployable consumer node (a terminal sink on a topic). |
 
 ### Node types
@@ -173,7 +175,16 @@ def get_weather(location: str) -> str:        # -> ToolNodeDef
     ...
 ```
 
-Turns a function into a tool node. The function's parameters and type annotations become the tool's argument schema, and its docstring becomes the description shown to the calling LLM. Declare an optional first `ctx: ToolContext` parameter to receive the [context](#context-objects) — it is hidden from the LLM schema. The return value must be JSON-serializable. Sync and async functions are both supported. The node's topics default to `tool.<function-name>.input` and `tool.<function-name>.output`.
+Turns a function into a tool node. The function's parameters and type annotations become the tool's argument schema, and its docstring becomes the description shown to the calling LLM. Declare an optional first `ctx: ToolContext` parameter to receive the [context](#context-objects) — it is hidden from the LLM schema. The return value must be JSON-serializable. Sync and async functions are both supported. The tool name defaults to the function name and is the node's identity — the name the LLM calls and the name a `Tools(...)` handle references; `agent_tool(func, name="...")` overrides it. The node's topics derive from that name (`tool.<name>.input` / `tool.<name>.output`).
+
+### `Tools`
+
+```python
+agent = Agent("researcher", subscribe_topics="researcher.input", model_client=model,
+              tools=[Tools("add", "subtract")])    # reference tool nodes by name
+```
+
+A frozen, identity-only handle to one or more deployed tool nodes. The agent discovers each named tool's schema at runtime from the capability control plane instead of importing the tool's code — the call-side counterpart to a deployed tool node. Resolved per turn; an unresolved name warns and degrades. See [discoverable tool nodes](tool-discovery.md).
 
 ### `@consumer`
 
