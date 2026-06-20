@@ -5,7 +5,7 @@ temporary instruction overrides, and one-way dispatch with an optional return
 address — all without redeploying the agent.
 
 See also: [CLI reference](cli.md) · [Worker lifecycle](worker-lifecycle.md) ·
-[Consumer nodes](consumer-nodes.md) · [Gating](gating.md).
+[Consumer nodes](consumer-nodes.md) · [Policy seams](policy-seams.md).
 
 ## Invocation patterns
 

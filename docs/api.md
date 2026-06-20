@@ -7,12 +7,13 @@ from calfkit import (
     Client, InvocationHandle, InvocationResult,          # client
     Agent, agent_tool, consumer,                         # node authoring
     BaseNodeDef, NodeDef, ToolNodeDef, ConsumerNode,     # node types
-    ConsumerFn, GateFunction,                            # node typing helpers
+    ConsumerFn,                                          # node typing helpers
     ToolContext,                                         # tool-side context
     OpenAIModelClient, OpenAIResponsesModelClient, AnthropicModelClient,  # providers
     Worker, LifecycleContext, ResourceSetupContext, ServingContext,       # worker + lifecycle
     ProvisioningConfig,                                  # provisioning (config only)
-    DeserializationError, LifecycleConfigError, ToolExecutionError,       # exceptions
+    NodeFaultError, ErrorReport, FaultTypes,             # faults
+    DeserializationError, LifecycleConfigError,          # exceptions
 )
 ```
 
@@ -52,7 +53,6 @@ The definition types that node authoring produces or builds on.
 | Symbol | Purpose |
 | --- | --- |
 | `ConsumerFn` | Type alias for a consumer's callable: `Callable[[ConsumerContext[OutputT]], None \| Awaitable[None]]`. |
-| `GateFunction` | Type alias for a gate predicate: `Callable[[BaseSessionRunContext], bool \| Awaitable[bool]]`. |
 
 ### Tool-side context
 
@@ -89,7 +89,7 @@ The definition types that node authoring produces or builds on.
 | --- | --- |
 | `DeserializationError` | Raised when client-side output deserialization fails. |
 | `LifecycleConfigError` | Raised when a node or worker lifecycle configuration is invalid. |
-| `ToolExecutionError` | Raised on the client when a tool node fails while executing. |
+| `NodeFaultError` | A terminal typed fault — `raise NodeFaultError(error_type, ...)` from node or seam code to mint one; carries an `ErrorReport` on `.report`. See [Errors & faults](#errors--faults). |
 
 ## Key entry points
 
@@ -154,7 +154,6 @@ Agent(
     system_prompt: str = "You are a helpful AI assistant.",
     subscribe_topics: str | list[str],
     publish_topic: str | None = None,
-    gates: list[GateFunction] | None = None,
     tools: Sequence[...] | None = None,
     model_client: PydanticModelClient,
     final_output_type: type = str,
@@ -183,7 +182,7 @@ Turns a function into a tool node. The function's parameters and type annotation
 async def log_output(ctx: ConsumerContext) -> None: ...   # -> ConsumerNode
 ```
 
-Turns a function into a consumer node — a terminal sink. The function receives a [`ConsumerContext`](#context-objects). Set `agent_output_type` to deserialize `ctx.output` into a specific type; `gates` accept or decline the inbound event before the body runs.
+Turns a function into a consumer node — a terminal sink. The function receives a [`ConsumerContext`](#context-objects). Set `agent_output_type` to deserialize `ctx.output` into a specific type. A consumer is an observer — it handles every inbound event and cannot register policy seams.
 
 ### `Worker`
 
@@ -199,6 +198,78 @@ Worker(
 
 Hosts the given `nodes` against the broker. Drive it with `await worker.run()` (blocking), the embeddable `await worker.start()` / `await worker.stop()` pair, or `async with worker:`.
 
+## Policy seams
+
+Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Each is registered as a constructor argument (`Agent`/`NodeDef`; a single callable or a list) or as a repeatable instance decorator (any node — and the only form for tool nodes); constructor entries precede decorator entries. A chain runs in registration order, resolving on the **first non-`None` return** (sync or async handlers). Observer nodes (`@consumer`) have no seams.
+
+| Seam | Handler signature | A `None` return… | A non-`None` return… |
+| --- | --- | --- | --- |
+| `before_node` | `(ctx)` | proceeds to the node body | short-circuits the body; the value becomes the node's output |
+| `after_node` | `(ctx, output)` | keeps the produced output | replaces the output (output values only) |
+| `on_node_error` | `(ctx, fault)` | escalates the original fault | recovers — the value becomes the node's output |
+| `on_callee_error` | `(ctx, fault)` | the failed call escalates | substitutes a result for that call |
+
+`ctx` is a [`SeamContext`](#seamcontext); for the error seams, `fault` is an [`ErrorReport`](#errors--faults). (Returning a node *action* — a `Call`/`ReturnCall`/…, the kind a node body returns to dispatch work — is accepted from `before_node` but raises `SeamContractError` from `after_node`.)
+
+**Minting:** `raise NodeFaultError(error_type, ...)` from any seam (or the node body) converts to a fault verbatim and **bypasses `on_node_error`** (the mint rule). Inside `on_node_error` / `on_callee_error`, raising `NodeFaultError` mints; raising any *other* exception is treated as that handler declining.
+
+Registration and recipes: [How to guard and transform node invocations](policy-seams.md) and [How to handle errors and faults](error-handling.md).
+
+## Errors & faults
+
+A failure surfaces as a typed [`ErrorReport`](#errorreport) that travels the result rail and escalates up the call chain. Faults are handled **inside a node** (the `on_node_error` / `on_callee_error` seams) or **observed** on a `publish_topic` tap; there is no client-side typed fault reception yet.
+
+### `NodeFaultError`
+
+```python
+raise NodeFaultError(
+    error_type: str,                          # an open dotted code you choose, e.g. "billing.quota_exceeded"
+    *,
+    message: str = "",
+    retryable: bool = False,                  # advisory only — the framework does not auto-retry
+    details: dict[str, Any] | None = None,    # must be JSON-serializable
+)
+```
+
+Mint a deliberate typed fault from node or seam code. `error_type` must be non-empty and **must not** begin with the framework-reserved `calf.` prefix (nor may any `details` key); the resulting `ErrorReport` is carried on `NodeFaultError.report`.
+
+### `ErrorReport`
+
+The typed fault value (frozen). Match on it with `.find()`, never a bare `==` — faults compose, so a fan-out wraps siblings in a group and a top-level equality check would silently stop matching.
+
+| Attribute | Type | Description |
+| --- | --- | --- |
+| `error_type` | `str` | Open dotted code (e.g. `calf.model.context_window_exceeded`); tolerate unknown values. |
+| `message` | `str` | Human summary (clamped, never rejected). |
+| `retryable` | `bool` | **Advisory only** — the framework never auto-retries on it. |
+| `details` | `dict[str, Any]` | Open, JSON-serializable extension slot. |
+| `causes` | `list[ErrorReport]` | Nested faults — non-empty for a fault group, conversion, or recovery-then-failure. |
+| `frame_chain` | `list[FrameRef]` | Call-frame topology at fault time (`FrameRef` = `frame_id` + `target_topic`; no payloads). |
+| `report_id` | `str` | Framework-minted UUID7, stable across hops; the dedup key. |
+| `origin_node_id` / `origin_frame_id` | `str \| None` | Where the fault originated. |
+
+| Method | Returns |
+| --- | --- |
+| `report.find(error_type)` | The first report in `walk()` order with that `error_type`, or `None`. |
+| `report.walk()` | Iterator over this report then every nested cause (pre-order, cycle-guarded). |
+
+### `FaultTypes`
+
+Framework-minted `error_type` codes (all under the reserved `calf.` prefix), shipped as constants so you match without typing magic strings:
+
+| Constant | Code | Meaning |
+| --- | --- | --- |
+| `FAULT_GROUP` | `calf.fault_group` | Multiple sibling faults composed under `causes` (e.g. a fan-out). |
+| `UNHANDLED` | `calf.unhandled` | An arbitrary exception synthesized into a fault. |
+| `FANOUT_ABORTED` | `calf.fanout.aborted` | A fan-out batch could not complete (`details["reason"]` says why). |
+| `MODEL_CONTEXT_WINDOW_EXCEEDED` | `calf.model.context_window_exceeded` | The model's context window was exceeded. |
+| `DELIVERY_REJECTED` | `calf.delivery.rejected` | A reply-owing delivery declined its body. |
+| `DELIVERY_UNDECODABLE` | `calf.delivery.undecodable` | An inbound delivery could not be decoded. |
+| `SLOT_MATERIALIZATION_FAILED` | `calf.slot.materialization_failed` | A seam substitute could not be materialized to wire parts. |
+| `AGENT_SELF_RETRY_EXHAUSTED` | `calf.agent.self_retry_exhausted` | An agent exhausted its self-retry budget. |
+
+`FaultTypes` also defines `details`-key constants (e.g. `SEAM_ERRORS`, `FANOUT_TOPOLOGY`); see the source for the full set.
+
 ## Context objects
 
 A node's own code receives a context object as its parameter. The shape depends on the kind of node:
@@ -207,7 +278,7 @@ A node's own code receives a context object as its parameter. The shape depends 
 | --- | --- | --- |
 | `@agent_tool` function | `ToolContext` (optional first parameter) | `calfkit.models` |
 | `@consumer` function | `ConsumerContext` | `calfkit.models` |
-| gate predicate (`gates=[...]`) | `SessionRunContext` | `calfkit.models` |
+| policy seam (`before_node` / `after_node` / `on_node_error` / `on_callee_error`) | `SeamContext` | received as `ctx` (not imported) |
 | lifecycle hooks / `@resource` | `LifecycleContext` / `ServingContext` / `ResourceSetupContext` | `calfkit.worker` |
 
 ### `ToolContext`
@@ -240,7 +311,35 @@ The context handed to a `@consumer` function, once per inbound envelope. It, its
 | `message_history` | `list[ModelMessage]` | Convenience for `state.message_history`. |
 | `metadata` | `Any` | Convenience for `state.metadata`. |
 
-The contexts for **gate predicates** (`SessionRunContext`) and **worker lifecycle hooks** (`LifecycleContext` / `ServingContext` / `ResourceSetupContext`) are described in [How to gate node invocations](gating.md) and [Worker lifecycle & embedding](worker-lifecycle.md).
+### `SeamContext`
+
+The context handed to every [policy seam](#policy-seams), received as `ctx` — it is **not** importable; annotate as needed or leave it untyped. Mutable on `state` only; the per-stage fields are set by the framework.
+
+| Attribute | Type | Description |
+| --- | --- | --- |
+| `state` | `StateT` | App state — **mutable**; the official input-transform channel (mutate in place, return `None`). |
+| `deps` | `Mapping[str, Any]` | Producer-supplied dependencies (read-only). |
+| `resources` | `Mapping[str, Any]` | The node's lifecycle-managed resources (read-only). |
+| `payload` | `Any \| None` | The inbound frame payload (a tool sees its `ToolCallRef`). |
+| `route` | `str \| None` | Inbound route key — set on call-kind ingress only. |
+| `delivery_kind` | `MessageKind` | `call` / `return` / `fault` — distinguishes ingress from continuation/closure firings. |
+| `callee_results` | `list[CalleeResult]` | All resolved callee calls in dispatch order; `[]` on ingress. |
+| `failing_call` | `CalleeResult \| None` | The failed call being handled — set during `on_callee_error` only. |
+| `exception` | `BaseException \| None` | The live exception — set during `on_node_error` only. |
+
+Also carries `node_id`, `correlation_id`, `emitter_node_id`, `awaiting_reply`, and the `callee_result` convenience (the single resolved call, for the non-fan-out case).
+
+### Lifecycle contexts
+
+Passed to the worker/node lifecycle hooks and `@resource` bodies. All three carry `owner` (the node or worker the hook was registered on); they differ in `resources` access and whether the live broker is present. Import from `calfkit.worker` (or `calfkit`).
+
+| Context | Used by | `resources` | `broker` |
+| --- | --- | --- | --- |
+| `LifecycleContext` | `on_startup` / `after_shutdown` | **writable** (`ctx.resources["k"] = v`) | — |
+| `ResourceSetupContext` | a `@resource` body | read-only | — |
+| `ServingContext` | `after_startup` / `on_shutdown` | read-only | `ctx.broker` (live `KafkaBroker`) |
+
+See [Worker lifecycle & embedding](worker-lifecycle.md) for the full lifecycle how-to.
 
 ## Other public modules
 
@@ -257,7 +356,8 @@ The top-level package re-exports the symbols above. A few public capabilities li
 
 - **[How to call nodes from a client](client-features.md)** — the `execute` / `start` / `send` patterns, multi-turn conversations, dependency injection, and reply memory.
 - **[How to tap a topic with a consumer node](consumer-nodes.md)** — terminal sinks built with `@consumer`.
-- **[How to gate node invocations](gating.md)** — predicate gate stacks (`GateFunction`).
+- **[How to guard and transform node invocations](policy-seams.md)** — `before_node` / `after_node` recipes.
+- **[How to handle errors and faults](error-handling.md)** — `on_node_error` / `on_callee_error`, minting `NodeFaultError`, and inspecting an `ErrorReport`.
 - **[How to give agents MCP tools](mcp-tool-discovery.md)** — fronting an MCP server as a toolbox.
 - **[Worker lifecycle & embedding](worker-lifecycle.md)** — `Worker`, the lifecycle contexts, and `@resource`.
 - **[CLI reference](cli.md)** — the `calfkit run` and `calfkit topics` commands.
