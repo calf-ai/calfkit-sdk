@@ -11,8 +11,10 @@ from calfkit._registry import handler
 from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+from calfkit.controlplane import ControlPlaneStamp, advertises
 from calfkit.models import SessionRunContext, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
+from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord, CapabilityToolDef
 from calfkit.models.payload import retry_text_part
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
@@ -55,6 +57,31 @@ class BaseToolNodeDef(BaseNodeDef):
         ``except Exception`` catch is the safety net for those.
         """
         return self._tool.function_schema.validator.validate_python(args_dict)
+
+    @advertises(topic=CAPABILITY_TOPIC, record=CapabilityRecord)
+    def _capability_advert(self, stamp: ControlPlaneStamp) -> CapabilityRecord:
+        """Advertise this node's single tool on the shared capability plane (always-on).
+
+        Static-schema advertiser: the tool surface is fixed at construction, so the factory
+        reads ``tool_schema`` directly — no session, no cache to prime, nothing that can fail
+        at publish time. ``content_updated_at`` is the process boot time (``stamp.started_at``):
+        the content never changes, so a stable, non-``now()`` value satisfies the substrate's
+        no-``now()``-in-factory contract. ``node_kind`` rides on the stamp (the worker stamps
+        it from ``_node_kind="tool"``), so it is not set here. ``subscribe_topics[0]`` is always
+        safe: ``BaseNodeSchema`` rejects an empty list at construction.
+        """
+        return CapabilityRecord(
+            **stamp.model_dump(),
+            dispatch_topic=self.subscribe_topics[0],
+            tools=[
+                CapabilityToolDef(
+                    name=self.tool_schema.name,
+                    description=self.tool_schema.description,
+                    parameters_json_schema=self.tool_schema.parameters_json_schema,
+                )
+            ],
+            content_updated_at=stamp.started_at,
+        )
 
 
 class ToolNodeDef(BaseToolNodeDef):
