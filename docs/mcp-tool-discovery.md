@@ -1,20 +1,18 @@
 # How to give agents MCP tools
 
-To let agents call tools served by an MCP server, deploy one `MCPToolboxNode`
-per server and give each agent a name-only `MCPToolbox` handle in `tools=[...]`
-— like a tool node. Discovery is automatic and cross-process: the toolbox advertises
-its tools on a control-plane topic, and each agent's worker keeps a local view
-of it. There is no discovery configuration in the happy path. (For why it
-works this way, see the
-[design spec](designs/mcp-capability-discovery-spec.md).)
+To let agents call tools served by an MCP server, deploy one `MCPToolboxNode` per
+server and reference it from each agent by name. Discovery is automatic and
+cross-process — no wiring, and no bring-up order. (For how it works under the
+hood, see the [design spec](designs/mcp-capability-discovery-spec.md).)
 
 ## Deploy a toolbox
 
+Wrap one `MCPToolboxNode` per MCP server in a worker and run it:
+
 ```python
-from calfkit.client.client import Client
-from calfkit.mcp.mcp_toolbox import MCPToolboxNode
-from calfkit.mcp.mcp_transport import StreamableHttpParameters
-from calfkit.worker.worker import Worker
+from calfkit.client import Client
+from calfkit.mcp import MCPToolboxNode, StreamableHttpParameters
+from calfkit.worker import Worker
 
 docs = MCPToolboxNode(
     "docs_server",
@@ -26,12 +24,10 @@ worker = Worker(client, nodes=[docs])
 await worker.run()
 ```
 
-On startup the toolbox connects to the MCP server and lists its tools; its host
-worker then advertises them on the capability control-plane topic
-(`calf.capabilities`), refreshes them whenever the server reports a tool-list
-change, and re-publishes periodically as a liveness heartbeat (a tool-list change
-lands on the next heartbeat). If the MCP server is unreachable at startup, the
-worker fails to boot — fix the connection rather than running dark.
+Connect over HTTP with `StreamableHttpParameters`, or spawn a local stdio server
+with `StdioServerParameters` (see the [reference](api.md#mcp-toolboxes)). If the
+MCP server is unreachable at startup, the toolbox fails to boot — fix the
+connection rather than running dark.
 
 ## Give the tools to an agent
 
@@ -49,21 +45,18 @@ agent = Agent(
     model_client=model,
     tools=[MCPToolbox("docs_server")],   # all of the toolbox's tools; scope with include= (below)
 )
-worker = Worker(client, nodes=[agent])   # capability view auto-registers
+worker = Worker(client, nodes=[agent])
 ```
 
-An `MCPToolbox` is a frozen, identity-only handle: it can never carry connection
-params, and deploying one fails immediately with a pointer to the hosting form.
-The agent's worker detects the declaration and maintains the local capability
-view, gated at boot so the first turn already sees it. Selections re-resolve at
-the start of every agent turn, so a toolbox that comes up later — or changes its
-tools — is picked up on the next turn. No restarts, no bring-up order.
+An `MCPToolbox` is an identity-only handle: it carries no connection config, and
+deploying one fails immediately with a pointer to the hosting form. A toolbox
+that comes up later — or changes its tools — is picked up automatically on the
+agent's next turn. No restarts, no bring-up order.
 
 ### Pass the toolbox object directly (when the agent shares the definition)
 
 If the agent's process already imports the toolbox definition — the same codebase
-— you can pass the `MCPToolboxNode` object itself instead of a name handle;
-passing it never contacts the MCP session or deploys the toolbox:
+— you can pass the `MCPToolboxNode` object itself instead of a name handle:
 
 ```python
 from my_service.toolboxes import docs   # shared module; deployed elsewhere
@@ -76,8 +69,8 @@ agent = Agent(
 )
 ```
 
-Both forms resolve through the same capability view; prefer the name handle
-unless you specifically want to share the definition.
+Both forms behave the same; prefer the name handle unless you specifically want
+to share the definition.
 
 ## Scope the selection
 
@@ -86,33 +79,26 @@ tools=[MCPToolbox("docs_server", include=("search", "fetch"))]   # only these to
 ```
 
 Use `include` to pin the exact tool names the agent may see — a server that
-starts advertising new tools cannot enlarge the agent's surface. (For the object
-form, `docs.select(include=("search", "fetch"))` returns the same handle.) An
-unresolved selection (the toolbox is offline, or a requested tool isn't
-advertised) logs a warning and the turn runs with whatever resolved.
+starts offering new tools cannot enlarge the agent's surface. (For the object
+form, `docs.select(include=("search", "fetch"))` returns the same handle.) If a
+requested tool isn't available — the toolbox is offline, or doesn't offer it —
+the turn proceeds with whatever tools are available and logs a warning.
 
 If a toolbox tool name collides with a locally configured tool, the local tool
 wins and an error is logged.
 
 ## Handle outages and topic creation
 
-- A **crashed** toolbox stops heartbeating; its advertisement goes **stale**
-  after roughly three heartbeat intervals, and the view then hides it — so
-  agents stop being offered its tools (the selection degrades) rather than
-  dispatching to a dead toolbox. A **clean shutdown** removes the advertisement
-  immediately. Either way the toolbox reappears on the next turn once it is back
-  and heartbeating.
-- With provisioning enabled (dev/CI), toolbox and agent workers both create
-  the compacted capability topic idempotently — bring up either side first.
-  In production, create the topic out-of-band (`cleanup.policy=compact`,
-  RF≥3) like any governed topic; see
-  [topic provisioning](topic-provisioning.md).
+- If a toolbox **crashes**, agents stop being offered its tools shortly after, so
+  they degrade rather than dispatch to a dead toolbox; a **clean shutdown** drops
+  them immediately. Either way the toolbox reappears automatically once it's back.
+- In dev/CI with provisioning enabled, the control-plane topic is created for you
+  — bring up either side first. In production, create it out-of-band as a
+  compacted topic (`calf.capabilities`, `cleanup.policy=compact`, RF≥3) like any
+  governed topic; see [topic provisioning](topic-provisioning.md).
 
 ## Tune it (optional)
 
-Every knob has a working default, and there is one config surface:
-`Worker(..., control_plane=ControlPlaneConfig(...))` — the boot catch-up
-timeout, the heartbeat interval, a staleness threshold, and a `bootstrap_servers`
-override for running the control plane on a separate Kafka cluster. The
-capability topic name is fixed (`calf.capabilities`). Toolboxes and agents
-inherit the config of the worker that hosts them.
+The control plane's timings and an alternate Kafka cluster are set with
+`Worker(control_plane=ControlPlaneConfig(...))` — every setting has a working
+default. See the [`ControlPlaneConfig` reference](api.md#mcp-toolboxes).

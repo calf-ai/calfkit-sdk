@@ -341,6 +341,56 @@ Passed to the worker/node lifecycle hooks and `@resource` bodies. All three carr
 
 See [Worker lifecycle & embedding](worker-lifecycle.md) for the full lifecycle how-to.
 
+## MCP toolboxes
+
+Host an MCP server's tools as a deployable node and reference them from agents. The toolbox types are imported from `calfkit.mcp`.
+
+| Symbol | Purpose |
+| --- | --- |
+| `MCPToolboxNode` | The deployable host — one per MCP server, placed in `Worker(nodes=[...])`. |
+| `MCPToolbox` | A frozen, identity-only handle to a toolbox by name, placed in an agent's `tools=[...]`. |
+| `StdioServerParameters` | Connection params for a local stdio (subprocess) MCP server. |
+| `StreamableHttpParameters` | Connection params for a Streamable HTTP MCP server. |
+
+### `MCPToolboxNode`
+
+```python
+MCPToolboxNode(
+    name: str,
+    connection_params: StdioServerParameters | StreamableHttpParameters,
+)
+```
+
+Hosts the tools of one MCP server; `name` is the toolbox identity agents reference. `node.select(*, include: Sequence[str] | None = None) -> MCPToolbox` returns a handle to this toolbox, optionally scoped to `include` tool names.
+
+### `MCPToolbox`
+
+```python
+MCPToolbox(name: str, include: tuple[str, ...] | None = None)
+```
+
+A frozen, identity-only handle to a toolbox. `name` must match the hosting `MCPToolboxNode`. `include` pins the tool names the agent may use; `None` exposes all of the toolbox's tools. The handle carries no connection params — passing connection details, or deploying a handle as a node, raises.
+
+### Connection params
+
+| Symbol | Key fields |
+| --- | --- |
+| `StdioServerParameters` | `command: str`, `args: list[str] = []`, `env`, `cwd`, `encoding` |
+| `StreamableHttpParameters` | `url: str`, `headers`, `timeout: float = 30.0`, `auth` |
+
+### `ControlPlaneConfig`
+
+The worker's control-plane configuration (`from calfkit import ControlPlaneConfig`), used by toolbox discovery. Passed as `Worker(control_plane=ControlPlaneConfig(...))`; every field has a default. The control-plane topic name is fixed (`calf.capabilities`).
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `heartbeat_interval` | `float` | `30.0` | Seconds between a toolbox's liveness re-publishes. |
+| `stale_after` | `float \| None` | `None` | Seconds after which an un-refreshed toolbox is hidden from agents; `None` uses the built-in default. |
+| `catchup_timeout` | `float` | `30.0` | Seconds a worker waits at boot to catch up the control-plane view before serving. |
+| `bootstrap_servers` | `str \| None` | `None` | Run the control plane on a separate Kafka cluster; `None` uses the worker's broker. |
+
+See also: [How to give agents MCP tools](mcp-tool-discovery.md).
+
 ## Other public modules
 
 The top-level package re-exports the symbols above. A few public capabilities live in submodules:
@@ -348,7 +398,7 @@ The top-level package re-exports the symbols above. A few public capabilities li
 | Import from | Provides |
 | --- | --- |
 | `calfkit.models` | `ConsumerContext` — the value passed to a `@consumer` function (`output`, `correlation_id`, `deps`, `resources`) — plus the wire/state models (`State`, `Envelope`, `ToolBinding`, …). |
-| `calfkit.mcp` | `MCPToolboxNode`, `MCPToolbox`, `StdioServerParameters`, `StreamableHttpParameters` — `MCPToolboxNode` hosts an MCP server's tools as a deployable node; `MCPToolbox` is the name-only handle agents put in `tools=[...]`. |
+| `calfkit.mcp` | `MCPToolboxNode`, `MCPToolbox`, `StdioServerParameters`, `StreamableHttpParameters` — see [MCP toolboxes](#mcp-toolboxes). |
 | `calfkit.provisioning` | The full topic-provisioning surface: `TopicProvisioner`, `provision_topics`, `topics_for_nodes`, `ProvisionReport`, `StartupTopicEnsurer`, `MissingTopicsError`. |
 | `calfkit.exceptions` | The complete exception set, including `ReplyExpiredError` (raised by `execute` / `start` when a `reply_ttl` elapses), `RegistryConfigError`, and `MissingTopicsError`. |
 
