@@ -35,7 +35,7 @@ from calfkit import (
 | Symbol | Purpose |
 | --- | --- |
 | `Agent` | An agent node — an LLM-backed node that consumes prompts, calls tools, and publishes output. |
-| `agent_tool` | Decorator that turns a function into a deployable tool node (`agent_tool(func, name=...)` overrides its name). |
+| `agent_tool` | Decorator that turns a function into a deployable tool node (`@agent_tool(name=...)` or `agent_tool(func, name=...)` overrides its name). |
 | `Tools` | Identity-only handle that references deployed tool nodes by name; pass in `Agent(tools=[...])` to discover their schemas at runtime. |
 | `consumer` | Decorator that turns a function into a deployable consumer node (a terminal sink on a topic). |
 
@@ -175,7 +175,7 @@ def get_weather(location: str) -> str:        # -> ToolNodeDef
     ...
 ```
 
-Turns a function into a tool node. The function's parameters and type annotations become the tool's argument schema, and its docstring becomes the description shown to the calling LLM. Declare an optional first `ctx: ToolContext` parameter to receive the [context](#context-objects) — it is hidden from the LLM schema. The return value must be JSON-serializable. Sync and async functions are both supported. The tool name defaults to the function name and is the node's identity — the name the LLM calls and the name a `Tools(...)` handle references; `agent_tool(func, name="...")` overrides it. The node's topics derive from that name (`tool.<name>.input` / `tool.<name>.output`).
+Turns a function into a tool node. The function's parameters and type annotations become the tool's argument schema, and its docstring becomes the description shown to the calling LLM. Declare an optional first `ctx: ToolContext` parameter to receive the [context](#context-objects) — it is hidden from the LLM schema. The return value must be JSON-serializable. Sync and async functions are both supported. The tool name defaults to the function name and is the node's identity — the name the LLM calls and the name a `Tools(...)` handle references; `@agent_tool(name="...")` (or `agent_tool(func, name="...")`) overrides it. The node's topics derive from that name (`tool.<name>.input` / `tool.<name>.output`).
 
 ### `Tools`
 

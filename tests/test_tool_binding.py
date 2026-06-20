@@ -179,6 +179,30 @@ class TestToolNodeIdentity:
         assert node.subscribe_topics == ["tool.weather.input"]
         assert node.publish_topic == "tool.weather.output"
 
+    def test_agent_tool_decorator_with_args_drives_all_three_identities(self) -> None:
+        from calfkit.nodes.tool import ToolNodeDef, agent_tool
+
+        @agent_tool(name="weather")
+        def get_weather(city: str) -> str:
+            return city
+
+        assert isinstance(get_weather, ToolNodeDef)  # the decorator replaces the function with the node
+        assert get_weather.node_id == "weather"
+        assert get_weather.tool_schema.name == "weather"
+        assert get_weather.subscribe_topics == ["tool.weather.input"]
+        assert get_weather.publish_topic == "tool.weather.output"
+
+    def test_agent_tool_decorator_empty_parens_uses_function_name(self) -> None:
+        from calfkit.nodes.tool import agent_tool
+
+        @agent_tool()
+        def get_weather(city: str) -> str:
+            return city
+
+        assert get_weather.node_id == "get_weather"
+        assert get_weather.tool_schema.name == "get_weather"
+        assert get_weather.subscribe_topics == ["tool.get_weather.input"]
+
     def test_create_tool_node_name_override(self) -> None:
         from calfkit.nodes.tool import ToolNodeDef
 
@@ -197,6 +221,8 @@ class TestToolNodeIdentity:
 
         with pytest.raises(ValueError, match="name"):
             agent_tool(fn, name="")
+        with pytest.raises(ValueError, match="name"):
+            agent_tool(name="")  # decorator-with-args form rejects eagerly, before decorating
         with pytest.raises(ValueError, match="name"):
             ToolNodeDef.create_tool_node(func=fn, subscribe_topics="t.in", publish_topic="t.out", name="")
 

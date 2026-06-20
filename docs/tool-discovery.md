@@ -64,12 +64,12 @@ unique across the cluster (like MCP toolbox names). Override the name without
 renaming the function — the disambiguation knob:
 
 ```python
+@agent_tool(name="issues_search")   # the tool name, not the function name "search"
 def search(query: str) -> list[str]:
     """Search the issue tracker."""
     ...
 
 
-issues_search = agent_tool(search, name="issues_search")   # not just "search"
 # ... then reference it: tools=[Tools("issues_search")]
 ```
 

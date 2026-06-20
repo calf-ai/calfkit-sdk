@@ -29,8 +29,9 @@ Three changes let the plane serve both adopters safely:
   tool-node record). It also lets the view observe (log) cross-kind `node_id` collisions.
 - A tool node's identity becomes the tool name — the `tool_` `node_id` prefix is dropped —
   so `node_id == the LLM-facing tool name == the capability key`, and an agent references a
-  node by the same name it calls. `agent_tool(func, name=...)` / `create_tool_node(..., name=...)`
-  override it (the disambiguation knob for the cluster-wide-unique identity contract).
+  node by the same name it calls. `@agent_tool(name=...)` (or `agent_tool(func, name=...)`) /
+  `create_tool_node(..., name=...)` override it (the disambiguation knob for the
+  cluster-wide-unique identity contract).
 - The `SelectorResult` / `resolve_capability` vocabulary is de-MCP'd to be
   cardinality-neutral (`missing_targets` / `invalid_targets` / `wrong_kind_targets`, tuple
   `bindings`), since `Tools` resolves N targets where `MCPToolbox` resolves one.

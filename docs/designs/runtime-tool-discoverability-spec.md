@@ -140,7 +140,7 @@ Notes:
 
 The capability key is the node's `node_id` (the view is `get(node_id)`). For `Tools("add")` → `view.get("add")` to resolve, the tool node's `node_id` **must equal the tool name** the user references. Today `create_tool_node` sets `node_id=f"tool_{func.__name__}"` (`tool.py:72`) while the LLM-facing tool name is `func.__name__` — they diverge.
 
-**Change `create_tool_node` / `agent_tool` so the effective tool name drives all three identities:** the `node_id`, the LLM-facing `tool_def.name`, and the topic names. The function name is the default; `name=` overrides it (the disambiguation knob for the cluster-unique-identity contract, §8). `name=` is accepted by **both** entry points; an empty `name=""` is rejected (it must not silently fall back to the function name and quietly violate the identity contract).
+**Change `create_tool_node` / `agent_tool` so the effective tool name drives all three identities:** the `node_id`, the LLM-facing `tool_def.name`, and the topic names. The function name is the default; `name=` overrides it (the disambiguation knob for the cluster-unique-identity contract, §8). `name=` is accepted by **both** entry points; an empty `name=""` is rejected (it must not silently fall back to the function name and quietly violate the identity contract). `agent_tool` is usable three ways — bare (`@agent_tool`), with args (`@agent_tool(name=...)`), or as a direct call (`agent_tool(fn, name=...)`) — via the standard optional-argument decorator pattern (`func=None` → return the builder; else build now).
 
 ```python
 @classmethod
@@ -157,15 +157,19 @@ def create_tool_node(cls, func, subscribe_topics, publish_topic, *, name=None) -
         _tool=tool,
     )
 
-def agent_tool(func, *, name=None) -> ToolNodeDef:
+def agent_tool(func=None, *, name=None) -> ToolNodeDef:   # bare / with-args / call (overloaded)
     if name is not None and not name:
         raise ValueError("name must be non-empty when given")
-    effective = name or func.__name__          # computed once; topics + identity share one source of truth
-    return ToolNodeDef.create_tool_node(
-        func=func, name=effective,
-        subscribe_topics=f"tool.{effective}.input",
-        publish_topic=f"tool.{effective}.output",
-    )
+
+    def _build(fn):
+        effective = name or fn.__name__        # computed once; topics + identity share one source of truth
+        return ToolNodeDef.create_tool_node(
+            func=fn, name=effective,
+            subscribe_topics=f"tool.{effective}.input",
+            publish_topic=f"tool.{effective}.output",
+        )
+
+    return _build if func is None else _build(func)       # (name=…) → return decorator; else build now
 ```
 
 `pydantic_ai.Tool` accepts a `name` override (verified `tools.py:294`, `self.name = name or function.__name__` at `tools.py:375`), so `tool_def.name`, `node_id`, and the topics stay in lockstep. The `tool_` prefix is removed (cosmetic — one construction site, nothing parses it). `node.name`/`node.id` are read-only aliases of `node_id` (`base.py:1748-1753`), so the capability key is equivalently the node's `name`.

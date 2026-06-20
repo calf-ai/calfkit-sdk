@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import KW_ONLY, dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, overload
 
 import pydantic_core
 from typing_extensions import Self
@@ -162,20 +162,37 @@ class ToolNodeDef(BaseToolNodeDef):
         return ReturnCall[State](state=ctx.state, value=result)
 
 
-def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]], *, name: str | None = None) -> ToolNodeDef:
+@overload
+def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]], *, name: str | None = None) -> ToolNodeDef: ...
+@overload
+def agent_tool(func: None = None, *, name: str | None = None) -> Callable[[Callable[..., Any]], ToolNodeDef]: ...
+def agent_tool(func: Callable[..., Any] | None = None, *, name: str | None = None) -> ToolNodeDef | Callable[[Callable[..., Any]], ToolNodeDef]:
     """Turn a function into a deployable tool node that agents can call.
 
-    Usable bare (``@agent_tool``) or as a call (``agent_tool(fn, name="x")``). The tool
-    name — ``name`` if given, else the function name — drives the node id (the capability
-    key an agent references), the LLM-facing tool name, and the ``tool.<name>.input`` /
-    ``.output`` topics, so one name is the only thing to reason about.
+    Usable three ways — bare (``@agent_tool``), with args (``@agent_tool(name="x")``),
+    or as a direct call (``agent_tool(fn, name="x")``). The tool name — ``name`` if given,
+    else the function name — drives the node id (the capability key an agent references),
+    the LLM-facing tool name, and the ``tool.<name>.input`` / ``.output`` topics, so one
+    name is the only thing to reason about.
+
+    When called without a function (``@agent_tool(name="x")`` or ``@agent_tool()``) it
+    returns the decorator that builds the node once applied; otherwise it builds the node
+    immediately. ``name`` is validated eagerly so ``@agent_tool(name="")`` fails at the
+    decoration site, not when the decorated function is defined.
     """
     if name is not None and not name:
         raise ValueError("name must be non-empty when given")
-    effective = name or func.__name__
-    subscribe_topic = f"tool.{effective}.input"
-    publish_topic = f"tool.{effective}.output"
-    return ToolNodeDef.create_tool_node(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic, name=effective)
+
+    def _build(fn: Callable[..., Any]) -> ToolNodeDef:
+        effective = name or fn.__name__
+        return ToolNodeDef.create_tool_node(
+            func=fn,
+            subscribe_topics=f"tool.{effective}.input",
+            publish_topic=f"tool.{effective}.output",
+            name=effective,
+        )
+
+    return _build if func is None else _build(func)
 
 
 @dataclass(frozen=True)
