@@ -105,7 +105,7 @@ class TestResolveTools:
 
     def test_stale_record_hidden_by_view(self) -> None:
         # age 100s > 3*30 = 90 threshold -> the view collapses it to None, so the
-        # resolver reports missing_toolbox (no advisory "use last-known" path).
+        # resolver reports missing_targets (no advisory "use last-known" path).
         view = make_view(make_record(last_heartbeat_at=datetime.now(tz=timezone.utc) - timedelta(seconds=100)))
         result = make_toolbox().resolve_tools(view)
         assert result.missing_targets == ("docs_server",)
@@ -113,7 +113,7 @@ class TestResolveTools:
 
     def test_newer_schema_hidden_by_view(self) -> None:
         # A record from a newer schema major is filtered (and logged) by the view;
-        # the resolver just sees None -> missing_toolbox.
+        # the resolver just sees None -> missing_targets.
         view = make_view(make_record(schema_version=2))
         result = make_toolbox().resolve_tools(view)
         assert result.missing_targets == ("docs_server",)

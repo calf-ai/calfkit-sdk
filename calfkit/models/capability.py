@@ -29,7 +29,8 @@ CAPABILITY_SCHEMA_VERSION = 1
 wire changes; additive fields ride on the tolerant reader instead."""
 
 CAPABILITY_TOPIC = "calf.capabilities"
-"""The cluster-wide compacted control-plane topic toolboxes advertise to.
+"""The cluster-wide compacted control-plane topic capability advertisers advertise to —
+both MCP toolboxes and function tool nodes.
 
 A control-plane topic (not MCP-specific transport): one record schema per topic.
 Both the ``@advertises`` factory and the reader's ``ControlPlaneView`` bind to it."""
