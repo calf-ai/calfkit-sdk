@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.11.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.10.0...v0.11.0) (2026-06-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* rename toolbox_id/server_name to name on the MCP toolbox types ([#255](https://github.com/calf-ai/calfkit-sdk/issues/255))
+* the fault rail: typed fault propagation, policy seams & in-node fan-out fold ([#247](https://github.com/calf-ai/calfkit-sdk/issues/247))
+
+### Features
+
+* control-plane substrate: generic node discoverability machinery ([#256](https://github.com/calf-ai/calfkit-sdk/issues/256)) ([37438b7](https://github.com/calf-ai/calfkit-sdk/commit/37438b740110fc58fb1fff04e81d331b52b66242))
+* durable in-node fan-out, return-only — staged pipeline + ktables store ([#233](https://github.com/calf-ai/calfkit-sdk/issues/233)) ([a05f7bc](https://github.com/calf-ai/calfkit-sdk/commit/a05f7bc9076ac26fc0f2b53b0c02983e5a5ad6dc))
+* fault wire model: ErrorReport, FaultMessage, NodeFaultError ([#229](https://github.com/calf-ai/calfkit-sdk/issues/229)) ([4dba194](https://github.com/calf-ai/calfkit-sdk/commit/4dba194d489cfeab758b14fc71ed3e9fe1a7c050))
+* per-delivery reply slot for returns; Envelope.reply + x-calf-kind ([#223](https://github.com/calf-ai/calfkit-sdk/issues/223)) ([4d80a5e](https://github.com/calf-ai/calfkit-sdk/commit/4d80a5eb53b8e38df2071b445024c8e6a248ca34))
+* phase-0 prereqs for in-node fan-out aggregation ([#228](https://github.com/calf-ai/calfkit-sdk/issues/228)) ([58f19a1](https://github.com/calf-ai/calfkit-sdk/commit/58f19a16b1a93d962b778a56d7e2db6a72e61104))
+* the fault rail: typed fault propagation, policy seams & in-node fan-out fold ([#247](https://github.com/calf-ai/calfkit-sdk/issues/247)) ([04203fc](https://github.com/calf-ai/calfkit-sdk/commit/04203fceb292971e7d3cf774987c8e7d1e91f9c2))
+
+
+### Bug Fixes
+
+* abort the durable fan-out batch on an OPEN-path failure ([#234](https://github.com/calf-ai/calfkit-sdk/issues/234)) ([e66cc74](https://github.com/calf-ai/calfkit-sdk/commit/e66cc74861e5d0694f30b67b7258dfc58ec3dc2a))
+
+
+### Documentation
+
+* accept ADR-0006: reply rides a per-delivery envelope slot ([#235](https://github.com/calf-ai/calfkit-sdk/issues/235)) ([a5107a6](https://github.com/calf-ai/calfkit-sdk/commit/a5107a697afe094fa29efaad07b8601fd280022e))
+* add concurrency model doc ([#252](https://github.com/calf-ai/calfkit-sdk/issues/252)) ([59b3d90](https://github.com/calf-ai/calfkit-sdk/commit/59b3d901b45f82fde2da72a93a40e959aa770998))
+* clarify the test-taxonomy table's run column in CONTRIBUTING ([#244](https://github.com/calf-ai/calfkit-sdk/issues/244)) ([c2eb989](https://github.com/calf-ai/calfkit-sdk/commit/c2eb989e7739008f1947df539894e26bd39e16d7))
+* design specs for node presence control plane ([#236](https://github.com/calf-ai/calfkit-sdk/issues/236)) ([d6b6210](https://github.com/calf-ai/calfkit-sdk/commit/d6b6210c7cf7825794636f3392ec7fd4b4ecb607))
+* extract API reference from README into docs/api.md ([#237](https://github.com/calf-ai/calfkit-sdk/issues/237)) ([f55dd8d](https://github.com/calf-ai/calfkit-sdk/commit/f55dd8da683ad19d5844a359910bca648154e7ed))
+* refresh ROADMAP to reflect shipped and in-flight work ([#245](https://github.com/calf-ai/calfkit-sdk/issues/245)) ([43d2880](https://github.com/calf-ai/calfkit-sdk/commit/43d2880f165d11cdb3d0f504dee676b3acbc9542))
+
+
+### Code Refactoring
+
+* rename toolbox_id/server_name to name on the MCP toolbox types ([#255](https://github.com/calf-ai/calfkit-sdk/issues/255)) ([779ed95](https://github.com/calf-ai/calfkit-sdk/commit/779ed953faffed05df822961312f25f725f0da5d))
+
 ## [0.10.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.9.1...v0.10.0) (2026-06-11)
 
 
