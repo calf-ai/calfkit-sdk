@@ -134,6 +134,23 @@ class TestCapabilityFactory:
         assert after.content_updated_at > before
         assert [t.name for t in after.tools] == ["new_tool"]
 
+    async def test_factory_fails_loud_if_cache_not_primed(self) -> None:
+        # The session resource primes the cache before the publisher pulls the factory.
+        # If that ordering ever breaks, fail loud with a NAMED cause (not a -O-stripped
+        # assert, and not a half-built record).
+        toolbox = make_toolbox()  # never refreshed
+        with pytest.raises(RuntimeError, match="primed the tool cache"):
+            toolbox._capability_record(make_stamp())
+
+    async def test_empty_tool_list_is_a_valid_advertisement(self) -> None:
+        # A server advertising zero tools is valid: the cache is [] (distinct from the
+        # uninitialized None), and the factory builds a record with an empty tool list.
+        toolbox = make_toolbox()
+        await toolbox._refresh_tools(FakeSession([]))
+        assert toolbox._last_tools == []  # [] != None — primed, just empty
+        record = toolbox._capability_record(make_stamp())
+        assert record.tools == []
+
 
 class TestListChanged:
     async def test_list_changed_updates_cache_via_offloaded_relist(self) -> None:

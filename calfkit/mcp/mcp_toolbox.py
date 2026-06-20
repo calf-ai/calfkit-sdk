@@ -116,6 +116,12 @@ class MCPToolboxNode(BaseNodeDef):
         next worker heartbeat tick (pull). ``content_updated_at`` advances ONLY
         when the tool set actually changes — never per heartbeat — so liveness
         and content currency stay distinct (CRITICAL-3).
+
+        On the offloaded ``tools/list_changed`` path a failed ``list_tools()`` raises
+        before the cache is touched, so the previous tool list stays cached and keeps
+        being advertised as live (logged by :meth:`_on_relist_done`); it self-heals on
+        the next successful re-list. Startup is fail-loud instead — the session resource
+        aborts boot.
         """
         listing = await session.list_tools()
         tools = [CapabilityToolDef(name=tool.name, description=tool.description, parameters_json_schema=tool.inputSchema) for tool in listing.tools]
@@ -132,7 +138,13 @@ class MCPToolboxNode(BaseNodeDef):
         cadence); identity (``toolbox_id`` × ``worker_id``) is the wire key, not
         carried in the value.
         """
-        assert self._last_tools is not None and self._tools_changed_at is not None  # session resource primes the cache first
+        if self._last_tools is None or self._tools_changed_at is None:
+            # The session resource primes the cache in the resource phase, before the
+            # publisher's after_startup pulls this factory; reaching here means that
+            # ordering broke. Fail loud with a named cause (not a `-O`-stripped assert).
+            raise RuntimeError(
+                f"MCPToolboxNode {self.node_id!r}: capability factory ran before the session resource primed the tool cache (lifecycle ordering bug)"
+            )
         return CapabilityRecord(
             **stamp.model_dump(),
             dispatch_topic=self.subscribe_topics[0],

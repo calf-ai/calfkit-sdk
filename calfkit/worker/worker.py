@@ -169,11 +169,11 @@ class Worker(LifecycleHookMixin):
         self._nodes.append(node)
 
     def _maybe_register_capability_view(self) -> None:
-        """Auto-register the MCP Capability View resource (spec §8.3).
+        """Auto-register the MCP Capability View resource.
 
         Zero user wiring: iff any hosted node declares MCP tool selectors, ONE
-        worker-level ``KafkaTable[CapabilityRecord]`` resource is registered
-        (idempotent — guarded by resource-name lookup). The table lands in the
+        worker-level ``ControlPlaneView[CapabilityRecord]`` resource is registered
+        (idempotent — guarded by resource-name lookup). The view lands in the
         worker bag and reaches every node's ``ctx.resources`` via the existing
         worker-under-node merge.
         """

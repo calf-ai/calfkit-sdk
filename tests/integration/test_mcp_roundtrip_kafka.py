@@ -120,37 +120,38 @@ async def _wait(predicate: Callable[[], bool], *, timeout: float, what: str) -> 
     raise AssertionError(f"timed out after {timeout}s waiting for: {what}")
 
 
+async def _await_view(bootstrap: str, predicate: Callable[[ControlPlaneView[CapabilityRecord]], bool], *, timeout: float, what: str) -> None:
+    """Open a transient capability view, wait for ``predicate`` over it, then close it.
+
+    ``start()`` is inside the ``try`` so a failed open never leaks the view.
+    """
+    view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
+        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
+    )
+    try:
+        await view.start()
+        await _wait(lambda: predicate(view), timeout=timeout, what=what)
+    finally:
+        await view.stop()
+
+
 async def _await_capability(bootstrap: str, toolbox_id: str, *, timeout: float) -> None:
     """Block until the toolbox's CapabilityRecord is live on ``calf.capabilities``.
 
     Starting the agent worker only after the record exists makes the agent's
     Capability View catch-up include it, so the binding resolves on the turn.
     """
-    view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
-    )
-    await view.start()
-    try:
-        await _wait(lambda: view.get(toolbox_id) is not None, timeout=timeout, what=f"capability record {toolbox_id!r}")
-    finally:
-        await view.stop()
+    await _await_view(bootstrap, lambda v: v.get(toolbox_id) is not None, timeout=timeout, what=f"capability record {toolbox_id!r}")
 
 
 async def _await_tool_in_record(bootstrap: str, toolbox_id: str, tool: str, *, timeout: float) -> None:
     """Block until ``toolbox_id``'s live record advertises ``tool`` (re-list landed)."""
-    view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
-    )
-    await view.start()
 
-    def _present() -> bool:
-        record = view.get(toolbox_id)
+    def _present(v: ControlPlaneView[CapabilityRecord]) -> bool:
+        record = v.get(toolbox_id)
         return record is not None and any(t.name == tool for t in record.tools)
 
-    try:
-        await _wait(_present, timeout=timeout, what=f"tool {tool!r} in record {toolbox_id!r}")
-    finally:
-        await view.stop()
+    await _await_view(bootstrap, _present, timeout=timeout, what=f"tool {tool!r} in record {toolbox_id!r}")
 
 
 async def _topics(bootstrap: str) -> set[str]:
@@ -412,7 +413,8 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
 
     driver = Client.connect(kafka_bootstrap)
     # Both toolboxes hosted in one worker (the agent reads the shared view either
-    # way); each opens its own MCP session and publishes its own record.
+    # way); each opens its own MCP session, and the shared worker publisher advertises
+    # one record per toolbox.
     toolbox_worker = _worker(kafka_bootstrap, nodes=[box_a, box_b], control_plane=control_plane)
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
@@ -522,9 +524,10 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
 
 async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_namespace: str) -> None:
     """Dynamic discovery: a tool registers a NEW tool at runtime and emits
-    ``notifications/tools/list_changed``; the toolbox re-lists and re-publishes,
-    and a fresh agent (whose view catch-up includes the grown record) can call
-    the new tool end-to-end."""
+    ``notifications/tools/list_changed``; the toolbox re-lists into its cache and the
+    worker's heartbeat carries the grown record on the next tick (pull), and a fresh
+    agent (whose view catch-up includes the grown record) can call the new tool
+    end-to-end."""
     enable_id = f"{topic_namespace}-enable-agent"
     enable_in = f"{topic_namespace}.enable-agent.input"
     bonus_id = f"{topic_namespace}-bonus-agent"
@@ -561,7 +564,7 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
         assert r1.output is not None and FINAL_OUTPUT in r1.output
         assert "enabled" in _serialized(tool_returns(r1.message_history)["enable_bonus"])
 
-        # 2) The toolbox re-listed and re-published; wait for the grown record.
+        # 2) The toolbox re-listed into its cache; the next heartbeat carried the grown record — wait for it.
         await _await_tool_in_record(kafka_bootstrap, _server_name(topic_namespace), "bonus", timeout=60)
 
         # 3) A fresh agent's view catch-up now includes 'bonus' deterministically.

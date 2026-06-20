@@ -74,6 +74,32 @@ class TestCapabilityViewRegistration:
         assert worker._control_plane == ControlPlaneConfig()
 
 
+class TestControlPlaneWriterRegistration:
+    """The writer side: hosting an advertising toolbox auto-wires the publisher + writer."""
+
+    def test_hosting_a_toolbox_registers_the_capability_writer_and_publisher(self) -> None:
+        from calfkit.controlplane.publisher import control_plane_writer_key
+        from calfkit.models.capability import CAPABILITY_TOPIC
+
+        worker = Worker(Client.connect("kafka:9092"), nodes=[make_toolbox()])
+        worker._maybe_register_control_plane()
+        assert control_plane_writer_key(CAPABILITY_TOPIC) in worker_resource_names(worker)
+        publisher = worker._control_plane_publisher
+        assert publisher is not None
+        assert CAPABILITY_TOPIC in [info.topic for _, info in publisher._adverts]
+
+    def test_agent_only_worker_registers_no_capability_writer(self) -> None:
+        from calfkit.controlplane.publisher import control_plane_writer_key
+        from calfkit.models.capability import CAPABILITY_TOPIC
+
+        # An agent declares a tool selector but advertises nothing — only the toolbox
+        # (host) advertises. A worker hosting just the agent wires no control-plane writer.
+        worker = Worker(Client.connect("kafka:9092"), nodes=[make_agent(make_toolbox())])
+        worker._maybe_register_control_plane()
+        assert control_plane_writer_key(CAPABILITY_TOPIC) not in worker_resource_names(worker)
+        assert worker._control_plane_publisher is None
+
+
 class FakeGroupedTable:
     """Stands in for ktables.GroupedKafkaTable; records construction and lifecycle."""
 

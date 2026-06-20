@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
 
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.controlplane import ControlPlaneRecord
@@ -52,8 +52,19 @@ class CapabilityRecord(ControlPlaneRecord):
     ``worker_id`` is the wire key; the worker stamps ``started_at`` /
     ``last_heartbeat_at`` / ``heartbeat_interval``) plus the capability content: the
     dispatch topic and the tool list. ``content_updated_at`` advances only when
-    ``tools`` actually changes — separate from the liveness heartbeat — so a consumer
-    can tell "instance alive" from "tool list fresh" (the CRITICAL-3 split).
+    ``tools`` actually changes — separate from the liveness heartbeat — so liveness
+    and content currency stay distinct. It is **advisory**: the substrate cannot
+    enforce its monotonicity (the writing node owns the contract; a hand-rolled
+    factory could pass ``now()``), and no production reader gates on it yet — it is
+    wire surface for future ops/observability consumers.
+
+    **Precondition for the collapsed view:** all replicas of one toolbox (same
+    ``toolbox_id``) must advertise *equivalent* content. The view collapses replicas to
+    one record by most-recent heartbeat — it does not merge tool sets — so two replicas
+    with divergent tool lists would flap the agent's visible surface tick-to-tick. The
+    dispatch topic is name-derived and identical across replicas, so routing is never
+    wrong; only tool *visibility* would flap. Keep a toolbox's replicas pointed at the
+    same server / tool set.
 
     Inherits the base's tolerant, frozen ``model_config`` (``extra="ignore"``); the
     value object is rebuilt per heartbeat tick, never mutated.
@@ -124,7 +135,11 @@ def resolve_capability(
         return SelectorResult(toolbox_id=toolbox_id, missing_toolbox=True)
     try:
         bindings = record_to_bindings(record)
-    except Exception:
+    except ValidationError:
+        # The one tolerant-reader bad-data path: an empty dispatch_topic fails
+        # ToolBinding's min_length. A poisoned advert degrades (invalid_record),
+        # not crashes the turn. A NON-validation error here is a logic bug — let
+        # it propagate (fail loud) rather than masking it as bad wire data.
         return SelectorResult(toolbox_id=toolbox_id, invalid_record=True)
     missing: tuple[str, ...] = ()
     if include is not None:
