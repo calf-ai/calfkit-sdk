@@ -268,7 +268,7 @@ The first shipped instance of this pattern is MCP tooling: `MCPToolboxNode` is
 the servant (hosts the MCP session, deploys via `add_nodes`), and
 `MCPToolbox` is the reference (identity + optional tool scoping, zero
 deployment knowledge — a passive resolution token rather than an RPC proxy) that agents hold in `tools=[...]` — see
-[mcp-tool-discovery](mcp-tool-discovery.md).
+[mcp-tool-discovery](../mcp-tool-discovery.md).
 
 Note the **naming inversion** versus the generic `Node` / `NodeRef` sketch above.
 The sketch follows the Akka `ActorRef` convention — the bare name is the servant,
@@ -278,7 +278,7 @@ high-frequency call-side type, in every agent's `tools=[...]`) and the
 `Node` suffix marks the once-per-deploy servant. The reference≠servant split is
 identical; only which name is decorated differs. The rationale (name the common
 case clean; "node" is calfkit's universal word for a deployable host) is recorded
-in [ADR-0009](adr/0009-call-side-handle-takes-the-bare-name.md).
+in [ADR-0009](../adr/0009-call-side-handle-takes-the-bare-name.md).
 
 The MCP bridge node — a node that both exposes tools and calls other nodes — is a
 genuine and natural instance of this pattern. The guidance that falls out of the

@@ -12,7 +12,7 @@ decision the whole thing turns on, and — the part most worth your time — how
 discovery, access-policy, and other future planes are all the *same* machinery
 over *different* topics. It is not a step-by-step guide (see
 [How to add a control plane to your nodes](control-plane-howto.md)) and not the
-full contract (see the [design spec](designs/control-plane-substrate-spec.md)).
+full contract (see the [design spec](../designs/control-plane-substrate-spec.md)).
 Read it while thinking about a design, not while mid-task.
 
 The short version, which the rest unpacks:
@@ -96,7 +96,7 @@ record value.** The value carries the stamp, `schema_version`, and content;
 Duplicating identity inside the value would make it *driftable* — a factory could
 return a value whose `node_id` disagreed with its key. Keeping identity key-only
 makes that disagreement unrepresentable. The reasoning is recorded in
-[ADR-0010](adr/0010-instance-keyed-control-plane-storage-collapsed-view.md).
+[ADR-0010](../adr/0010-instance-keyed-control-plane-storage-collapsed-view.md).
 
 ## Liveness is advisory, and it travels on the record
 
@@ -145,7 +145,7 @@ covering every node it hosts. Liveness is a worker concern: the heartbeat
 reflects the health of the *process*, so the process should own it. A node
 contributes only *content*, through its `@advertises` factory; it never imports
 ktables and never runs a loop. This split, recorded in
-[ADR-0011](adr/0011-worker-owned-control-plane-publisher.md), is what lets a node
+[ADR-0011](../adr/0011-worker-owned-control-plane-publisher.md), is what lets a node
 be use-case-rich while the worker stays use-case-blind: the worker calls an
 opaque factory and publishes an opaque record, knowing nothing about capabilities
 or ACLs.
@@ -232,9 +232,9 @@ for a concrete reason:
 
 See also:
 [How to add a control plane to your nodes](control-plane-howto.md) for the
-recipe, the [design spec](designs/control-plane-substrate-spec.md) for the full
-contract, and [ADR-0010](adr/0010-instance-keyed-control-plane-storage-collapsed-view.md)
-/ [ADR-0011](adr/0011-worker-owned-control-plane-publisher.md) for the two
+recipe, the [design spec](../designs/control-plane-substrate-spec.md) for the full
+contract, and [ADR-0010](../adr/0010-instance-keyed-control-plane-storage-collapsed-view.md)
+/ [ADR-0011](../adr/0011-worker-owned-control-plane-publisher.md) for the two
 decisions above.
 
 *The source tree is always the source of truth. The types and behaviour

@@ -4,7 +4,7 @@ The two MCP toolbox types ([ADR-0002](0002-two-type-toolbox-reference-over-union
 were renamed: the identity-only call-side handle is now `MCPToolbox` (was
 `MCPToolboxRef`) and the deployable hosting servant is now `MCPToolboxNode` (was
 `MCPToolbox`). This **inverts** the convention recorded implicitly in 0002 and
-in the [peer-node pattern doc](../peer-node-pattern.md), where the bare name is
+in the [peer-node pattern doc](../dev/peer-node-pattern.md), where the bare name is
 the servant and the `Ref`-suffixed name is the lightweight handle (the Akka
 `ActorRef` shape).
 
