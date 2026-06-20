@@ -9,7 +9,7 @@
 
 ## 1. Summary
 
-Today an agent can only use a function tool node by being handed the **live node object** (`tools=[my_tool_node]`), which bakes the tool's JSON schema into the agent's process at construction (`BaseToolNodeDef.tool_bindings`, `calfkit/nodes/tool.py:30`). That couples the agent's deployment to *importing the tool's Python code*, even though the call itself always crosses Kafka.
+Today an agent can only use a function tool node by being handed the **live node object** (`tools=[my_tool_node]`), which bakes the tool's JSON schema into the agent's process at construction (`BaseToolNodeDef.tool_bindings`, `calfkit/nodes/tool.py:32`). That couples the agent's deployment to *importing the tool's Python code*, even though the call itself always crosses Kafka.
 
 This feature adds an **identity-only handle** — `Tools(*names)` — that lets an agent reference tool nodes **by name** and discover their schemas **at runtime** from the shared capability control plane (a `ControlPlaneView[CapabilityRecord]` materialized from the compacted `calf.capabilities` topic). It is the exact mirror of how `MCPToolbox` already resolves MCP tools, applied to function tool nodes.
 
@@ -51,19 +51,19 @@ The eager path is **kept** unchanged. `Tools` is purely additive: the same tool 
 
 | Piece | Location | Role |
 |---|---|---|
-| `ControlPlaneRecord` / `ControlPlaneStamp` | `calfkit/controlplane/records.py:14,33` | Record base: identity-as-key + boot/liveness/cadence stamp + `schema_version`. **This spec adds `node_kind` to the stamp (§6.4).** |
+| `ControlPlaneRecord` / `ControlPlaneStamp` | `calfkit/controlplane/records.py:14,38` | Record base: identity-as-key + boot/liveness/cadence stamp + `schema_version`. **This spec adds `node_kind` to the stamp (§6.4).** |
 | `@advertises(topic, record=...)` | `calfkit/controlplane/advert.py:52` | Class-body marker: binds a node *type* to one topic + record schema; factory `(self, stamp) -> record`. |
 | `ControlPlanePublisher` | `calfkit/controlplane/publisher.py:42` | One per worker; fail-loud first publish, per-advert-resilient heartbeat loop, ordered tombstone. **Stamps `node_kind` (§6.4).** |
 | `ControlPlaneView[R]` | `calfkit/controlplane/view.py:64` | Read side: instance-keyed (`node_id × worker_id`) → collapsed `get(node_id)`, staleness + schema-version filtering, health passthrough. **Gains a mixed-`node_kind` warning (§6.4, C1).** |
 | `CapabilityRecord` / `CapabilityToolDef` | `calfkit/models/capability.py:48,38` | Wire content: `dispatch_topic`, `tools[name/description/json_schema]`, `content_updated_at` (+ inherited `node_kind`). |
-| `resolve_capability` / `record_to_bindings` | `calfkit/models/capability.py:116,79` | Resolution kernel: `view.get(id)` → validator-less `ToolBinding`s. **Gains `expected_kind` (§6.4).** |
-| `ToolBinding` / `ToolProvider` / `ToolSelector` / `SelectorResult` | `calfkit/models/tool_dispatch.py:21,58,96,71` | The agent's tool-type machinery. |
-| `_node_kind` | `calfkit/nodes/base.py:483` (used in `HDR_EMITTER_KIND`); `mcp_toolbox.py:41` (`"toolbox"`); `tool.py:25` (`"tool"`) | Each node type's kind. Already exists; `node_kind` on the stamp is sourced from it. |
+| `resolve_capability` / `record_to_bindings` | `calfkit/models/capability.py:117,79` | Resolution kernel: `view.get(id)` → validator-less `ToolBinding`s. **Gains `expected_kind` (§6.4).** |
+| `ToolBinding` / `ToolProvider` / `ToolSelector` / `SelectorResult` | `calfkit/models/tool_dispatch.py:21,59,100,72` | The agent's tool-type machinery. |
+| `_node_kind` | `calfkit/nodes/base.py:483` (used in `HDR_EMITTER_KIND`); `mcp_toolbox.py:41` (`"toolbox"`); `tool.py:27` (`"tool"`) | Each node type's kind. Already exists; `node_kind` on the stamp is sourced from it. |
 | Worker read-side wiring | `calfkit/worker/worker.py:171-184` | Registers ONE `ControlPlaneView[CapabilityRecord]` resource iff any hosted node has `_tool_selectors`. |
 | Worker write-side wiring | `calfkit/worker/worker.py:232-253` | Registers the publisher + one writer per topic iff any hosted node declares an `@advertises`. |
 | Agent resolution | `calfkit/nodes/agent.py:195-258` | Per turn: read the view, resolve each selector, merge bindings (collision → existing wins), warn/degrade. |
 
-MCP's flow today: `MCPToolboxNode` declares `@advertises(topic=CAPABILITY_TOPIC, record=CapabilityRecord)` (`mcp_toolbox.py:132`); the `MCPToolbox` handle (`name` + `include`, no `strict`) resolves via `resolve_capability(view, name, include=...)` (`mcp_toolbox.py:246`). `Tools` and the tool node mirror both halves.
+MCP's flow today: `MCPToolboxNode` declares `@advertises(topic=CAPABILITY_TOPIC, record=CapabilityRecord)` (`mcp_toolbox.py:132`); the `MCPToolbox` handle (`name` + `include`, no `strict`) resolves via `resolve_capability(view, name, include=...)` (`mcp_toolbox.py:247`). `Tools` and the tool node mirror both halves.
 
 ---
 
@@ -98,7 +98,7 @@ model calls add → Call(dispatch_topic="tool.add.input", body=ToolCallRef) → 
 
 ### 6.1 Tool node as advertiser (always-on)
 
-`BaseToolNodeDef` already extends `BaseNodeDef`, which carries `AdvertRegistryMixin` (`base.py:221`), and already holds `tool_schema: ToolDefinition` (`tool.py:28`) and `subscribe_topics`. The factory mirrors MCP's, reading static data instead of a cached session list. **It does not stamp `node_kind` itself** — that rides on the stamp (§6.4), so it flows in via `stamp.model_dump()`:
+`BaseToolNodeDef` already extends `BaseNodeDef`, which carries `AdvertRegistryMixin` (`base.py:221`), and already holds `tool_schema: ToolDefinition` (`tool.py:30`) and `subscribe_topics`. The factory mirrors MCP's, reading static data instead of a cached session list. **It does not stamp `node_kind` itself** — that rides on the stamp (§6.4), so it flows in via `stamp.model_dump()`:
 
 ```python
 # calfkit/nodes/tool.py — on BaseToolNodeDef
@@ -111,10 +111,9 @@ def _capability_advert(self, stamp: ControlPlaneStamp) -> CapabilityRecord:
     ``content_updated_at`` is the process boot time (``stamp.started_at``): the
     content never changes, so a stable, non-``now()`` value satisfies the
     substrate's no-``now()``-in-factory contract. ``node_kind`` rides on the
-    stamp (the worker stamps it), so it is not set here.
+    stamp (the worker stamps it), so it is not set here. ``subscribe_topics[0]``
+    is always safe: ``BaseNodeSchema`` rejects an empty list at construction.
     """
-    if not self.subscribe_topics:  # named guard: empty subscribe_topics would IndexError mid-publish
-        raise RuntimeError(f"tool node {self.node_id!r} has no subscribe_topics; cannot advertise a dispatch topic")
     return CapabilityRecord(
         **stamp.model_dump(),  # started_at, last_heartbeat_at, heartbeat_interval, node_kind, schema_version
         dispatch_topic=self.subscribe_topics[0],
@@ -131,7 +130,7 @@ def _capability_advert(self, stamp: ControlPlaneStamp) -> CapabilityRecord:
 
 Notes:
 - **Always-on.** The `@advertises` lives on the base type, so every `ToolNodeDef` advertises (L7). Consequence: a worker hosting any tool node stands up the control-plane writer + publisher at boot (fail-loud) — see §8. The opt-in alternative is fully designed in §14.1.
-- **Fail-safe at publish.** The factory reads only static fields; the one non-content read (`subscribe_topics[0]`) is guarded with a named error rather than letting an `IndexError` escape mid-publish.
+- **Fail-safe at publish.** The factory reads only static fields; the one non-content read (`subscribe_topics[0]`) is safe by construction — `BaseNodeSchema` rejects an empty `subscribe_topics` list at node construction, so no `IndexError` can escape mid-publish.
 - **`content_updated_at = stamp.started_at`.** Correct for a static schema; never moves tick-to-tick.
 - **Replicas are trivially equivalent.** `CapabilityRecord`'s collapse precondition (equivalent content across replicas) is satisfied by construction for tool nodes: the schema is derived from the same `func`, so two replicas of the same tool node advertise byte-identical content. (Two *different* functions deployed under the same `name` would violate it — but that is the identity-collision case of §8, not a replica case.)
 - **Tombstone on clean shutdown** is handled by the shared publisher (`publisher.py:75`). No tool-node-specific lifecycle code.
@@ -230,7 +229,7 @@ class Tools:
         )
 ```
 
-Both `Tools("add", "subtract")` (varargs, the common case) and `Tools(names=[...])` (pre-built list) work; mixing them raises. `Tools` satisfies the existing `ToolSelector` protocol (`tool_dispatch.py:96`), so it flows through `split_tool_declarations` into `agent._tool_selectors` with **no change to the agent's `tools=` union type**.
+Both `Tools("add", "subtract")` (varargs, the common case) and `Tools(names=[...])` (pre-built list) work; mixing them raises. `Tools` satisfies the existing `ToolSelector` protocol (`tool_dispatch.py:100`), so it flows through `split_tool_declarations` into `agent._tool_selectors` with **no change to the agent's `tools=` union type**.
 
 ### 6.4 Wire model, resolution kernel & de-MCP'd `SelectorResult`
 
@@ -272,7 +271,7 @@ class CapabilityRecord(ControlPlaneRecord):   # ControlPlaneRecord(ControlPlaneS
 
 **Wire compatibility — breaking change (accepted; pre-1.0, no deployments).** `node_kind` is **required**, like the sibling stamp fields. A `CapabilityRecord` written before this field existed will fail to decode (`model_validate_json` raises; ktables' poison-tolerance then *skips* it — `kafka_table.py`), so the compacted `calf.capabilities` topic must be **recreated/drained on upgrade**. This is a deliberate clean break rather than a compat default: a defaulted `node_kind="node"` would mask a publisher that forgot to stamp the field and would conflate "legacy/unknown" with the real base-node kind — and with no live deployments to preserve, the shim earns nothing (and a shim runs against the project's hard-breaks-over-compat stance). **No `CAPABILITY_SCHEMA_VERSION` bump** — the topic is recreated with the new shape, so `schema_version` stays `1`. `node_kind` is typed `str` (not the `NodeKind` Literal) so a future *additive* kind value from a newer writer still decodes on an older reader.
 
-**C1 — heterogeneous-owner collision (observable, documented).** Tool nodes and MCP toolboxes share the `calf.capabilities` `node_id` keyspace. A `node_id` collision between *different owners* (a tool node and a toolbox, or two unrelated tool nodes) would land them in one group as different `worker_id` members, and the collapsed `get()` (max-by-heartbeat, `view.py:90`) would flap the agent's surface between two owners tick-to-tick. This is **a facet of the existing global `node_id`-uniqueness contract** — `node_id` already must be unique cluster-wide because it drives return topics and consumer groups (`worker.py:299,309`); a collision is an already-broken deployment, and the flap is one more symptom. So it is documented, not policed (§8). For observability, the generic view logs (dedup'd, like its schema-skip warning) when one group holds members of differing `node_kind`:
+**C1 — heterogeneous-owner collision (observable, documented).** Tool nodes and MCP toolboxes share the `calf.capabilities` `node_id` keyspace. A `node_id` collision between *different owners* (a tool node and a toolbox, or two unrelated tool nodes) would land them in one group as different `worker_id` members, and the collapsed `get()` (max-by-heartbeat, `view.py:91`) would flap the agent's surface between two owners tick-to-tick. This is **a facet of the existing global `node_id`-uniqueness contract** — `node_id` already must be unique cluster-wide because it drives return topics and consumer groups (`worker.py:299,309`); a collision is an already-broken deployment, and the flap is one more symptom. So it is documented, not policed (§8). For observability, the generic view logs (dedup'd, like its schema-skip warning) when one group holds members of differing `node_kind`:
 
 ```python
 # calfkit/controlplane/view.py — inside _live_members, after collecting live members
@@ -362,19 +361,19 @@ for selector in self._tool_selectors:          # selector in scope
 - **Degrade (unchanged policy):** missing view, degraded/failed view, or `result.unresolved` → warn and continue. No raise.
 
 **Validation semantics (the eager/discovered divergence, by design):**
-- *Eager:* `ToolBinding.validator = validate_call_args` (`tool.py:41`) → the agent validates LLM args **before** dispatch; a schema mismatch is corrected locally with no Kafka hop.
+- *Eager:* `ToolBinding.validator = validate_call_args` (`tool.py:43`) → the agent validates LLM args **before** dispatch; a schema mismatch is corrected locally with no Kafka hop.
 - *Discovered:* `validator=None` → the agent dispatches unvalidated. Two distinct outcomes at the tool node:
-  - a **schema-mismatch** (`function_schema` raises `ValidationError`, `tool.py:110`) escapes to the chokepoint → `on_node_error` → fault rail → typed fault back to the agent;
-  - an in-body **`ModelRetry`** is *not* a fault — it is rendered at origin to a `calf.retry`-marked reply (`tool.py:116-121`), a model-visible recoverable, identical on both eager and discovered paths (it's body behavior, not arg validation).
+  - a **schema-mismatch** (`function_schema` raises `ValidationError`, `tool.py:145`) escapes to the chokepoint → `on_node_error` → fault rail → typed fault back to the agent;
+  - an in-body **`ModelRetry`** is *not* a fault — it is rendered at origin to a `calf.retry`-marked reply (`tool.py:151-156`), a model-visible recoverable, identical on both eager and discovered paths (it's body behavior, not arg validation).
 
 So the discovered path's *arg-validation* failure rides the rail (one Kafka hop later than the eager path's local correction); in-body retries behave identically on both paths.
 
-**`add_tools` timing caveat (carried over from MCP).** `Agent.add_tools` (`agent.py:518`) added *after* the worker's `register_handlers` has snapshotted `_tool_selectors` will **not** get a capability view (the read-side gate already ran), so its `Tools`/`MCPToolbox` selectors silently degrade to no-discovery. Declare discovery selectors at agent construction. (Pre-existing MCP constraint; `Tools` inherits it.)
+**`add_tools` timing caveat (carried over from MCP).** `Agent.add_tools` (`agent.py:519`) added *after* the worker's `register_handlers` has snapshotted `_tool_selectors` will **not** get a capability view (the read-side gate already ran), so its `Tools`/`MCPToolbox` selectors silently degrade to no-discovery. Declare discovery selectors at agent construction. (Pre-existing MCP constraint; `Tools` inherits it.)
 
 ### 6.6 Worker wiring (zero new code)
 
-- **Write side:** `_maybe_register_control_plane` (`worker.py:245`) collects `type(node)._adverts`. With `@advertises` on `BaseToolNodeDef`, every hosted tool node contributes the capability advert automatically — no new branch.
-- **Read side:** `_maybe_register_capability_view` (`worker.py:180`) registers the view iff any hosted node has `_tool_selectors`. A `Tools` selector trips the same gate. One worker-level `ControlPlaneView[CapabilityRecord]`, shared with MCP.
+- **Write side:** `_maybe_register_control_plane` (`worker.py:232`) collects `type(node)._adverts`. With `@advertises` on `BaseToolNodeDef`, every hosted tool node contributes the capability advert automatically — no new branch.
+- **Read side:** `_maybe_register_capability_view` (`worker.py:171`) registers the view iff any hosted node has `_tool_selectors`. A `Tools` selector trips the same gate. One worker-level `ControlPlaneView[CapabilityRecord]`, shared with MCP.
 
 ---
 
@@ -416,7 +415,7 @@ So the discovered path's *arg-validation* failure rides the rail (one Kafka hop 
 No wire-format break to `CapabilityRecord`/`CapabilityToolDef` content (MCP and tool nodes interoperate immediately).
 
 **Concrete migration checklist (from the blast-radius review — nothing parses the prefix, so it is mechanical):**
-- Production: `tool.py:72` (the prefix), `tool.py:130-136`/`61-77` (`name=`), `agent.py` resolution logs (SelectorResult fields), `mcp_toolbox.py:246` (`expected_kind`), substrate touch (`records.py`, `publisher.py`, `view.py`).
+- Production: `tool.py:72` (the prefix), `tool.py:130-136`/`61-77` (`name=`), `agent.py` resolution logs (SelectorResult fields), `mcp_toolbox.py:247` (`expected_kind`), substrate touch (`records.py`, `publisher.py`, `view.py`).
 - Node-id test assertions (8): `tests/test_run_loader.py:25,33,41,91,110,138`, `tests/test_run_serve.py:48,122` (all fed by `tests/provisioning_cli_nodes.py`).
 - `SelectorResult`-field assertions (~14): `tests/test_tool_selector.py` (many), `tests/test_mcp_toolbox.py:95` (`toolbox_id` equality — needs rewrite).
 - **`node_kind` required-field fallout (new).** Because `node_kind` is required, **every** test that constructs a `ControlPlaneStamp`/`ControlPlaneRecord`/`CapabilityRecord` must pass it, and the field-set assertions break: `tests/test_controlplane_records.py:49,53` (add `node_kind`); the `_stamp`/`make_stamp`/`make_record` helpers in `tests/test_controlplane_records.py`, `tests/test_controlplane_advert.py`, `tests/test_mcp_toolbox_publisher.py`, `tests/test_capability_models.py`, `tests/test_tool_selector.py`, `tests/test_mcp_toolbox.py`, `tests/test_controlplane_view.py`, `tests/test_controlplane_worker_wiring.py`, `tests/test_controlplane_publisher.py`. Resolution fixtures must set the kind the selector expects (`"tool"` for `Tools` tests, `"toolbox"` for MCP tests) or they resolve as `wrong_kind`. Add a publisher test asserting the stamp carries `node._node_kind`.
@@ -431,7 +430,7 @@ No wire-format break to `CapabilityRecord`/`CapabilityToolDef` content (MCP and 
 1. **`node_kind` on the substrate** — add required `node_kind: str` to `ControlPlaneStamp`, stamp it in the publisher from `node._node_kind`, add the view's mixed-kind warning. *Tests:* the publisher stamps `node_kind` from `node._node_kind` (`MCPToolboxNode`→`"toolbox"`, tool node→`"tool"`); the view warns once per `(node_id, frozenset(kinds))` on a cross-kind group (and does NOT warn on a same-kind group).
 2. **De-MCP `SelectorResult` + `resolve_capability`** — plural/immutable fields, `expected_kind`, `bindings` tuple, kept fail-loud comment. Update `MCPToolbox.resolve_tools` (`expected_kind="toolbox"`) and agent logs (selector-provenance). *Tests:* MCP resolution adapted; new `missing_targets`/`invalid_targets`/`wrong_kind_targets` cases.
 3. **Drop the `tool_` prefix + `name=`** on `agent_tool`/`create_tool_node` (reject empty). *Tests:* `node_id == effective`, topics derive from it, `tool_def.name == effective`, override on both entry points, empty rejected.
-4. **Tool node advertises** (`@advertises` on `BaseToolNodeDef`, guarded `subscribe_topics[0]`). *Tests:* factory builds a valid record from `tool_schema`+stamp; `content_updated_at == started_at`; worker auto-registers publisher/writer.
+4. **Tool node advertises** (`@advertises` on `BaseToolNodeDef`; `subscribe_topics[0]` is safe by `BaseNodeSchema`'s construction-time non-empty check). *Tests:* factory builds a valid record from `tool_schema`+stamp; `content_updated_at == started_at`; worker auto-registers publisher/writer.
 5. **`Tools` selector** — varargs + `names=`, dedupe, reject-mixed, reject-empty, `expected_kind="tool"`. *Tests (dict view):* single/multi name; `names=` form; dedupe; mixed-call raises; missing → `missing_targets`; toolbox key → `wrong_kind_targets`; satisfies `ToolSelector`; lands in `_tool_selectors`.
 6. **Eager/discovered parity test** (§7).
 7. **Kafka-lane roundtrip** (mirror `test_mcp_roundtrip_kafka.py`): tool node in one worker, agent with `tools=[Tools("add")]` in another; discover → dispatch `add(2,3)` → `5` returns. Plus a bad-args case asserting the fault-rail path.
@@ -440,7 +439,7 @@ No wire-format break to `CapabilityRecord`/`CapabilityToolDef` content (MCP and 
 
 ## 11. Testing strategy
 
-- **Unit** — `CapabilityLookup` is a `Protocol` satisfied by a `dict` (`capability.py:104`), so all resolution logic is broker-free.
+- **Unit** — `CapabilityLookup` is a `Protocol` satisfied by a `dict` (`capability.py:105`), so all resolution logic is broker-free.
 - **Parity** — eager vs discovered `ToolDefinition` equality (§7 guard).
 - **Scenarios** (from review) — duplicate names dedupe; `Tools(...)`/`Tools(names=...)` and the rejected mixed call; rejected empty `name=`; `Tools` + eager same tool (eager wins, validator preserved); `Tools` against `view is None` / degraded view; `wrong_kind_targets` (Tools → toolbox key); `expected_kind` for both selectors; the publisher stamps `node_kind` from `_node_kind`; cross-kind view warning fires / same-kind does not; `name=` collision (two nodes same `name`); `add_tools` post-registration degradation; replica content-equivalence; eager/discovered `ToolDefinition` parity.
 - **Worker wiring** — tool node trips write-side; `Tools` agent trips read-side.

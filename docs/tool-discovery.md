@@ -51,11 +51,12 @@ plane (gated at boot, so the first turn already sees it) and resolves each name 
 the start of every turn, so a tool node that comes up later — or runs in another
 process — is picked up on the next turn. No restarts, no bring-up order.
 
-The alternative, passing the live node (`tools=[add]`), bakes the schema into the
-agent's process and validates arguments locally *before* dispatch. A discovered
-`Tools` binding has no local validator: bad arguments are dispatched and the tool
-node rejects them on receipt (the failure travels back as a typed fault). Same
-node, two handles — choose per deployment.
+**Which handle?** Reach for `Tools(...)` when you want the agent's deployment
+decoupled from the tool's code — the schema travels over the plane. Pass the live
+node (`tools=[add]`) when you'd rather bake the schema in and validate arguments
+locally *before* dispatch, at the cost of importing the tool. Same node, either
+handle. (A discovered binding defers argument validation to the tool node; see the
+[design spec](designs/runtime-tool-discoverability-spec.md) for the full trade-off.)
 
 ## Names are cluster-wide identities
 
