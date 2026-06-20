@@ -9,9 +9,10 @@ calls out:
 * a ``@resource`` (and a callback-shape resource) opened at boot reaches a live
   handler as ``ctx.resources[...]`` and is closed (key popped from the bag) on
   stop;
-* ``resources`` reach all four read surfaces (Agent ``run`` / custom
-  ``BaseNodeDef`` ``ctx.resources``, ``agent_tool`` ``ctx.resources``, and the
-  consumer ``result.resources``);
+* ``resources`` reach the custom ``BaseNodeDef`` ``ctx.resources`` and the
+  consumer ``result.resources`` surfaces here; the Agent ``run`` and
+  ``agent_tool`` surfaces need a real broker (the always-on control-plane
+  writer), so they live in ``tests/integration/test_lifecycle_resources_kafka.py``;
 * when an owner mixes ``@resource`` and resource-phase callbacks on the same
   key, the ``@resource`` brackets win (callbacks ignored, warning logged), and a
   duplicate ``@resource`` name on one owner raises ``LifecycleConfigError`` at
@@ -20,8 +21,7 @@ calls out:
 * an ``after_startup`` failure stops the broker, and a double ``start()`` raises.
 
 We avoid the LLM by driving deterministic node handlers directly over the
-broker (mirroring ``tests/test_consumer.py``'s hand-built envelope pattern) and
-a ``FunctionModel``-backed agent for the tool surface.
+broker (mirroring ``tests/test_consumer.py``'s hand-built envelope pattern).
 """
 
 from __future__ import annotations
@@ -33,8 +33,6 @@ import pytest
 from faststream.kafka import TestKafkaBroker
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND
-from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client, InvocationResult
 from calfkit.exceptions import LifecycleConfigError
 from calfkit.models import ReturnCall
@@ -48,8 +46,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import State
-from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool, consumer
+from calfkit.nodes import consumer
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.worker import ServingContext, Worker
 
@@ -181,7 +178,8 @@ async def test_callback_resource_reaches_handler_then_closes_on_stop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# resources reach ALL FOUR surfaces
+# resources reach the in-process surfaces (custom BaseNodeDef + consumer); the
+# Agent-run + agent_tool surfaces need a real broker -> the kafka lane
 # ---------------------------------------------------------------------------
 
 
@@ -224,69 +222,6 @@ async def test_resources_reach_consumer_result() -> None:
 
     assert received, "consumer never ran"
     assert received[-1].resources["db"] is sentinel
-
-
-def _tool_then_text(captured: dict[str, Any]) -> FunctionModel:
-    """A FunctionModel that calls ``read_resource`` once, then emits text."""
-
-    def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        last = messages[-1]
-        if any(isinstance(p, ToolReturnPart) for p in getattr(last, "parts", [])):
-            return ModelResponse(parts=[TextPart("done")])
-        return ModelResponse(parts=[ToolCallPart(tool_name="read_resource", args={})])
-
-    return FunctionModel(_fn)
-
-
-async def test_resources_reach_agent_run_and_agent_tool() -> None:
-    """The Agent's ``run`` reads ``ctx.resources`` (via prepare_context) and an
-    ``agent_tool`` reads ``ctx.resources`` (via the ToolContext) — two of the
-    four surfaces, exercised through a real agent->tool round trip over Kafka."""
-    tool_saw: dict[str, Any] = {}
-
-    def read_resource(ctx: ToolContext) -> str:
-        tool_saw["db"] = ctx.resources["db"]
-        return "ok"
-
-    tool = agent_tool(read_resource)
-    tool_sentinel = object()
-    tool.resources["db"] = tool_sentinel
-
-    # A custom agent subclass so we can also assert the *agent's* ctx.resources
-    # surface (prepare_context stamping) on the same run.
-    agent_saw: dict[str, Any] = {}
-
-    class _ResAgent(Agent[str]):
-        async def run(self, ctx: SessionRunContext) -> Any:
-            agent_saw["db"] = ctx.resources.get("db")
-            return await super().run(ctx)
-
-    agent: _ResAgent = _ResAgent(
-        "res_agent",
-        system_prompt="x",
-        subscribe_topics="res_agent.in",
-        publish_topic="res_agent.out",
-        model_client=_tool_then_text(tool_saw),  # type: ignore[arg-type]
-        tools=[tool],
-    )
-    agent_sentinel = object()
-    agent.resources["db"] = agent_sentinel
-
-    worker = _make_worker()
-    worker.add_nodes(agent, tool)
-    broker = worker._client.broker
-    client = worker._client
-
-    async with TestKafkaBroker(broker):
-        await worker.start()
-        result = await client.execute("hi", "res_agent.in", timeout=5)
-        await worker.stop()
-
-    assert result.output == "done"
-    # agent_tool surface: the tool read its node's resources.
-    assert tool_saw["db"] is tool_sentinel
-    # Agent run surface: the agent read its own node's resources.
-    assert agent_saw["db"] is agent_sentinel
 
 
 # ---------------------------------------------------------------------------
