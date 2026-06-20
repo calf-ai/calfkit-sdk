@@ -1,5 +1,5 @@
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -70,27 +70,30 @@ class ToolProvider(Protocol):
 
 @dataclass(frozen=True)
 class SelectorResult:
-    """Outcome of resolving one MCP tool selector against the Capability View.
+    """Outcome of resolving one tool selector against the capability view.
 
-    Carries the bindings plus structured diagnostics so the agent owns the
-    warn/degrade policy in one place and tests assert on data, not log text.
+    Cardinality-neutral: a selector may resolve one target (a tool node), one target
+    with many tools (an MCP toolbox), or many targets (a ``Tools`` handle). Carries the
+    bindings plus structured diagnostics so the agent owns the warn/degrade policy in one
+    place and tests assert on data, not log text. A frozen value object — every field is
+    immutable (``bindings`` is a tuple), so equal results compare and hash equal.
 
-    Staleness and schema-version filtering are the :class:`ControlPlaneView`'s
-    job now (it hides stale/newer-schema records), so the only ways a selection
-    is ``unresolved`` are a missing toolbox, missing requested tools, or a
-    record that fails binding expansion.
+    The :class:`ControlPlaneView` owns staleness + schema-version filtering, so the only
+    ways a selection is ``unresolved`` are: an absent target, an ``include``-pinned tool
+    missing from a present record (MCP ``include`` only), a present-but-unexpandable
+    record, or a present record of the wrong node kind (the over-pull guard).
     """
 
-    toolbox_id: str
-    bindings: list[ToolBinding] = field(default_factory=list)
-    missing_toolbox: bool = False
-    missing_tools: tuple[str, ...] = ()
-    invalid_record: bool = False
+    bindings: tuple[ToolBinding, ...] = ()
+    missing_targets: tuple[str, ...] = ()  # requested identities with no live record
+    missing_tools: tuple[str, ...] = ()  # include-pinned tool names absent from a present record (MCP include only)
+    invalid_targets: tuple[str, ...] = ()  # identities whose record was present but failed binding expansion
+    wrong_kind_targets: tuple[str, ...] = ()  # identities present but of the wrong node_kind for this selector
 
     @property
     def unresolved(self) -> bool:
         """True when anything the selector asked for could not be delivered."""
-        return self.missing_toolbox or bool(self.missing_tools) or self.invalid_record
+        return bool(self.missing_targets or self.missing_tools or self.invalid_targets or self.wrong_kind_targets)
 
 
 @runtime_checkable
@@ -98,12 +101,13 @@ class ToolSelector(Protocol):
     """Deferred tool declaration, resolved per turn against the Capability View.
 
     Implemented by :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` (the handle
-    agents hold, including ``select()`` results) and by the hosting
-    :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode`, which delegates to it:
-    passing either to an agent extracts only a lookup key — no session contact,
-    no deployment. The ``view`` is a :class:`~calfkit.models.capability.CapabilityLookup`
-    (anything with ``get(toolbox_id) -> CapabilityRecord | None``), so the agent layer
-    needs no ktables import and tests can use plain dicts.
+    agents hold, including ``select()`` results) and the hosting
+    :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode` that delegates to it, and by
+    :class:`~calfkit.nodes.tool.Tools` for function tool nodes: passing any of them
+    to an agent extracts only a lookup key — no session contact, no deployment. The
+    ``view`` is a :class:`~calfkit.models.capability.CapabilityLookup` (anything with
+    ``get(target_id) -> CapabilityRecord | None``), so the agent layer needs no
+    ktables import and tests can use plain dicts.
     """
 
     def resolve_tools(self, view: "CapabilityLookup") -> SelectorResult: ...

@@ -4,7 +4,7 @@ from calfkit.client import Client, InvocationHandle, InvocationResult
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView, advertises
 from calfkit.exceptions import DeserializationError, LifecycleConfigError, NodeFaultError
 from calfkit.models import ErrorReport, FaultTypes, ToolContext
-from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, agent_tool, consumer
+from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, Tools, agent_tool, consumer
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.worker import LifecycleContext, ResourceSetupContext, ServingContext, Worker
@@ -27,6 +27,7 @@ __all__ = [
     "ConsumerNode",
     "NodeDef",
     "ToolNodeDef",
+    "Tools",
     "agent_tool",
     "consumer",
     # providers

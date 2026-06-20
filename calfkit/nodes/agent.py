@@ -194,32 +194,32 @@ class BaseAgentNodeDef(
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool
-        surface for the turn, so MCP selectors are skipped entirely when
+        surface for the turn, so selectors are skipped entirely when
         ``override_agent_tools`` is present (overrides are the exact surface;
-        MCP must not widen a turn the caller scoped away from it)."""
+        discovery must not widen a turn the caller scoped away from it)."""
         if not self._tool_selectors:
             return
         if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
             logger.debug(
-                "agent=%s per-run tool overrides active; skipping MCP selector resolution for this turn",
+                "agent=%s per-run tool overrides active; skipping selector resolution for this turn",
                 self.name,
             )
             return
         self._resolve_selector_tools(ctx.resources, tools_registry)
 
     def _resolve_selector_tools(self, resources: Mapping[str, Any], tools_registry: dict[str, ToolBinding]) -> None:
-        """Per-turn MCP selector resolution against the Capability View.
+        """Per-turn tool-selector resolution against the capability view.
 
-        Merges AFTER static tools with collision = error-log + static wins (a
-        remote server must never silently shadow a locally defined tool). The
-        :class:`ControlPlaneView` owns staleness + schema-version filtering, so
-        an unresolved selection (missing toolbox/tools, or a poisoned record)
+        Merges AFTER static tools with collision = error-log + existing wins (a
+        discovered tool must never silently shadow a locally configured one). The
+        :class:`ControlPlaneView` owns staleness + schema-version filtering, so an
+        unresolved selection (missing target/tools, wrong kind, or a poisoned record)
         only warns and degrades — there is no strict fail path.
         """
         view = resources.get(CAPABILITY_VIEW_RESOURCE_KEY)
         if view is None:
             logger.warning(
-                "agent=%s has MCP tool selectors but no Capability View resource; running without MCP tools",
+                "agent=%s has tool selectors but no Capability View resource; running without discovered tools",
                 self.name,
             )
             return
@@ -229,7 +229,7 @@ class BaseAgentNodeDef(
         failure = getattr(view, "failure", None)
         if failure is not None or status in ("degraded", "failed"):
             logger.warning(
-                "agent=%s resolving MCP tools against a %s Capability View (failure=%r); tools may be stale",
+                "agent=%s resolving tools against a %s Capability View (failure=%r); tools may be stale",
                 self.name,
                 status,
                 failure,
@@ -238,21 +238,22 @@ class BaseAgentNodeDef(
             result: SelectorResult = selector.resolve_tools(view)
             if result.unresolved:
                 logger.warning(
-                    "agent=%s MCP selection partially unresolved (toolbox=%r missing_toolbox=%s "
-                    "missing_tools=%s invalid_record=%s); running degraded",
+                    "agent=%s tool selection partially unresolved by %r (missing_targets=%s "
+                    "missing_tools=%s invalid_targets=%s wrong_kind_targets=%s); running degraded",
                     self.name,
-                    result.toolbox_id,
-                    result.missing_toolbox,
+                    selector,
+                    result.missing_targets,
                     result.missing_tools,
-                    result.invalid_record,
+                    result.invalid_targets,
+                    result.wrong_kind_targets,
                 )
             for binding in result.bindings:
                 if binding.name in tools_registry:
                     logger.error(
-                        "agent=%s MCP tool %r from toolbox=%s collides with a locally configured tool; static wins",
+                        "agent=%s discovered tool %r from selector %r collides with an existing tool; existing wins",
                         self.name,
                         binding.name,
-                        result.toolbox_id,
+                        selector,
                     )
                     continue
                 tools_registry[binding.name] = binding

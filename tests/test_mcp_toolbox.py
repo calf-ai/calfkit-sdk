@@ -24,6 +24,7 @@ def make_record(toolbox_id: str = "github", tool_names: tuple[str, ...] = ("sear
         started_at=now,
         last_heartbeat_at=now,
         heartbeat_interval=30.0,
+        node_kind="toolbox",
         dispatch_topic=f"mcp_server.{toolbox_id}",
         tools=[CapabilityToolDef(name=n, parameters_json_schema={"type": "object", "properties": {}}) for n in tool_names],
         content_updated_at=now,
@@ -92,7 +93,7 @@ class TestMintingAndParity:
         via_toolbox = make_toolbox().resolve_tools(view)
         via_ref = MCPToolbox("github").resolve_tools(view)
         assert [b.name for b in via_toolbox.bindings] == [b.name for b in via_ref.bindings]
-        assert via_toolbox.toolbox_id == via_ref.toolbox_id
+        assert via_toolbox == via_ref  # identical SelectorResult (frozen value): toolbox and ref resolve the same
 
     def test_scoped_selector_is_gone(self) -> None:
         import calfkit.mcp.mcp_toolbox as mod

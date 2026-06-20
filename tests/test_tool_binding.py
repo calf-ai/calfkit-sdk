@@ -148,6 +148,85 @@ class TestToolNodeDefProvidesBindings:
         assert isinstance(node, ToolProvider)
 
 
+class TestToolNodeIdentity:
+    """The tool name drives node_id (the capability key), the LLM tool name, and topics.
+
+    No `tool_` prefix: `node_id == tool name`, so an agent can reference the node by the
+    same name it calls. `name=` overrides all three without renaming the function.
+    """
+
+    def test_agent_tool_node_id_is_the_function_name(self) -> None:
+        from calfkit.nodes.tool import agent_tool
+
+        def get_weather(city: str) -> str:
+            return city
+
+        node = agent_tool(get_weather)
+        assert node.node_id == "get_weather"  # no tool_ prefix
+        assert node.tool_schema.name == "get_weather"  # capability key == LLM tool name
+        assert node.subscribe_topics == ["tool.get_weather.input"]
+        assert node.publish_topic == "tool.get_weather.output"
+
+    def test_agent_tool_name_override_drives_all_three_identities(self) -> None:
+        from calfkit.nodes.tool import agent_tool
+
+        def get_weather(city: str) -> str:
+            return city
+
+        node = agent_tool(get_weather, name="weather")
+        assert node.node_id == "weather"
+        assert node.tool_schema.name == "weather"
+        assert node.subscribe_topics == ["tool.weather.input"]
+        assert node.publish_topic == "tool.weather.output"
+
+    def test_agent_tool_decorator_with_args_drives_all_three_identities(self) -> None:
+        from calfkit.nodes.tool import ToolNodeDef, agent_tool
+
+        @agent_tool(name="weather")
+        def get_weather(city: str) -> str:
+            return city
+
+        assert isinstance(get_weather, ToolNodeDef)  # the decorator replaces the function with the node
+        assert get_weather.node_id == "weather"
+        assert get_weather.tool_schema.name == "weather"
+        assert get_weather.subscribe_topics == ["tool.weather.input"]
+        assert get_weather.publish_topic == "tool.weather.output"
+
+    def test_agent_tool_decorator_empty_parens_uses_function_name(self) -> None:
+        from calfkit.nodes.tool import agent_tool
+
+        @agent_tool()
+        def get_weather(city: str) -> str:
+            return city
+
+        assert get_weather.node_id == "get_weather"
+        assert get_weather.tool_schema.name == "get_weather"
+        assert get_weather.subscribe_topics == ["tool.get_weather.input"]
+
+    def test_create_tool_node_name_override(self) -> None:
+        from calfkit.nodes.tool import ToolNodeDef
+
+        def fn(x: int) -> int:
+            return x
+
+        node = ToolNodeDef.create_tool_node(func=fn, subscribe_topics="t.in", publish_topic="t.out", name="renamed")
+        assert node.node_id == "renamed"
+        assert node.tool_schema.name == "renamed"
+
+    def test_empty_name_is_rejected(self) -> None:
+        from calfkit.nodes.tool import ToolNodeDef, agent_tool
+
+        def fn(x: int) -> int:
+            return x
+
+        with pytest.raises(ValueError, match="name"):
+            agent_tool(fn, name="")
+        with pytest.raises(ValueError, match="name"):
+            agent_tool(name="")  # decorator-with-args form rejects eagerly, before decorating
+        with pytest.raises(ValueError, match="name"):
+            ToolNodeDef.create_tool_node(func=fn, subscribe_topics="t.in", publish_topic="t.out", name="")
+
+
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient  # noqa: E402
 
 

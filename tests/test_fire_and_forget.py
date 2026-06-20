@@ -286,7 +286,7 @@ async def test_send_tool_overrides_only_builds_overrides(container):
     overrides carry the tool list and a None model_settings. A ToolProvider
     (here a ToolNodeDef) is normalized into its ToolBindings, same as
     ``Agent(tools=...)``."""
-    tool = ping  # a ToolProvider (ToolNodeDef); a named fn yields a topic-safe node_id (a lambda's "tool_<lambda>" is rejected)
+    tool = ping  # a ToolProvider (ToolNodeDef); a named fn yields a topic-safe node_id (a lambda's "<lambda>" is rejected)
     client = container.get(Client)
     client._send = AsyncMock(return_value="cid")
 

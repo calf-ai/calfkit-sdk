@@ -26,8 +26,14 @@ class _CapRec(ControlPlaneRecord):
 class _Node:
     """A node stand-in exposing a fixed factory method named ``make_record``."""
 
-    def __init__(self, node_id: str, factory: Callable[[ControlPlaneStamp], ControlPlaneRecord]) -> None:
+    def __init__(
+        self,
+        node_id: str,
+        factory: Callable[[ControlPlaneStamp], ControlPlaneRecord],
+        node_kind: str = "node",
+    ) -> None:
         self.node_id = node_id
+        self._node_kind = node_kind
         self._factory = factory
 
     def make_record(self, identity: ControlPlaneStamp) -> ControlPlaneRecord:
@@ -101,6 +107,20 @@ async def test_start_publishes_each_advert_once_with_identity() -> None:
         assert (group, member) == ("n1", "wkr")  # identity is the wire key
         assert record.heartbeat_interval == 3600.0  # stamped from config
         assert record.started_at == pub._started_at
+    finally:
+        await pub.stop(ctx)
+
+
+async def test_start_stamps_node_kind_from_node() -> None:
+    # The worker stamps node_kind from the node's _node_kind — the over-pull guard's basis.
+    writer = _Writer()
+    node = _Node("n1", _rec_factory("x"), node_kind="tool")
+    pub = ControlPlanePublisher(worker_id="wkr", adverts=[(node, _advert("t"))], config=ControlPlaneConfig(heartbeat_interval=3600.0))
+    ctx = _Ctx({_key("t"): writer})
+    await pub.start(ctx)
+    try:
+        _, _, record = writer.sets[0]
+        assert record.node_kind == "tool"
     finally:
         await pub.stop(ctx)
 

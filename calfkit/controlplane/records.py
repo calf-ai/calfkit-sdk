@@ -14,13 +14,17 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict
 class ControlPlaneStamp(BaseModel):
     """The worker-stamped per-instance fields, spread into every record by the publisher.
 
-    Boot time + liveness + the writer's cadence — everything the *worker* (not the node)
-    owns and stamps on each tick. Node identity (``node_id`` × ``worker_id``) is the wire
-    **key**, never duplicated here. Frozen: built fresh per tick, never mutated.
+    Boot time + liveness + the writer's cadence + the node's kind — everything the *worker*
+    stamps on each tick. Node identity (``node_id`` × ``worker_id``) is the wire **key**, never
+    duplicated here. Frozen: built fresh per tick, never mutated.
 
     ``heartbeat_interval`` is the writer's cadence, carried on the wire so any reader
     (including a config-less out-of-process one) can judge staleness against the writer's
-    interval rather than its own config (spec §9).
+    interval rather than its own config (spec §9). ``node_kind`` is the node's own
+    ``_node_kind``, stamped by the worker; it lets a reader filter by advertiser kind (a tool
+    selector must not bind a toolbox record) and observe heterogeneous-owner ``node_id``
+    collisions. It is **required** (no default): adding it is a breaking wire change, so the
+    control-plane topic is recreated on upgrade.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -28,6 +32,7 @@ class ControlPlaneStamp(BaseModel):
     started_at: AwareDatetime  # this instance's boot time -> uptime / restart detection
     last_heartbeat_at: AwareDatetime  # liveness basis; refreshed every heartbeat tick
     heartbeat_interval: float  # the writer's cadence (seconds)
+    node_kind: str  # the node's kind ("tool"/"toolbox"/"agent"/...), stamped from BaseNodeDef._node_kind
 
 
 class ControlPlaneRecord(ControlPlaneStamp):

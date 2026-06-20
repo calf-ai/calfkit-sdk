@@ -38,6 +38,7 @@ def make_record(**overrides: Any) -> CapabilityRecord:
         started_at=now,
         last_heartbeat_at=now,
         heartbeat_interval=30.0,
+        node_kind="toolbox",
         dispatch_topic="mcp_server.docs_server",
         tools=[CapabilityToolDef(name=n, parameters_json_schema={"type": "object", "properties": {}}) for n in ("search", "fetch")],
         content_updated_at=now,
@@ -68,16 +69,17 @@ class TestResolveTools:
         view = {"docs_server": make_record()}
         result = toolbox.resolve_tools(view)
         assert isinstance(result, SelectorResult)
+        assert isinstance(result.bindings, tuple)  # frozen value: immutable binding sequence
         assert [b.name for b in result.bindings] == ["search", "fetch"]
         assert all(isinstance(b, ToolBinding) and b.validator is None for b in result.bindings)
         assert all(b.dispatch_topic == "mcp_server.docs_server" for b in result.bindings)
-        assert not result.missing_toolbox and not result.missing_tools
+        assert not result.unresolved
 
-    def test_missing_toolbox_diagnostic(self) -> None:
+    def test_missing_target_diagnostic(self) -> None:
         result = make_toolbox().resolve_tools({})
-        assert result.missing_toolbox
-        assert result.bindings == []
-        assert result.toolbox_id == "docs_server"
+        assert result.missing_targets == ("docs_server",)
+        assert result.bindings == ()
+        assert result.unresolved
 
     def test_include_filter_and_missing_tools(self) -> None:
         toolbox = make_toolbox()
@@ -93,35 +95,43 @@ class TestResolveTools:
 
     def test_malformed_record_is_skipped_with_diagnostic(self) -> None:
         # Tolerant reader admits an empty dispatch_topic; binding expansion
-        # must not crash the turn — it surfaces as invalid_record instead.
+        # must not crash the turn — it surfaces as invalid_targets instead.
         record = make_record(dispatch_topic="")
         result = make_toolbox().resolve_tools({"docs_server": record})
-        assert result.invalid_record
-        assert result.bindings == []
+        assert result.invalid_targets == ("docs_server",)
+        assert result.bindings == ()
 
     # -- view-owned filtering (D6): the resolver never sees stale/newer-schema records --
 
     def test_stale_record_hidden_by_view(self) -> None:
         # age 100s > 3*30 = 90 threshold -> the view collapses it to None, so the
-        # resolver reports missing_toolbox (no advisory "use last-known" path).
+        # resolver reports missing_targets (no advisory "use last-known" path).
         view = make_view(make_record(last_heartbeat_at=datetime.now(tz=timezone.utc) - timedelta(seconds=100)))
         result = make_toolbox().resolve_tools(view)
-        assert result.missing_toolbox
-        assert result.bindings == []
+        assert result.missing_targets == ("docs_server",)
+        assert result.bindings == ()
 
     def test_newer_schema_hidden_by_view(self) -> None:
         # A record from a newer schema major is filtered (and logged) by the view;
-        # the resolver just sees None -> missing_toolbox.
+        # the resolver just sees None -> missing_targets.
         view = make_view(make_record(schema_version=2))
         result = make_toolbox().resolve_tools(view)
-        assert result.missing_toolbox
-        assert result.bindings == []
+        assert result.missing_targets == ("docs_server",)
+        assert result.bindings == ()
 
     def test_live_record_resolves_through_view(self) -> None:
         view = make_view(make_record())
         result = make_toolbox().resolve_tools(view)
         assert [b.name for b in result.bindings] == ["search", "fetch"]
-        assert not result.missing_toolbox
+        assert not result.unresolved
+
+    def test_wrong_kind_record_is_rejected(self) -> None:
+        # Over-pull guard: an MCP toolbox handle must not bind a record of a
+        # different node_kind (e.g. a function tool node sharing the name).
+        result = make_toolbox().resolve_tools({"docs_server": make_record(node_kind="tool")})
+        assert result.wrong_kind_targets == ("docs_server",)
+        assert result.bindings == ()
+        assert result.unresolved
 
 
 class TestSplitToolDeclarations:
@@ -243,6 +253,9 @@ class TestNoStrictSurface:
         assert "strict" not in fields
         assert "stale_seconds" not in fields
         assert "skipped_newer_schema" not in fields
+        # cardinality-neutral, de-MCP'd diagnostics (no singular toolbox_id)
+        assert "toolbox_id" not in fields
+        assert {"bindings", "missing_targets", "missing_tools", "invalid_targets", "wrong_kind_targets"} <= fields
 
     def test_resolution_error_is_gone(self) -> None:
         import calfkit.exceptions as exc

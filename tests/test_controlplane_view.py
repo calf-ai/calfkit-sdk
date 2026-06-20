@@ -14,13 +14,22 @@ class _Rec(ControlPlaneRecord):
     content: str
 
 
-def _rec(worker_id: str, *, age_s: float = 0.0, hb: float = 30.0, schema_version: int = 1, content: str | None = None) -> _Rec:
+def _rec(
+    worker_id: str,
+    *,
+    age_s: float = 0.0,
+    hb: float = 30.0,
+    schema_version: int = 1,
+    content: str | None = None,
+    node_kind: str = "node",
+) -> _Rec:
     now = datetime.now(tz=timezone.utc)
     return _Rec(
         schema_version=schema_version,
         started_at=now,
         last_heartbeat_at=now - timedelta(seconds=age_s),
         heartbeat_interval=hb,
+        node_kind=node_kind,
         content=content if content is not None else worker_id,  # default content = the instance label (identity is the key)
     )
 
@@ -164,6 +173,28 @@ def test_schema_skip_dedup_is_per_member_not_per_node(caplog: pytest.LogCaptureF
     skip_logs = [r for r in caplog.records if "schema" in r.getMessage().lower() and r.levelname == "WARNING"]
     assert len(skip_logs) == 2  # one per distinct member, deduped across reads
     assert {"w1", "w2"} == {w for w in ("w1", "w2") if any(w in r.getMessage() for r in skip_logs)}
+
+
+def test_mixed_kind_group_warns_once(caplog: pytest.LogCaptureFixture) -> None:
+    # A node_id group holding members of DIFFERENT node_kind is a heterogeneous-owner
+    # collision (spec C1/L14): observable, dedup'd. Cross-kind only.
+    v = _view({"add": {"w1": _rec("w1", node_kind="tool"), "w2": _rec("w2", node_kind="toolbox")}})
+    with caplog.at_level("WARNING"):
+        v.get("add")
+        v.get("add")  # second read must NOT re-log the same (node, kind-set)
+    mixed = [r for r in caplog.records if "node_kind" in r.getMessage() and r.levelname == "WARNING"]
+    assert len(mixed) == 1
+    msg = mixed[0].getMessage()
+    assert "add" in msg and "tool" in msg and "toolbox" in msg
+
+
+def test_same_kind_group_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    # Same-kind members (the benign replica case) must NOT trip the cross-kind warning.
+    v = _view({"add": {"w1": _rec("w1", node_kind="tool"), "w2": _rec("w2", node_kind="tool")}})
+    with caplog.at_level("WARNING"):
+        v.get("add")
+    mixed = [r for r in caplog.records if "node_kind" in r.getMessage() and r.levelname == "WARNING"]
+    assert mixed == []
 
 
 def test_collapse_filters_stale_before_tiebreak() -> None:

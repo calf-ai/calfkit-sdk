@@ -23,7 +23,7 @@ class _Rec2(ControlPlaneRecord):
 
 def _stamp() -> ControlPlaneStamp:
     ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return ControlPlaneStamp(started_at=ts, last_heartbeat_at=ts, heartbeat_interval=30.0)
+    return ControlPlaneStamp(started_at=ts, last_heartbeat_at=ts, heartbeat_interval=30.0, node_kind="node")
 
 
 # -- decorator ---------------------------------------------------------------

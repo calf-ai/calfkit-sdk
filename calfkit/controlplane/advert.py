@@ -57,8 +57,8 @@ def advertises(topic: str, *, record: type[ControlPlaneRecord]) -> Callable[[_Me
     :meth:`AdvertRegistryMixin.__init_subclass__` when the owning class is built.
 
     The decorated method is a *content factory*: it takes a **bare**
-    :class:`~calfkit.controlplane.records.ControlPlaneStamp` (the three worker-stamped
-    boot/liveness fields) and returns a fully-formed ``record`` instance —
+    :class:`~calfkit.controlplane.records.ControlPlaneStamp` (the worker-stamped
+    boot/liveness/cadence/kind fields) and returns a fully-formed ``record`` instance —
     typically ``record(**stamp.model_dump(), <content>)``. Node identity is the wire
     key, never in the record value, so there is nothing for the factory to get wrong.
     Splat the stamp, never a full record: because ``ControlPlaneRecord`` *is-a*

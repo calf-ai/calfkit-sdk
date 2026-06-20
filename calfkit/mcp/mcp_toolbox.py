@@ -135,7 +135,7 @@ class MCPToolboxNode(BaseNodeDef):
 
         Reads the cached tool list — NEVER re-lists inline (this runs on the
         shared heartbeat loop). Splat the bare ``stamp`` (boot + liveness +
-        cadence); identity (``toolbox_id`` × ``worker_id``) is the wire key, not
+        cadence + kind); identity (``toolbox_id`` × ``worker_id``) is the wire key, not
         carried in the value.
         """
         if self._last_tools is None or self._tools_changed_at is None:
@@ -244,4 +244,4 @@ class MCPToolbox:
             object.__setattr__(self, "include", tuple(self.include))
 
     def resolve_tools(self, view: CapabilityLookup) -> SelectorResult:
-        return resolve_capability(view, self.name, include=self.include)
+        return resolve_capability(view, self.name, include=self.include, expected_kind="toolbox")
