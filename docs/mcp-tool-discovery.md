@@ -33,11 +33,37 @@ change, and re-publishes periodically as a liveness heartbeat (a tool-list chang
 lands on the next heartbeat). If the MCP server is unreachable at startup, the
 worker fails to boot — fix the connection rather than running dark.
 
-## Give the tools to an agent — same or different process
+## Give the tools to an agent
 
-Pass the toolbox object in `tools=[...]`. Passing it never contacts the MCP
-session and does not deploy the toolbox; an agent in another process imports
-the same definition:
+Reference the toolbox **by name** with an `MCPToolbox` handle in `tools=[...]`.
+This is the default pattern: it works whether the agent shares a process with the
+toolbox or runs as a separate deployment, and the agent host never needs the
+toolbox's connection config — secrets stay on the toolbox host.
+
+```python
+from calfkit.mcp import MCPToolbox
+
+agent = Agent(
+    "researcher",
+    subscribe_topics="researcher.input",
+    model_client=model,
+    tools=[MCPToolbox("docs_server")],   # all of the toolbox's tools; scope with include= (below)
+)
+worker = Worker(client, nodes=[agent])   # capability view auto-registers
+```
+
+An `MCPToolbox` is a frozen, identity-only handle: it can never carry connection
+params, and deploying one fails immediately with a pointer to the hosting form.
+The agent's worker detects the declaration and maintains the local capability
+view, gated at boot so the first turn already sees it. Selections re-resolve at
+the start of every agent turn, so a toolbox that comes up later — or changes its
+tools — is picked up on the next turn. No restarts, no bring-up order.
+
+### Pass the toolbox object directly (when the agent shares the definition)
+
+If the agent's process already imports the toolbox definition — the same codebase
+— you can pass the `MCPToolboxNode` object itself instead of a name handle;
+passing it never contacts the MCP session or deploys the toolbox:
 
 ```python
 from my_service.toolboxes import docs   # shared module; deployed elsewhere
@@ -48,44 +74,22 @@ agent = Agent(
     model_client=model,
     tools=[weather_tool, docs],          # all of the toolbox's tools
 )
-worker = Worker(client, nodes=[agent])   # capability view auto-registers
 ```
 
-If the agent host doesn't import the toolbox definition — or must not hold
-its connection config at all (secrets stay on the toolbox host) — reference
-the toolbox **by name** instead:
-
-```python
-from calfkit.mcp import MCPToolbox
-
-agent = Agent(
-    "researcher",
-    subscribe_topics="researcher.input",
-    model_client=model,
-    tools=[MCPToolbox("docs_server", include=("search",))],
-)
-```
-
-An `MCPToolbox` is a frozen, identity-only handle: it can never carry connection
-params, and deploying one fails immediately with a pointer to the hosting
-form. (`MCPToolboxNode.select(...)` returns the same type.)
-
-The agent's worker detects the declaration and maintains the local capability
-view, gated at boot so the first turn already sees it. Selections re-resolve
-at the start of every agent turn, so a toolbox that comes up later — or
-changes its tools — is picked up on the next turn. No restarts, no bring-up
-order.
+Both forms resolve through the same capability view; prefer the name handle
+unless you specifically want to share the definition.
 
 ## Scope the selection
 
 ```python
-tools=[docs.select(include=["search", "fetch"])]      # only these tools
+tools=[MCPToolbox("docs_server", include=("search", "fetch"))]   # only these tools
 ```
 
 Use `include` to pin the exact tool names the agent may see — a server that
-starts advertising new tools cannot enlarge the agent's surface. An unresolved
-selection (the toolbox is offline, or a requested tool isn't advertised) logs a
-warning and the turn runs with whatever resolved.
+starts advertising new tools cannot enlarge the agent's surface. (For the object
+form, `docs.select(include=("search", "fetch"))` returns the same handle.) An
+unresolved selection (the toolbox is offline, or a requested tool isn't
+advertised) logs a warning and the turn runs with whatever resolved.
 
 If a toolbox tool name collides with a locally configured tool, the local tool
 wins and an error is logged.
