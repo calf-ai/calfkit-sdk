@@ -43,7 +43,7 @@ dependencies = [
     "typing-extensions>=4.15.0",
     "dishka>=1.9.1",
     "mcp>=1.27.2",
-    "ktables>=0.3.0",
+    "ktables>=0.4.0",
 ]
 
 [project.urls]
