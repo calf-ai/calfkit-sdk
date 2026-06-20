@@ -200,38 +200,24 @@ Hosts the given `nodes` against the broker. Drive it with `await worker.run()` (
 
 ## Policy seams
 
-Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Register each as a constructor argument (a single callable or a list) **or** as a repeatable instance decorator; constructor entries run first. Each chain runs in registration order and the **first non-`None` return wins** (a `None` return declines and passes to the next handler). Handlers may be sync or async. Observer nodes (`@consumer`) cannot register seams.
+Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Each is registered as a constructor argument (`Agent`/`NodeDef`; a single callable or a list) or as a repeatable instance decorator (any node — and the only form for tool nodes); constructor entries precede decorator entries. A chain runs in registration order, resolving on the **first non-`None` return** (sync or async handlers). Observer nodes (`@consumer`) have no seams.
 
 | Seam | Handler signature | A `None` return… | A non-`None` return… |
 | --- | --- | --- | --- |
-| `before_node` | `(ctx)` | proceeds to the node body | short-circuits the body — the value becomes the node's output (or a returned action runs as-is) |
-| `after_node` | `(ctx, output)` | keeps the produced output | replaces the output (values only — returning an action raises `SeamContractError`) |
+| `before_node` | `(ctx)` | proceeds to the node body | skips the body; the value becomes the node's output |
+| `after_node` | `(ctx, output)` | keeps the produced output | replaces the output (output values only) |
 | `on_node_error` | `(ctx, fault)` | escalates the original fault | recovers — the value becomes the node's output |
-| `on_callee_error` | `(ctx, fault)` | the failed callee slot escalates at close | substitutes a result for that slot |
+| `on_callee_error` | `(ctx, fault)` | the failed call escalates | substitutes a result for that call |
 
-`ctx` is a [`SeamContext`](#seamcontext); for the error seams, `fault` is an [`ErrorReport`](#errors--faults).
+`ctx` is a [`SeamContext`](#seamcontext); for the error seams, `fault` is an [`ErrorReport`](#errors--faults). (Returning a node *action* — a `Call`/`ReturnCall`/…, the kind a node body returns to dispatch work — is accepted from `before_node` but raises `SeamContractError` from `after_node`.)
 
 **Minting:** `raise NodeFaultError(error_type, ...)` from any seam (or the node body) converts to a fault verbatim and **bypasses `on_node_error`** (the mint rule). Inside `on_node_error` / `on_callee_error`, raising `NodeFaultError` mints; raising any *other* exception is treated as that handler declining.
 
-```python
-from calfkit.nodes import Agent
-
-agent = Agent("planner", subscribe_topics="planner.in", model_client=model)
-
-# Decorator form — repeatable; the handler stays a plain function:
-@agent.on_callee_error
-def use_fallback(ctx, fault):
-    ...
-
-# Constructor form — a callable or a list; constructor entries run before decorated ones:
-agent = Agent("planner", subscribe_topics="planner.in", model_client=model, before_node=[reject_unaddressed])
-```
-
-Recipes: [How to guard and transform node invocations](policy-seams.md) and [How to handle errors and faults](error-handling.md).
+Registration and recipes: [How to guard and transform node invocations](policy-seams.md) and [How to handle errors and faults](error-handling.md).
 
 ## Errors & faults
 
-A failure surfaces as a typed [`ErrorReport`](#errorreport) that travels the result rail and escalates up the call chain. Today you handle a fault **inside a node** (the `on_node_error` / `on_callee_error` seams) or **observe** it on a `publish_topic` tap; a typed client-side reception surface is not yet available.
+A failure surfaces as a typed [`ErrorReport`](#errorreport) that travels the result rail and escalates up the call chain. Faults are handled **inside a node** (the `on_node_error` / `on_callee_error` seams) or **observed** on a `publish_topic` tap; there is no client-side typed fault reception yet.
 
 ### `NodeFaultError`
 
@@ -337,11 +323,11 @@ The context handed to every [policy seam](#policy-seams), received as `ctx` — 
 | `payload` | `Any \| None` | The inbound frame payload (a tool sees its `ToolCallRef`). |
 | `route` | `str \| None` | Inbound route key — set on call-kind ingress only. |
 | `delivery_kind` | `MessageKind` | `call` / `return` / `fault` — distinguishes ingress from continuation/closure firings. |
-| `callee_results` | `list[CalleeResult]` | All resolved callee slots in dispatch order; `[]` on ingress. |
-| `failing_call` | `CalleeResult \| None` | The slot being handled — set during `on_callee_error` only. |
+| `callee_results` | `list[CalleeResult]` | All resolved callee calls in dispatch order; `[]` on ingress. |
+| `failing_call` | `CalleeResult \| None` | The failed call being handled — set during `on_callee_error` only. |
 | `exception` | `BaseException \| None` | The live exception — set during `on_node_error` only. |
 
-Also carries `node_id`, `correlation_id`, `emitter_node_id`, `awaiting_reply`, and the `callee_result` convenience (the single resolved slot, for the non-fan-out case).
+Also carries `node_id`, `correlation_id`, `emitter_node_id`, `awaiting_reply`, and the `callee_result` convenience (the single resolved call, for the non-fan-out case).
 
 ### Lifecycle contexts
 

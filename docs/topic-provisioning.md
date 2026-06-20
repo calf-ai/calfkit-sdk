@@ -146,9 +146,9 @@ that were registered; each node's `_return_topic` is passed as a framework topic
 so `topic_configs` is never applied to it. A provisioning failure aborts startup.
 
 For a manual `register_handlers()`-without-`run()` deployment (which bypasses the
-worker's startup hook), run an explicit provisioning pass out-of-band — the CLI
-(`calfkit topics provision`, §4.3) or the `calfkit.provisioning.provision_topics()`
-module function (§3) — both idempotent.
+worker's startup hook), provision out-of-band — the CLI (`calfkit topics provision`,
+§4.3), or programmatically via `TopicProvisioner.from_connection(...).provision(...)`
+(§3). Both are idempotent.
 
 ### 4.2 Client reply topic (lazy, once)
 
@@ -159,9 +159,10 @@ user `topic_configs` off it. This is gated on the same
 `client.provisioning.enabled`.
 
 The client also exposes read-only properties the worker reads to reach the same
-broker: `client.provisioning` and `client.server_urls`. (The broker credentials
-captured at `Client.connect(...)` are forwarded to the provisioner internally —
-see §5.3.)
+broker: `client.provisioning` and `client.server_urls`. On this path provisioning
+reuses the broker's own admin client, so admin-side security is whatever you set on
+the broker — a FastStream `security=` object passed to `Client.connect(...)`; there
+is no separate credential handling.
 
 ### 4.3 CLI: `calfkit topics provision`
 
@@ -230,7 +231,7 @@ provisioning hits the same broker with the same credentials.
 - Disabled config -> no admin client constructed, `aiokafka.admin` never imported.
 - Empty topic set -> returns an empty `ProvisionReport` without contacting Kafka.
 - The client reply topic is provisioned at most once per client.
-- An explicit `calfkit.provisioning.provision_topics()` pass (or the CLI) is safe to repeat and is idempotent.
+- An explicit out-of-band provisioning pass (the CLI, or `TopicProvisioner.from_connection(...)`) is safe to repeat and is idempotent.
 
 ## 6. Dev-safe / review-for-prod
 

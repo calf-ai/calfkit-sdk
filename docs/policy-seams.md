@@ -12,10 +12,12 @@ To recover from a failure or a failed tool call, see
 
 ## Register a handler
 
-Pass a handler to the constructor — a single callable or a list — or attach it as
-a decorator on the node instance. Both append to the same chain (constructor
-entries first), the chain runs in registration order, and the **first handler to
-return a non-`None` value wins**. Handlers may be sync or async.
+Register a handler two ways: pass it to the node's constructor (`Agent` or a
+`NodeDef` subclass) — a single callable or a list — or attach it as a decorator on
+the node instance. The decorator works on any node and is the only form for tool
+nodes (which you build with `@agent_tool`). Both feed the same chain (constructor
+entries first); it runs in registration order, and the **first handler to return a
+non-`None` value wins**. Handlers may be sync or async.
 
 ```python
 from calfkit.nodes import Agent
@@ -34,9 +36,10 @@ agent = Agent(
 )
 ```
 
-Every seam handler has exactly three moves, and they mean the same thing
-everywhere: **return `None`** to let the flow continue, **return a value** to
-*substitute*, or **raise** to *stop*. What each does depends on the seam.
+Every seam handler has the same three moves: **return `None`** to let the flow
+continue, **return a value** to take over with your own result, or **raise** to
+stop the flow. What each move means depends on the seam — the sections below show
+each.
 
 ## Transform the input before the body runs
 
@@ -55,8 +58,8 @@ def add_locale_hint(ctx):
 
 ## Answer directly without running the body
 
-Return a value from `before_node` to **short-circuit**: the body is skipped, your
-value becomes the node's output, and it is still passed through `after_node` and
+Return a value from `before_node` to **answer directly**: the body is skipped, your
+value becomes the node's output, and it still passes through `after_node` and is
 replied/published as usual. Use it for a cache hit or a canned response.
 
 ```python
@@ -67,10 +70,9 @@ def serve_cached(ctx):
 
 ## Block an invocation
 
-To **reject** an invocation so the body never runs, `raise`. Raising — not a
-returned value — is how you stop a flow that would otherwise proceed: a returned
-value is a *substitution*, an exception is a *stop*. Raise `NodeFaultError` to send
-the caller a clean, typed fault:
+To **block** an invocation so the body never runs, `raise` — a returned value
+answers in the body's place, but only a raised exception stops the flow. Raise
+`NodeFaultError` to send the caller a clean, typed fault:
 
 ```python
 from calfkit import NodeFaultError
@@ -83,7 +85,7 @@ def require_entitlement(ctx):
 ```
 
 The caller receives the fault on the result rail; the body and `after_node` are
-skipped. Any other exception also stops the flow but surfaces as a generic
+skipped. Any other exception also blocks the invocation but surfaces as a generic
 `calf.unhandled` fault — prefer `NodeFaultError` so callers get a code they can
 branch on. See [How to handle errors and faults](error-handling.md) for minting,
 the reserved `calf.*` namespace, and the caller-side `ErrorReport`.
@@ -106,10 +108,11 @@ def redact(ctx, output):
     return None                # accept as-is
 ```
 
-`after_node` is values-only: returning an *action* (a `Call`/`ReturnCall`/…)
-raises `SeamContractError`. To stack behavior, register several handlers — they
-run in order and the first non-`None` return wins, so place specific handlers
-before general ones.
+`after_node` takes output values only: returning a framework *action* object (the
+kind a node body returns to dispatch a call, not a plain output) raises
+`SeamContractError`. To stack behavior, register several handlers — they run in
+order and the first non-`None` return wins, so place specific handlers before
+general ones.
 
 See also: the [Policy seams reference](api.md#policy-seams) for the full
 signature and return-value table, and [How to handle errors and

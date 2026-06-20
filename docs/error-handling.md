@@ -8,19 +8,21 @@ invocations](policy-seams.md).
 
 **How failures work here, briefly.** calfkit has no dead-letter queue. A failure
 — your node's, or a node it called — becomes a typed [`ErrorReport`](api.md#errorreport)
-that travels the result rail and **escalates up the call chain** until a node
-handles it. You intercept a fault in one of two seams — `on_callee_error` (a node
+that travels the result rail and **escalates up the call chain until a node
+handles it**. You intercept a fault in one of two seams — `on_callee_error` (a node
 you called failed) or `on_node_error` (your own body failed) — or you observe it by
-tapping a `publish_topic` with a [consumer](consumer-nodes.md). The `retryable`
-flag on a report is **advisory**: the framework never retries for you. (A typed
-client-side `except NodeFaultError` surface is planned but not yet available, so
-handle faults in-node today. For the design rationale, see the [fault rail &
-policy seams spec](designs/fault-rail-and-policy-seams-spec.md).)
+tapping a `publish_topic` with a [consumer](consumer-nodes.md).
+
+Two things to know up front: a report's `retryable` flag is **advisory** (the
+framework never retries for you), and a typed client-side `except NodeFaultError`
+surface is planned but not yet available — so handle faults in-node today. For the
+design rationale, see the [fault rail & policy seams
+spec](designs/fault-rail-and-policy-seams-spec.md).
 
 Seam handlers follow the same three moves as every seam: **return `None`** to let
 the failure continue (escalate), **return a value** to recover, or **raise** to
-replace one fault with another. Register them like any seam — a constructor
-argument or a decorator (see [Register a handler](policy-seams.md#register-a-handler)).
+replace one fault with another. Register them like any other seam (see [Register a
+handler](policy-seams.md#register-a-handler)).
 
 ## Recover when a tool (or callee) fails
 
