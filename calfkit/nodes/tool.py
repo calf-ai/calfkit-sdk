@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import KW_ONLY, dataclass
 from typing import Any, ClassVar
 
@@ -14,9 +14,9 @@ from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.controlplane import ControlPlaneStamp, advertises
 from calfkit.models import SessionRunContext, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
-from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord, CapabilityToolDef
+from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityLookup, CapabilityRecord, CapabilityToolDef, resolve_capability
 from calfkit.models.payload import retry_text_part
-from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
+from calfkit.models.tool_dispatch import SelectorResult, ToolBinding, ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
 
 logger = logging.getLogger(__name__)
@@ -176,3 +176,54 @@ def agent_tool(func: Callable[..., Any] | Callable[..., Awaitable[Any]], *, name
     subscribe_topic = f"tool.{effective}.input"
     publish_topic = f"tool.{effective}.output"
     return ToolNodeDef.create_tool_node(func=func, subscribe_topics=subscribe_topic, publish_topic=publish_topic, name=effective)
+
+
+@dataclass(frozen=True)
+class Tools:
+    """Identity-only handle to one or more function tool nodes, resolved per agent turn.
+
+    The call-side counterpart to deployed tool nodes (mirrors :class:`~calfkit.mcp.MCPToolbox`):
+    constructible anywhere with just the tool names — no schema, no import of the tool's code.
+    Each name is a tool node's identity (its ``node_id``, which equals the LLM-facing tool name).
+    Resolution reuses :func:`~calfkit.models.capability.resolve_capability` with
+    ``expected_kind="tool"`` (the over-pull guard), so a name that resolves to a toolbox record is
+    rejected rather than absorbed. Frozen value semantics: names are order-preserving-deduped, so
+    equal handles compare and hash equal.
+
+    Accepts either ``Tools("add", "subtract")`` or ``Tools(names=[...])`` (not both). There is no
+    ``strict`` knob — an unresolved selection warns and degrades (mirrors MCP).
+    """
+
+    names: tuple[str, ...]
+
+    # ``*positional`` varargs (the common case) plus a keyword-only ``names=`` list; no name
+    # collision because the varargs param is ``positional`` while the stored field is ``names``.
+    def __init__(self, *positional: str, names: Sequence[str] | None = None) -> None:
+        if positional and names is not None:
+            raise ValueError("Tools: pass tool names positionally or via names=, not both")
+        source = positional if positional else tuple(names or ())
+        collected = tuple(dict.fromkeys(source))  # order-preserving dedupe
+        if not collected:
+            raise ValueError("Tools requires at least one tool name")
+        if any(not n for n in collected):
+            raise ValueError("Tools names must be non-empty")
+        object.__setattr__(self, "names", collected)
+
+    def resolve_tools(self, view: CapabilityLookup) -> SelectorResult:
+        """Resolve each name against the capability view and aggregate (one binding per tool node)."""
+        bindings: list[ToolBinding] = []
+        missing: list[str] = []
+        invalid: list[str] = []
+        wrong_kind: list[str] = []
+        for name in self.names:
+            result = resolve_capability(view, name, expected_kind="tool")
+            bindings.extend(result.bindings)
+            missing.extend(result.missing_targets)
+            invalid.extend(result.invalid_targets)
+            wrong_kind.extend(result.wrong_kind_targets)
+        return SelectorResult(
+            bindings=tuple(bindings),
+            missing_targets=tuple(missing),
+            invalid_targets=tuple(invalid),
+            wrong_kind_targets=tuple(wrong_kind),
+        )
