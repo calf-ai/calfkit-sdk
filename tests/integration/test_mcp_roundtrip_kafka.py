@@ -42,16 +42,15 @@ from pathlib import Path
 import pydantic_core
 import pytest
 from aiokafka.admin import AIOKafkaAdminClient
-from ktables import KafkaTable
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
+from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.mcp import MCPToolboxNode, StdioServerParameters
-from calfkit.models.capability import CapabilityRecord
+from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
 from calfkit.nodes import Agent
 from calfkit.worker import Worker
-from calfkit.worker.worker_config import MCPDiscoveryConfig
 from tests.integration._roundtrip_helpers import (
     FINAL_OUTPUT,
     retry_prompt_texts,
@@ -91,17 +90,22 @@ def _server_params(script: Path) -> StdioServerParameters:
     return StdioServerParameters(command=sys.executable, args=[str(script)], env=dict(os.environ))
 
 
-def _discovery(cap_topic: str, bootstrap: str) -> MCPDiscoveryConfig:
-    return MCPDiscoveryConfig(topic=cap_topic, heartbeat_interval=5.0, bootstrap_servers=bootstrap)
+def _control_plane(bootstrap: str) -> ControlPlaneConfig:
+    return ControlPlaneConfig(heartbeat_interval=5.0, bootstrap_servers=bootstrap)
 
 
-def _worker(bootstrap: str, *, nodes: list, discovery: MCPDiscoveryConfig) -> Worker:
-    """A Worker on its own broker connection, MCP discovery on, reading earliest.
+def _server_name(topic_namespace: str, base: str = _SERVER_NAME) -> str:
+    """A per-test-unique toolbox id on the fixed ``calf.capabilities`` topic."""
+    return f"{topic_namespace}.{base}"
+
+
+def _worker(bootstrap: str, *, nodes: list, control_plane: ControlPlaneConfig) -> Worker:
+    """A Worker on its own broker connection, control plane on, reading earliest.
 
     ``earliest`` is mandatory so a node's consumer-group join never races (and
     drops) the publish addressing it on a freshly-auto-created partition.
     """
-    return Worker(Client.connect(bootstrap), nodes=nodes, mcp_discovery=discovery, extra_subscribe_kwargs=_EARLIEST)
+    return Worker(Client.connect(bootstrap), nodes=nodes, control_plane=control_plane, extra_subscribe_kwargs=_EARLIEST)
 
 
 # ── polling utilities (no bare sleeps) ───────────────────────────────────────
@@ -116,27 +120,37 @@ async def _wait(predicate: Callable[[], bool], *, timeout: float, what: str) -> 
     raise AssertionError(f"timed out after {timeout}s waiting for: {what}")
 
 
-async def _await_capability(bootstrap: str, topic: str, toolbox_id: str, *, timeout: float) -> None:
-    """Block until the toolbox's CapabilityRecord is visible on ``topic``.
+async def _await_capability(bootstrap: str, toolbox_id: str, *, timeout: float) -> None:
+    """Block until the toolbox's CapabilityRecord is live on ``calf.capabilities``.
 
     Starting the agent worker only after the record exists makes the agent's
     Capability View catch-up include it, so the binding resolves on the turn.
     """
-    table: KafkaTable[CapabilityRecord] = KafkaTable.json(bootstrap_servers=bootstrap, topic=topic, model=CapabilityRecord, ensure_topic=False)
-    async with table:
-        await _wait(lambda: toolbox_id in table, timeout=timeout, what=f"capability record {toolbox_id!r}")
+    view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
+        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
+    )
+    await view.start()
+    try:
+        await _wait(lambda: view.get(toolbox_id) is not None, timeout=timeout, what=f"capability record {toolbox_id!r}")
+    finally:
+        await view.stop()
 
 
-async def _await_tool_in_record(bootstrap: str, topic: str, toolbox_id: str, tool: str, *, timeout: float) -> None:
-    """Block until ``toolbox_id``'s record advertises ``tool`` (re-list landed)."""
-    table: KafkaTable[CapabilityRecord] = KafkaTable.json(bootstrap_servers=bootstrap, topic=topic, model=CapabilityRecord, ensure_topic=False)
+async def _await_tool_in_record(bootstrap: str, toolbox_id: str, tool: str, *, timeout: float) -> None:
+    """Block until ``toolbox_id``'s live record advertises ``tool`` (re-list landed)."""
+    view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
+        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
+    )
+    await view.start()
 
     def _present() -> bool:
-        record = table.get(toolbox_id)
+        record = view.get(toolbox_id)
         return record is not None and any(t.name == tool for t in record.tools)
 
-    async with table:
+    try:
         await _wait(_present, timeout=timeout, what=f"tool {tool!r} in record {toolbox_id!r}")
+    finally:
+        await view.stop()
 
 
 async def _topics(bootstrap: str) -> set[str]:
@@ -167,10 +181,9 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     value travels all the way back into the agent's history."""
     agent_id = f"{topic_namespace}-mcp-agent"
     agent_in = f"{topic_namespace}.mcp-agent.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call the add tool",
@@ -180,11 +193,11 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     )
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
         async with agent_worker:
             result = await driver.execute("add 2 and 3", agent_in, timeout=120)
 
@@ -205,10 +218,9 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     finalizes normally, and the error content travels back in history."""
     agent_id = f"{topic_namespace}-mcp-iserror"
     agent_in = f"{topic_namespace}.mcp-iserror.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call domain_error",
@@ -218,11 +230,11 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     )
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
         async with agent_worker:
             result = await driver.execute("trigger the error", agent_in, timeout=120)
 
@@ -245,10 +257,9 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     and each result lands back in its own slot."""
     agent_id = f"{topic_namespace}-mcp-fanout-agent"
     agent_in = f"{topic_namespace}.mcp-fanout-agent.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call both tools",
@@ -264,11 +275,11 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     assert agent._is_fanout_capable
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
         async with agent_worker:
             topics = await _topics(kafka_bootstrap)
             assert f"calf.fanout.{agent_id}.state" in topics
@@ -294,10 +305,9 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     tool_call_id (not tool name), so both results return to their own slot."""
     agent_id = f"{topic_namespace}-dup-agent"
     agent_in = f"{topic_namespace}.dup-agent.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="add two pairs",
@@ -312,11 +322,11 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     )
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
         async with agent_worker:
             result = await driver.execute("add 2+3 and 10+20", agent_in, timeout=120)
 
@@ -337,10 +347,9 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     results still round-trip."""
     agent_id = f"{topic_namespace}-seq-agent"
     agent_in = f"{topic_namespace}.seq-agent.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call both tools sequentially",
@@ -357,11 +366,11 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     assert not agent._is_fanout_capable
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
         async with agent_worker:
             result = await driver.execute("add then echo", agent_in, timeout=120)
             topics = await _topics(kafka_bootstrap)
@@ -384,11 +393,10 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
     to the correct toolbox topic: ``add`` resolves on server A, ``mul`` on B."""
     agent_id = f"{topic_namespace}-multi-server-agent"
     agent_in = f"{topic_namespace}.multi-server-agent.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    box_a = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
-    box_b = MCPToolboxNode(_SERVER_B_NAME, connection_params=_server_params(_SERVER_B_SCRIPT))
+    box_a = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    box_b = MCPToolboxNode(_server_name(topic_namespace, _SERVER_B_NAME), connection_params=_server_params(_SERVER_B_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="use a tool from each server",
@@ -405,12 +413,12 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
     driver = Client.connect(kafka_bootstrap)
     # Both toolboxes hosted in one worker (the agent reads the shared view either
     # way); each opens its own MCP session and publishes its own record.
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[box_a, box_b], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[box_a, box_b], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_B_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace, _SERVER_B_NAME), timeout=60)
         async with agent_worker:
             result = await driver.execute("add 2+3 and mul 4*5", agent_in, timeout=120)
 
@@ -431,10 +439,9 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     a1_in = f"{topic_namespace}.agent-1.input"
     a2_id = f"{topic_namespace}-agent-2"
     a2_in = f"{topic_namespace}.agent-2.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     agent1 = Agent(
         a1_id,
         system_prompt="add",
@@ -451,11 +458,11 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     )
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent1, agent2], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent1, agent2], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
         async with agent_worker:
             h1 = await driver.start("agent 1 add 2+3", a1_in)
             h2 = await driver.start("agent 2 add 10+20", a2_in)
@@ -482,10 +489,9 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     — the agent answers the model with an unknown-tool retry and finalizes."""
     agent_id = f"{topic_namespace}-pin-agent"
     agent_in = f"{topic_namespace}.pin-agent.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="try to call danger",
@@ -495,11 +501,11 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     )
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
         async with agent_worker:
             result = await driver.execute("call danger", agent_in, timeout=120)
 
@@ -523,10 +529,9 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     enable_in = f"{topic_namespace}.enable-agent.input"
     bonus_id = f"{topic_namespace}-bonus-agent"
     bonus_in = f"{topic_namespace}.bonus-agent.input"
-    cap_topic = f"{topic_namespace}.capabilities"
-    discovery = _discovery(cap_topic, kafka_bootstrap)
+    control_plane = _control_plane(kafka_bootstrap)
 
-    toolbox = MCPToolboxNode(_SERVER_NAME, connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
     enable_agent = Agent(
         enable_id,
         system_prompt="enable the bonus tool",
@@ -543,12 +548,12 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     )
 
     driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], discovery=discovery)
-    enable_worker = _worker(kafka_bootstrap, nodes=[enable_agent], discovery=discovery)
-    bonus_worker = _worker(kafka_bootstrap, nodes=[bonus_agent], discovery=discovery)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    enable_worker = _worker(kafka_bootstrap, nodes=[enable_agent], control_plane=control_plane)
+    bonus_worker = _worker(kafka_bootstrap, nodes=[bonus_agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, cap_topic, _SERVER_NAME, timeout=60)
+        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
 
         # 1) Trigger the runtime tool registration + list_changed notification.
         async with enable_worker:
@@ -557,7 +562,7 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
         assert "enabled" in _serialized(tool_returns(r1.message_history)["enable_bonus"])
 
         # 2) The toolbox re-listed and re-published; wait for the grown record.
-        await _await_tool_in_record(kafka_bootstrap, cap_topic, _SERVER_NAME, "bonus", timeout=60)
+        await _await_tool_in_record(kafka_bootstrap, _server_name(topic_namespace), "bonus", timeout=60)
 
         # 3) A fresh agent's view catch-up now includes 'bonus' deterministically.
         async with bonus_worker:

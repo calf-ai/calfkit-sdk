@@ -179,14 +179,3 @@ class MissingTopicsError(RuntimeError):
             f"Topic provisioning was enabled but these topic(s) could not be created: {names}. "
             "Grant the client CreateTopics authorization, or pre-create the topic(s) out-of-band."
         )
-
-
-class MCPToolResolutionError(Exception):
-    """A strict MCP tool selector could not be satisfied for this turn.
-
-    Raised by the agent BEFORE the model runs when a selector declared with
-    ``strict=True`` cannot fully resolve against the Capability View (toolbox
-    missing, requested tool not advertised, malformed/newer-schema record, or
-    no view resource at all). Non-strict selectors degrade with a warning
-    instead.
-    """

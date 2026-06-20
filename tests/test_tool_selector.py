@@ -1,9 +1,11 @@
-"""PR C: ToolSelector protocol, MCPToolboxNode-as-selector, and agent resolution.
+"""ToolSelector protocol, MCPToolboxNode-as-selector, and agent resolution.
 
-Spec §8.4: the toolbox instance is passed to agents like a tool node
-(``tools=[docs]``); resolution happens per turn against the Capability View,
-typed as a plain ``Mapping[str, CapabilityRecord]`` — these tests use plain
-dicts as the view (the agent layer never imports ktables).
+The toolbox instance is passed to agents like a tool node (``tools=[docs]``);
+resolution happens per turn against the Capability View. Post-migration the view
+is a :class:`ControlPlaneView` that owns staleness + schema-version filtering, so
+the resolver simplifies to "is it here, and does it have the tools I asked for".
+The ``strict`` flag and the ``stale_seconds`` / ``skipped_newer_schema``
+diagnostics are gone (D5/D6); unresolved selections always warn + degrade.
 """
 
 from __future__ import annotations
@@ -13,32 +15,41 @@ from typing import Any
 
 import pytest
 
-from calfkit.exceptions import MCPToolResolutionError
+from calfkit.controlplane import ControlPlaneView
 from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
 from calfkit.models.capability import (
-    CAPABILITY_SCHEMA_VERSION,
     CAPABILITY_VIEW_RESOURCE_KEY,
     CapabilityRecord,
     CapabilityToolDef,
     SelectorResult,
 )
 from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, ToolSelector, split_tool_declarations
+from tests.test_controlplane_view import _FakeTable  # the substrate's dict-backed GroupedTableReader fake
 
 
 def make_toolbox(name: str = "docs_server") -> MCPToolboxNode:
     return MCPToolboxNode(name, connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
 
 
-def make_record(toolbox_id: str = "docs_server", *, tool_names: tuple[str, ...] = ("search", "fetch"), **overrides: Any) -> CapabilityRecord:
+def make_record(**overrides: Any) -> CapabilityRecord:
+    now = datetime.now(tz=timezone.utc)
     defaults: dict[str, Any] = dict(
-        toolbox_id=toolbox_id,
-        dispatch_topic=f"mcp_server.{toolbox_id}",
-        tools=[CapabilityToolDef(name=n, parameters_json_schema={"type": "object", "properties": {}}) for n in tool_names],
-        published_at=datetime.now(tz=timezone.utc),
+        started_at=now,
+        last_heartbeat_at=now,
+        heartbeat_interval=30.0,
+        dispatch_topic="mcp_server.docs_server",
+        tools=[CapabilityToolDef(name=n, parameters_json_schema={"type": "object", "properties": {}}) for n in ("search", "fetch")],
+        content_updated_at=now,
     )
     defaults.update(overrides)
     return CapabilityRecord(**defaults)
+
+
+def make_view(record: CapabilityRecord | None = None, **table_kwargs: Any) -> ControlPlaneView[CapabilityRecord]:
+    """A real ControlPlaneView over a one-instance dict-backed fake, keyed docs_server×w1."""
+    data: dict[str, dict[str, CapabilityRecord]] = {"docs_server": {"w1": record}} if record is not None else {}
+    return ControlPlaneView(_FakeTable(data, **table_kwargs), CapabilityRecord)
 
 
 class TestToolboxIsNoLongerAProvider:
@@ -61,7 +72,6 @@ class TestResolveTools:
         assert all(isinstance(b, ToolBinding) and b.validator is None for b in result.bindings)
         assert all(b.dispatch_topic == "mcp_server.docs_server" for b in result.bindings)
         assert not result.missing_toolbox and not result.missing_tools
-        assert not result.strict
 
     def test_missing_toolbox_diagnostic(self) -> None:
         result = make_toolbox().resolve_tools({})
@@ -76,33 +86,42 @@ class TestResolveTools:
         assert [b.name for b in result.bindings] == ["search"]
         assert result.missing_tools == ("nonexistent",)
 
-    def test_strict_flag_propagates(self) -> None:
-        selector = make_toolbox().select(strict=True)
-        assert selector.resolve_tools({}).strict is True
-
     def test_scoped_selector_is_frozen(self) -> None:
         selector = make_toolbox().select(include=["search"])
         with pytest.raises(Exception):
-            selector.strict = True  # type: ignore[misc]
-
-    def test_newer_schema_is_skipped_with_diagnostic(self) -> None:
-        record = make_record(schema_version=CAPABILITY_SCHEMA_VERSION + 1)
-        result = make_toolbox().resolve_tools({"docs_server": record})
-        assert result.skipped_newer_schema
-        assert result.bindings == []
+            selector.include = ("other",)  # type: ignore[misc]
 
     def test_malformed_record_is_skipped_with_diagnostic(self) -> None:
         # Tolerant reader admits an empty dispatch_topic; binding expansion
-        # must not crash the turn (spec §8.4 guard).
+        # must not crash the turn — it surfaces as invalid_record instead.
         record = make_record(dispatch_topic="")
         result = make_toolbox().resolve_tools({"docs_server": record})
         assert result.invalid_record
         assert result.bindings == []
 
-    def test_stale_seconds_reflects_record_age(self) -> None:
-        old = make_record(published_at=datetime.now(tz=timezone.utc) - timedelta(seconds=120))
-        result = make_toolbox().resolve_tools({"docs_server": old})
-        assert result.stale_seconds is not None and 119 < result.stale_seconds < 130
+    # -- view-owned filtering (D6): the resolver never sees stale/newer-schema records --
+
+    def test_stale_record_hidden_by_view(self) -> None:
+        # age 100s > 3*30 = 90 threshold -> the view collapses it to None, so the
+        # resolver reports missing_toolbox (no advisory "use last-known" path).
+        view = make_view(make_record(last_heartbeat_at=datetime.now(tz=timezone.utc) - timedelta(seconds=100)))
+        result = make_toolbox().resolve_tools(view)
+        assert result.missing_toolbox
+        assert result.bindings == []
+
+    def test_newer_schema_hidden_by_view(self) -> None:
+        # A record from a newer schema major is filtered (and logged) by the view;
+        # the resolver just sees None -> missing_toolbox.
+        view = make_view(make_record(schema_version=2))
+        result = make_toolbox().resolve_tools(view)
+        assert result.missing_toolbox
+        assert result.bindings == []
+
+    def test_live_record_resolves_through_view(self) -> None:
+        view = make_view(make_record())
+        result = make_toolbox().resolve_tools(view)
+        assert [b.name for b in result.bindings] == ["search", "fetch"]
+        assert not result.missing_toolbox
 
 
 class TestSplitToolDeclarations:
@@ -127,14 +146,10 @@ class TestSplitToolDeclarations:
 
 
 class TestAgentResolution:
-    """Drives the agent's per-turn selector resolution against a plain dict."""
+    """Drives the agent's per-turn selector resolution."""
 
     def make_agent(self, *tools: Any):
         from calfkit.nodes.agent import Agent
-
-        class _FakeModel:
-            pass
-
         from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
         class FakeModel(PydanticModelClient):
@@ -184,20 +199,55 @@ class TestAgentResolution:
         assert registry == {}
         assert any("capability" in r.message.lower() for r in caplog.records)
 
-    def test_missing_view_with_strict_raises(self) -> None:
-        agent = self.make_agent(make_toolbox().select(strict=True))
-        with pytest.raises(MCPToolResolutionError):
-            agent._resolve_selector_tools({}, {})
-
-    def test_unresolved_toolbox_warns_or_raises(self, caplog: pytest.LogCaptureFixture) -> None:
-        lenient = self.make_agent(make_toolbox())
+    def test_unresolved_toolbox_warns_and_degrades(self, caplog: pytest.LogCaptureFixture) -> None:
+        # No strict path: an unresolved toolbox always warns + degrades, never raises.
+        agent = self.make_agent(make_toolbox())
+        registry: dict[str, ToolBinding] = {}
         with caplog.at_level("WARNING"):
-            lenient._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: {}}, {})
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: {}}, registry)
+        assert registry == {}
         assert any("docs_server" in r.message for r in caplog.records)
 
-        strict = self.make_agent(make_toolbox().select(strict=True))
-        with pytest.raises(MCPToolResolutionError, match="docs_server"):
-            strict._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: {}}, {})
+    def test_degraded_view_logs_warning_but_proceeds(self, caplog: pytest.LogCaptureFixture) -> None:
+        # CRITICAL-4 (D6, log-only): a degraded reader is surfaced via a warning,
+        # but resolution still proceeds against whatever the view serves.
+        agent = self.make_agent(make_toolbox())
+        registry: dict[str, ToolBinding] = {}
+        view = make_view(make_record(), status="degraded")
+        with caplog.at_level("WARNING"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert sorted(registry) == ["fetch", "search"]  # turn proceeds
+        assert any("degraded" in r.message.lower() for r in caplog.records)
+
+    def test_failed_view_logs_warning_but_proceeds(self, caplog: pytest.LogCaptureFixture) -> None:
+        agent = self.make_agent(make_toolbox())
+        registry: dict[str, ToolBinding] = {}
+        view = make_view(make_record(), status="failed", failure=RuntimeError("reader died"))
+        with caplog.at_level("WARNING"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert any("failed" in r.message.lower() or "reader died" in r.message for r in caplog.records)
+
+
+class TestNoStrictSurface:
+    """D5: the strict knob and its exception are gone from the public surface."""
+
+    def test_select_has_no_strict_parameter(self) -> None:
+        import inspect
+
+        params = inspect.signature(MCPToolboxNode.select).parameters
+        assert "strict" not in params
+        assert "include" in params
+
+    def test_selector_result_has_no_strict_or_filtering_diagnostics(self) -> None:
+        fields = set(SelectorResult.__dataclass_fields__)
+        assert "strict" not in fields
+        assert "stale_seconds" not in fields
+        assert "skipped_newer_schema" not in fields
+
+    def test_resolution_error_is_gone(self) -> None:
+        import calfkit.exceptions as exc
+
+        assert not hasattr(exc, "MCPToolResolutionError")
 
 
 class TestOverridesSuppressSelectors:
@@ -213,16 +263,18 @@ class TestOverridesSuppressSelectors:
         ctx = _make_ctx(state)
         return ctx
 
-    def test_overridden_turn_skips_selectors_even_strict(self) -> None:
+    def test_overridden_turn_skips_selector_resolution(self) -> None:
         from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 
-        agent = TestAgentResolution().make_agent(make_toolbox().select(strict=True))
+        agent = TestAgentResolution().make_agent(make_toolbox())
         override = ToolBinding(tool_def=ToolDefinition(name="pinned"), dispatch_topic="pinned.topic")
         registry = {"pinned": override}
-        # No Capability View anywhere: a strict selector would raise — but the
+        ctx = self._ctx(overrides=[override])
+        # A view IS present and would resolve docs_server's tools — but the
         # override gate must short-circuit before resolution.
-        agent._maybe_resolve_selectors(self._ctx(overrides=[override]), registry)
-        assert list(registry) == ["pinned"]
+        ctx._resources = {CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}
+        agent._maybe_resolve_selectors(ctx, registry)
+        assert list(registry) == ["pinned"]  # search/fetch NOT merged
 
     def test_non_overridden_turn_resolves(self) -> None:
         agent = TestAgentResolution().make_agent(make_toolbox())
