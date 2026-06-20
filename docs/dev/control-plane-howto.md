@@ -124,7 +124,7 @@ plane lives).
 
 To tie the view's lifecycle to a worker instead of managing it by hand, open it
 inside a `@resource` (open + `start()` on setup, `stop()` on teardown); see
-[worker lifecycle](worker-lifecycle.md).
+[worker lifecycle](../worker-lifecycle.md).
 
 ## Adapt it
 
@@ -135,7 +135,7 @@ inside a `@resource` (open + `start()` on setup, `stop()` on teardown); see
 - **Create the topic.** With provisioning enabled (dev/CI) the worker's writer
   creates the compacted topic idempotently — bring up either side first. In
   production, create it out-of-band like any governed topic
-  (`cleanup.policy=compact`, RF ≥ 3); see [topic provisioning](topic-provisioning.md).
+  (`cleanup.policy=compact`, RF ≥ 3); see [topic provisioning](../topic-provisioning.md).
   A view does not create topics unless you pass `ensure_topic=True`.
 
 - **Evolve the schema.** Adding a field is safe: records are tolerant readers and
@@ -150,5 +150,5 @@ inside a `@resource` (open + `start()` on setup, `stop()` on teardown); see
   [explanation](control-plane-substrate.md#liveness-is-advisory-and-it-travels-on-the-record).
 
 See also: [About the control-plane substrate](control-plane-substrate.md) for the
-reasoning, and the [design spec](designs/control-plane-substrate-spec.md) for the
+reasoning, and the [design spec](../designs/control-plane-substrate-spec.md) for the
 exact contract.
