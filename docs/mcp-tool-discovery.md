@@ -5,6 +5,10 @@ server and reference it from each agent by name. Discovery is automatic and
 cross-process — no wiring, and no bring-up order. (For how it works under the
 hood, see the [design spec](designs/mcp-capability-discovery-spec.md).)
 
+A complete, runnable version of this guide — a toolbox fronting a real MCP server
+plus a separately-deployed agent that uses it by name — lives in
+[`examples/quickstart_mcp/`](../examples/quickstart_mcp/).
+
 ## Deploy a toolbox
 
 Wrap one `MCPToolboxNode` per MCP server in a worker and run it:
