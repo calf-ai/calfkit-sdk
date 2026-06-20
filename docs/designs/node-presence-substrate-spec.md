@@ -1,6 +1,6 @@
 # Node Presence Control Plane — Substrate & Shared Primitive
 
-- **Status:** Draft (design)
+- **Status:** Motivation only. ⚠️ The substrate shipped as PR #256 with a **different (collapsed `get()`-based) API** than sketched here; the authoritative design is [`control-plane-substrate-spec.md`](./control-plane-substrate-spec.md). The presence plane (`PresenceRecord`/`calf.presence`) and the `calfkit nodes` CLI are **not built**.
 - **Date:** 2026-06-16
 - **Scope:** The foundational presence substrate and the reusable control-plane primitive it is built on. This is the base layer; two follow-on specs build on it:
   - [Capability-Plane Migration & Ops CLI](./capability-plane-migration-and-ops-spec.md)

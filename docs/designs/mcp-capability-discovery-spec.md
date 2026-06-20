@@ -1,6 +1,6 @@
 # MCP Capability Discovery — Design Spec
 
-**Status:** converged design, pre-implementation (grilling session 2026-06-09)
+**Status:** IMPLEMENTED, then migrated onto the control-plane substrate (2026-06-19). ⚠️ The §3.3/§8.5 node-owned writer + heartbeat + tombstone, the flat `mcp.capabilities` topic, `MCPDiscoveryConfig`, and the `strict` selector flag are **superseded** — see ADR-0012 and [`mcp-capability-substrate-migration-plan.md`](./mcp-capability-substrate-migration-plan.md). What still holds: the wire model (`CapabilityRecord`/`CapabilityToolDef`), the `include` trust boundary, and per-turn agent resolution. The plane is now instance-keyed on `calf.capabilities` and read through a `ControlPlaneView`.
 **Depends on:** the `ToolBinding`/`ToolProvider` contract on `feat/mcp_bridge_v2` (`calfkit/models/tool_dispatch.py`)
 
 ## 1. Problem

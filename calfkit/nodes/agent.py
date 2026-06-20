@@ -14,7 +14,7 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
-from calfkit.exceptions import DeserializationError, MCPToolResolutionError, safe_exc_message
+from calfkit.exceptions import DeserializationError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.node_result import _extract_text, extract_lenient
@@ -195,8 +195,8 @@ class BaseAgentNodeDef(
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool
         surface for the turn, so MCP selectors are skipped entirely when
-        ``override_agent_tools`` is present (a strict selector must not be
-        able to fail a turn the caller scoped away from MCP)."""
+        ``override_agent_tools`` is present (overrides are the exact surface;
+        MCP must not widen a turn the caller scoped away from it)."""
         if not self._tool_selectors:
             return
         if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
@@ -207,46 +207,44 @@ class BaseAgentNodeDef(
             return
         self._resolve_selector_tools(ctx.resources, tools_registry)
 
-    _STALE_LOG_AFTER_SECONDS = 90.0  # 3x the default heartbeat interval
-
     def _resolve_selector_tools(self, resources: Mapping[str, Any], tools_registry: dict[str, ToolBinding]) -> None:
-        """Per-turn MCP selector resolution against the Capability View (spec §8.4).
+        """Per-turn MCP selector resolution against the Capability View.
 
         Merges AFTER static tools with collision = error-log + static wins (a
-        remote server must never silently shadow a locally defined tool).
-        Unresolved selections warn and degrade; ``strict=True`` raises before
-        the model runs. Staleness and newer-schema records are log-only (v1).
+        remote server must never silently shadow a locally defined tool). The
+        :class:`ControlPlaneView` owns staleness + schema-version filtering, so
+        an unresolved selection (missing toolbox/tools, or a poisoned record)
+        only warns and degrades — there is no strict fail path.
         """
         view = resources.get(CAPABILITY_VIEW_RESOURCE_KEY)
         if view is None:
-            if any(getattr(sel, "strict", False) for sel in self._tool_selectors):
-                raise MCPToolResolutionError(
-                    f"agent {self.name!r} declares strict MCP tool selectors but no Capability View "
-                    f"resource ({CAPABILITY_VIEW_RESOURCE_KEY!r}) is available — is this agent hosted "
-                    "by a Worker with MCP discovery active?"
-                )
             logger.warning(
                 "agent=%s has MCP tool selectors but no Capability View resource; running without MCP tools",
                 self.name,
             )
             return
+        # CRITICAL-4 (log-only): a degraded/failed reader serves a possibly-frozen view.
+        # Surface it so the staleness is observable — but never block the turn.
+        status = getattr(view, "status", None)
+        failure = getattr(view, "failure", None)
+        if failure is not None or status in ("degraded", "failed"):
+            logger.warning(
+                "agent=%s resolving MCP tools against a %s Capability View (failure=%r); tools may be stale",
+                self.name,
+                status,
+                failure,
+            )
         for selector in self._tool_selectors:
             result: SelectorResult = selector.resolve_tools(view)
             if result.unresolved:
-                detail = (
-                    f"toolbox={result.toolbox_id!r} missing_toolbox={result.missing_toolbox} "
-                    f"missing_tools={result.missing_tools} newer_schema={result.skipped_newer_schema} "
-                    f"invalid_record={result.invalid_record}"
-                )
-                if result.strict:
-                    raise MCPToolResolutionError(f"agent {self.name!r}: strict MCP selection unresolved: {detail}")
-                logger.warning("agent=%s MCP selection partially unresolved (%s); running degraded", self.name, detail)
-            if result.stale_seconds is not None and result.stale_seconds > self._STALE_LOG_AFTER_SECONDS:
                 logger.warning(
-                    "agent=%s toolbox=%s capability record is %.0fs stale (heartbeats missing?); using last-known tools",
+                    "agent=%s MCP selection partially unresolved (toolbox=%r missing_toolbox=%s "
+                    "missing_tools=%s invalid_record=%s); running degraded",
                     self.name,
                     result.toolbox_id,
-                    result.stale_seconds,
+                    result.missing_toolbox,
+                    result.missing_tools,
+                    result.invalid_record,
                 )
             for binding in result.bindings:
                 if binding.name in tools_registry:

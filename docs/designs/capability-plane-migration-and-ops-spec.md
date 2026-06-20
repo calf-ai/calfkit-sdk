@@ -1,6 +1,6 @@
 # Capability-Plane Migration & Ops CLI
 
-- **Status:** Draft (design)
+- **Status:** SUPERSEDED for the capability migration by [`mcp-capability-substrate-migration-plan.md`](./mcp-capability-substrate-migration-plan.md) + ADR-0012 (implemented 2026-06-19). ⚠️ The reader API sketched here (`view.instances()`/`is_online()`, `node_id`/`worker_id` carried in the record value) **diverged from the shipped substrate**, which collapses to `get()` and keeps identity as the wire key only. The `calfkit nodes` ops CLI (§5) remains future work.
 - **Date:** 2026-06-16
 - **Builds on:** [Node Presence Control Plane — Substrate & Shared Primitive](./node-presence-substrate-spec.md)
 - **Scope:** (1) the shared `ControlPlaneRecord` base + record schemas; (2) migrating the shipped MCP capability plane onto the shared primitive (fixing CRITICAL-1/3/4); (3) the `calfkit nodes` ops view. These ship together in Phase 1, on top of the substrate.

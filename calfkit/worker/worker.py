@@ -11,7 +11,8 @@ from typing_extensions import Self
 from calfkit.client import Client
 from calfkit.controlplane.config import ControlPlaneConfig
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
-from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
+from calfkit.controlplane.view import ControlPlaneView
+from calfkit.models.capability import CAPABILITY_TOPIC, CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
 from calfkit.models.tool_dispatch import ToolSelector
 from calfkit.nodes import BaseNodeDef
 from calfkit.provisioning import topics_for_nodes
@@ -26,7 +27,6 @@ from calfkit.worker.lifecycle import (
     _resource_cm,
     _span_cm,
 )
-from calfkit.worker.worker_config import MCPDiscoveryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,6 @@ class Worker(LifecycleHookMixin):
         extra_subscribe_kwargs: dict[str, Any] = {},
         id: str | None = None,
         name: str | None = None,
-        mcp_discovery: MCPDiscoveryConfig | None = None,
         control_plane: ControlPlaneConfig | None = None,
     ):
         """Initialize a worker.
@@ -90,21 +89,18 @@ class Worker(LifecycleHookMixin):
                 Validated non-empty; a uuid7 hex is generated when ``None``.
                 Read-only after construction — mirrors ``BaseClient.emitter_id``.
             name: Display-only label; defaults to ``id``. Never put on the wire.
-            mcp_discovery: Optional tuning for MCP capability discovery
-                (topic, catch-up timeout, bootstrap override). Entirely
-                optional — the Capability View is auto-registered with
-                defaults whenever a hosted agent declares MCP tool selectors.
             control_plane: Optional tuning for the control-plane substrate
                 (heartbeat interval, staleness, catch-up timeout, bootstrap
-                override). The publisher is auto-registered with defaults
-                whenever a hosted node declares an advert (``@advertises``).
+                override). Entirely optional. The publisher is auto-registered
+                whenever a hosted node declares an advert (``@advertises``), and
+                the MCP Capability View whenever a hosted agent declares MCP tool
+                selectors — both with these defaults, zero user wiring.
         """
         if id is not None and not id.strip():
             raise ValueError("id must be a non-empty string or None")
         if name is not None and not name.strip():
             raise ValueError("name must be a non-empty string or None")
         self._client = client
-        self._mcp_discovery = mcp_discovery if mcp_discovery is not None else MCPDiscoveryConfig()
         self._control_plane = control_plane if control_plane is not None else ControlPlaneConfig()
         self._max_workers = max_workers
         self._group_id = group_id
@@ -173,11 +169,11 @@ class Worker(LifecycleHookMixin):
         self._nodes.append(node)
 
     def _maybe_register_capability_view(self) -> None:
-        """Auto-register the MCP Capability View resource (spec §8.3).
+        """Auto-register the MCP Capability View resource.
 
         Zero user wiring: iff any hosted node declares MCP tool selectors, ONE
-        worker-level ``KafkaTable[CapabilityRecord]`` resource is registered
-        (idempotent — guarded by resource-name lookup). The table lands in the
+        worker-level ``ControlPlaneView[CapabilityRecord]`` resource is registered
+        (idempotent — guarded by resource-name lookup). The view lands in the
         worker bag and reaches every node's ``ctx.resources`` via the existing
         worker-under-node merge.
         """
@@ -188,34 +184,35 @@ class Worker(LifecycleHookMixin):
         self.resource(name=CAPABILITY_VIEW_RESOURCE_KEY)(self._capability_view_resource)
 
     async def _capability_view_resource(self, ctx: ResourceSetupContext["Worker"]) -> AsyncIterator[Any]:
-        """Open the Capability View for this worker's lifetime.
+        """Open the Capability View (``ControlPlaneView[CapabilityRecord]``) for this worker's lifetime.
 
-        ``KafkaTable.start()`` IS the boot gate: it replays the capability
-        topic to its start-time end offsets bounded by ``catchup_timeout``
-        (serving degraded, loudly, on expiry) — and because resource setup
-        runs before the broker serves, agents never see a half-built view.
+        ``view.start()`` IS the boot gate: the underlying grouped table replays
+        ``calf.capabilities`` to its start-time end offsets bounded by
+        ``catchup_timeout`` (serving degraded, loudly, on expiry) — and because
+        resource setup runs before the broker serves, agents never see a
+        half-built view. The view collapses the instance-keyed records to one
+        live record per toolbox and owns staleness + schema-version filtering.
         """
-        from ktables import KafkaTable  # the one ktables import outside calfkit.mcp
-
-        cfg = self._mcp_discovery
+        cfg = self._control_plane
         bootstrap = cfg.bootstrap_servers or self._derive_bootstrap_servers()
         if not bootstrap:
             raise RuntimeError(
                 "cannot derive Kafka bootstrap servers for the MCP Capability View "
-                "(client built without connect()?); set MCPDiscoveryConfig(bootstrap_servers=...)."
+                "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
             )
-        table: KafkaTable[CapabilityRecord] = KafkaTable.json(
+        view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
             bootstrap_servers=bootstrap,
-            topic=cfg.topic,
-            model=CapabilityRecord,
+            topic=CAPABILITY_TOPIC,
+            record_type=CapabilityRecord,
             catchup_timeout=cfg.catchup_timeout,
-            # Readers ensure only in dev/CI (spec §3.1); production topics are
-            # ops-governed and a missing topic fails setup loudly.
+            # Readers ensure only in dev/CI; production topics are ops-governed
+            # and a missing topic fails setup loudly.
             ensure_topic=self._client._provisioning.enabled,
+            stale_after=cfg.stale_after,
         )
-        await table.start()
-        yield table
-        await table.stop()
+        await view.start()
+        yield view
+        await view.stop()
 
     def _derive_bootstrap_servers(self) -> str | None:
         """The Kafka bootstrap address for this worker's client, or ``None`` if underivable.

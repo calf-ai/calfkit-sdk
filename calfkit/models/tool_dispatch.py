@@ -1,6 +1,6 @@
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
@@ -8,6 +8,11 @@ from typing_extensions import Self
 
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+
+if TYPE_CHECKING:
+    # Type-only: the Capability View lookup the resolver consumes lives a layer up
+    # (it references CapabilityRecord). A runtime import would cycle; this does not.
+    from calfkit.models.capability import CapabilityLookup
 
 ArgsValidator = Callable[[dict[str, Any]], Any]
 """Validates LLM-emitted tool args pre-dispatch; raises ``pydantic.ValidationError`` on mismatch."""
@@ -68,22 +73,24 @@ class SelectorResult:
     """Outcome of resolving one MCP tool selector against the Capability View.
 
     Carries the bindings plus structured diagnostics so the agent owns the
-    warn/strict policy in one place and tests assert on data, not log text.
+    warn/degrade policy in one place and tests assert on data, not log text.
+
+    Staleness and schema-version filtering are the :class:`ControlPlaneView`'s
+    job now (it hides stale/newer-schema records), so the only ways a selection
+    is ``unresolved`` are a missing toolbox, missing requested tools, or a
+    record that fails binding expansion.
     """
 
     toolbox_id: str
-    strict: bool = False
     bindings: list[ToolBinding] = field(default_factory=list)
     missing_toolbox: bool = False
     missing_tools: tuple[str, ...] = ()
-    skipped_newer_schema: bool = False
     invalid_record: bool = False
-    stale_seconds: float | None = None
 
     @property
     def unresolved(self) -> bool:
         """True when anything the selector asked for could not be delivered."""
-        return self.missing_toolbox or bool(self.missing_tools) or self.skipped_newer_schema or self.invalid_record
+        return self.missing_toolbox or bool(self.missing_tools) or self.invalid_record
 
 
 @runtime_checkable
@@ -94,11 +101,12 @@ class ToolSelector(Protocol):
     agents hold, including ``select()`` results) and by the hosting
     :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode`, which delegates to it:
     passing either to an agent extracts only a lookup key — no session contact,
-    no deployment. The ``view`` is a plain ``Mapping`` so the agent layer needs
-    no ktables import and tests can use dicts.
+    no deployment. The ``view`` is a :class:`~calfkit.models.capability.CapabilityLookup`
+    (anything with ``get(toolbox_id) -> CapabilityRecord | None``), so the agent layer
+    needs no ktables import and tests can use plain dicts.
     """
 
-    def resolve_tools(self, view: Mapping[str, Any]) -> SelectorResult: ...
+    def resolve_tools(self, view: "CapabilityLookup") -> SelectorResult: ...
 
 
 def split_tool_declarations(

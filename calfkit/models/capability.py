@@ -1,31 +1,38 @@
 """Capability control-plane wire model (spec §3.2).
 
-A :class:`CapabilityRecord` is one MCP Toolbox's advertisement on the
-capability topic: identity, dispatch topic, and tool definitions, keyed on the
-wire by ``toolbox_id``. Records are calfkit-owned models — never the vendored
-``ToolDefinition`` — because compacted records outlive deploys, so the wire
-shape must not move when the vendored library does.
+A :class:`CapabilityRecord` is one MCP Toolbox instance's advertisement on the
+capability control-plane topic: dispatch topic and tool definitions, keyed on the
+wire by ``toolbox_id`` × ``worker_id`` (the control-plane instance key, held by the
+substrate — never in the value). Records are calfkit-owned models — never the
+vendored ``ToolDefinition`` — because compacted records outlive deploys, so the
+wire shape must not move when the vendored library does.
 
-Reader policy: tolerant (unknown fields ignored — a newer writer may add
-fields), and records with a newer ``schema_version`` decode fine but must be
-*skipped with a log* by the consumer; :func:`is_unsupported_schema` is that
-policy's predicate.
+Reader policy: tolerant (unknown fields ignored — a newer writer may add fields).
+Staleness and newer-``schema_version`` filtering are owned by the reader's
+:class:`~calfkit.controlplane.ControlPlaneView` (it hides such records and logs the
+skip), so the resolver here only maps a live record to tool bindings.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
 
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+from calfkit.controlplane import ControlPlaneRecord
 from calfkit.models.tool_dispatch import SelectorResult as SelectorResult  # re-export: resolution API lives here
 from calfkit.models.tool_dispatch import ToolBinding
 
 CAPABILITY_SCHEMA_VERSION = 1
 """The record schema major this reader understands. Bump only on breaking
 wire changes; additive fields ride on the tolerant reader instead."""
+
+CAPABILITY_TOPIC = "calf.capabilities"
+"""The cluster-wide compacted control-plane topic toolboxes advertise to.
+
+A control-plane topic (not MCP-specific transport): one record schema per topic.
+Both the ``@advertises`` factory and the reader's ``ControlPlaneView`` bind to it."""
 
 
 class CapabilityToolDef(BaseModel):
@@ -38,22 +45,35 @@ class CapabilityToolDef(BaseModel):
     parameters_json_schema: dict[str, Any]
 
 
-class CapabilityRecord(BaseModel):
-    """One toolbox's current advertisement; superseded whole by its next publish."""
+class CapabilityRecord(ControlPlaneRecord):
+    """One toolbox instance's current advertisement on the capability control plane.
 
-    model_config = ConfigDict(extra="ignore")
+    A :class:`~calfkit.controlplane.ControlPlaneRecord` (identity ``toolbox_id`` ×
+    ``worker_id`` is the wire key; the worker stamps ``started_at`` /
+    ``last_heartbeat_at`` / ``heartbeat_interval``) plus the capability content: the
+    dispatch topic and the tool list. ``content_updated_at`` advances only when
+    ``tools`` actually changes — separate from the liveness heartbeat — so liveness
+    and content currency stay distinct. It is **advisory**: the substrate cannot
+    enforce its monotonicity (the writing node owns the contract; a hand-rolled
+    factory could pass ``now()``), and no production reader gates on it yet — it is
+    wire surface for future ops/observability consumers.
+
+    **Precondition for the collapsed view:** all replicas of one toolbox (same
+    ``toolbox_id``) must advertise *equivalent* content. The view collapses replicas to
+    one record by most-recent heartbeat — it does not merge tool sets — so two replicas
+    with divergent tool lists would flap the agent's visible surface tick-to-tick. The
+    dispatch topic is name-derived and identical across replicas, so routing is never
+    wrong; only tool *visibility* would flap. Keep a toolbox's replicas pointed at the
+    same server / tool set.
+
+    Inherits the base's tolerant, frozen ``model_config`` (``extra="ignore"``); the
+    value object is rebuilt per heartbeat tick, never mutated.
+    """
 
     schema_version: int = CAPABILITY_SCHEMA_VERSION
-    toolbox_id: str
     dispatch_topic: str
     tools: list[CapabilityToolDef]
-    published_at: AwareDatetime
-
-
-def is_unsupported_schema(record: CapabilityRecord) -> bool:
-    """True when ``record`` was written by a newer schema major than this
-    reader understands — the consumer must skip it and log, not act on it."""
-    return record.schema_version > CAPABILITY_SCHEMA_VERSION
+    content_updated_at: AwareDatetime
 
 
 def record_to_bindings(record: CapabilityRecord) -> list[ToolBinding]:
@@ -75,23 +95,36 @@ def record_to_bindings(record: CapabilityRecord) -> list[ToolBinding]:
     ]
 
 
-CAPABILITY_VIEW_RESOURCE_KEY = "calfkit.mcp.capability_view"
+CAPABILITY_VIEW_RESOURCE_KEY = "calfkit.controlplane.capability_view"
 """Worker resource-bag key under which the Capability View (a
-``Mapping[str, CapabilityRecord]``) is published to hosted nodes."""
+:class:`CapabilityLookup`, in practice a ``ControlPlaneView[CapabilityRecord]``)
+is published to hosted nodes."""
+
+
+class CapabilityLookup(Protocol):
+    """The minimal read surface the resolver needs: ``get(toolbox_id)``.
+
+    Satisfied by a ``ControlPlaneView[CapabilityRecord]`` (production) and by a
+    plain ``dict`` (tests), so the agent layer needs no ktables import. The view
+    already hides stale and newer-schema records, so a returned record is live
+    and supported.
+    """
+
+    def get(self, toolbox_id: str) -> CapabilityRecord | None: ...
 
 
 def resolve_capability(
-    view: Any,
+    view: CapabilityLookup,
     toolbox_id: str,
     *,
     include: tuple[str, ...] | None = None,
-    strict: bool = False,
 ) -> SelectorResult:
-    """Resolve ``toolbox_id`` (optionally filtered) against the view.
+    """Resolve ``toolbox_id`` (optionally filtered) against the Capability View.
 
     Public API: this is the resolution kernel behind ``MCPToolbox`` and
     ``MCPToolboxNode.resolve_tools``; custom ``ToolSelector`` implementations may
-    call it directly.
+    call it directly. The view owns staleness + schema-version filtering, so this
+    only maps a present record to bindings.
 
     Never raises on bad records: the tolerant reader admits shapes that fail
     binding expansion (e.g. empty ``dispatch_topic``); those surface as
@@ -99,23 +132,18 @@ def resolve_capability(
     """
     record = view.get(toolbox_id)
     if record is None:
-        return SelectorResult(toolbox_id=toolbox_id, strict=strict, missing_toolbox=True)
-    if is_unsupported_schema(record):
-        return SelectorResult(toolbox_id=toolbox_id, strict=strict, skipped_newer_schema=True)
+        return SelectorResult(toolbox_id=toolbox_id, missing_toolbox=True)
     try:
         bindings = record_to_bindings(record)
-    except Exception:
-        return SelectorResult(toolbox_id=toolbox_id, strict=strict, invalid_record=True)
+    except ValidationError:
+        # The one tolerant-reader bad-data path: an empty dispatch_topic fails
+        # ToolBinding's min_length. A poisoned advert degrades (invalid_record),
+        # not crashes the turn. A NON-validation error here is a logic bug — let
+        # it propagate (fail loud) rather than masking it as bad wire data.
+        return SelectorResult(toolbox_id=toolbox_id, invalid_record=True)
     missing: tuple[str, ...] = ()
     if include is not None:
         wanted = set(include)
         bindings = [b for b in bindings if b.name in wanted]
         missing = tuple(name for name in include if name not in {b.name for b in bindings})
-    stale = max(0.0, (datetime.now(tz=timezone.utc) - record.published_at).total_seconds())
-    return SelectorResult(
-        toolbox_id=toolbox_id,
-        strict=strict,
-        bindings=bindings,
-        missing_tools=missing,
-        stale_seconds=stale,
-    )
+    return SelectorResult(toolbox_id=toolbox_id, bindings=bindings, missing_tools=missing)

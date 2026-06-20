@@ -26,11 +26,12 @@ worker = Worker(client, nodes=[docs])
 await worker.run()
 ```
 
-On startup the toolbox connects to the MCP server, lists its tools, and
-advertises them on the capability topic (default `mcp.capabilities`). It
-re-advertises whenever the server reports a tool-list change and as a
-periodic heartbeat. If the MCP server is unreachable at startup, the worker
-fails to boot — fix the connection rather than running dark.
+On startup the toolbox connects to the MCP server and lists its tools; its host
+worker then advertises them on the capability control-plane topic
+(`calf.capabilities`), refreshes them whenever the server reports a tool-list
+change, and re-publishes periodically as a liveness heartbeat (a tool-list change
+lands on the next heartbeat). If the MCP server is unreachable at startup, the
+worker fails to boot — fix the connection rather than running dark.
 
 ## Give the tools to an agent — same or different process
 
@@ -75,26 +76,28 @@ at the start of every agent turn, so a toolbox that comes up later — or
 changes its tools — is picked up on the next turn. No restarts, no bring-up
 order.
 
-## Scope or require the selection
+## Scope the selection
 
 ```python
 tools=[docs.select(include=["search", "fetch"])]      # only these tools
-tools=[docs.select(include=["search"], strict=True)]  # fail the turn if unavailable
 ```
 
 Use `include` to pin the exact tool names the agent may see — a server that
-starts advertising new tools cannot enlarge the agent's surface. By default an
-unresolved selection logs a warning and the turn runs with whatever resolved;
-use `strict=True` to raise before the model runs instead.
+starts advertising new tools cannot enlarge the agent's surface. An unresolved
+selection (the toolbox is offline, or a requested tool isn't advertised) logs a
+warning and the turn runs with whatever resolved.
 
 If a toolbox tool name collides with a locally configured tool, the local tool
 wins and an error is logged.
 
 ## Handle outages and topic creation
 
-- A **crashed** toolbox keeps its advertisement: agents keep their last-known
-  tools and calls fail visibly. A **clean shutdown** removes the
-  advertisement until the toolbox restarts.
+- A **crashed** toolbox stops heartbeating; its advertisement goes **stale**
+  after roughly three heartbeat intervals, and the view then hides it — so
+  agents stop being offered its tools (the selection degrades) rather than
+  dispatching to a dead toolbox. A **clean shutdown** removes the advertisement
+  immediately. Either way the toolbox reappears on the next turn once it is back
+  and heartbeating.
 - With provisioning enabled (dev/CI), toolbox and agent workers both create
   the compacted capability topic idempotently — bring up either side first.
   In production, create the topic out-of-band (`cleanup.policy=compact`,
@@ -104,7 +107,8 @@ wins and an error is logged.
 ## Tune it (optional)
 
 Every knob has a working default, and there is one config surface:
-`Worker(..., mcp_discovery=MCPDiscoveryConfig(...))` — the topic name, the
-boot catch-up timeout, the heartbeat interval, and a `bootstrap_servers`
-override for running the capability topic on a separate Kafka cluster.
-Toolboxes inherit the config of the worker that hosts them.
+`Worker(..., control_plane=ControlPlaneConfig(...))` — the boot catch-up
+timeout, the heartbeat interval, a staleness threshold, and a `bootstrap_servers`
+override for running the control plane on a separate Kafka cluster. The
+capability topic name is fixed (`calf.capabilities`). Toolboxes and agents
+inherit the config of the worker that hosts them.

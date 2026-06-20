@@ -1,30 +1,37 @@
-"""PR A: capability wire model, discovery config, and server_urls retention.
+"""Capability wire model (migrated onto the control-plane substrate).
 
-Spec: docs/designs/mcp-capability-discovery-spec.md §3.2 (wire format),
-§8.3 (zero-config bootstrap derivation, MCPDiscoveryConfig defaults).
+The capability record is now a :class:`ControlPlaneRecord` subclass: identity
+(``toolbox_id`` × ``worker_id``) is the wire key, never in the value; liveness
+(``last_heartbeat_at``) is split from content currency (``content_updated_at``).
+See ``docs/designs/mcp-capability-substrate-migration-plan.md``.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
+from pydantic_core import PydanticUndefined
 
 from calfkit.client.client import Client
+from calfkit.controlplane import ControlPlaneRecord
 from calfkit.models.capability import (
     CAPABILITY_SCHEMA_VERSION,
+    CAPABILITY_TOPIC,
     CapabilityRecord,
     CapabilityToolDef,
-    is_unsupported_schema,
     record_to_bindings,
 )
 from calfkit.models.tool_dispatch import ToolBinding
-from calfkit.worker.worker_config import MCPDiscoveryConfig
 
 
-def make_record(**overrides) -> CapabilityRecord:
-    defaults = dict(
-        toolbox_id="docs_server",
+def make_record(**overrides: Any) -> CapabilityRecord:
+    now = datetime.now(tz=timezone.utc)
+    defaults: dict[str, Any] = dict(
+        started_at=now,
+        last_heartbeat_at=now,
+        heartbeat_interval=30.0,
         dispatch_topic="mcp_server.docs_server",
         tools=[
             CapabilityToolDef(
@@ -34,13 +41,40 @@ def make_record(**overrides) -> CapabilityRecord:
             ),
             CapabilityToolDef(name="fetch", parameters_json_schema={"type": "object", "properties": {}}),
         ],
-        published_at=datetime.now(tz=timezone.utc),
+        content_updated_at=now,
     )
     defaults.update(overrides)
     return CapabilityRecord(**defaults)
 
 
 class TestCapabilityRecordWireFormat:
+    def test_is_a_control_plane_record(self) -> None:
+        # The migration's foundation: capability records carry the substrate's
+        # identity/liveness base (started_at, last_heartbeat_at, heartbeat_interval).
+        assert issubclass(CapabilityRecord, ControlPlaneRecord)
+        record = make_record()
+        assert record.heartbeat_interval == 30.0
+        assert record.last_heartbeat_at is not None
+        assert record.started_at is not None
+
+    def test_schema_version_has_a_concrete_default(self) -> None:
+        # Load-bearing: ControlPlaneView derives its reader version from this
+        # default and rejects a record type that lacks one.
+        default = CapabilityRecord.model_fields["schema_version"].default
+        assert default is not PydanticUndefined
+        assert default == CAPABILITY_SCHEMA_VERSION == 1
+
+    def test_identity_is_not_carried_in_the_value(self) -> None:
+        # toolbox_id is the wire key now, never a field on the record value.
+        assert "toolbox_id" not in CapabilityRecord.model_fields
+
+    def test_liveness_and_content_currency_are_separate_fields(self) -> None:
+        # CRITICAL-3 fix: a heartbeat refreshes last_heartbeat_at without
+        # touching content_updated_at, so the two facts are distinguishable.
+        assert "last_heartbeat_at" in CapabilityRecord.model_fields
+        assert "content_updated_at" in CapabilityRecord.model_fields
+        assert "published_at" not in CapabilityRecord.model_fields
+
     def test_round_trips_through_json(self) -> None:
         record = make_record()
         restored = CapabilityRecord.model_validate_json(record.model_dump_json())
@@ -53,18 +87,16 @@ class TestCapabilityRecordWireFormat:
         payload = make_record().model_dump_json()
         widened = payload[:-1] + ', "future_field": {"x": 1}}'
         restored = CapabilityRecord.model_validate_json(widened)
-        assert restored.toolbox_id == "docs_server"
+        assert restored.dispatch_topic == "mcp_server.docs_server"
 
     def test_description_is_optional(self) -> None:
         record = make_record()
         assert record.tools[1].description is None
 
-    def test_newer_major_schema_is_detected_not_rejected(self) -> None:
-        # Decoding succeeds (ktables applies any valid JSON); the POLICY of
-        # skipping newer-major records lives with the caller via this helper.
-        newer = make_record(schema_version=CAPABILITY_SCHEMA_VERSION + 1)
-        assert is_unsupported_schema(newer)
-        assert not is_unsupported_schema(make_record())
+
+class TestCapabilityConstants:
+    def test_topic_is_the_renamed_control_plane_topic(self) -> None:
+        assert CAPABILITY_TOPIC == "calf.capabilities"
 
 
 class TestRecordToBindings:
@@ -81,21 +113,6 @@ class TestRecordToBindings:
         [search, _] = record_to_bindings(make_record())
         assert search.tool_def.description == "Search the docs"
         assert search.tool_def.parameters_json_schema == {"type": "object", "properties": {"q": {"type": "string"}}}
-
-
-class TestMCPDiscoveryConfig:
-    def test_defaults_match_spec(self) -> None:
-        cfg = MCPDiscoveryConfig()
-        assert cfg.topic == "mcp.capabilities"
-        assert cfg.catchup_timeout == 30.0
-        assert cfg.heartbeat_interval == 30.0
-        assert cfg.bootstrap_servers is None  # None = derive from the client
-
-    def test_rejects_non_positive_intervals(self) -> None:
-        with pytest.raises(ValueError):
-            MCPDiscoveryConfig(catchup_timeout=0)
-        with pytest.raises(ValueError):
-            MCPDiscoveryConfig(heartbeat_interval=-1)
 
 
 class TestClientServerUrlsRetention:

@@ -19,11 +19,14 @@ from calfkit.models.tool_dispatch import ToolSelector, split_tool_declarations
 
 
 def make_record(toolbox_id: str = "github", tool_names: tuple[str, ...] = ("search", "create_issue")) -> CapabilityRecord:
+    now = datetime.now(tz=timezone.utc)
     return CapabilityRecord(
-        toolbox_id=toolbox_id,
+        started_at=now,
+        last_heartbeat_at=now,
+        heartbeat_interval=30.0,
         dispatch_topic=f"mcp_server.{toolbox_id}",
         tools=[CapabilityToolDef(name=n, parameters_json_schema={"type": "object", "properties": {}}) for n in tool_names],
-        published_at=datetime.now(tz=timezone.utc),
+        content_updated_at=now,
     )
 
 
@@ -43,15 +46,13 @@ class TestDirectConstruction:
         ref = MCPToolbox("github")
         result = ref.resolve_tools({"github": make_record()})
         assert [b.name for b in result.bindings] == ["search", "create_issue"]
-        assert not result.strict
 
-    def test_include_and_strict_kwargs(self) -> None:
+    def test_include_kwarg_filters(self) -> None:
         from calfkit.mcp import MCPToolbox
 
-        ref = MCPToolbox("github", include=("search",), strict=True)
+        ref = MCPToolbox("github", include=("search",))
         result = ref.resolve_tools({"github": make_record()})
         assert [b.name for b in result.bindings] == ["search"]
-        assert result.strict
 
     def test_include_accepts_any_sequence_normalized_to_tuple(self) -> None:
         from calfkit.mcp import MCPToolbox
@@ -64,7 +65,7 @@ class TestDirectConstruction:
 
         ref = MCPToolbox("github", include=("search",))
         with pytest.raises(Exception):
-            ref.strict = True  # type: ignore[misc]
+            ref.include = ("other",)  # type: ignore[misc]
         assert len({ref, MCPToolbox("github", include=("search",))}) == 1  # value semantics
 
     def test_satisfies_tool_selector_and_splits_as_selector(self) -> None:
@@ -80,9 +81,9 @@ class TestMintingAndParity:
     def test_select_returns_the_public_ref_type(self) -> None:
         from calfkit.mcp import MCPToolbox
 
-        ref = make_toolbox().select(include=["search"], strict=True)
+        ref = make_toolbox().select(include=["search"])
         assert isinstance(ref, MCPToolbox)
-        assert ref.name == "github" and ref.include == ("search",) and ref.strict
+        assert ref.name == "github" and ref.include == ("search",)
 
     def test_toolbox_resolution_delegates_to_its_ref(self) -> None:
         from calfkit.mcp import MCPToolbox

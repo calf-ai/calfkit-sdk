@@ -202,7 +202,7 @@ class ControlPlaneConfig:
 
 The knobs split by side: `heartbeat_interval` is the publisher's (and is stamped on records, so it reaches readers); `stale_after` and `catchup_timeout` are the view's; `bootstrap_servers` applies to whichever side opens a table. A reader in a different process than the writer needs **no** agreement on `heartbeat_interval` — it arrives on the record (the C1 decision).
 
-`ControlPlaneConfig` is introduced *alongside* the still-live `MCPDiscoveryConfig` (which keeps serving the un-migrated capability plane). That temporary duplication is intentional and collapses when the capability migration PR folds `MCPDiscoveryConfig` into `ControlPlaneConfig`.
+`ControlPlaneConfig` was introduced *alongside* the then-still-live `MCPDiscoveryConfig`. That temporary duplication has since **collapsed**: the capability migration (ADR-0012) deleted `MCPDiscoveryConfig` and folded it into `ControlPlaneConfig`.
 
 ## 12. Naming
 
