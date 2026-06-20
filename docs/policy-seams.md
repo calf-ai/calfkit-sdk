@@ -56,9 +56,9 @@ def add_locale_hint(ctx):
     # return None → the agent runs with the instruction applied
 ```
 
-## Answer directly without running the body
+## Short-circuit the body
 
-Return a value from `before_node` to **answer directly**: the body is skipped, your
+Return a value from `before_node` to **short-circuit** the body: it is skipped, your
 value becomes the node's output, and it still passes through `after_node` and is
 replied/published as usual. Use it for a cache hit or a canned response.
 
@@ -71,7 +71,7 @@ def serve_cached(ctx):
 ## Block an invocation
 
 To **block** an invocation so the body never runs, `raise` — a returned value
-answers in the body's place, but only a raised exception stops the flow. Raise
+short-circuits the body, but only a raised exception stops the flow. Raise
 `NodeFaultError` to send the caller a clean, typed fault:
 
 ```python

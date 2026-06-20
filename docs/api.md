@@ -204,7 +204,7 @@ Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams
 
 | Seam | Handler signature | A `None` return… | A non-`None` return… |
 | --- | --- | --- | --- |
-| `before_node` | `(ctx)` | proceeds to the node body | skips the body; the value becomes the node's output |
+| `before_node` | `(ctx)` | proceeds to the node body | short-circuits the body; the value becomes the node's output |
 | `after_node` | `(ctx, output)` | keeps the produced output | replaces the output (output values only) |
 | `on_node_error` | `(ctx, fault)` | escalates the original fault | recovers — the value becomes the node's output |
 | `on_callee_error` | `(ctx, fault)` | the failed call escalates | substitutes a result for that call |
