@@ -15,7 +15,7 @@
 When multiple agents share a conversational surface (a Discord channel, a group chat), each agent must be invoked with the conversation projected from **its own** point of view: messages it authored stay assistant turns; everyone else's become attributed, surface-only user turns. The transcript already exists as `State.message_history` — one list that travels on the wire and accumulates per turn. The feature adds:
 
 1. **Always-on identity stamping** — every `ModelResponse` is tagged with the producing agent's id via `ModelResponse.name`, in one `State` helper at the two history-append sites.
-2. **Always-on projection** — at the model-input boundary, `message_history` is projected to the running agent's POV. It **auto-detects** whether the history is multi-participant: if a single role is unambiguous (one agent, ≤1 named human) it passes through transparently (byte-identical to today); otherwise it re-roles other agents to attributed user turns. `name` is always stripped from the model input.
+2. **Always-on projection** — at the model-input boundary, `message_history` is projected to the running agent's POV. It **auto-detects** whether the history is multi-participant: if the running agent is the sole author (no agent other than the viewer, ≤1 named human) it passes through transparently (byte-identical to today); otherwise — including a single *other* agent's history (e.g. a handed-off conversation) — it re-roles other agents to attributed user turns. `name` is always stripped from the model input.
 
 There is **no opt-in flag and no new public type/wire field** — it is recipe-layer behavior consistent with v1 §11 (multi-agent patterns are recipes) and §7.2 (message history is an agent-loop concern).
 
@@ -113,19 +113,20 @@ agent_names = { m.name for m in history if isinstance(m, ModelResponse) and m.na
 human_names = { p.name for m in history if isinstance(m, ModelRequest)
                         for p in m.parts if isinstance(p, UserPromptPart) and p.name }
 
-if len(agent_names) >= 2 or len(human_names) >= 2:
-    # multi-participant → re-role + prefix (§5.2–5.4)
+if (agent_names - {viewer}) or len(human_names) >= 2:
+    # viewer-aware: an agent OTHER than the viewer authored a turn (incl. a single one —
+    # a handed-off conversation), or ≥2 named humans → re-role + prefix (§5.2–5.4)
 else:
-    # one unambiguous agent, ≤1 named human → TRANSPARENT pass-through:
+    # only the viewer's own turns, ≤1 named human → TRANSPARENT pass-through:
     #   strip name from every message; keep roles; no prefixes → model input identical to today
 ```
 
-This is correct across the cases (verified by analysis): a single agent + any unnamed humans → transparent; **two agents + an unnamed human → projected** (the primary channel case, which a "total unique names > N" rule would miss because unnamed humans don't count); two agents + no human → projected; one agent + ≥2 named humans → projected. Unnamed humans remain indistinguishable (to us and the model) — naming them is how a user opts into distinguishing them. A new agent that hasn't spoken yet owns nothing but correctly sees ≥1 other agent → projected (no spurious "viewer desync" warning needed).
+This is correct across the cases (verified by analysis + tests): **only the viewer's own turns** + any unnamed humans → transparent; **any agent other than the viewer authored a turn → projected** — including a *single* other agent (a handed-off or cross-fed conversation; the handoff first-hop) and the multi-agent channel cases (two agents ± an unnamed human, etc.); one agent + ≥2 named humans → projected. Unnamed humans remain indistinguishable (to us and the model) — naming them is how a user opts into distinguishing them. A new agent that hasn't spoken yet owns nothing but correctly sees the other author(s) → projected. (The earlier gate counted distinct authors `>= 2`, which **missed a single other-agent's history**; the viewer-aware `agent_names - {viewer}` fixes it.)
 
 **Two consequences to state honestly:**
 - **"Transparent" means the model *input* is byte-identical to today**, not that the stored history is. Stamping is always-on, so the stored canonical `message_history` now carries `name` on every `ModelResponse` (an additive optional field; no calfkit consumer reads it, and it never reaches a provider — §5.5). It is backward-compatible but *not* a zero-diff on the wire.
 - **The transparent→projected transition (when a 2nd agent first speaks) rewrites the prompt prefix**: the same human messages retroactively gain `<user>` prefixes on that turn, which **invalidates provider prompt caches** (Anthropic/OpenAI prefix caching) for the history once. This is the inherent cost of keeping single-agent chats prefix-free; the alternative (always prefixing) would change every 1:1 conversation. Accepted as a one-time, per-channel cost. Implementation should `logger.debug` when an agent first transitions transparent→multi-participant, so the engage point is greppable (the no-flag model has no other signal).
-- **The cross-feed footgun (document, don't fix):** the detection scans the *whole* history, so manually feeding **agent A's** `result.message_history` into a **different** agent B via the client engages projection if ≥2 agents are present — and if only A has spoken, B is in transparent mode and sees A's turns as **its own** assistant messages (name stripped, roles kept). This is pre-existing behavior (B always inherited A's history as its own), not a regression, but always-on stamping now makes the bytes *look* attributable while projection still treats them as B's. The README `message_history=result.message_history` pattern is **same-agent multi-turn** and stays transparent/identical; cross-agent context sharing is the channel topology (§9), not the client handoff. The README multi-agent section (§15.5) must say so.
+- **Cross-feed / single-other-agent (now fixed — viewer-aware gate):** the detection scans the *whole* history and compares authors to the viewer, so feeding **agent A's** `result.message_history` to a **different** agent B — or handing a conversation off to B — re-roles A's turns as attributed `<A>` user turns **even when A is the only author**. (The original design left this as a "document, don't fix" footgun under the author-count `>= 2` gate, where B saw A's turns as its own; the `agent_names - {viewer}` gate fixes it, which the handoff feature requires.) The README `message_history=result.message_history` **same-agent multi-turn** pattern is unaffected (viewer == sole author → transparent/identical).
 
 ### 5.2 Per-message re-roling (multi-participant mode)
 

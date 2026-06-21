@@ -8,10 +8,13 @@ canonical history, so re-projection for the next viewer is always clean), and
 strips ``name`` from every message it emits (§5.5) so attribution never reaches a
 provider.
 
-Detection (§5.1): if a single role is unambiguous (one agent, ≤1 named human)
-the history passes through transparently (byte-identical model input to today,
-but with ``name`` stripped); otherwise other participants are re-roled to
-attributed, surface-only ``ModelRequest`` user turns.
+Detection (§5.1, viewer-aware): if every authored turn is the viewer's own (no
+agent *other than* the viewer) and there is ≤1 named human, the history passes
+through transparently (byte-identical model input to today, but with ``name``
+stripped); otherwise other participants — including a *single* other agent, e.g.
+a handed-off conversation — are re-roled to attributed, surface-only
+``ModelRequest`` user turns. (Counting distinct authors instead of comparing to
+the viewer would miss a single other-agent's history.)
 
 ``structured_output_preamble`` is the client-facing sibling (§7): given a run's
 new messages it returns the tool-mode text preamble that accompanies a structured
@@ -56,7 +59,11 @@ def project(history: list[ModelMessage], viewer: str) -> list[ModelMessage]:
     agent_names = {m.name for m in history if isinstance(m, ModelResponse) and m.name}
     human_names = {p.name for m in history if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, UserPromptPart) and p.name}
 
-    multi_participant = len(agent_names) >= 2 or len(human_names) >= 2
+    # Viewer-aware: attribute when any turn was authored by someone OTHER than the
+    # viewer (another agent — incl. a single one, e.g. a handed-off conversation) or
+    # there are multiple named humans to disambiguate. Counting distinct authors (the
+    # old `len(agent_names) >= 2`) missed a single other-agent's history.
+    multi_participant = bool(agent_names - {viewer}) or len(human_names) >= 2
 
     if not multi_participant:
         return _project_transparent(history)
