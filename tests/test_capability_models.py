@@ -102,18 +102,26 @@ class TestCapabilityConstants:
 
 class TestRecordToBindings:
     def test_builds_validatorless_bindings_with_record_topic(self) -> None:
-        record = make_record()
-        bindings = record_to_bindings(record)
-        assert [b.name for b in bindings] == ["search", "fetch"]
+        record = make_record()  # node_kind="toolbox"
+        bindings = record_to_bindings(record, name="docs_server")
+        # C1: a toolbox's LLM-facing tool names are namespaced <node_id>__<tool>.
+        assert [b.name for b in bindings] == ["docs_server__search", "docs_server__fetch"]
         assert all(isinstance(b, ToolBinding) for b in bindings)
         assert all(b.dispatch_topic == "mcp_server.docs_server" for b in bindings)
         # Wire-crossing tools dispatch unvalidated (schema-only carve-out).
         assert all(b.validator is None for b in bindings)
 
     def test_tool_def_fields_survive(self) -> None:
-        [search, _] = record_to_bindings(make_record())
+        [search, _] = record_to_bindings(make_record(), name="docs_server")
         assert search.tool_def.description == "Search the docs"
         assert search.tool_def.parameters_json_schema == {"type": "object", "properties": {"q": {"type": "string"}}}
+
+    def test_tool_node_record_stays_bare(self) -> None:
+        # C2: namespacing is toolbox-scoped. A function tool node's record
+        # (node_kind="tool") expands to BARE names, preserving the
+        # node_id == tool name == capability key identity (ADR-0013).
+        bindings = record_to_bindings(make_record(node_kind="tool"), name="docs_server")
+        assert [b.name for b in bindings] == ["search", "fetch"]
 
 
 class TestClientServerUrlsRetention:

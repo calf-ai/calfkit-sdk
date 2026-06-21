@@ -318,7 +318,7 @@ def resolve_capability(view, target_id, *, include=None, expected_kind=None) -> 
     if expected_kind is not None and record.node_kind != expected_kind:
         return SelectorResult(wrong_kind_targets=(target_id,))
     try:
-        bindings = record_to_bindings(record)
+        bindings = record_to_bindings(record, name=target_id)  # name: namespaces toolbox tools (ADR-0018)
     except ValidationError:
         # tolerant-reader bad-data path ONLY (e.g. empty dispatch_topic fails ToolBinding min_length);
         # a non-ValidationError here is a logic bug — let it propagate (fail loud).

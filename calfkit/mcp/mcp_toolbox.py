@@ -209,11 +209,18 @@ class MCPToolboxNode(BaseNodeDef):
             )
             raise RuntimeError(f"no live MCP session for server {self.node_id!r}")
 
+        # Strip this toolbox's own ``<node_id>__`` prefix to recover the BARE server-side tool
+        # name (ADR-0018, C6). Exact-prefix ``removeprefix``, NOT ``split("__")`` — a server tool
+        # name (``a__b``) or a toolbox name (``my__server``) may legitimately contain ``__``;
+        # ``removeprefix`` of the exact ``<node_id>__`` round-trips and is a no-op on an already-bare
+        # name. The namespace is the agent's cluster-side projection; it never crosses to the server,
+        # and the strip is local here so the agent's dispatch path stays generic.
+        server_tool_name = payload.name.removeprefix(f"{self.node_id}__")
         # A transport error escapes to the chokepoint (on_node_error → fault). The B1 eager wire-safety
         # check (pydantic_core.to_json) likewise raises HERE on a non-wire-safe result, not mid-publish.
         # ``isError=True`` results pass through TRANSPARENTLY (B2): the MCPCallToolResult rides the reply
         # slot as an ordinary successful return — the agent/model sees it exactly as today.
-        tool_result: MCPCallToolResult = await session.call_tool(name=payload.name, arguments=payload.args)
+        tool_result: MCPCallToolResult = await session.call_tool(name=server_tool_name, arguments=payload.args)
         pydantic_core.to_json(tool_result)
         return ReturnCall[State](state=ctx.state, value=tool_result)
 

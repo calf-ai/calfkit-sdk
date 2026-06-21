@@ -79,7 +79,7 @@ to share the definition.
 ## Scope the selection
 
 ```python
-tools=[MCPToolbox("docs_server", include=("search", "fetch"))]   # only these tools
+tools=[MCPToolbox("docs_server", include=("search", "fetch"))]   # only these tools, by BARE name
 ```
 
 Use `include` to pin the exact tool names the agent may see — a server that
@@ -88,8 +88,28 @@ form, `docs.select(include=("search", "fetch"))` returns the same handle.) If a
 requested tool isn't available — the toolbox is offline, or doesn't offer it —
 the turn proceeds with whatever tools are available and logs a warning.
 
-If a toolbox tool name collides with a locally configured tool, the local tool
-wins and an error is logged.
+`include` names are the **bare** server-side tool names (`search`, not
+`docs_server__search`) — see below.
+
+## Tool names: bare in your code, namespaced for the model
+
+The model is shown each MCP tool under a **namespaced** name,
+`<toolbox_name>__<tool>` (e.g. `docs_server__search`), so tools from different
+toolboxes — and from your function tool nodes — never collide. You never type
+that form: calfkit applies it only on the model-facing surface and strips it back
+to the bare name before the call reaches the MCP server. Everywhere in your code —
+`include=(...)`, and any tool name you mention to the model in a system prompt —
+use the **bare** server-side name.
+
+Keep toolbox and tool names within the provider's tool-name charset
+(`[a-zA-Z0-9_-]`) and length limit: the combined `<toolbox>__<tool>` is what the
+model receives, and an over-long or out-of-charset name is rejected by the
+provider at the turn.
+
+Because MCP names are namespaced, a toolbox tool (`docs_server__search`) won't
+collide with a locally configured function tool (`search`). A collision would
+require a local tool named literally `docs_server__search`; in that rare case the
+local tool wins and an error is logged.
 
 ## Handle outages and topic creation
 

@@ -79,6 +79,17 @@ _SERVER_B_NAME = "roundtrip_server_b"
 _EARLIEST = {"auto_offset_reset": "earliest"}
 
 
+def _ns(node_id: str, tool: str) -> str:
+    """The LLM-facing namespaced tool name (ADR-0018): ``<toolbox_node_id>__<tool>``.
+
+    ``node_id`` is the toolbox's construction name — here the per-test-unique
+    ``_server_name(topic_namespace)`` — NOT the bare server base. The model is
+    advertised this namespaced name and emits it; the toolbox strips the prefix
+    before calling the MCP server (which only ever sees the bare ``tool``).
+    """
+    return f"{node_id}__{tool}"
+
+
 # ── builders ─────────────────────────────────────────────────────────────────
 
 
@@ -185,14 +196,15 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     agent_id = f"{topic_namespace}-mcp-agent"
     agent_in = f"{topic_namespace}.mcp-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call the add tool",
         subscribe_topics=agent_in,
-        model_client=scripted_model([ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="call-add")]),
-        tools=[toolbox.select(include=_TOOLS)],
+        model_client=scripted_model([ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-add")]),
+        tools=[toolbox.select(include=_TOOLS)],  # include uses BARE names (C5)
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -200,14 +212,14 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
             result = await driver.execute("add 2 and 3", agent_in, timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
-    returns = tool_returns(result.message_history)
-    assert "add" in returns
-    assert "5" in _serialized(returns["add"])
+    returns = tool_returns(result.message_history)  # keyed by the model-facing (namespaced) name
+    assert _ns(server_name, "add") in returns
+    assert "5" in _serialized(returns[_ns(server_name, "add")])
 
     await driver.close()
     await toolbox_worker._client.close()
@@ -222,14 +234,15 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     agent_id = f"{topic_namespace}-mcp-iserror"
     agent_in = f"{topic_namespace}.mcp-iserror.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call domain_error",
         subscribe_topics=agent_in,
-        model_client=scripted_model([ToolCallPart("domain_error", {}, tool_call_id="call-err")]),
-        tools=[toolbox.select(include=["domain_error"])],
+        model_client=scripted_model([ToolCallPart(_ns(server_name, "domain_error"), {}, tool_call_id="call-err")]),
+        tools=[toolbox.select(include=["domain_error"])],  # include = BARE (C5)
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -237,7 +250,7 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
             result = await driver.execute("trigger the error", agent_in, timeout=120)
 
@@ -246,8 +259,8 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     # It arrived as an ORDINARY return (tool_returns collects ToolReturnParts only), carrying
     # the isError result through transparently.
     returns = tool_returns(result.message_history)
-    assert "domain_error" in returns
-    assert "isError" in _serialized(returns["domain_error"])
+    assert _ns(server_name, "domain_error") in returns
+    assert "isError" in _serialized(returns[_ns(server_name, "domain_error")])
 
     await driver.close()
     await toolbox_worker._client.close()
@@ -261,16 +274,17 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     agent_id = f"{topic_namespace}-mcp-fanout-agent"
     agent_in = f"{topic_namespace}.mcp-fanout-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call both tools",
         subscribe_topics=agent_in,
         model_client=scripted_model(
             [
-                ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="call-add"),
-                ToolCallPart("echo", {"text": "hi"}, tool_call_id="call-echo"),
+                ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-add"),
+                ToolCallPart(_ns(server_name, "echo"), {"text": "hi"}, tool_call_id="call-echo"),
             ]
         ),
         tools=[toolbox.select(include=_TOOLS)],
@@ -282,7 +296,7 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
             topics = await _topics(kafka_bootstrap)
             assert f"calf.fanout.{agent_id}.state" in topics
@@ -291,9 +305,9 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)
-    assert "add" in returns and "echo" in returns
-    assert "5" in _serialized(returns["add"])
-    assert "hi" in _serialized(returns["echo"])
+    assert _ns(server_name, "add") in returns and _ns(server_name, "echo") in returns
+    assert "5" in _serialized(returns[_ns(server_name, "add")])
+    assert "hi" in _serialized(returns[_ns(server_name, "echo")])
 
     await driver.close()
     await toolbox_worker._client.close()
@@ -309,16 +323,17 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     agent_id = f"{topic_namespace}-dup-agent"
     agent_in = f"{topic_namespace}.dup-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="add two pairs",
         subscribe_topics=agent_in,
         model_client=scripted_model(
             [
-                ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="call-a"),
-                ToolCallPart("add", {"a": 10, "b": 20}, tool_call_id="call-b"),
+                ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-a"),
+                ToolCallPart(_ns(server_name, "add"), {"a": 10, "b": 20}, tool_call_id="call-b"),
             ]
         ),
         tools=[toolbox.select(include=_TOOLS)],
@@ -329,7 +344,7 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
             result = await driver.execute("add 2+3 and 10+20", agent_in, timeout=120)
 
@@ -351,16 +366,17 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     agent_id = f"{topic_namespace}-seq-agent"
     agent_in = f"{topic_namespace}.seq-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="call both tools sequentially",
         subscribe_topics=agent_in,
         model_client=scripted_model(
             [
-                ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="call-add"),
-                ToolCallPart("echo", {"text": "hi"}, tool_call_id="call-echo"),
+                ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-add"),
+                ToolCallPart(_ns(server_name, "echo"), {"text": "hi"}, tool_call_id="call-echo"),
             ]
         ),
         tools=[toolbox.select(include=_TOOLS)],
@@ -373,15 +389,15 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
             result = await driver.execute("add then echo", agent_in, timeout=120)
             topics = await _topics(kafka_bootstrap)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)
-    assert "5" in _serialized(returns["add"])
-    assert "hi" in _serialized(returns["echo"])
+    assert "5" in _serialized(returns[_ns(server_name, "add")])
+    assert "hi" in _serialized(returns[_ns(server_name, "echo")])
     # No durable store was opened — the sequential path never fans out.
     assert f"calf.fanout.{agent_id}.state" not in topics
     assert f"calf.fanout.{agent_id}.basestate" not in topics
@@ -397,20 +413,22 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
     agent_id = f"{topic_namespace}-multi-server-agent"
     agent_in = f"{topic_namespace}.multi-server-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_a_name = _server_name(topic_namespace)
+    server_b_name = _server_name(topic_namespace, _SERVER_B_NAME)
 
-    box_a = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
-    box_b = MCPToolboxNode(_server_name(topic_namespace, _SERVER_B_NAME), connection_params=_server_params(_SERVER_B_SCRIPT))
+    box_a = MCPToolboxNode(server_a_name, connection_params=_server_params(_SERVER_SCRIPT))
+    box_b = MCPToolboxNode(server_b_name, connection_params=_server_params(_SERVER_B_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="use a tool from each server",
         subscribe_topics=agent_in,
         model_client=scripted_model(
             [
-                ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="call-add"),
-                ToolCallPart("mul", {"a": 4, "b": 5}, tool_call_id="call-mul"),
+                ToolCallPart(_ns(server_a_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-add"),
+                ToolCallPart(_ns(server_b_name, "mul"), {"a": 4, "b": 5}, tool_call_id="call-mul"),
             ]
         ),
-        tools=[box_a.select(include=["add"]), box_b.select(include=["mul"])],
+        tools=[box_a.select(include=["add"]), box_b.select(include=["mul"])],  # each include is BARE
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -421,15 +439,16 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace, _SERVER_B_NAME), timeout=60)
+        await _await_capability(kafka_bootstrap, server_a_name, timeout=60)
+        await _await_capability(kafka_bootstrap, server_b_name, timeout=60)
         async with agent_worker:
             result = await driver.execute("add 2+3 and mul 4*5", agent_in, timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)
-    assert "5" in _serialized(returns["add"])  # only server A could produce 5
-    assert "20" in _serialized(returns["mul"])  # only server B could produce 20
+    # Each call namespaced by its OWN toolbox; the server saw the bare name and produced these.
+    assert "5" in _serialized(returns[_ns(server_a_name, "add")])  # only server A could produce 5
+    assert "20" in _serialized(returns[_ns(server_b_name, "mul")])  # only server B could produce 20
 
     await driver.close()
     await toolbox_worker._client.close()
@@ -444,20 +463,21 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     a2_id = f"{topic_namespace}-agent-2"
     a2_in = f"{topic_namespace}.agent-2.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     agent1 = Agent(
         a1_id,
         system_prompt="add",
         subscribe_topics=a1_in,
-        model_client=scripted_model([ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="c1")]),
+        model_client=scripted_model([ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="c1")]),
         tools=[toolbox.select(include=["add"])],
     )
     agent2 = Agent(
         a2_id,
         system_prompt="add",
         subscribe_topics=a2_in,
-        model_client=scripted_model([ToolCallPart("add", {"a": 10, "b": 20}, tool_call_id="c2")]),
+        model_client=scripted_model([ToolCallPart(_ns(server_name, "add"), {"a": 10, "b": 20}, tool_call_id="c2")]),
         tools=[toolbox.select(include=["add"])],
     )
 
@@ -466,7 +486,7 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     agent_worker = _worker(kafka_bootstrap, nodes=[agent1, agent2], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
             h1 = await driver.start("agent 1 add 2+3", a1_in)
             h2 = await driver.start("agent 2 add 10+20", a2_in)
@@ -476,8 +496,8 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     assert r1.output is not None and FINAL_OUTPUT in r1.output
     assert r2.output is not None and FINAL_OUTPUT in r2.output
     # Each caller got ITS OWN result back, not the other's.
-    assert "5" in _serialized(tool_returns(r1.message_history)["add"])
-    assert "30" in _serialized(tool_returns(r2.message_history)["add"])
+    assert "5" in _serialized(tool_returns(r1.message_history)[_ns(server_name, "add")])
+    assert "30" in _serialized(tool_returns(r2.message_history)[_ns(server_name, "add")])
 
     await driver.close()
     await toolbox_worker._client.close()
@@ -494,14 +514,15 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     agent_id = f"{topic_namespace}-pin-agent"
     agent_in = f"{topic_namespace}.pin-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     agent = Agent(
         agent_id,
         system_prompt="try to call danger",
         subscribe_topics=agent_in,
-        model_client=scripted_model([ToolCallPart("danger", {}, tool_call_id="call-danger")]),
-        tools=[toolbox.select(include=["add"])],  # danger is advertised but NOT included
+        model_client=scripted_model([ToolCallPart(_ns(server_name, "danger"), {}, tool_call_id="call-danger")]),
+        tools=[toolbox.select(include=["add"])],  # danger is advertised but NOT included (include is BARE)
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -509,14 +530,14 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
             result = await driver.execute("call danger", agent_in, timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
-    # danger never reached the server / never round-tripped.
-    assert "danger" not in tool_returns(result.message_history)
-    # The agent told the model the tool does not exist.
+    # danger never reached the server / never round-tripped (check the namespaced key it WOULD have had).
+    assert _ns(server_name, "danger") not in tool_returns(result.message_history)
+    # The agent told the model the tool does not exist (retry text carries the emitted name).
     assert any("danger" in text for text in retry_prompt_texts(result.message_history))
 
     await driver.close()
@@ -535,20 +556,21 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     bonus_id = f"{topic_namespace}-bonus-agent"
     bonus_in = f"{topic_namespace}.bonus-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
 
-    toolbox = MCPToolboxNode(_server_name(topic_namespace), connection_params=_server_params(_SERVER_SCRIPT))
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     enable_agent = Agent(
         enable_id,
         system_prompt="enable the bonus tool",
         subscribe_topics=enable_in,
-        model_client=scripted_model([ToolCallPart("enable_bonus", {}, tool_call_id="call-enable")]),
+        model_client=scripted_model([ToolCallPart(_ns(server_name, "enable_bonus"), {}, tool_call_id="call-enable")]),
         tools=[toolbox.select(include=["enable_bonus"])],
     )
     bonus_agent = Agent(
         bonus_id,
         system_prompt="use the bonus tool",
         subscribe_topics=bonus_in,
-        model_client=scripted_model([ToolCallPart("bonus", {}, tool_call_id="call-bonus")]),
+        model_client=scripted_model([ToolCallPart(_ns(server_name, "bonus"), {}, tool_call_id="call-bonus")]),
         tools=[toolbox.select(include=["bonus"])],
     )
 
@@ -558,22 +580,23 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     bonus_worker = _worker(kafka_bootstrap, nodes=[bonus_agent], control_plane=control_plane)
 
     async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, _server_name(topic_namespace), timeout=60)
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
 
         # 1) Trigger the runtime tool registration + list_changed notification.
         async with enable_worker:
             r1 = await driver.execute("enable the bonus tool", enable_in, timeout=120)
         assert r1.output is not None and FINAL_OUTPUT in r1.output
-        assert "enabled" in _serialized(tool_returns(r1.message_history)["enable_bonus"])
+        assert "enabled" in _serialized(tool_returns(r1.message_history)[_ns(server_name, "enable_bonus")])
 
-        # 2) The toolbox re-listed into its cache; the next heartbeat carried the grown record — wait for it.
-        await _await_tool_in_record(kafka_bootstrap, _server_name(topic_namespace), "bonus", timeout=60)
+        # 2) The toolbox re-listed into its cache; the next heartbeat carried the grown record — wait
+        #    for it. The WIRE record carries BARE tool names, so probe for the bare "bonus".
+        await _await_tool_in_record(kafka_bootstrap, server_name, "bonus", timeout=60)
 
         # 3) A fresh agent's view catch-up now includes 'bonus' deterministically.
         async with bonus_worker:
             r2 = await driver.execute("use the bonus tool", bonus_in, timeout=120)
         assert r2.output is not None and FINAL_OUTPUT in r2.output
-        assert "bonus-result" in _serialized(tool_returns(r2.message_history)["bonus"])
+        assert "bonus-result" in _serialized(tool_returns(r2.message_history)[_ns(server_name, "bonus")])
 
     await driver.close()
     await toolbox_worker._client.close()
@@ -584,31 +607,56 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
 # ── Group C: the agent's point of view of its advertised tools ───────────────
 
 
-async def test_agent_pov_matches_advertised_capability_view(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """The agent's POV of its tools IS what the toolbox advertised on the Capability View.
+async def test_agent_pov_is_namespaced_and_strips_to_bare_on_dispatch(
+    kafka_bootstrap: str, topic_namespace: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Headline end-to-end namespacing proof, in one test (ADR-0018):
 
-    Instead of hardcoding the available surface, this inspects what the agent actually
-    resolved from the view and handed the model (``AgentInfo.function_tools``), asserts it
-    matches the live ``CapabilityRecord`` on ``calf.capabilities`` by NAME and by SCHEMA,
-    and that a tool drawn from that POV round-trips — proving every advertised tool reaches
-    the model exactly as advertised and is callable on the turn.
+    1. every tool the agent presents in its POV (``AgentInfo.function_tools``) exists and is
+       namespaced ``<toolbox_node_id>__<tool>`` — matched against the live ``CapabilityRecord``
+       on ``calf.capabilities`` by NAME and by SCHEMA, nothing added or dropped;
+    2. calls drawn from that POV (by their namespaced names) are dispatched namespaced and
+       STRIPPED TO BARE at the ``MCPToolboxNode`` before the server — captured at the MCP
+       ``call_tool`` boundary, the truest "what the server received" evidence; and
+    3. the results round-trip back into history.
+
+    Only the broker + MCP server are real; the model is offline (``capturing_model``).
     """
+    import mcp
+
     agent_id = f"{topic_namespace}-pov-agent"
     agent_in = f"{topic_namespace}.pov-agent.input"
     control_plane = _control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
+    # Capture the tool name the MCP server actually receives (after the node strips its prefix).
+    # monkeypatch auto-reverts; patching the class method spies every session in this test.
+    server_names: list[str] = []
+    _orig_call_tool = mcp.ClientSession.call_tool
+
+    async def _spy_call_tool(self: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+        server_names.append(name)
+        return await _orig_call_tool(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(mcp.ClientSession, "call_tool", _spy_call_tool)
+
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    pov: dict[str, Any] = {}  # name -> ToolDefinition the agent presented to the model
+    pov: dict[str, Any] = {}  # namespaced name -> ToolDefinition the agent presented to the model
     agent = Agent(
         agent_id,
-        system_prompt="call add",
+        system_prompt="call add and echo",
         subscribe_topics=agent_in,
-        model_client=capturing_model(pov, [ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="call-add")]),
+        model_client=capturing_model(
+            pov,
+            [
+                ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-add"),
+                ToolCallPart(_ns(server_name, "echo"), {"text": "hi"}, tool_call_id="call-echo"),
+            ],
+        ),
         tools=[toolbox],  # NO include: the agent sees the toolbox's full advertised set
     )
 
-    advertised: dict[str, Any] = {}  # name -> parameters_json_schema, read straight from the view record
+    advertised: dict[str, Any] = {}  # BARE name -> parameters_json_schema, read straight from the view record
 
     def _capture_advertised(view: ControlPlaneView[CapabilityRecord]) -> bool:
         record = view.get(server_name)
@@ -624,26 +672,33 @@ async def test_agent_pov_matches_advertised_capability_view(kafka_bootstrap: str
 
     async with toolbox_worker:
         await _await_capability(kafka_bootstrap, server_name, timeout=60)
-        # The source of truth the agent reads: what the toolbox advertised on the view.
+        # The source of truth the agent reads: what the toolbox advertised on the view (BARE names).
         await _await_view(kafka_bootstrap, _capture_advertised, timeout=60, what=f"advertised tools for {server_name!r}")
         async with agent_worker:
-            result = await driver.execute("add 2 and 3", agent_in, timeout=120)
+            result = await driver.execute("add 2 and 3, and echo hi", agent_in, timeout=120)
 
-    # 1) the call drawn from the advertised set round-tripped to a finalized turn
-    assert result.output is not None and FINAL_OUTPUT in result.output
-    assert "5" in _serialized(tool_returns(result.message_history)["add"])
+    returns = tool_returns(result.message_history)  # keyed by the model-facing (namespaced) name
 
-    # 2) the toolbox advertised exactly the server's tool set — all advertised tools present
-    assert set(advertised) == {"add", "echo", "ping", "danger", "domain_error", "enable_bonus"}
-
-    # 3) the agent's POV == the advertised view record, by NAME and by SCHEMA. The agent
-    #    presented to the model exactly what the toolbox advertised — nothing added or dropped.
+    # (1) Existence + naming for the WHOLE set: the toolbox advertised the bare server set, and the
+    #     agent's POV is exactly that set NAMESPACED — by NAME and by SCHEMA, nothing added or dropped.
+    assert set(advertised) == {"add", "echo", "ping", "danger", "domain_error", "enable_bonus"}  # bare wire names
     assert pov, "the model never captured the agent's tool POV"
-    assert set(pov) == set(advertised)
-    assert {name: td.parameters_json_schema for name, td in pov.items()} == advertised
+    assert set(pov) == {_ns(server_name, n) for n in advertised}
+    assert {name: td.parameters_json_schema for name, td in pov.items()} == {_ns(server_name, n): s for n, s in advertised.items()}
 
-    # 4) the called tool reached the model as advertised — its schema carries its real args
-    assert {"a", "b"} <= set(pov["add"].parameters_json_schema.get("properties", {}))
+    # (2) The called tools were drawn from the POV (by their namespaced names).
+    assert {_ns(server_name, "add"), _ns(server_name, "echo")} <= set(pov)
+
+    # (3) Strip verified at the node->server boundary: the server saw ONLY the BARE names; the
+    #     namespaced prefix never crossed to it.
+    assert set(server_names) == {"add", "echo"}
+    assert all(n in advertised for n in server_names)
+    assert _ns(server_name, "add") not in server_names
+
+    # (4) Results round-trip back into history, keyed by the model-facing namespaced name.
+    assert result.output is not None and FINAL_OUTPUT in result.output
+    assert "5" in _serialized(returns[_ns(server_name, "add")])
+    assert "hi" in _serialized(returns[_ns(server_name, "echo")])
 
     await driver.close()
     await toolbox_worker._client.close()

@@ -77,17 +77,36 @@ class CapabilityRecord(ControlPlaneRecord):
     content_updated_at: AwareDatetime
 
 
-def record_to_bindings(record: CapabilityRecord) -> list[ToolBinding]:
+def _namespace_prefix(node_kind: str, name: str) -> str:
+    """LLM-facing tool-name prefix for a capability record.
+
+    Toolbox tools are namespaced ``<name>__`` so the cluster tool namespace is
+    collision-free (ADR-0018); function tool-node names stay bare to preserve the
+    ``node_id == tool name == capability key`` identity (ADR-0013). This is a
+    read-time projection: the wire record's ``CapabilityToolDef.name`` stays bare
+    (so re-advertising re-projects; no ``schema_version`` bump), and dispatch strips
+    it back in ``MCPToolboxNode.run``.
+    """
+    return f"{name}__" if node_kind == "toolbox" else ""
+
+
+def record_to_bindings(record: CapabilityRecord, *, name: str) -> list[ToolBinding]:
     """Expand a record into validator-less :class:`ToolBinding`s.
 
     Wire-crossing tools dispatch unvalidated (the schema-only carve-out): the advertiser
     validates arguments on receipt — the toolbox's MCP server, or the tool node's own
     function schema.
+
+    ``name`` is the advertiser's identity (its ``node_id`` / capability key — the
+    control-plane wire key, never a field in the record value), supplied by the caller.
+    Toolbox tools are namespaced ``<name>__<tool>`` for the LLM; tool-node names stay
+    bare. See :func:`_namespace_prefix`.
     """
+    prefix = _namespace_prefix(record.node_kind, name)
     return [
         ToolBinding(
             tool_def=ToolDefinition(
-                name=tool.name,
+                name=f"{prefix}{tool.name}",
                 description=tool.description,
                 parameters_json_schema=tool.parameters_json_schema,
             ),
@@ -142,7 +161,7 @@ def resolve_capability(
     if expected_kind is not None and record.node_kind != expected_kind:
         return SelectorResult(wrong_kind_targets=(target_id,))
     try:
-        bindings = record_to_bindings(record)
+        bindings = record_to_bindings(record, name=target_id)
     except ValidationError:
         # The one tolerant-reader bad-data path: an empty dispatch_topic fails
         # ToolBinding's min_length. A poisoned advert degrades (invalid_targets),
@@ -151,7 +170,12 @@ def resolve_capability(
         return SelectorResult(invalid_targets=(target_id,))
     missing_tools: tuple[str, ...] = ()
     if include is not None:
+        # ``include`` pins BARE server-side tool names (C5): a dev knows the tool as
+        # `search`, not `github__search`. Strip the toolbox namespace prefix to compare.
         wanted = set(include)
-        bindings = [b for b in bindings if b.name in wanted]
-        missing_tools = tuple(name for name in include if name not in {b.name for b in bindings})
+        prefix = _namespace_prefix(record.node_kind, target_id)
+        tagged = [(b.name.removeprefix(prefix), b) for b in bindings]
+        present_bare = {bare for bare, _ in tagged}  # bare names this record advertises
+        bindings = [b for bare, b in tagged if bare in wanted]
+        missing_tools = tuple(n for n in include if n not in present_bare)
     return SelectorResult(bindings=tuple(bindings), missing_tools=missing_tools)

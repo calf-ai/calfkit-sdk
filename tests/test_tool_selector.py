@@ -70,7 +70,7 @@ class TestResolveTools:
         result = toolbox.resolve_tools(view)
         assert isinstance(result, SelectorResult)
         assert isinstance(result.bindings, tuple)  # frozen value: immutable binding sequence
-        assert [b.name for b in result.bindings] == ["search", "fetch"]
+        assert [b.name for b in result.bindings] == ["docs_server__search", "docs_server__fetch"]
         assert all(isinstance(b, ToolBinding) and b.validator is None for b in result.bindings)
         assert all(b.dispatch_topic == "mcp_server.docs_server" for b in result.bindings)
         assert not result.unresolved
@@ -83,10 +83,31 @@ class TestResolveTools:
 
     def test_include_filter_and_missing_tools(self) -> None:
         toolbox = make_toolbox()
-        selector = toolbox.select(include=["search", "nonexistent"])
+        selector = toolbox.select(include=["search", "nonexistent"])  # include = BARE names (C5)
         result = selector.resolve_tools({"docs_server": make_record()})
-        assert [b.name for b in result.bindings] == ["search"]
-        assert result.missing_tools == ("nonexistent",)
+        assert [b.name for b in result.bindings] == ["docs_server__search"]
+        assert result.missing_tools == ("nonexistent",)  # missing_tools reported bare too
+
+    def test_include_pins_bare_name_containing_double_underscore(self) -> None:
+        # C6 at the EXPANSION+include layer: a server tool whose BARE name contains `__` must
+        # expand to docs_server__a__b AND stay pinnable by its bare name `a__b` — the include
+        # strip must recover `a__b`, not mangle it (removeprefix, not split("__")).
+        record = make_record(tools=[CapabilityToolDef(name="a__b", parameters_json_schema={"type": "object", "properties": {}})])
+        result = make_toolbox().select(include=["a__b"]).resolve_tools({"docs_server": record})
+        assert [b.name for b in result.bindings] == ["docs_server__a__b"]
+        assert result.missing_tools == ()
+
+    def test_empty_include_pins_nothing(self) -> None:
+        # include=() pins ZERO tools — distinct from include=None (all tools).
+        result = make_toolbox().select(include=[]).resolve_tools({"docs_server": make_record()})
+        assert result.bindings == ()
+        assert result.missing_tools == ()
+
+    def test_empty_toolbox_record_resolves_to_no_bindings(self) -> None:
+        # A toolbox advertising zero tools expands to zero bindings; an include miss is bare.
+        result = make_toolbox().select(include=["search"]).resolve_tools({"docs_server": make_record(tools=[])})
+        assert result.bindings == ()
+        assert result.missing_tools == ("search",)
 
     def test_scoped_selector_is_frozen(self) -> None:
         selector = make_toolbox().select(include=["search"])
@@ -122,7 +143,7 @@ class TestResolveTools:
     def test_live_record_resolves_through_view(self) -> None:
         view = make_view(make_record())
         result = make_toolbox().resolve_tools(view)
-        assert [b.name for b in result.bindings] == ["search", "fetch"]
+        assert [b.name for b in result.bindings] == ["docs_server__search", "docs_server__fetch"]
         assert not result.unresolved
 
     def test_wrong_kind_record_is_rejected(self) -> None:
@@ -186,20 +207,37 @@ class TestAgentResolution:
         agent = self.make_agent(make_toolbox())
         registry: dict[str, ToolBinding] = {}
         agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}, registry)
-        assert sorted(registry) == ["fetch", "search"]
+        assert sorted(registry) == ["docs_server__fetch", "docs_server__search"]
 
-    def test_collision_static_wins_and_logs(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_namespaced_toolbox_tool_does_not_collide_with_static(self, caplog: pytest.LogCaptureFixture) -> None:
+        # C8: namespacing makes a toolbox tool `search` (advertised as docs_server__search)
+        # disjoint from a static local tool named `search` — both coexist, no collision.
+        from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+
         agent = self.make_agent(make_toolbox())
-        static = ToolBinding(
-            tool_def=__import__("calfkit._vendor.pydantic_ai.tools", fromlist=["ToolDefinition"]).ToolDefinition(name="search"),
-            dispatch_topic="static.topic",
-        )
+        static = ToolBinding(tool_def=ToolDefinition(name="search"), dispatch_topic="static.topic")
         registry = {"search": static}
         with caplog.at_level("ERROR"):
             agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}, registry)
-        assert registry["search"] is static  # remote never shadows local
-        assert any("search" in r.message for r in caplog.records)
-        assert "fetch" in registry  # non-colliding remote tool still merged
+        # Both survive under their own keys; the remote tools merge without shadowing the static.
+        assert registry["search"] is static
+        assert "docs_server__search" in registry and "docs_server__fetch" in registry
+        assert not any("collides" in r.message for r in caplog.records)
+
+    def test_collision_static_wins_and_logs(self, caplog: pytest.LogCaptureFixture) -> None:
+        # The merge rule is unchanged — a static local binding wins over a discovered one on a
+        # genuine key collision. Post-namespacing the collision is at the NAMESPACED name the
+        # toolbox actually advertises (docs_server__search).
+        from calfkit._vendor.pydantic_ai.tools import ToolDefinition
+
+        agent = self.make_agent(make_toolbox())
+        static = ToolBinding(tool_def=ToolDefinition(name="docs_server__search"), dispatch_topic="static.topic")
+        registry = {"docs_server__search": static}
+        with caplog.at_level("ERROR"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}, registry)
+        assert registry["docs_server__search"] is static  # remote never shadows local
+        assert any("docs_server__search" in r.message for r in caplog.records)
+        assert "docs_server__fetch" in registry  # non-colliding remote tool still merged
 
     def test_missing_view_warns_and_degrades(self, caplog: pytest.LogCaptureFixture) -> None:
         agent = self.make_agent(make_toolbox())
@@ -226,7 +264,7 @@ class TestAgentResolution:
         view = make_view(make_record(), status="degraded")
         with caplog.at_level("WARNING"):
             agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
-        assert sorted(registry) == ["fetch", "search"]  # turn proceeds
+        assert sorted(registry) == ["docs_server__fetch", "docs_server__search"]  # turn proceeds
         assert any("degraded" in r.message.lower() for r in caplog.records)
 
     def test_failed_view_logs_warning_but_proceeds(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -287,7 +325,7 @@ class TestOverridesSuppressSelectors:
         # override gate must short-circuit before resolution.
         ctx._resources = {CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}
         agent._maybe_resolve_selectors(ctx, registry)
-        assert list(registry) == ["pinned"]  # search/fetch NOT merged
+        assert list(registry) == ["pinned"]  # docs_server tools NOT merged
 
     def test_non_overridden_turn_resolves(self) -> None:
         agent = TestAgentResolution().make_agent(make_toolbox())
@@ -295,4 +333,4 @@ class TestOverridesSuppressSelectors:
         ctx._resources = {CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}
         registry: dict[str, ToolBinding] = {}
         agent._maybe_resolve_selectors(ctx, registry)
-        assert sorted(registry) == ["fetch", "search"]
+        assert sorted(registry) == ["docs_server__fetch", "docs_server__search"]

@@ -112,8 +112,10 @@ async def test_capability_parity_toolbox_to_agent(kafka_bootstrap: str) -> None:
 
         registry: dict = {}
         agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
-        assert sorted(registry) == ["search"]
-        assert registry["search"].dispatch_topic == f"mcp_server.{name}"
+        # The agent's resolved registry is keyed by the NAMESPACED tool name (C1, ADR-0018);
+        # the wire record (asserted above) stays BARE. dispatch_topic is unchanged.
+        assert sorted(registry) == [f"{name}__search"]
+        assert registry[f"{name}__search"].dispatch_topic == f"mcp_server.{name}"
 
         # clean shutdown tombstones the instance; the next turn degrades (empty)
         await pub.stop(ctx)
