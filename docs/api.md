@@ -380,7 +380,7 @@ Hosts the tools of one MCP server; `name` is the toolbox identity agents referen
 MCPToolbox(name: str, include: tuple[str, ...] | None = None)
 ```
 
-A frozen, identity-only handle to a toolbox. `name` must match the hosting `MCPToolboxNode`. `include` pins the tool names the agent may use; `None` exposes all of the toolbox's tools. The handle carries no connection params — passing connection details, or deploying a handle as a node, raises.
+A frozen, identity-only handle to a toolbox. `name` must match the hosting `MCPToolboxNode`. `include` pins the tool names the agent may use **by their bare server-side name** (`search`, not `docs_server__search`); `None` exposes all of the toolbox's tools. The LLM-facing name of each tool is namespaced `<name>__<tool>` (e.g. `docs_server__search`) and stripped back to the bare name before dispatch to the MCP server (ADR-0018); the combined name must fit the provider's tool-name charset (`[a-zA-Z0-9_-]`) and length limit. The handle carries no connection params — passing connection details, or deploying a handle as a node, raises.
 
 ### Connection params
 

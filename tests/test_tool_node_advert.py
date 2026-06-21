@@ -96,7 +96,7 @@ class TestEagerDiscoveredParity:
     def test_eager_and_discovered_tool_def_are_identical(self) -> None:
         node = make_node("add")
         eager = node.tool_bindings()[0]  # live path: schema baked in, with a local validator
-        discovered = record_to_bindings(node._capability_advert(make_stamp()))[0]  # discovered path
+        discovered = record_to_bindings(node._capability_advert(make_stamp()), name="add")[0]  # discovered; node_kind="tool" stays BARE (C2)
         # Same ToolDefinition — name, description, JSON schema, and every defaulted field.
         assert discovered.tool_def == eager.tool_def
         # The only difference is the validation locus: eager validates locally; the discovered
