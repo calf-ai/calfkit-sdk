@@ -107,9 +107,9 @@ model receives, and an over-long or out-of-charset name is rejected by the
 provider at the turn.
 
 Because MCP names are namespaced, a toolbox tool (`docs_server__search`) won't
-collide with a locally configured function tool (`search`). In the rare case a
-namespaced name does coincide with a local tool, the local tool wins and an error
-is logged.
+collide with a locally configured function tool (`search`). A collision would
+require a local tool named literally `docs_server__search`; in that rare case the
+local tool wins and an error is logged.
 
 ## Handle outages and topic creation
 

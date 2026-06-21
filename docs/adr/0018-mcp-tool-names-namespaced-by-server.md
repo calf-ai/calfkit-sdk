@@ -42,15 +42,20 @@ on its own, independent of any tool-discovery work, and lands first in its own P
   `dispatch_topic`, or any server-reported value.
 - **Separator & name validity.** `:` is not a valid tool-name character for major providers
   (OpenAI and Anthropic restrict tool names to roughly `[a-zA-Z0-9_-]`), so the separator is
-  `__` (double underscore), the common MCP-client convention. The provider charset was
-  confirmed at implementation against the vendored sanitizer
-  (`calfkit/_vendor/pydantic_ai/_output.py`, `[^a-zA-Z0-9-_]`). **Length and charset are
-  document-only (no runtime enforcement):** `{toolbox_name}__{tool_name}` must fit the
-  provider tool-name limit (Anthropic 128, OpenAI 64) and stay within the charset. The
-  toolbox name is a deployment identity, so the framework documents the constraint rather
-  than policing it — a violation surfaces as a provider 400 at turn time, exactly as a bad
-  *bare* name already would. Concatenation never truncates (truncation would create new
-  collisions); deployers keep toolbox and tool names short and charset-safe.
+  `__` (double underscore), the common MCP-client convention (e.g. Claude Code surfaces MCP
+  tools as `mcp__<server>__<tool>`). The provider charset was confirmed at implementation
+  against the vendored sanitizer (`calfkit/_vendor/pydantic_ai/_output.py`, `[^a-zA-Z0-9-_]` —
+  set-equivalent to `[a-zA-Z0-9_-]` above). **Length and charset are document-only (no runtime
+  enforcement):** `{toolbox_name}__{tool_name}` must fit the provider tool-name limit
+  (Anthropic 128, OpenAI 64) and stay within the charset. The toolbox name is a deployment
+  identity, so the framework documents the constraint rather than policing it — a violation
+  surfaces as a provider 400 at turn time, exactly as a bad *bare* name already would.
+  Concatenation never truncates (truncation would create new collisions); deployers keep
+  toolbox and tool names short and charset-safe. Keep toolbox names **`__`-free**, too: a
+  toolbox name containing `__` can reintroduce cross-toolbox ambiguity (toolbox `a` + tool
+  `b__c` and toolbox `a__b` + tool `c` both project to `a__b__c`) — a clash that is loud (the
+  agent's registry-merge logs an error) and dispatch-safe (each node strips its own
+  `<node_id>__`), but the losing tool drops for that turn.
 - **Toolbox-scoped, not in the shared kernel.** The record→`ToolDefinition` expansion
   (`record_to_bindings`, `calfkit/models/capability.py`) is **shared** by MCP toolboxes and
   function tool nodes. Namespacing must apply **only to `node_kind == "toolbox"` records** —

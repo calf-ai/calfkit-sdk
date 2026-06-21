@@ -175,7 +175,7 @@ def resolve_capability(
         wanted = set(include)
         prefix = _namespace_prefix(record.node_kind, target_id)
         tagged = [(b.name.removeprefix(prefix), b) for b in bindings]
-        present_bare = {bare for bare, _ in tagged}  # all bare names advertised
+        present_bare = {bare for bare, _ in tagged}  # bare names this record advertises
         bindings = [b for bare, b in tagged if bare in wanted]
         missing_tools = tuple(n for n in include if n not in present_bare)
     return SelectorResult(bindings=tuple(bindings), missing_tools=missing_tools)

@@ -88,6 +88,27 @@ class TestResolveTools:
         assert [b.name for b in result.bindings] == ["docs_server__search"]
         assert result.missing_tools == ("nonexistent",)  # missing_tools reported bare too
 
+    def test_include_pins_bare_name_containing_double_underscore(self) -> None:
+        # C6 at the EXPANSION+include layer: a server tool whose BARE name contains `__` must
+        # expand to docs_server__a__b AND stay pinnable by its bare name `a__b` — the include
+        # strip must recover `a__b`, not mangle it (removeprefix, not split("__")).
+        record = make_record(tools=[CapabilityToolDef(name="a__b", parameters_json_schema={"type": "object", "properties": {}})])
+        result = make_toolbox().select(include=["a__b"]).resolve_tools({"docs_server": record})
+        assert [b.name for b in result.bindings] == ["docs_server__a__b"]
+        assert result.missing_tools == ()
+
+    def test_empty_include_pins_nothing(self) -> None:
+        # include=() pins ZERO tools — distinct from include=None (all tools).
+        result = make_toolbox().select(include=[]).resolve_tools({"docs_server": make_record()})
+        assert result.bindings == ()
+        assert result.missing_tools == ()
+
+    def test_empty_toolbox_record_resolves_to_no_bindings(self) -> None:
+        # A toolbox advertising zero tools expands to zero bindings; an include miss is bare.
+        result = make_toolbox().select(include=["search"]).resolve_tools({"docs_server": make_record(tools=[])})
+        assert result.bindings == ()
+        assert result.missing_tools == ("search",)
+
     def test_scoped_selector_is_frozen(self) -> None:
         selector = make_toolbox().select(include=["search"])
         with pytest.raises(Exception):
