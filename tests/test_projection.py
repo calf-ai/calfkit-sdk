@@ -437,6 +437,26 @@ def test_detection_new_agent_not_yet_spoken_sees_other_projected():
     assert not any(isinstance(m, ModelResponse) for m in out)
 
 
+def test_detection_single_other_agent_is_projected():
+    """A history authored by ONE agent, viewed by a DIFFERENT agent (the handoff first-hop),
+    is projected: the other agent's turn is attributed, not shown as the viewer's own.
+
+    Regression: the gate counted distinct authors (>=2) instead of viewer-awareness, so a
+    single other-agent's history fell into transparent mode and B saw A's turns as its own.
+    """
+    history: list[ModelMessage] = [
+        _user("h"),
+        _response(TextPart(content="a"), name="alpha"),
+    ]
+
+    # viewer "beta" has not spoken; the sole author is alpha (!= beta) → attributed
+    out = project(history, viewer="beta")
+
+    assert "<alpha>\na" in _user_prompt_texts(out)
+    # beta owns no ModelResponse → alpha's turn is re-roled, never kept as beta's own assistant turn
+    assert not any(isinstance(m, ModelResponse) for m in out)
+
+
 def test_detection_empty_history_transparent():
     """Empty history → transparent (no participants), returns an empty list."""
     out = project([], viewer="solo")
