@@ -16,14 +16,29 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 #: A positive timeout in milliseconds. ``strict=True`` so a config knob is a real ``int`` —
 #: not a coerced ``bool`` (``True -> 1``), ``float`` (``5.0 -> 5``), or ``str`` (``"5" -> 5``).
 PositiveTimeoutMs = Annotated[int, Field(ge=1, strict=True)]
 
-#: A finite, strictly-positive timeout in seconds (rejects ``0``, negatives, ``inf``, ``nan``).
-PositiveFiniteFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+def _reject_non_number(value: object) -> object:
+    """Reject ``bool`` and non-numeric input before float coercion.
+
+    ``bool`` is an ``int`` subclass, so a flag mistaken for a timeout would otherwise coerce
+    (``True -> 1.0``); strings would coerce too (``"5" -> 5.0``). We still allow a plain ``int``
+    (``30 -> 30.0`` is the natural way to write a float default) — this keeps the float knobs in
+    parity with the strict int knobs, rejecting exactly what ``strict=True`` rejects bar ``int``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("must be an int or float")
+    return value
+
+
+#: A finite, strictly-positive timeout in seconds. Accepts ``int``/``float``; rejects ``0``,
+#: negatives, ``inf``, ``nan``, ``bool``, and strings.
+PositiveFiniteFloat = Annotated[float, BeforeValidator(_reject_non_number), Field(gt=0, allow_inf_nan=False)]
 
 
 class KTableReaderTuning(BaseModel):
@@ -31,6 +46,11 @@ class KTableReaderTuning(BaseModel):
 
     ``None`` (the default for both) omits the knob so ktables applies its own default
     (``poll_timeout_ms=200``, ``fetch_max_wait_ms=500``).
+
+    Invariant: **every field on this model is a ktables reader-constructor kwarg.**
+    :meth:`as_kwargs` splats the whole (non-``None``) model into ``KafkaTable.json(...)`` /
+    ``GroupedKafkaTable.json(...)``, so do not add a field here that is not one — it would be
+    forwarded to ktables/aiokafka and fail far from its cause.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -61,4 +81,6 @@ class FanoutConfig(BaseModel):
     """Per-read ``barrier()`` timeout for the read-your-own-writes freshness wait."""
 
 
-__all__ = ["FanoutConfig", "KTableReaderTuning", "PositiveFiniteFloat", "PositiveTimeoutMs"]
+# `PositiveTimeoutMs` / `PositiveFiniteFloat` are field-constraint implementation detail (used
+# here and in `controlplane.config`), not public API — users construct configs with plain int/float.
+__all__ = ["FanoutConfig", "KTableReaderTuning"]

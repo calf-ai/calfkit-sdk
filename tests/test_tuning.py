@@ -91,16 +91,22 @@ def test_fanout_config_accepts_tuning_and_timeouts() -> None:
     assert c.barrier_timeout == 5.0
 
 
-@pytest.mark.parametrize("bad", [0, -1.0, float("inf"), float("nan")])
-def test_fanout_config_rejects_bad_catchup_timeout(bad: float) -> None:
+@pytest.mark.parametrize("bad", [0, -1.0, float("inf"), float("nan"), True, "5"])
+def test_fanout_config_rejects_bad_catchup_timeout(bad: object) -> None:
     with pytest.raises(ValidationError):
         FanoutConfig(catchup_timeout=bad)
 
 
-@pytest.mark.parametrize("bad", [0, -1.0, float("inf"), float("nan")])
-def test_fanout_config_rejects_bad_barrier_timeout(bad: float) -> None:
+@pytest.mark.parametrize("bad", [0, -1.0, float("inf"), float("nan"), True, "5"])
+def test_fanout_config_rejects_bad_barrier_timeout(bad: object) -> None:
+    # `True`/`"5"` must NOT silently coerce to a number — parity with the strict int knobs.
     with pytest.raises(ValidationError):
         FanoutConfig(barrier_timeout=bad)
+
+
+def test_fanout_config_accepts_int_for_float_field() -> None:
+    # ...but a plain int IS a natural way to write a float timeout.
+    assert FanoutConfig(barrier_timeout=5).barrier_timeout == 5.0
 
 
 def test_fanout_config_catchup_timeout_none_allowed() -> None:

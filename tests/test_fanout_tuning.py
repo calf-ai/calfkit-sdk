@@ -126,6 +126,14 @@ def test_store_default_omits_cadence_and_catchup(fake_ktables: None) -> None:
         assert "catchup_timeout" not in reader.kwargs
 
 
+def test_store_forwards_a_single_set_knob(fake_ktables: None) -> None:
+    # Partial tuning: exactly the set knob is forwarded; the unset one is omitted.
+    _store(reader_tuning=KTableReaderTuning(fetch_max_wait_ms=10))
+    for reader in FakeKafkaTable.instances:
+        assert reader.kwargs["fetch_max_wait_ms"] == 10
+        assert "poll_timeout_ms" not in reader.kwargs
+
+
 async def test_await_fresh_uses_configured_barrier_timeout(fake_ktables: None) -> None:
     store = _store(barrier_timeout=9.0)
     await store.read_state("X")  # _await_fresh barriers the state reader before reading
@@ -168,5 +176,27 @@ async def test_fanout_resource_passes_worker_fanout(monkeypatch: pytest.MonkeyPa
     assert captured["reader_tuning"].poll_timeout_ms == 5  # type: ignore[attr-defined]
     assert captured["catchup_timeout"] == 7.0
     assert captured["barrier_timeout"] == 9.0
+    with pytest.raises(StopAsyncIteration):
+        await anext(gen)
+
+
+async def test_fanout_resource_boots_through_offline_store_mirror() -> None:
+    # No SpyStore re-patch here: the autouse `_offline_fanout_store` fixture swaps in the real
+    # `OfflineFanoutBatchStore`, so this exercises its signature mirror — it must accept the new
+    # kwargs the resource now passes (`reader_tuning`/`catchup_timeout`/`barrier_timeout`), or
+    # construction raises `TypeError`. This makes the fake's "loud failure on drift" claim real.
+    from calfkit.nodes.agent import Agent
+    from tests._fanout_fakes import OfflineFanoutBatchStore
+
+    agent = Agent("a", subscribe_topics="a.in", model_client=_FakeModel())
+    worker = Worker(
+        Client.connect("kafka:9092"),
+        nodes=[agent],
+        fanout=FanoutConfig(reader_tuning=KTableReaderTuning(poll_timeout_ms=5), catchup_timeout=7.0, barrier_timeout=9.0),
+    )
+    agent._worker = worker
+    gen = agent._fanout_store_resource(None)  # type: ignore[arg-type]
+    store = await anext(gen)
+    assert isinstance(store, OfflineFanoutBatchStore)
     with pytest.raises(StopAsyncIteration):
         await anext(gen)
