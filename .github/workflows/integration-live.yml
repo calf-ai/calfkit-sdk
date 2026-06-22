@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # No `integration` group: the live tests use the in-memory TestKafkaBroker,
       # not a real broker, so testcontainers/Docker are not needed.
