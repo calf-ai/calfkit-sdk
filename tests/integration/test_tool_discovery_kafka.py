@@ -44,6 +44,7 @@ from calfkit.nodes import Agent, ToolNodeDef, Tools, agent_tool
 from calfkit.worker import Worker
 from tests.integration._fault_kafka import ensure_topic
 from tests.integration._fault_tap import fault_tap
+from tests.integration._kafka_helpers import fast_control_plane
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, capturing_model, scripted_model, tool_returns
 
 # Every test here needs a real broker. FunctionModel is offline, but pydantic-ai still
@@ -52,10 +53,6 @@ pytestmark = pytest.mark.kafka
 models.ALLOW_MODEL_REQUESTS = True
 
 _EARLIEST = {"auto_offset_reset": "earliest"}
-
-
-def _control_plane(bootstrap: str) -> ControlPlaneConfig:
-    return ControlPlaneConfig(heartbeat_interval=5.0, bootstrap_servers=bootstrap)
 
 
 def _worker(bootstrap: str, *, nodes: list, control_plane: ControlPlaneConfig) -> Worker:
@@ -111,7 +108,7 @@ async def test_discovered_tool_node_roundtrips_over_the_wire(kafka_bootstrap: st
     tool_name = f"{topic_namespace}-add"
     agent_id = f"{topic_namespace}-disc-agent"
     agent_in = f"{topic_namespace}.disc-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
 
     tool = _add_tool(tool_name)
     agent = Agent(
@@ -152,7 +149,7 @@ async def test_model_pov_matches_the_advertised_tool(kafka_bootstrap: str, topic
     tool_name = f"{topic_namespace}-add"
     agent_id = f"{topic_namespace}-pov-agent"
     agent_in = f"{topic_namespace}.pov-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
 
     tool = _add_tool(tool_name)
     pov: dict[str, Any] = {}  # name -> ToolDefinition the agent resolved from the view and presented to the model
@@ -215,7 +212,7 @@ async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str
     agent_id = f"{topic_namespace}-disc-fault"
     agent_in = f"{topic_namespace}.disc-fault.input"
     agent_pub = f"{topic_namespace}.disc-fault.mirror"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
 
     tool = _add_tool(tool_name)
     agent = Agent(

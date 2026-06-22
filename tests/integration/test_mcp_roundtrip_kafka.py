@@ -52,6 +52,7 @@ from calfkit.mcp import MCPToolboxNode, StdioServerParameters
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
 from calfkit.nodes import Agent
 from calfkit.worker import Worker
+from tests.integration._kafka_helpers import fast_control_plane
 from tests.integration._roundtrip_helpers import (
     FINAL_OUTPUT,
     capturing_model,
@@ -101,10 +102,6 @@ def _server_params(script: Path) -> StdioServerParameters:
     site-packages regardless of env); env is forwarded for PATH parity.
     """
     return StdioServerParameters(command=sys.executable, args=[str(script)], env=dict(os.environ))
-
-
-def _control_plane(bootstrap: str) -> ControlPlaneConfig:
-    return ControlPlaneConfig(heartbeat_interval=5.0, bootstrap_servers=bootstrap)
 
 
 def _server_name(topic_namespace: str, base: str = _SERVER_NAME) -> str:
@@ -195,7 +192,7 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     value travels all the way back into the agent's history."""
     agent_id = f"{topic_namespace}-mcp-agent"
     agent_in = f"{topic_namespace}.mcp-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -233,7 +230,7 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     finalizes normally, and the error content travels back in history."""
     agent_id = f"{topic_namespace}-mcp-iserror"
     agent_in = f"{topic_namespace}.mcp-iserror.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -273,7 +270,7 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     and each result lands back in its own slot."""
     agent_id = f"{topic_namespace}-mcp-fanout-agent"
     agent_in = f"{topic_namespace}.mcp-fanout-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -322,7 +319,7 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     tool_call_id (not tool name), so both results return to their own slot."""
     agent_id = f"{topic_namespace}-dup-agent"
     agent_in = f"{topic_namespace}.dup-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -365,7 +362,7 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     results still round-trip."""
     agent_id = f"{topic_namespace}-seq-agent"
     agent_in = f"{topic_namespace}.seq-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -412,7 +409,7 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
     to the correct toolbox topic: ``add`` resolves on server A, ``mul`` on B."""
     agent_id = f"{topic_namespace}-multi-server-agent"
     agent_in = f"{topic_namespace}.multi-server-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_a_name = _server_name(topic_namespace)
     server_b_name = _server_name(topic_namespace, _SERVER_B_NAME)
 
@@ -462,7 +459,7 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     a1_in = f"{topic_namespace}.agent-1.input"
     a2_id = f"{topic_namespace}-agent-2"
     a2_in = f"{topic_namespace}.agent-2.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -513,7 +510,7 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     — the agent answers the model with an unknown-tool retry and finalizes."""
     agent_id = f"{topic_namespace}-pin-agent"
     agent_in = f"{topic_namespace}.pin-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -555,7 +552,7 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     enable_in = f"{topic_namespace}.enable-agent.input"
     bonus_id = f"{topic_namespace}-bonus-agent"
     bonus_in = f"{topic_namespace}.bonus-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
@@ -626,7 +623,7 @@ async def test_agent_pov_is_namespaced_and_strips_to_bare_on_dispatch(
 
     agent_id = f"{topic_namespace}-pov-agent"
     agent_in = f"{topic_namespace}.pov-agent.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
     server_name = _server_name(topic_namespace)
 
     # Capture the tool name the MCP server actually receives (after the node strips its prefix).

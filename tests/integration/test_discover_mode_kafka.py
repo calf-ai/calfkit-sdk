@@ -37,6 +37,7 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
 from calfkit.nodes import Agent, ToolNodeDef, Tools, agent_tool
 from calfkit.worker import Worker
+from tests.integration._kafka_helpers import fast_control_plane
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, capturing_model, tool_returns
 
 # Every test here needs a real broker. FunctionModel is offline, but pydantic-ai still
@@ -45,10 +46,6 @@ pytestmark = pytest.mark.kafka
 models.ALLOW_MODEL_REQUESTS = True
 
 _EARLIEST = {"auto_offset_reset": "earliest"}
-
-
-def _control_plane(bootstrap: str) -> ControlPlaneConfig:
-    return ControlPlaneConfig(heartbeat_interval=5.0, bootstrap_servers=bootstrap)
 
 
 def _worker(bootstrap: str, *, nodes: list, control_plane: ControlPlaneConfig) -> Worker:
@@ -110,7 +107,7 @@ async def test_discover_finds_all_separately_deployed_tool_nodes(kafka_bootstrap
     mul_name = f"{topic_namespace}-mul"
     agent_id = f"{topic_namespace}-disc-all"
     agent_in = f"{topic_namespace}.disc-all.input"
-    control_plane = _control_plane(kafka_bootstrap)
+    control_plane = fast_control_plane(kafka_bootstrap)
 
     pov: dict[str, Any] = {}  # name -> ToolDefinition the agent resolved from the view and presented to the model
     agent = Agent(
