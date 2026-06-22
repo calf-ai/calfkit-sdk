@@ -14,9 +14,12 @@ routing-key-precise `node_id` — applied progressively across the node family.
 This is the orthogonal axis to [ADR-0009](0009-call-side-handle-takes-the-bare-name.md): 0009
 decides *which class* of a two-type pair carries the `Node` suffix; this ADR decides *what the
 identity parameter is called*. The MCP toolbox types led the migration
-(`MCPToolboxNode(name=...)`, PRs #254/#255); the `Agent` ctor followed (PR #272). `BaseNodeDef`,
-`ConsumerNode`, the tool-node factories, and the underlying `BaseNodeSchema.node_id` storage
-field still take/use `node_id` and remain the migration target.
+(`MCPToolboxNode(name=...)`, PRs #254/#255); the `Agent` ctor followed (PR #272), then the
+`@consumer` decorator and `ConsumerNode` (PR #274). The function-tool-node factories
+(`agent_tool` / `create_tool_node`) already take `name` (PR #266). What still uses `node_id` is
+the **raw base construction** — `BaseNodeDef(node_id=...)` / `NodeDef` / the raw `ToolNodeDef(node_id=...)`
+dataclass form — and the underlying `BaseNodeSchema.node_id` storage field, which remain the
+migration target.
 
 ## Notes
 
