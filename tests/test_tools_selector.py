@@ -18,7 +18,9 @@ from calfkit.controlplane import ControlPlaneView
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord, CapabilityToolDef, SelectorResult
 from calfkit.models.tool_dispatch import ToolBinding, ToolSelector, split_tool_declarations
 from calfkit.nodes.tool import Tools
+from tests._capability_fakes import _FakeView  # dict-backed EnumerableCapabilityView (adds snapshot())
 from tests.test_controlplane_view import _FakeTable  # the substrate's dict-backed GroupedTableReader fake
+from tests.test_tool_binding import make_tool_node  # builds a real ToolNodeDef (eager tool node)
 
 
 def make_tool_record(name: str = "add", *, dispatch: str | None = None, **overrides: Any) -> CapabilityRecord:
@@ -147,7 +149,11 @@ class TestToolsThroughAgent:
         assert all(registry[n].validator is None for n in registry)  # discovered = schema-only
 
     def test_eager_static_tool_wins_on_collision(self, caplog: pytest.LogCaptureFixture) -> None:
-        # Tools + an eager tool of the same name: the eager (locally validated) binding wins.
+        # The per-turn registry merge: when a discovered binding's name is already in the
+        # registry (e.g. a pre-seeded static/override binding), the existing one wins and the
+        # collision is error-logged. The construction-time contract forbids pairing an eager
+        # tool node with a same-named Tools handle — that combination raises before any turn
+        # (see TestToolSurfaceContract); this exercises the residual runtime merge path.
         from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 
         agent = make_agent(Tools("add"))
@@ -158,6 +164,214 @@ class TestToolsThroughAgent:
         assert registry["add"] is static  # existing (eager) wins; discovered never shadows it
         assert registry["add"].validator is not None  # local fail-fast validation preserved
         assert any("add" in r.message for r in caplog.records)
+
+
+class TestToolsDiscoverMode:
+    """``Tools(discover=True)`` — open-ended discovery of every live tool node (spec §15.1)."""
+
+    def test_discover_constructs_with_no_names(self) -> None:
+        t = Tools(discover=True)
+        assert t.discover is True
+        assert t.names == ()
+
+    def test_discover_with_positional_names_raises(self) -> None:
+        with pytest.raises(ValueError, match="no tool names"):
+            Tools("add", discover=True)
+
+    def test_discover_with_names_kwarg_raises(self) -> None:
+        with pytest.raises(ValueError, match="no tool names"):
+            Tools(names=["add"], discover=True)
+
+    def test_named_handle_defaults_to_discover_false(self) -> None:
+        assert Tools("add").discover is False
+
+    def test_empty_with_discover_false_raises(self) -> None:
+        # The fail-loud rail: a bare/empty handle is never an implicit "everything".
+        with pytest.raises(ValueError, match="at least one"):
+            Tools(discover=False)
+
+    def test_discover_value_semantics(self) -> None:
+        assert Tools(discover=True) == Tools(discover=True)
+        assert len({Tools(discover=True), Tools(discover=True)}) == 1
+        assert Tools(discover=True) != Tools("add")
+
+    def test_discover_resolves_all_tool_nodes_excluding_toolboxes(self) -> None:
+        view = _FakeView(
+            {
+                "add": make_tool_record("add"),
+                "sub": make_tool_record("sub"),
+                "github": make_tool_record("search", dispatch="mcp_server.github", node_kind="toolbox"),
+            }
+        )
+        result = Tools(discover=True).resolve_tools(view)
+        assert sorted(b.name for b in result.bindings) == ["add", "sub"]  # toolbox record excluded
+        assert all(b.validator is None for b in result.bindings)  # discovered = schema-only
+        assert not result.unresolved
+
+
+class TestToolSurfaceContract:
+    """The construction-time tool-surface contract (spec §15.3, L18), enforced in both
+    ``Agent(tools=...)`` and ``add_tools``:
+      (1) no duplicate tool names across eager bindings + named ``Tools``;
+      (2) ``Tools(discover=True)`` owns the tool-node surface (no eager tool node or named
+          ``Tools`` alongside it; an ``MCPToolbox`` — a different kind — may).
+    """
+
+    # --- (1) no duplicate tool names ------------------------------------------------
+    def test_duplicate_named_handles_raise(self) -> None:
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            make_agent(Tools("add"), Tools("add"))
+
+    def test_eager_node_and_named_same_name_raises(self) -> None:
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            make_agent(make_tool_node("add"), Tools("add"))
+
+    def test_eager_node_and_named_same_name_raises_order_independent(self) -> None:
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            make_agent(Tools("add"), make_tool_node("add"))
+
+    # --- (2) discover owns the tool-node surface ------------------------------------
+    def test_discover_with_eager_tool_node_raises(self) -> None:
+        with pytest.raises(ValueError, match="tool-node surface"):
+            make_agent(make_tool_node("add"), Tools(discover=True))
+
+    def test_discover_with_named_tools_raises(self) -> None:
+        with pytest.raises(ValueError, match="tool-node surface"):
+            make_agent(Tools("add"), Tools(discover=True))
+
+    # --- legal combinations ---------------------------------------------------------
+    def test_discover_alone_is_legal(self) -> None:
+        agent = make_agent(Tools(discover=True))
+        assert agent._tool_selectors == [Tools(discover=True)]
+
+    def test_discover_composes_with_mcp_toolbox(self) -> None:
+        from calfkit.mcp import MCPToolbox
+
+        agent = make_agent(Tools(discover=True), MCPToolbox("fs"))
+        assert Tools(discover=True) in agent._tool_selectors
+        assert MCPToolbox("fs") in agent._tool_selectors
+
+    def test_distinct_named_handles_are_legal(self) -> None:
+        agent = make_agent(Tools("add"), Tools("sub"))
+        assert agent._tool_selectors == [Tools("add"), Tools("sub")]
+
+    def test_distinct_eager_nodes_are_legal(self) -> None:
+        agent = make_agent(make_tool_node("add"), make_tool_node("sub"))
+        assert [b.name for b in agent.tools] == ["add", "sub"]
+
+    # --- add_tools enforces the contract incrementally ------------------------------
+    def test_add_tools_discover_onto_eager_node_raises(self) -> None:
+        agent = make_agent(make_tool_node("add"))
+        with pytest.raises(ValueError, match="tool-node surface"):
+            agent.add_tools(Tools(discover=True))
+
+    def test_add_tools_duplicate_onto_named_raises(self) -> None:
+        agent = make_agent(Tools("add"))
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            agent.add_tools(make_tool_node("add"))
+
+    def test_add_tools_discover_onto_named_raises(self) -> None:
+        # The contract re-validates the FULL accumulated surface: a discover handle added onto
+        # an agent that already holds a named Tools is the discover-exclusivity violation.
+        agent = make_agent(Tools("add"))
+        with pytest.raises(ValueError, match="tool-node surface"):
+            agent.add_tools(Tools(discover=True))
+
+    def test_add_tools_named_onto_discover_raises(self) -> None:
+        # ...and the reverse: a named Tools added onto an agent already in discover mode.
+        agent = make_agent(Tools(discover=True))
+        with pytest.raises(ValueError, match="tool-node surface"):
+            agent.add_tools(Tools("add"))
+
+    def test_add_tools_accumulates_disjoint_surfaces(self) -> None:
+        agent = make_agent(make_tool_node("add"))
+        agent.add_tools(make_tool_node("sub"))
+        agent.add_tools(Tools("mul"))
+        assert [b.name for b in agent.tools] == ["add", "sub"]
+        assert agent._tool_selectors == [Tools("mul")]
+
+    def test_add_tools_raise_leaves_surface_unchanged(self) -> None:
+        # validate-before-commit: a failed add must not mutate the live surface — all three
+        # pieces of tool-surface state (bindings, selectors, eager tool nodes) stay as they were.
+        agent = make_agent(make_tool_node("add"))
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            agent.add_tools(make_tool_node("add"))
+        assert [b.name for b in agent.tools] == ["add"]
+        assert agent._tool_selectors == []
+        assert [n.name for n in agent._eager_tool_nodes] == ["add"]
+
+
+class TestDiscoverDiagnostics:
+    """Discover-mode diagnostics (spec §15.4): a per-turn DEBUG count; healthy-empty is
+    silent by design; a degraded view still warns; per-run overrides skip discover."""
+
+    def test_discover_binds_all_tool_nodes_and_logs_count(self, caplog: pytest.LogCaptureFixture) -> None:
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        view = _FakeView(
+            {
+                "add": make_tool_record("add"),
+                "sub": make_tool_record("sub"),
+                "github": make_tool_record("search", dispatch="mcp_server.github", node_kind="toolbox"),
+            }
+        )
+        with caplog.at_level("DEBUG"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert sorted(registry) == ["add", "sub"]  # every live tool node; the toolbox is excluded
+        assert any("discover mode resolved 2 tool node(s)" in r.getMessage() for r in caplog.records)
+
+    def test_discover_on_healthy_empty_view_is_silent_with_debug_count(self, caplog: pytest.LogCaptureFixture) -> None:
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        with caplog.at_level("DEBUG"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: _FakeView({})}, registry)
+        assert registry == {}
+        assert any("discover mode resolved 0 tool node(s)" in r.getMessage() for r in caplog.records)
+        # An empty cluster is a legitimate state, not a misconfiguration — no WARNING (don't cry wolf).
+        assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_discover_with_poisoned_record_warns_and_binds_the_healthy(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A poisoned tool record (empty dispatch_topic fails ToolBinding expansion) degrades to
+        # invalid_targets: the healthy node still binds, the unresolved WARNING names the poisoned
+        # one, and the DEBUG count reflects the successfully-resolved nodes.
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        # Override dispatch_topic to "" directly: make_tool_record's `dispatch=` param coalesces ""
+        # to the default, so poison it via the override (empty topic fails ToolBinding expansion).
+        view = _FakeView({"add": make_tool_record("add"), "broken": make_tool_record("broken", dispatch_topic="")})
+        with caplog.at_level("DEBUG"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert "add" in registry and "broken" not in registry  # healthy survives, poisoned dropped
+        assert any("discover mode resolved 1 tool node(s)" in r.getMessage() for r in caplog.records)
+        assert any(r.levelname == "WARNING" and "broken" in r.getMessage() for r in caplog.records)
+
+    def test_discover_against_degraded_view_still_warns_and_binds(self, caplog: pytest.LogCaptureFixture) -> None:
+        class _DegradedView(_FakeView):
+            status = "degraded"
+            failure = None
+
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        view = _DegradedView({"add": make_tool_record("add")})
+        with caplog.at_level("WARNING"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert "add" in registry  # binds whatever the frozen view holds
+        assert any(r.levelname == "WARNING" and "degraded" in r.getMessage() for r in caplog.records)
+
+    def test_per_run_overrides_skip_discover(self) -> None:
+        from types import SimpleNamespace
+
+        from calfkit.models.state import OverridesState
+
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        # Overrides pin the exact surface for the turn; discovery must not widen it.
+        ctx = SimpleNamespace(
+            state=SimpleNamespace(overrides=OverridesState(override_agent_tools=[])),
+            resources={CAPABILITY_VIEW_RESOURCE_KEY: _FakeView({"add": make_tool_record("add")})},
+        )
+        agent._maybe_resolve_selectors(ctx, registry)  # type: ignore[arg-type]
+        assert registry == {}  # discover did not run — the view's "add" was not bound
 
 
 class TestToolsExport:

@@ -58,6 +58,30 @@ locally *before* dispatch, at the cost of importing the tool. Same node, either
 handle. (A discovered binding defers argument validation to the tool node; see the
 [design spec](designs/runtime-tool-discoverability-spec.md) for the full trade-off.)
 
+## Discover every tool node
+
+To give an agent *all* the tool nodes on the cluster instead of naming each one,
+pass `Tools(discover=True)`. It resolves every live tool node from the capability
+view at the start of each turn, so a node deployed later is picked up automatically —
+no names to maintain:
+
+```python
+from calfkit import Agent, Tools
+
+agent = Agent(
+    "researcher",
+    subscribe_topics="researcher.input",
+    model_client=model,
+    tools=[Tools(discover=True)],   # every live tool node — no names
+)
+```
+
+Discover mode takes no names and **owns the agent's tool-node surface**: you cannot
+pair `Tools(discover=True)` with an eager tool node or a named `Tools(...)` — that
+raises at construction, so pick one or the other. It still composes with an
+`MCPToolbox` (a different kind of provider), and it binds only function tool nodes,
+never an MCP toolbox's tools.
+
 ## Names are cluster-wide identities
 
 A tool node's name is its key on the shared capability topic, so names must be
@@ -76,8 +100,9 @@ def search(query: str) -> list[str]:
 
 `Tools` binds only tool-node records, so `Tools("github")` pointed at a multi-tool
 MCP toolbox (or any non-tool-node record) resolves nothing rather than absorbing
-the whole toolbox. If a discovered tool name collides with a tool the agent
-already has, the existing one wins and an error is logged.
+the whole toolbox. An agent's tool surface must also have no duplicate tool names:
+referencing the same tool node both eagerly and by name, or naming it twice, raises
+at construction — each tool is referenced once.
 
 ## Outages and topic creation
 

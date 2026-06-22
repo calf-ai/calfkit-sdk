@@ -36,7 +36,7 @@ from calfkit import (
 | --- | --- |
 | `Agent` | An agent node — an LLM-backed node that consumes prompts, calls tools, and publishes output. |
 | `agent_tool` | Decorator that turns a function into a deployable tool node (`@agent_tool(name=...)` or `agent_tool(func, name=...)` overrides its name). |
-| `Tools` | Identity-only handle that references deployed tool nodes by name; pass in `Agent(tools=[...])` to discover their schemas at runtime. |
+| `Tools` | Identity-only handle that references deployed tool nodes — by name, or every live one with `discover=True`; pass in `Agent(tools=[...])` to discover their schemas at runtime. |
 | `consumer` | Decorator that turns a function into a deployable consumer node (a terminal sink on a topic). |
 
 ### Node types
@@ -181,10 +181,13 @@ Turns a function into a tool node. The function's parameters and type annotation
 
 ```python
 agent = Agent("researcher", subscribe_topics="researcher.input", model_client=model,
-              tools=[Tools("add", "subtract")])    # reference tool nodes by name
+              tools=[Tools("add", "subtract")])    # named: reference specific tool nodes
+# or
+agent = Agent("researcher", subscribe_topics="researcher.input", model_client=model,
+              tools=[Tools(discover=True)])         # discover: every live tool node
 ```
 
-A frozen, identity-only handle to one or more deployed tool nodes. The agent discovers each named tool's schema at runtime from the capability control plane instead of importing the tool's code — the call-side counterpart to a deployed tool node. Resolved per turn; an unresolved name warns and degrades. See [discoverable tool nodes](tool-discovery.md).
+A frozen, identity-only handle to deployed function tool nodes, resolved per turn from the capability control plane (the agent discovers schemas at runtime instead of importing the tool's code). Two mutually exclusive modes: **named** — `Tools("add", "subtract")` / `Tools(names=[...])` references specific tool nodes; **discover** — `Tools(discover=True)` selects every live tool node (`node_kind == "tool"`; never an MCP toolbox's tools), carrying no names. Exactly one of {non-empty names, `discover=True`} holds — both, or the empty handle, raise. An unresolved selection warns and degrades. The agent's tool surface admits no duplicate tool names, and `Tools(discover=True)` owns the tool-node surface (no eager tool node or named `Tools` alongside it — an `MCPToolbox` may); a violation raises at construction. See [discoverable tool nodes](tool-discovery.md).
 
 ### `@consumer`
 

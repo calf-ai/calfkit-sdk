@@ -25,6 +25,7 @@ from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider,
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
+from calfkit.nodes.tool import BaseToolNodeDef, Tools
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
@@ -56,7 +57,10 @@ class BaseAgentNodeDef(
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
-        self.tools, self._tool_selectors = split_tool_declarations(tools)
+        self.tools: list[ToolBinding] = []
+        self._tool_selectors: list[ToolSelector] = []
+        self._eager_tool_nodes: list[BaseToolNodeDef] = []
+        self._add_tools(tools)  # enforce the tool-surface contract, then commit (raises before agent-loop build)
         self.sequential_only_mode = sequential_only_mode
 
         if not isinstance(subscribe_topics, (list, tuple)):
@@ -236,6 +240,11 @@ class BaseAgentNodeDef(
             )
         for selector in self._tool_selectors:
             result: SelectorResult = selector.resolve_tools(view)
+            if isinstance(selector, Tools) and selector.discover:
+                # Discover names nothing, so a healthy view with zero tool nodes resolves silently
+                # (a legitimate empty cluster, not a misconfiguration). A DEBUG count aids the
+                # "why does my agent have no tools?" case without crying wolf.
+                logger.debug("agent=%s discover mode resolved %d tool node(s)", self.name, len(result.bindings))
             if result.unresolved:
                 logger.warning(
                     "agent=%s tool selection partially unresolved by %r (missing_targets=%s "
@@ -516,8 +525,47 @@ class BaseAgentNodeDef(
             # chokepoint), not the retired State.final_output_parts side-channel (§4.5).
             return ReturnCall[State](state=ctx.state, value=parts)
 
+    def _add_tools(self, raw_tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None) -> None:
+        """Validate the prospective tool surface against the contract, then commit.
+
+        Shared by ``__init__`` and :meth:`add_tools`. The tool-surface contract (spec §15.3) is
+        checked over the RAW entries — types intact before ``split_tool_declarations`` flattens a
+        tool node into a bare :class:`ToolBinding`:
+
+          1. **No duplicate tool names** across eager bindings + named ``Tools``.
+          2. **``Tools(discover=True)`` owns the tool-node surface** — no eager tool node and no
+             named ``Tools(...)`` may accompany it (an ``MCPToolbox``, a different node kind, may).
+
+        Validate-before-commit: a raised ``ValueError`` leaves the existing surface unchanged.
+        """
+        bindings, selectors = split_tool_declarations(raw_tools)
+        # The eager tool nodes, kept TYPED — read off the raw ``BaseToolNodeDef`` entries (which the
+        # split flattens into bindings). The discover-exclusivity check needs to know which
+        # references are tool nodes, and that type is gone from ``self.tools`` after the split.
+        new_nodes = [t for t in (raw_tools or ()) if isinstance(t, BaseToolNodeDef)]
+        eager_nodes = self._eager_tool_nodes + new_nodes
+        selectors_all = self._tool_selectors + selectors
+        named = [s for s in selectors_all if isinstance(s, Tools) and not s.discover]
+        discover = any(isinstance(s, Tools) and s.discover for s in selectors_all)
+
+        # (2) discover owns the tool-node surface
+        if discover and (eager_nodes or named):
+            raise ValueError(
+                "Tools(discover=True) owns the agent's tool-node surface: no eager tool node "
+                "or named Tools(...) may accompany it (an MCPToolbox may)."
+            )
+        # (1) no duplicate tool names across the statically-named sources
+        static_names = [b.name for b in self.tools + bindings] + [n for s in named for n in s.names]
+        dupes = sorted({n for n in static_names if static_names.count(n) > 1})
+        if dupes:
+            raise ValueError(f"duplicate tool name(s) in tools=: {dupes}; each tool may be referenced once")
+
+        self.tools += bindings  # commit only after both checks pass
+        self._tool_selectors += selectors
+        self._eager_tool_nodes = eager_nodes
+
     def add_tools(self, *tools: ToolProvider | ToolBinding | ToolSelector) -> None:
-        """Add tools after construction.
+        """Add tools after construction (enforces the §15.3 tool-surface contract).
 
         Note: a ToolSelector added AFTER the hosting worker's
         ``register_handlers()`` has run will not get a Capability View
@@ -525,9 +573,7 @@ class BaseAgentNodeDef(
         provisioning) — it degrades per the unresolved-selector policy.
         Declare selectors before registering, or at construction.
         """
-        bindings, selectors = split_tool_declarations(tools)
-        self.tools.extend(bindings)
-        self._tool_selectors.extend(selectors)
+        self._add_tools(tools)
 
     def instructions(self, func: Callable[..., str | None]) -> Callable[..., str | None]:
         """Decorator to define dynamic instruction functions that can build instructions at runtime."""
