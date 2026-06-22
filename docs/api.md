@@ -151,7 +151,7 @@ One-way send. Publishes `user_prompt` to `topic` and returns the correlation id;
 
 ```python
 Agent(
-    node_id: str,
+    name: str,
     *,
     system_prompt: str = "You are a helpful AI assistant.",
     subscribe_topics: str | list[str],

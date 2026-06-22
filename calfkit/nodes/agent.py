@@ -40,7 +40,7 @@ class BaseAgentNodeDef(
 
     def __init__(
         self,
-        node_id: str,
+        name: str,
         *,
         system_prompt: str = "You are a helpful AI assistant.",
         subscribe_topics: str | list[str],
@@ -67,7 +67,7 @@ class BaseAgentNodeDef(
             subscribe_topics = [subscribe_topics]
 
         super().__init__(
-            node_id=node_id,
+            node_id=name,
             subscribe_topics=subscribe_topics,
             publish_topic=publish_topic,
             before_node=before_node,

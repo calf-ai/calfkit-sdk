@@ -45,7 +45,7 @@ def _agent() -> Agent[Any]:
     def _fn(messages: list[Any], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ModelTextPart("done")])
 
-    return Agent(node_id="a", subscribe_topics="in", model_client=FunctionModel(_fn))
+    return Agent(name="a", subscribe_topics="in", model_client=FunctionModel(_fn))
 
 
 class TestBaseResolveSlot:
