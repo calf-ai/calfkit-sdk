@@ -117,7 +117,7 @@ class TestNoSeamsOnObservers:
     def test_registering_any_seam_on_a_consumer_raises(self, seam: str) -> None:
         from calfkit.nodes.consumer import ConsumerNode
 
-        node = ConsumerNode(node_id="obs", subscribe_topics="in", consume_fn=lambda ctx: None)
+        node = ConsumerNode(name="obs", subscribe_topics="in", consume_fn=lambda ctx: None)
         register = getattr(node, seam)
         # The guard fires before the callable/arity checks, so a perfectly valid handler
         # is still rejected purely because the node is an observer.

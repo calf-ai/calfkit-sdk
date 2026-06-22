@@ -122,7 +122,7 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
 
     @consumer(
         subscribe_topics="alpha_agent.out",
-        node_id="alpha_final_sink",
+        name="alpha_final_sink",
     )
     def alpha_sink(ctx: ConsumerContext) -> None:
         if not ctx.output_parts:
@@ -131,7 +131,7 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
 
     @consumer(
         subscribe_topics="bravo_agent.out",
-        node_id="bravo_final_sink",
+        name="bravo_final_sink",
     )
     def bravo_sink(ctx: ConsumerContext) -> None:
         if not ctx.output_parts:
@@ -430,7 +430,7 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
         ),
         pytest.param(
             lambda: ConsumerNode(
-                node_id="empty_consumer",
+                name="empty_consumer",
                 subscribe_topics=[],
                 consume_fn=lambda r: None,
             ),

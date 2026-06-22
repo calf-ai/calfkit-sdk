@@ -46,7 +46,7 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
     def __init__(
         self,
         *,
-        node_id: str,
+        name: str,
         consume_fn: ConsumerFn[OutputT],
         subscribe_topics: str | list[str],
         agent_output_type: type[OutputT] = _UNSET,
@@ -54,7 +54,7 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
         _validate_consume_fn(consume_fn)
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
-        super().__init__(node_id=node_id, subscribe_topics=list(subscribe_topics))
+        super().__init__(node_id=name, subscribe_topics=list(subscribe_topics))
         self._func: ConsumerFn[OutputT] = consume_fn
         self._output_type = agent_output_type
 
@@ -132,7 +132,7 @@ def consumer(
     *,
     subscribe_topics: str | list[str],
     agent_output_type: type[OutputT] = _UNSET,
-    node_id: str | None = None,
+    name: str | None = None,
 ) -> Callable[[ConsumerFn[OutputT]], ConsumerNode[OutputT]]:
     """Decorator turning a function into a deployable consumer node.
 
@@ -151,7 +151,7 @@ def consumer(
 
     def _wrap(fn: ConsumerFn[OutputT]) -> ConsumerNode[OutputT]:
         return ConsumerNode[OutputT](
-            node_id=node_id or f"consumer_{fn.__name__}",
+            name=name or f"consumer_{fn.__name__}",
             subscribe_topics=subscribe_topics,
             consume_fn=fn,
             agent_output_type=agent_output_type,
