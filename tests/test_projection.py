@@ -314,6 +314,47 @@ def test_ordinary_function_tool_call_is_not_surfaced():
     assert not any("<researcher>" in t for t in _user_prompt_texts(out))
 
 
+def test_prefix_lookalike_function_tool_is_not_surfaced():
+    """A function tool sharing the 'final_result' prefix WITHOUT the '_' separator
+    (e.g. 'final_results') must NOT be mistaken for an output tool.
+
+    Guards the ``startswith(_FINAL_RESULT_TOOL_NAME + "_")`` separator: dropping the
+    ``+ "_"`` would silently start surfacing such a function tool cross-agent (a leak).
+    """
+    history: list[ModelMessage] = [
+        _response(TextPart(content="scheduler text"), name="scheduler"),
+        _response(
+            ToolCallPart(tool_name="final_results", args={"q": "x"}, tool_call_id="c1"),
+            name="researcher",
+        ),
+    ]
+
+    out = project(history, viewer="scheduler")
+
+    assert not any("<researcher>" in t for t in _user_prompt_texts(out))
+
+
+def test_renamed_union_tool_empty_args_is_omitted():
+    """A renamed (union) output tool with falsy args produces no surface → turn omitted (§5.5).
+
+    Locks the ``if p.args:`` truthiness branch for the renamed namespace — the agent-mesh
+    handoff case (an empty ``final_result_HandoffRequest`` must still be omitted, not
+    surfaced as ``<author>\\n{}``).
+    """
+    for empty in (None, {}):
+        history: list[ModelMessage] = [
+            _response(TextPart(content="scheduler text"), name="scheduler"),
+            _response(
+                ToolCallPart(tool_name="final_result_SomeModel", args=empty, tool_call_id="c1"),
+                name="researcher",
+            ),
+        ]
+
+        out = project(history, viewer="scheduler")
+
+        assert not any("<researcher>" in t for t in _user_prompt_texts(out))
+
+
 def test_user_prefix_no_name():
     """Unnamed human gets <user> when projection is engaged."""
     history: list[ModelMessage] = [

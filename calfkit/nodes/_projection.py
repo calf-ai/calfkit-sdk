@@ -18,8 +18,8 @@ the viewer would miss a single other-agent's history.)
 
 ``structured_output_preamble`` is the client-facing sibling (§7): given a run's
 new messages it returns the tool-mode text preamble that accompanies a structured
-answer. It lives here because it shares the ``final_result``/``TextPart`` shape
-with the projection surface (``_surface``).
+answer. It lives here because it shares the output-tool (``final_result*``, via
+``_is_output_tool``) / ``TextPart`` shape with the projection surface (``_surface``).
 """
 
 from __future__ import annotations
@@ -60,8 +60,11 @@ def _is_output_tool(tool_name: str) -> bool:
     pydantic-ai names the output tool ``final_result`` for a single output, and
     ``final_result_<TypeName>`` for each member of a multi-output union
     (``_output.py`` ``OutputToolset.build``, ``multiple=True``). Both must be
-    surfaced cross-agent. A user-customized ``ToolOutput(name=...)`` is out of this
-    namespace and remains the documented limitation (§16): not surfaced.
+    surfaced cross-agent. ``final_result*`` is treated as pydantic-ai's reserved
+    output-tool namespace: a user-customized ``ToolOutput(name=...)`` falls outside
+    it and remains the documented limitation (§16, not surfaced), while a *function*
+    tool a user names ``final_result_*`` would be matched here and mis-surfaced — so
+    keep function-tool names out of that namespace (§16).
     """
     return tool_name == _FINAL_RESULT_TOOL_NAME or tool_name.startswith(_FINAL_RESULT_TOOL_NAME + "_")
 
@@ -271,7 +274,8 @@ def _surface(m: ModelResponse) -> str:
                     components.append(_render_structured_args(p))
                 except Exception:
                     logger.warning(
-                        "could not render final_result args for projection surface (tool_call_id=%s); omitting structured component",
+                        "could not render output-tool args for projection surface (tool_name=%s tool_call_id=%s); omitting structured component",
+                        p.tool_name,
                         p.tool_call_id,
                         exc_info=True,
                     )
