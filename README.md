@@ -58,7 +58,7 @@ Calfkit shifts the paradigm of agent development from orchestration (centralized
 $ pip install calfkit
 ```
 
-The command-line tools (`calfkit run`, `calfkit topics`) live behind an optional extra:
+The command-line tools (`ck run`, `ck topics`) live behind an optional extra:
 
 ```console
 $ pip install "calfkit[cli]"
@@ -119,10 +119,10 @@ def get_weather(location: str) -> str:
     return f"It's sunny in {location}"
 ```
 
-`calfkit run` points at a `module:attr` target and starts the tool for you — no extra wiring required. This requires the `[cli]` extra installed.
+`ck run` points at a `module:attr` target and starts the tool for you — no extra wiring required. This requires the `[cli]` extra installed.
 
 ```console
-$ calfkit run weather_tool:get_weather
+$ ck run weather_tool:get_weather
 ```
 
 ### 2. Deploy the agent node
@@ -154,7 +154,7 @@ $ export OPENAI_API_KEY=sk-...
 Start the agent:
 
 ```console
-$ calfkit run agent_service:agent
+$ ck run agent_service:agent
 ```
 
 ### 3. Invoke the agent
@@ -267,7 +267,7 @@ In-repo documentation lives under [`docs/`](docs/).
 **Reference:**
 
 - **[API reference](docs/api.md)** — the public surface re-exported from the top-level `calfkit` package, with the key entry-point signatures.
-- **[CLI reference](docs/cli.md)** — the `calfkit run` and `calfkit topics` commands.
+- **[CLI reference](docs/cli.md)** — the `ck run` and `ck topics` commands.
 - **[Topic provisioning](docs/topic-provisioning.md)** — the experimental, opt-in topic-creation helper for dev/CI.
 
 **Design & background:**

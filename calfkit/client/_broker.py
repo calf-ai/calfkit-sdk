@@ -4,7 +4,7 @@ FastStream 0.7.x has no broker-level startup hook, and a bare
 ``client.broker.start()`` has no FastStream app to host ``on_startup`` hooks.
 ``KafkaBroker.start()`` is the single choke point every start path funnels
 through (bare ``broker.start()``, ``Worker.run()``/``start()``/``async with``,
-``calfkit run``, and auto-start on first publish). This subclass adds a generic
+``ck run``, and auto-start on first publish). This subclass adds a generic
 seam there: run an injected async hook **after** ``connect()`` (so the broker's
 admin client and the cluster are reachable) and **before** subscribers begin
 consuming.

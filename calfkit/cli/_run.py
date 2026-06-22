@@ -1,4 +1,4 @@
-"""Runtime glue for ``calfkit run``.
+"""Runtime glue for ``ck run``.
 
 ``serve`` is the single entrypoint that turns resolved ``module:attr`` targets
 into a running :class:`~calfkit.worker.Worker`. It is deliberately a

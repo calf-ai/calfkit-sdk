@@ -1,7 +1,7 @@
 """Shared node loader for the calfkit CLI.
 
 Resolves ``module:attr`` specs into a flat list of node objects. Used by both
-``calfkit topics provision`` (``--nodes module:attr``) and ``calfkit run``
+``ck topics provision`` (``--nodes module:attr``) and ``ck run``
 (positional ``module:attr`` targets).
 
 Each ``attr`` may resolve to a single node or an iterable of nodes; iterables
@@ -39,8 +39,8 @@ def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label:
             user runs the command from). The path is absolutised; duplicates are
             not re-inserted.
         source_label: How to name the spec source in error messages (e.g.
-            ``"target"`` for ``calfkit run`` or ``"--nodes"`` for
-            ``calfkit topics provision``).
+            ``"target"`` for ``ck run`` or ``"--nodes"`` for
+            ``ck topics provision``).
 
     Raises:
         typer.Exit: (code 2) on a malformed spec, an import failure, or a
@@ -117,7 +117,7 @@ def validate_nodes(objs: list[Any], *, source_label: str = "target") -> None:
 def load_nodes(targets: list[str], *, app_dir: str | None = None, source_label: str = "target") -> list[Any]:
     """Resolve, validate, and de-duplicate ``targets`` into a non-empty node list.
 
-    The composition used by ``calfkit run`` for both the inline (no-reload) path
+    The composition used by ``ck run`` for both the inline (no-reload) path
     and the parent-side pre-flight before the reload supervisor starts. Raising
     on an empty result means a misconfigured run fails fast and loud (exit 2)
     instead of starting an idle worker.

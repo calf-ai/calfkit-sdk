@@ -5,7 +5,7 @@ reply topic; a worker's node topics) and, **when provisioning is enabled**,
 creates them at broker start — before any subscriber begins consuming — reusing
 FastStream's broker-managed admin client. It is wired as a generic pre-start
 hook on the client's broker, so every start path (bare ``broker.start()``,
-``Worker.run()``/``start()``/``async with``, ``calfkit run``) is covered.
+``Worker.run()``/``start()``/``async with``, ``ck run``) is covered.
 
 When provisioning is **disabled** (the default), ``run`` is a pure no-op: the
 admin client is never touched and the broker's own / cluster's topic-creation

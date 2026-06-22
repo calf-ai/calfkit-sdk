@@ -1,4 +1,4 @@
-"""Tests for the ``calfkit run`` serve entrypoint (``calfkit.cli._run.serve``).
+"""Tests for the ``ck run`` serve entrypoint (``calfkit.cli._run.serve``).
 
 ``serve`` is the picklable function the reload supervisor spawns and the
 no-reload path calls directly. These tests patch the ``Client``/``Worker``

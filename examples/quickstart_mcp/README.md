@@ -28,10 +28,10 @@ agent one tool — `fetch` (URL → markdown) — so it can read the live web.
 
 ```console
 # 1) the toolbox node (spawns the MCP fetch server)
-$ calfkit run fetch_toolbox:fetcher
+$ ck run fetch_toolbox:fetcher
 
 # 2) the agent — references the toolbox by name
-$ calfkit run research_agent:agent
+$ ck run research_agent:agent
 
 # 3) ask it something that needs the web
 $ python ask.py
