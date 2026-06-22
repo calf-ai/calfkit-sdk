@@ -1,4 +1,4 @@
-"""Tests for the ``calfkit run`` typer command and its top-level mounting.
+"""Tests for the ``ck run`` typer command and its top-level mounting.
 
 The ``serve`` engine is patched out (it would block on a real broker), so
 these tests assert the command's dispatch: no-reload calls ``serve`` directly,

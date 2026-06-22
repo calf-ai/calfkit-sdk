@@ -425,7 +425,7 @@ The top-level package re-exports the symbols above. A few public capabilities li
 - **[How to give agents MCP tools](mcp-tool-discovery.md)** — fronting an MCP server as a toolbox.
 - **[How to give agents discoverable tool nodes](tool-discovery.md)** — referencing deployed function tool nodes by name with `Tools`.
 - **[Worker lifecycle & embedding](worker-lifecycle.md)** — `Worker`, the lifecycle contexts, and `@resource`.
-- **[CLI reference](cli.md)** — the `calfkit run` and `calfkit topics` commands.
+- **[CLI reference](cli.md)** — the `ck run` and `ck topics` commands.
 - **[Topic provisioning](topic-provisioning.md)** — `ProvisioningConfig` and the opt-in topic-creation helper.
 
 Full signatures and behavior live in the source docstrings.

@@ -146,7 +146,7 @@ that were registered; each node's `_return_topic` is passed as a framework topic
 so `topic_configs` is never applied to it. A provisioning failure aborts startup.
 
 For a manual `register_handlers()`-without-`run()` deployment (which bypasses the
-worker's startup hook), provision out-of-band — the CLI (`calfkit topics provision`,
+worker's startup hook), provision out-of-band — the CLI (`ck topics provision`,
 §4.3), or programmatically via `TopicProvisioner.from_connection(...).provision(...)`
 (§3). Both are idempotent.
 
@@ -164,25 +164,25 @@ reuses the broker's own admin client, so admin-side security is whatever you set
 the broker — a FastStream `security=` object passed to `Client.connect(...)`; there
 is no separate credential handling.
 
-### 4.3 CLI: `calfkit topics provision`
+### 4.3 CLI: `ck topics provision`
 
 A static, out-of-band path for CI/setup scripts. It does **not** require a running
 worker — it imports node definitions, resolves their topics, and creates them.
 
 ```shell
 # Resolve + create every topic the nodes reference
-calfkit topics provision \
+ck topics provision \
     --nodes myapp.workers:all_nodes \
     --bootstrap-servers localhost:9092
 
 # Multiple node sources, custom partition/replication
-calfkit topics provision \
+ck topics provision \
     --nodes myapp.workers:agent \
     --nodes myapp.workers:tool \
     --partitions 3 --replication-factor 3
 
 # Resolve + print the topic set, create nothing
-calfkit topics provision --nodes myapp.workers:all_nodes --dry-run
+ck topics provision --nodes myapp.workers:all_nodes --dry-run
 ```
 
 - `--nodes module:attr` (repeatable) — each `attr` may be a single node or an

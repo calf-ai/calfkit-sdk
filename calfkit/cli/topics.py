@@ -1,4 +1,4 @@
-"""``calfkit topics`` typer subcommand.
+"""``ck topics`` typer subcommand.
 
 **Experimental** (part of the opt-in topic-provisioning feature; may change or
 be removed in a minor release — calfkit is pre-1.0).
@@ -13,16 +13,16 @@ import raises with a clear remediation message rather than silently failing.
 
 Example invocations::
 
-    calfkit topics provision \\
+    ck topics provision \\
         --nodes myapp.workers:all_nodes \\
         --bootstrap-servers localhost:9092
 
-    calfkit topics provision \\
+    ck topics provision \\
         --nodes myapp.workers:agent \\
         --nodes myapp.workers:tool \\
         --partitions 3 --replication-factor 3
 
-    calfkit topics provision \\
+    ck topics provision \\
         --nodes myapp.workers:all_nodes \\
         --dry-run          # resolve + print the topic set, create nothing
 
@@ -38,7 +38,7 @@ import asyncio
 try:
     import typer
 except ImportError as e:  # pragma: no cover -- exercised manually
-    raise ImportError("calfkit topics provision requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
+    raise ImportError("ck topics provision requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
 
 from calfkit.cli._loader import resolve_specs, validate_nodes
 
@@ -171,5 +171,5 @@ if __name__ == "__main__":  # pragma: no cover
     main()
 
 
-# Re-export the typer app so the top-level ``calfkit`` script can mount it.
+# Re-export the typer app so the top-level ``ck`` script can mount it.
 __all__ = ["app", "main"]

@@ -1,4 +1,4 @@
-"""Tests for the ``calfkit topics provision`` CLI subcommand and the
+"""Tests for the ``ck topics provision`` CLI subcommand and the
 top-level ``ProvisioningConfig`` export.
 
 Uses typer's ``CliRunner`` + a small in-repo nodes module so the topic-set

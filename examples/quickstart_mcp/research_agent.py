@@ -7,7 +7,7 @@ re-resolves them every turn, so bring-up order does not matter.
 
 Prerequisites: a running broker, and ``export OPENAI_API_KEY=sk-...``.
 
-Run it with:  calfkit run research_agent:agent
+Run it with:  ck run research_agent:agent
 """
 
 from calfkit.mcp import MCPToolbox

@@ -7,7 +7,7 @@ toolbox is the cluster's MCP client.
 
 Prerequisites: a running broker, and ``uv`` on your PATH (for ``uvx``).
 
-Run it with:  calfkit run fetch_toolbox:fetcher
+Run it with:  ck run fetch_toolbox:fetcher
 """
 
 from calfkit.mcp import MCPToolboxNode, StdioServerParameters

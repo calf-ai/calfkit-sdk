@@ -1,11 +1,11 @@
-"""``calfkit run`` typer command.
+"""``ck run`` typer command.
 
 A development convenience that runs one or more node(s) as a worker without the
 ``Client``/``Worker``/``run()`` boilerplate — point it at ``module:attr``
 targets and it starts serving, FastAPI-CLI style::
 
-    calfkit run weather_tool:get_weather
-    calfkit run myapp.agents:weather_agent myapp.tools:get_weather --reload
+    ck run weather_tool:get_weather
+    ck run myapp.agents:weather_agent myapp.tools:get_weather --reload
 
 Targets are dotted Python import paths (``module:attr``); each ``attr`` may be
 a single node or an iterable of nodes. All resolved nodes run in one worker.

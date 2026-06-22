@@ -1,4 +1,4 @@
-"""Small importable nodes module for ``calfkit topics provision`` CLI tests.
+"""Small importable nodes module for ``ck topics provision`` CLI tests.
 
 The CLI resolves ``--nodes module:attr``; these attrs give it a single node
 and a list of nodes.
@@ -31,7 +31,7 @@ nodes = [
 # actionable error rather than letting an AttributeError escape as exit 1.
 not_a_node = object()
 
-# An attr that is an empty iterable — resolves to zero nodes. ``calfkit run``
+# An attr that is an empty iterable — resolves to zero nodes. ``ck run``
 # must treat "nothing resolved" as an error (exit 2), not silently start an
 # idle worker.
 empty_list: list = []

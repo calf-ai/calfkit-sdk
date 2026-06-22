@@ -36,7 +36,7 @@ Run::
 
 The same one-off provisioning is available from the CLI (no Python)::
 
-    calfkit topics provision --nodes topic_provisioning:NODES \\
+    ck topics provision --nodes topic_provisioning:NODES \\
         --bootstrap-servers localhost:9092 --partitions 3
 """
 
@@ -78,7 +78,7 @@ async def log_results(result: InvocationResult) -> None:
 
 
 # The nodes a deployment would serve. Exposed at module scope so the CLI can
-# resolve them too: ``calfkit topics provision --nodes topic_provisioning:NODES``.
+# resolve them too: ``ck topics provision --nodes topic_provisioning:NODES``.
 NODES = [agent, get_weather, log_results]
 
 # A richer-than-default config. The defaults (partitions=1, rf=1, no configs) are

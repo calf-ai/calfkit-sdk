@@ -1,35 +1,35 @@
 # Calfkit CLI reference
 
-The `calfkit` command bundles the SDK's command-line tooling. It is installed
+The `ck` command bundles the SDK's command-line tooling. It is installed
 via the **`cli` optional extra** (it pulls in `typer` and `watchfiles`):
 
 ```console
 $ pip install "calfkit[cli]"
 ```
 
-If the extra isn't installed, invoking `calfkit` raises a clear remediation
+If the extra isn't installed, invoking `ck` raises a clear remediation
 message instead of failing obscurely.
 
 Commands:
 
 | Command | Purpose |
 | --- | --- |
-| [`calfkit run`](#calfkit-run) | Run node(s) as a worker for local development (no `Worker` boilerplate). |
-| [`calfkit topics`](#calfkit-topics) | Best-effort create the Kafka topics a set of nodes reference. |
+| [`ck run`](#ck-run) | Run node(s) as a worker for local development (no `Worker` boilerplate). |
+| [`ck topics`](#ck-topics) | Best-effort create the Kafka topics a set of nodes reference. |
 
 ---
 
-## `calfkit run`
+## `ck run`
 
 Run one or more nodes as a worker without writing the
 `Client.connect(...)` → `Worker(...)` → `worker.run()` boilerplate — point it at
 a node and it serves, in the spirit of `fastapi dev`.
 
 ```text
-calfkit run TARGET [TARGET ...] [OPTIONS]
+ck run TARGET [TARGET ...] [OPTIONS]
 ```
 
-> **Development only.** `calfkit run` is a convenience for running nodes locally.
+> **Development only.** `ck run` is a convenience for running nodes locally.
 > Production deployments should use an explicit `Worker` so startup, scaling, and
 > topic governance stay under operator control — see
 > [Production deployment](#production-deployment) below.
@@ -41,7 +41,7 @@ Each `TARGET` is a dotted **`module:attr`** import path (like `uvicorn main:app`
 - `attr` may be a **single node** or an **iterable of nodes** — iterables are
   expanded, so `mypkg.workers:all_nodes` (a list) works.
 - Pass **multiple targets** to run them in one worker:
-  `calfkit run app.agents:planner app.tools:search`.
+  `ck run app.agents:planner app.tools:search`.
 - Targets de-duplicate by `node_id`, so listing the same node twice is harmless.
 
 Targets are resolved with Python's import machinery, so the module must be
@@ -50,10 +50,10 @@ is placed on the import path (see `--app-dir`), so run from your project root:
 
 ```console
 $ # project root contains weather_tool.py
-$ calfkit run weather_tool:get_weather
+$ ck run weather_tool:get_weather
 
 $ # nested package (dots, not slashes; no .py suffix)
-$ calfkit run app.tools.weather:get_weather
+$ ck run app.tools.weather:get_weather
 ```
 
 Nested directories work as packages, including
@@ -63,7 +63,7 @@ Nested directories work as packages, including
 
 ### Node files need no boilerplate
 
-Because `calfkit run` imports your module and runs the node, the file only needs
+Because `ck run` imports your module and runs the node, the file only needs
 the node definition at module scope — no `main()`, no `asyncio.run(...)`, no
 `Worker`:
 
@@ -79,7 +79,7 @@ def get_weather(location: str) -> str:
 
 If a file *does* keep its own runnable entrypoint, guard it with
 `if __name__ == "__main__": asyncio.run(...)` — the guard does not fire on
-import, so `calfkit run` ignores it. (A `Worker.run()` left at module top level
+import, so `ck run` ignores it. (A `Worker.run()` left at module top level
 would block the import; keep it under the guard.)
 
 ### Options
@@ -121,21 +121,21 @@ re-import) on every change.
 
 ```console
 $ # One tool node
-$ calfkit run weather_tool:get_weather
+$ ck run weather_tool:get_weather
 
 $ # An agent and its tool in one worker, against a specific broker
-$ calfkit run agent_service:agent weather_tool:get_weather --host localhost:9092
+$ ck run agent_service:agent weather_tool:get_weather --host localhost:9092
 
 $ # Auto-restart on edits, auto-create dev topics
-$ calfkit run agent_service:agent --reload --provision
+$ ck run agent_service:agent --reload --provision
 
 $ # Resolve targets relative to ./src, load a custom env file
-$ calfkit run workers:all_nodes --app-dir src --env-file .env.local
+$ ck run workers:all_nodes --app-dir src --env-file .env.local
 ```
 
 ### Production deployment
 
-`calfkit run` is for development. In production, deploy each node with an
+`ck run` is for development. In production, deploy each node with an
 explicit `Worker`:
 
 ```python
@@ -160,10 +160,10 @@ $ python serve_tool.py
 
 ---
 
-## `calfkit topics`
+## `ck topics`
 
 ```text
-calfkit topics provision --nodes module:attr [--nodes module:attr ...] [OPTIONS]
+ck topics provision --nodes module:attr [--nodes module:attr ...] [OPTIONS]
 ```
 
 Resolve the Kafka topics a set of nodes reference (subscribe inboxes, framework

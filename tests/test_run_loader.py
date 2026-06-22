@@ -1,7 +1,7 @@
 """Tests for the shared CLI node loader (``calfkit.cli._loader``).
 
 The loader resolves ``module:attr`` specs into a flat list of node objects and
-is shared by ``calfkit topics provision`` and ``calfkit run``. These tests
+is shared by ``ck topics provision`` and ``ck run``. These tests
 exercise it directly (no CliRunner) against the small in-repo
 ``tests.provisioning_cli_nodes`` fixture module.
 """
@@ -71,7 +71,7 @@ def test_resolve_specs_missing_attr_exits_2() -> None:
 def test_resolve_specs_app_dir_enables_nested_dotted_import(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
     """``app_dir`` puts a directory on sys.path so a nested dotted module that
     is otherwise unimportable resolves — incl. PEP-420 namespace packages
-    (no __init__.py), matching ``calfkit run subdir.agent_file:agent``."""
+    (no __init__.py), matching ``ck run subdir.agent_file:agent``."""
     from calfkit.cli._loader import resolve_specs
 
     subdir = tmp_path / "subpkg"  # type: ignore[operator]

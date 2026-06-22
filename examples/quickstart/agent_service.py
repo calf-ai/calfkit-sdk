@@ -3,7 +3,7 @@ from weather_tool import get_weather  # Import the tool definition (reusable)
 from calfkit.nodes import Agent
 from calfkit.providers import OpenAIResponsesModelClient
 
-# Run it with: calfkit run agent_service:agent
+# Run it with: ck run agent_service:agent
 agent = Agent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
