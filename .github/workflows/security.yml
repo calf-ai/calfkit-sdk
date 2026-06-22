@@ -1,45 +1,15 @@
 name: Security
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
-  schedule:
-    # Run weekly on Monday at 00:00 UTC
-    - cron: "0 0 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  codeql:
-    name: CodeQL Analysis
-    runs-on: ubuntu-latest
-
-    permissions:
-      security-events: write
-      contents: read
-      actions: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: python
-          queries: security-and-quality
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
-        with:
-          category: "/language:python"
-
   dependency-review:
     name: Dependency Review
     if: github.event_name == 'pull_request'
