@@ -20,6 +20,7 @@ from calfkit.models.tool_dispatch import ToolBinding, ToolSelector, split_tool_d
 from calfkit.nodes.tool import Tools
 from tests._capability_fakes import _FakeView  # dict-backed EnumerableCapabilityView (adds snapshot())
 from tests.test_controlplane_view import _FakeTable  # the substrate's dict-backed GroupedTableReader fake
+from tests.test_tool_binding import make_tool_node  # builds a real ToolNodeDef (eager tool node)
 
 
 def make_tool_record(name: str = "add", *, dispatch: str | None = None, **overrides: Any) -> CapabilityRecord:
@@ -148,7 +149,11 @@ class TestToolsThroughAgent:
         assert all(registry[n].validator is None for n in registry)  # discovered = schema-only
 
     def test_eager_static_tool_wins_on_collision(self, caplog: pytest.LogCaptureFixture) -> None:
-        # Tools + an eager tool of the same name: the eager (locally validated) binding wins.
+        # The per-turn registry merge: when a discovered binding's name is already in the
+        # registry (e.g. a pre-seeded static/override binding), the existing one wins and the
+        # collision is error-logged. The construction-time contract forbids pairing an eager
+        # tool node with a same-named Tools handle — that combination raises before any turn
+        # (see TestToolSurfaceContract); this exercises the residual runtime merge path.
         from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 
         agent = make_agent(Tools("add"))
@@ -202,6 +207,83 @@ class TestToolsDiscoverMode:
         assert sorted(b.name for b in result.bindings) == ["add", "sub"]  # toolbox record excluded
         assert all(b.validator is None for b in result.bindings)  # discovered = schema-only
         assert not result.unresolved
+
+
+class TestToolSurfaceContract:
+    """The construction-time tool-surface contract (spec §15.3, L18), enforced in both
+    ``Agent(tools=...)`` and ``add_tools``:
+      (1) no duplicate tool names across eager bindings + named ``Tools``;
+      (2) ``Tools(discover=True)`` owns the tool-node surface (no eager tool node or named
+          ``Tools`` alongside it; an ``MCPToolbox`` — a different kind — may).
+    """
+
+    # --- (1) no duplicate tool names ------------------------------------------------
+    def test_duplicate_named_handles_raise(self) -> None:
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            make_agent(Tools("add"), Tools("add"))
+
+    def test_eager_node_and_named_same_name_raises(self) -> None:
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            make_agent(make_tool_node("add"), Tools("add"))
+
+    def test_eager_node_and_named_same_name_raises_order_independent(self) -> None:
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            make_agent(Tools("add"), make_tool_node("add"))
+
+    # --- (2) discover owns the tool-node surface ------------------------------------
+    def test_discover_with_eager_tool_node_raises(self) -> None:
+        with pytest.raises(ValueError, match="tool-node surface"):
+            make_agent(make_tool_node("add"), Tools(discover=True))
+
+    def test_discover_with_named_tools_raises(self) -> None:
+        with pytest.raises(ValueError, match="tool-node surface"):
+            make_agent(Tools("add"), Tools(discover=True))
+
+    # --- legal combinations ---------------------------------------------------------
+    def test_discover_alone_is_legal(self) -> None:
+        agent = make_agent(Tools(discover=True))
+        assert agent._tool_selectors == [Tools(discover=True)]
+
+    def test_discover_composes_with_mcp_toolbox(self) -> None:
+        from calfkit.mcp import MCPToolbox
+
+        agent = make_agent(Tools(discover=True), MCPToolbox("fs"))
+        assert Tools(discover=True) in agent._tool_selectors
+        assert MCPToolbox("fs") in agent._tool_selectors
+
+    def test_distinct_named_handles_are_legal(self) -> None:
+        agent = make_agent(Tools("add"), Tools("sub"))
+        assert agent._tool_selectors == [Tools("add"), Tools("sub")]
+
+    def test_distinct_eager_nodes_are_legal(self) -> None:
+        agent = make_agent(make_tool_node("add"), make_tool_node("sub"))
+        assert [b.name for b in agent.tools] == ["add", "sub"]
+
+    # --- add_tools enforces the contract incrementally ------------------------------
+    def test_add_tools_discover_onto_eager_node_raises(self) -> None:
+        agent = make_agent(make_tool_node("add"))
+        with pytest.raises(ValueError, match="tool-node surface"):
+            agent.add_tools(Tools(discover=True))
+
+    def test_add_tools_duplicate_onto_named_raises(self) -> None:
+        agent = make_agent(Tools("add"))
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            agent.add_tools(make_tool_node("add"))
+
+    def test_add_tools_accumulates_disjoint_surfaces(self) -> None:
+        agent = make_agent(make_tool_node("add"))
+        agent.add_tools(make_tool_node("sub"))
+        agent.add_tools(Tools("mul"))
+        assert [b.name for b in agent.tools] == ["add", "sub"]
+        assert agent._tool_selectors == [Tools("mul")]
+
+    def test_add_tools_raise_leaves_surface_unchanged(self) -> None:
+        # validate-before-commit: a failed add must not mutate the live surface.
+        agent = make_agent(make_tool_node("add"))
+        with pytest.raises(ValueError, match="duplicate tool name"):
+            agent.add_tools(make_tool_node("add"))
+        assert [b.name for b in agent.tools] == ["add"]
+        assert agent._tool_selectors == []
 
 
 class TestToolsExport:
