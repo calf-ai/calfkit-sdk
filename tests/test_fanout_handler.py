@@ -50,7 +50,7 @@ def _model(_messages: object, _info: AgentInfo) -> ModelResponse:
 
 def _agent(*, sequential: bool = False) -> Agent[str]:
     return Agent(
-        node_id="a",
+        name="a",
         subscribe_topics=["a.in"],
         model_client=FunctionModel(_model),
         sequential_only_mode=sequential,
