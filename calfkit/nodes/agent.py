@@ -240,6 +240,11 @@ class BaseAgentNodeDef(
             )
         for selector in self._tool_selectors:
             result: SelectorResult = selector.resolve_tools(view)
+            if isinstance(selector, Tools) and selector.discover:
+                # Discover names nothing, so a healthy view with zero tool nodes resolves silently
+                # (a legitimate empty cluster, not a misconfiguration). A DEBUG count aids the
+                # "why does my agent have no tools?" case without crying wolf.
+                logger.debug("agent=%s discover mode resolved %d tool node(s)", self.name, len(result.bindings))
             if result.unresolved:
                 logger.warning(
                     "agent=%s tool selection partially unresolved by %r (missing_targets=%s "

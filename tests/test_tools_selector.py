@@ -286,6 +286,64 @@ class TestToolSurfaceContract:
         assert agent._tool_selectors == []
 
 
+class TestDiscoverDiagnostics:
+    """Discover-mode diagnostics (spec §15.4): a per-turn DEBUG count; healthy-empty is
+    silent by design; a degraded view still warns; per-run overrides skip discover."""
+
+    def test_discover_binds_all_tool_nodes_and_logs_count(self, caplog: pytest.LogCaptureFixture) -> None:
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        view = _FakeView(
+            {
+                "add": make_tool_record("add"),
+                "sub": make_tool_record("sub"),
+                "github": make_tool_record("search", dispatch="mcp_server.github", node_kind="toolbox"),
+            }
+        )
+        with caplog.at_level("DEBUG"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert sorted(registry) == ["add", "sub"]  # every live tool node; the toolbox is excluded
+        assert any("discover mode resolved 2 tool node(s)" in r.getMessage() for r in caplog.records)
+
+    def test_discover_on_healthy_empty_view_is_silent_with_debug_count(self, caplog: pytest.LogCaptureFixture) -> None:
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        with caplog.at_level("DEBUG"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: _FakeView({})}, registry)
+        assert registry == {}
+        assert any("discover mode resolved 0 tool node(s)" in r.getMessage() for r in caplog.records)
+        # An empty cluster is a legitimate state, not a misconfiguration — no WARNING (don't cry wolf).
+        assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_discover_against_degraded_view_still_warns_and_binds(self, caplog: pytest.LogCaptureFixture) -> None:
+        class _DegradedView(_FakeView):
+            status = "degraded"
+            failure = None
+
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        view = _DegradedView({"add": make_tool_record("add")})
+        with caplog.at_level("WARNING"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert "add" in registry  # binds whatever the frozen view holds
+        assert any(r.levelname == "WARNING" and "degraded" in r.getMessage() for r in caplog.records)
+
+    def test_per_run_overrides_skip_discover(self) -> None:
+        from types import SimpleNamespace
+
+        from calfkit.models.state import OverridesState
+
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        # Overrides pin the exact surface for the turn; discovery must not widen it.
+        ctx = SimpleNamespace(
+            state=SimpleNamespace(overrides=OverridesState(override_agent_tools=[])),
+            resources={CAPABILITY_VIEW_RESOURCE_KEY: _FakeView({"add": make_tool_record("add")})},
+        )
+        agent._maybe_resolve_selectors(ctx, registry)  # type: ignore[arg-type]
+        assert registry == {}  # discover did not run — the view's "add" was not bound
+
+
 class TestToolsExport:
     def test_importable_from_calfkit_and_nodes(self) -> None:
         import calfkit
