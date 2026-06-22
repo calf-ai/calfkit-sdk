@@ -32,7 +32,7 @@ def test_legal_node_id_accepted(node_id: str) -> None:
 def test_consumer_node_id_validated_too() -> None:
     # Observers run the same __post_init__ — validation is uniform across kinds.
     with pytest.raises(ValueError, match="node_id"):
-        ConsumerNode(node_id="bad id", consume_fn=lambda ctx: None, subscribe_topics=["t"])
+        ConsumerNode(name="bad id", consume_fn=lambda ctx: None, subscribe_topics=["t"])
 
 
 def test_max_length_component_node_id_accepted() -> None:

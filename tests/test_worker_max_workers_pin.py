@@ -50,7 +50,7 @@ def test_caller_capable_node_pinned_to_max_workers_1(monkeypatch) -> None:  # no
 
 def test_observer_uses_worker_max_workers(monkeypatch) -> None:  # noqa: ANN001
     client = Client.connect()
-    consumer = ConsumerNode(node_id="obs", consume_fn=lambda ctx: None, subscribe_topics=["events"])
+    consumer = ConsumerNode(name="obs", consume_fn=lambda ctx: None, subscribe_topics=["events"])
     worker = Worker(client, nodes=[consumer], max_workers=4)
     calls = _spy_registration(monkeypatch, client)
 
@@ -105,7 +105,7 @@ def test_observer_honors_extra_subscribe_kwargs_max_workers(monkeypatch) -> None
     # The observer branch uses setdefault, so an explicit extra value wins over the worker
     # default (which only fills in when extra didn't set one).
     client = Client.connect()
-    consumer = ConsumerNode(node_id="obs", consume_fn=lambda ctx: None, subscribe_topics=["events"])
+    consumer = ConsumerNode(name="obs", consume_fn=lambda ctx: None, subscribe_topics=["events"])
     worker = Worker(client, nodes=[consumer], max_workers=2, extra_subscribe_kwargs={"max_workers": 5})
     calls = _spy_registration(monkeypatch, client)
 

@@ -135,7 +135,7 @@ def test_decorator_sets_default_node_id_from_fn_name():
 
 
 def test_decorator_accepts_explicit_node_id_and_list_topics():
-    @consumer(subscribe_topics=["a", "b"], node_id="custom_id")
+    @consumer(subscribe_topics=["a", "b"], name="custom_id")
     def my_sink(ctx: ConsumerContext) -> None:
         return None
 
@@ -144,7 +144,7 @@ def test_decorator_accepts_explicit_node_id_and_list_topics():
 
 
 def test_class_form_normalizes_str_topic_to_list():
-    node = ConsumerNode(node_id="x", subscribe_topics="single_topic", consume_fn=lambda ctx: None)
+    node = ConsumerNode(name="x", subscribe_topics="single_topic", consume_fn=lambda ctx: None)
     assert node.subscribe_topics == ["single_topic"]
     assert node.publish_topic is None
 
@@ -154,7 +154,7 @@ def test_generator_function_rejected_at_construction():
         yield ctx
 
     with pytest.raises(TypeError, match="generator function"):
-        ConsumerNode(node_id="x", subscribe_topics="t", consume_fn=gen)
+        ConsumerNode(name="x", subscribe_topics="t", consume_fn=gen)
 
 
 def test_async_generator_function_rejected_at_construction():
@@ -162,7 +162,7 @@ def test_async_generator_function_rejected_at_construction():
         yield ctx
 
     with pytest.raises(TypeError, match="async generator function"):
-        ConsumerNode(node_id="x", subscribe_topics="t", consume_fn=agen)
+        ConsumerNode(name="x", subscribe_topics="t", consume_fn=agen)
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +322,7 @@ async def test_consumer_fans_in_across_multiple_topics(container):
 async def test_intermediate_hop_passes_to_fn_with_output_none(caplog):
     """Empty final_output_parts (intermediate hop) → ctx.output is None, NO error log."""
     received: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="int_sink", subscribe_topics="t", consume_fn=received.append)
+    node = ConsumerNode(name="int_sink", subscribe_topics="t", consume_fn=received.append)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope())
@@ -336,7 +336,7 @@ async def test_intermediate_hop_passes_to_fn_with_output_none(caplog):
 async def test_validation_error_on_present_parts_logs_and_skips(caplog):
     """Parts present but don't match output_type → skip + ERROR with context."""
     invocations: list[str] = []
-    node = ConsumerNode(node_id="val_sink", subscribe_topics="t", consume_fn=lambda ctx: invocations.append("ran"), agent_output_type=Report)
+    node = ConsumerNode(name="val_sink", subscribe_topics="t", consume_fn=lambda ctx: invocations.append("ran"), agent_output_type=Report)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_data_reply({"unexpected": "shape"})))
@@ -352,7 +352,7 @@ async def test_missing_emitter_header_warns_and_still_invokes_fn(caplog):
     """No x-calf-emitter header → BaseNodeDef.handler warns; fn still runs with
     emitter_node_id=None (a legitimate non-calfkit producer)."""
     received: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="noemit_sink", subscribe_topics="t", consume_fn=received.append)
+    node = ConsumerNode(name="noemit_sink", subscribe_topics="t", consume_fn=received.append)
 
     with caplog.at_level(logging.WARNING, logger=BASE_LOGGER):
         await _handle(node, _envelope(_text_reply("hello")), headers={})
@@ -374,7 +374,7 @@ async def test_consume_fn_exception_swallowed_and_logged(caplog):
     def boom(ctx: ConsumerContext) -> None:
         raise RuntimeError("intentional consumer failure")
 
-    node = ConsumerNode(node_id="boom_sink", subscribe_topics="t", consume_fn=boom)
+    node = ConsumerNode(name="boom_sink", subscribe_topics="t", consume_fn=boom)
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         resp = await _handle(node, _envelope(_text_reply("hi")))
@@ -392,7 +392,7 @@ async def test_cancelled_error_always_propagates():
     async def cancels(ctx: ConsumerContext) -> None:
         raise asyncio.CancelledError()
 
-    node = ConsumerNode(node_id="cancel_sink", subscribe_topics="t", consume_fn=cancels)
+    node = ConsumerNode(name="cancel_sink", subscribe_topics="t", consume_fn=cancels)
     with pytest.raises(asyncio.CancelledError):
         await _handle(node, _envelope(_text_reply("hi")))
 
@@ -403,7 +403,7 @@ async def test_observer_observes_every_kind_even_a_caller_capable_stray_shape(ca
     ordinary ReturnMessage) still reaches the consume body — observers bypass the caller-capable
     stray-check / fault pipeline entirely and never fault or floor a peer's observed traffic."""
     captured: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="obs_sink", subscribe_topics="t", consume_fn=captured.append)
+    node = ConsumerNode(name="obs_sink", subscribe_topics="t", consume_fn=captured.append)
 
     with caplog.at_level(logging.WARNING, logger=BASE_LOGGER):
         await _handle(node, _envelope(_text_reply("observed")), headers={**_HEADERS, HDR_KIND: b"fault"})
@@ -425,7 +425,7 @@ async def test_observer_on_live_frame_never_unwinds_or_publishes(consume_raises:
         if consume_raises:
             raise RuntimeError("observer body blew up on someone else's reply-owing envelope")
 
-    node = ConsumerNode(node_id="forge_sink", subscribe_topics="t", consume_fn=consume)
+    node = ConsumerNode(name="forge_sink", subscribe_topics="t", consume_fn=consume)
 
     # A LIVE frame: a real caller's callback address sits on the stack (the shape a sink
     # would see if mis-wired onto reply-owing traffic). _envelope builds a FRAMELESS stack,
@@ -461,7 +461,7 @@ async def test_callable_class_generator_detected_at_call_site(caplog):
         def __call__(self, ctx):
             yield ctx
 
-    node = ConsumerNode(node_id="gen_sink", subscribe_topics="t", consume_fn=GenSink())
+    node = ConsumerNode(name="gen_sink", subscribe_topics="t", consume_fn=GenSink())
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_text_reply("hi")))
 
@@ -476,7 +476,7 @@ async def test_function_returning_generator_object_detected(caplog):
     def sink(ctx):
         return _wrapper_gen()
 
-    node = ConsumerNode(node_id="gen_ret", subscribe_topics="t", consume_fn=sink)
+    node = ConsumerNode(name="gen_ret", subscribe_topics="t", consume_fn=sink)
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_text_reply("hi")))
 
@@ -492,7 +492,7 @@ async def test_function_returning_async_generator_object_detected(caplog):
     def sink(ctx):
         return _wrapper_agen()
 
-    node = ConsumerNode(node_id="agen_ret", subscribe_topics="t", consume_fn=sink)
+    node = ConsumerNode(name="agen_ret", subscribe_topics="t", consume_fn=sink)
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
         await _handle(node, _envelope(_text_reply("hi")))
 
@@ -517,7 +517,7 @@ async def test_final_only_consumer_idiom_filters_intermediate():
             return  # intermediate hop — skip
         received.append(ctx)
 
-    node = ConsumerNode(node_id="filtered", subscribe_topics="t", consume_fn=consume)
+    node = ConsumerNode(name="filtered", subscribe_topics="t", consume_fn=consume)
 
     await _handle(node, _envelope(), correlation_id="cid-int")  # intermediate → skipped
     await _handle(node, _envelope(_text_reply("final!")), correlation_id="cid-final")  # terminal → kept
@@ -535,7 +535,7 @@ async def test_consumer_sees_tool_results_via_state():
     """A consumer wired to a tool's output reads the tool's return value through
     ``ctx.state.tool_results`` (full session-state visibility)."""
     captured: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="tool_obs", subscribe_topics="t", consume_fn=captured.append)
+    node = ConsumerNode(name="tool_obs", subscribe_topics="t", consume_fn=captured.append)
 
     state = State()
     tool_call = ToolCallPart(tool_name="get_weather", args={"location": "Tokyo"})
@@ -554,7 +554,7 @@ async def test_consumer_sees_tool_results_via_state():
 
 async def test_consumer_reads_inbound_deps():
     captured: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="deps_sink", subscribe_topics="t", consume_fn=captured.append)
+    node = ConsumerNode(name="deps_sink", subscribe_topics="t", consume_fn=captured.append)
 
     await _handle(node, _envelope(_text_reply("hi"), deps={"discord": {"channel_id": 42}}), correlation_id="cid-deps")
 
@@ -564,7 +564,7 @@ async def test_consumer_reads_inbound_deps():
 
 async def test_consumer_deps_defaults_to_empty_dict():
     captured: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="deps_empty", subscribe_topics="t", consume_fn=captured.append)
+    node = ConsumerNode(name="deps_empty", subscribe_topics="t", consume_fn=captured.append)
 
     await _handle(node, _envelope(_text_reply("hi")))
 
@@ -573,7 +573,7 @@ async def test_consumer_deps_defaults_to_empty_dict():
 
 async def test_consumer_convenience_properties_read_through_state():
     captured: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="props", subscribe_topics="t", consume_fn=captured.append)
+    node = ConsumerNode(name="props", subscribe_topics="t", consume_fn=captured.append)
 
     state = State()
     state.message_history = [ModelRequest.user_text_prompt("hi")]
@@ -589,7 +589,7 @@ async def test_consumer_convenience_properties_read_through_state():
 
 async def test_resources_flow_from_node_bag():
     captured: list[ConsumerContext] = []
-    node = ConsumerNode(node_id="res_sink", subscribe_topics="t", consume_fn=captured.append)
+    node = ConsumerNode(name="res_sink", subscribe_topics="t", consume_fn=captured.append)
     sentinel = object()
     node.resources["db"] = sentinel
 
@@ -684,7 +684,7 @@ def test_unschematizable_output_type_raises_at_construction():
         TypeAdapter(BadType)
     except Exception:
         with pytest.raises(Exception):
-            ConsumerNode(node_id="bad", subscribe_topics="t", consume_fn=lambda ctx: None, agent_output_type=BadType)
+            ConsumerNode(name="bad", subscribe_topics="t", consume_fn=lambda ctx: None, agent_output_type=BadType)
     else:
         pytest.skip("TypeAdapter(BadType) succeeded on this pydantic version")
 
@@ -700,7 +700,7 @@ async def test_unexpected_projection_exception_is_logged_and_skipped(monkeypatch
     import sys
 
     invocations: list[str] = []
-    node = ConsumerNode(node_id="safety", subscribe_topics="t", consume_fn=lambda ctx: invocations.append("ran"))
+    node = ConsumerNode(name="safety", subscribe_topics="t", consume_fn=lambda ctx: invocations.append("ran"))
 
     consumer_mod = sys.modules["calfkit.nodes.consumer"]
 

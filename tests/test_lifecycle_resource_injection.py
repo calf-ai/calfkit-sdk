@@ -155,7 +155,7 @@ async def test_consumer_handler_injects_node_resources_into_context() -> None:
         seen["db"] = ctx.resources["db"]
 
     node: ConsumerNode[str] = ConsumerNode(
-        node_id="sink",
+        name="sink",
         subscribe_topics="sink.in",
         consume_fn=sink,
         agent_output_type=str,
@@ -198,7 +198,7 @@ async def test_consumer_context_resources_is_shallow_copy_of_node_bag() -> None:
         ctx.resources["mutated"] = object()  # type: ignore[index]
 
     node: ConsumerNode[str] = ConsumerNode(
-        node_id="sink_iso",
+        name="sink_iso",
         subscribe_topics="sink_iso.in",
         consume_fn=sink,
         agent_output_type=str,
