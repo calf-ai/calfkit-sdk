@@ -44,10 +44,10 @@ class KTableReaderTuning(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     poll_timeout_ms: PositiveTimeoutMs | None = None
-    """Reader-loop ``getmany`` cadence; gates the barrier resolution half + idle CPU."""
+    """Reader-loop ``getmany`` cadence (**milliseconds**); gates the barrier resolution half + idle CPU."""
 
     fetch_max_wait_ms: PositiveTimeoutMs | None = None
-    """Consumer fetch long-poll; gates the barrier end-offset snapshot half."""
+    """Consumer fetch long-poll (**milliseconds**); gates the barrier end-offset snapshot half."""
 
     def as_kwargs(self) -> dict[str, Any]:
         """The set (non-``None``) knobs, ready to splat into a ktables ``*.json(...)`` factory."""
@@ -63,10 +63,10 @@ class FanoutConfig(BaseModel):
     """Cadence applied to the store's two compacted-table readers (``state`` + ``basestate``)."""
 
     catchup_timeout: PositiveFiniteFloat | None = None
-    """Bound on each reader's catch-up gate at ``start()``; ``None`` => ktables' default."""
+    """Bound (**seconds**) on each reader's catch-up gate at ``start()``; ``None`` => ktables' default."""
 
     barrier_timeout: PositiveFiniteFloat = 30.0
-    """Per-read ``barrier()`` timeout for the read-your-own-writes freshness wait."""
+    """Per-read ``barrier()`` timeout (**seconds**) for the read-your-own-writes freshness wait."""
 
 
 # `PositiveTimeoutMs` / `PositiveFiniteFloat` are field-constraint implementation detail (used

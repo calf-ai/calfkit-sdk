@@ -27,9 +27,9 @@ class ControlPlaneConfig(BaseModel):
         heartbeat_interval: Seconds between record re-publishes (the publisher's
             loop cadence). Also stamped on every record so a reader can judge
             staleness without knowing this value.
-        stale_after: Read-side override/floor for the staleness threshold. ``None``
+        stale_after: Read-side override/floor for the staleness threshold (seconds). ``None``
             (default) derives ``STALE_MULTIPLIER × record.heartbeat_interval``.
-        catchup_timeout: Bound on a view's catch-up gate.
+        catchup_timeout: Bound (seconds) on a view's catch-up gate.
         bootstrap_servers: Override for the control-plane Kafka cluster. ``None``
             (default) derives from the connected client; set only for the
             split-cluster case (control plane on different brokers than data).
