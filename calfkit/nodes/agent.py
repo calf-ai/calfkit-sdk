@@ -108,7 +108,14 @@ class BaseAgentNodeDef(
             raise RuntimeError(
                 f"cannot derive Kafka bootstrap servers for fan-out agent {self.node_id!r}'s durable store (client built without connect()?)."
             )
-        store = KtablesFanoutBatchStore(bootstrap_servers=bootstrap, node_id=self.node_id)
+        fcfg = worker._fanout
+        store = KtablesFanoutBatchStore(
+            bootstrap_servers=bootstrap,
+            node_id=self.node_id,
+            reader_tuning=fcfg.reader_tuning,
+            catchup_timeout=fcfg.catchup_timeout,
+            barrier_timeout=fcfg.barrier_timeout,
+        )
         await store.start()
         try:
             yield store

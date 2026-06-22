@@ -27,6 +27,8 @@ from calfkit.exceptions import RegistryConfigError
 if TYPE_CHECKING:
     from ktables import TableStatus
 
+    from calfkit.tuning import KTableReaderTuning
+
 logger = logging.getLogger(__name__)
 
 R = TypeVar("R", bound=ControlPlaneRecord)
@@ -209,6 +211,7 @@ class ControlPlaneView(Generic[R]):
         catchup_timeout: float = 30.0,
         ensure_topic: bool = False,
         stale_after: float | None = None,
+        reader_tuning: KTableReaderTuning | None = None,
     ) -> ControlPlaneView[R]:  # pragma: no cover - exercised in the kafka lane
         """Open a view over a real ``GroupedKafkaTable``. The caller still awaits ``start()``."""
         from ktables import GroupedKafkaTable
@@ -219,5 +222,6 @@ class ControlPlaneView(Generic[R]):
             model=record_type,
             catchup_timeout=catchup_timeout,
             ensure_topic=ensure_topic,
+            **(reader_tuning.as_kwargs() if reader_tuning else {}),
         )
         return cls(table, record_type, stale_after=stale_after)

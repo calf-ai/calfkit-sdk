@@ -16,6 +16,7 @@ from calfkit.models.capability import CAPABILITY_TOPIC, CAPABILITY_VIEW_RESOURCE
 from calfkit.models.tool_dispatch import ToolSelector
 from calfkit.nodes import BaseNodeDef
 from calfkit.provisioning import topics_for_nodes
+from calfkit.tuning import FanoutConfig
 from calfkit.worker.lifecycle import (
     PHASE_PAIRS,
     LifecycleContext,
@@ -69,6 +70,7 @@ class Worker(LifecycleHookMixin):
         id: str | None = None,
         name: str | None = None,
         control_plane: ControlPlaneConfig | None = None,
+        fanout: FanoutConfig | None = None,
     ):
         """Initialize a worker.
 
@@ -95,6 +97,9 @@ class Worker(LifecycleHookMixin):
                 whenever a hosted node declares an advert (``@advertises``), and
                 the MCP Capability View whenever a hosted agent declares MCP tool
                 selectors — both with these defaults, zero user wiring.
+            fanout: Optional tuning for fan-out agents' durable batch stores
+                (reader cadence, catch-up + barrier timeouts). Applied uniformly to
+                every fan-out agent this worker hosts. Entirely optional.
         """
         if id is not None and not id.strip():
             raise ValueError("id must be a non-empty string or None")
@@ -102,6 +107,7 @@ class Worker(LifecycleHookMixin):
             raise ValueError("name must be a non-empty string or None")
         self._client = client
         self._control_plane = control_plane if control_plane is not None else ControlPlaneConfig()
+        self._fanout = fanout if fanout is not None else FanoutConfig()
         self._max_workers = max_workers
         self._group_id = group_id
         self._extra_publish_kwargs = extra_publish_kwargs
@@ -209,6 +215,7 @@ class Worker(LifecycleHookMixin):
             # and a missing topic fails setup loudly.
             ensure_topic=self._client._provisioning.enabled,
             stale_after=cfg.stale_after,
+            reader_tuning=cfg.reader_tuning,
         )
         await view.start()
         yield view
