@@ -182,6 +182,28 @@ class TestCapabilityViewResource:
         assert fake_table.instances[0].kwargs["ensure_topic"] is True
         await close(gen)
 
+    async def test_reader_tuning_forwarded_to_table(self, fake_table: type[FakeGroupedTable]) -> None:
+        from calfkit.tuning import KTableReaderTuning
+
+        worker = Worker(
+            Client.connect("kafka:9092"),
+            control_plane=ControlPlaneConfig(reader_tuning=KTableReaderTuning(poll_timeout_ms=20, fetch_max_wait_ms=10)),
+        )
+        gen, _ = await drive(worker)
+        kwargs = fake_table.instances[0].kwargs
+        assert kwargs["poll_timeout_ms"] == 20
+        assert kwargs["fetch_max_wait_ms"] == 10
+        await close(gen)
+
+    async def test_reader_tuning_default_omits_cadence(self, fake_table: type[FakeGroupedTable]) -> None:
+        # Behavior-preserving: no tuning set => no cadence kwargs reach ktables (its defaults apply).
+        worker = Worker(Client.connect("kafka:9092"))
+        gen, _ = await drive(worker)
+        kwargs = fake_table.instances[0].kwargs
+        assert "poll_timeout_ms" not in kwargs
+        assert "fetch_max_wait_ms" not in kwargs
+        await close(gen)
+
 
 class TestRegisterHandlersIdempotency:
     def test_second_call_is_a_guarded_no_op(self) -> None:

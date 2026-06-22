@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from calfkit.models.error_report import FaultTypes
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutBaseState, FanoutOpen, FanoutOutcome, FanoutState, SlotRef
+from calfkit.tuning import KTableReaderTuning
 
 if TYPE_CHECKING:
     from ktables import KafkaTable, KafkaTableWriter
@@ -267,14 +268,21 @@ class KtablesFanoutBatchStore:
     ``ensure_topic`` (spec §9) — no calfkit provisioner involvement.
     """
 
-    _BARRIER_TIMEOUT_S = 30.0
-
-    def __init__(self, *, bootstrap_servers: str, node_id: str, catchup_timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        bootstrap_servers: str,
+        node_id: str,
+        reader_tuning: KTableReaderTuning | None = None,
+        catchup_timeout: float | None = None,
+        barrier_timeout: float = 30.0,
+    ) -> None:
         import ktables  # lazy: keep ktables off the offline import path (only a real store touches it)
 
+        self._barrier_timeout = barrier_timeout
         state_topic = f"calf.fanout.{node_id}.state"
         basestate_topic = f"calf.fanout.{node_id}.basestate"
-        reader_kwargs: dict[str, Any] = {"ensure_topic": True}
+        reader_kwargs: dict[str, Any] = {"ensure_topic": True, **(reader_tuning.as_kwargs() if reader_tuning else {})}
         if catchup_timeout is not None:
             reader_kwargs["catchup_timeout"] = catchup_timeout
         self._state_reader: KafkaTable[FanoutState] = ktables.KafkaTable.json(
@@ -308,7 +316,7 @@ class KtablesFanoutBatchStore:
         ``status == "failed"`` is terminal (raise); any other ``False`` (timeout / stop-race /
         snapshot-error / loading / degraded) is transient and retried — a persistently degraded
         table is an operational failure (spec §7), not a floor."""
-        while not await reader.barrier(timeout=self._BARRIER_TIMEOUT_S):
+        while not await reader.barrier(timeout=self._barrier_timeout):
             if reader.status == "failed":
                 raise FanoutStoreUnavailableError(f"fan-out table {reader.topic!r} reader died ({reader.failure!r})") from reader.failure
             logger.warning("fan-out table %r barrier not yet fresh (status=%s); retrying", reader.topic, reader.status)

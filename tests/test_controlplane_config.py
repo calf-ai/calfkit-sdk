@@ -1,11 +1,11 @@
 """Unit tests for ControlPlaneConfig (spec §11, plan §3.3)."""
 
-import dataclasses
-
 import pytest
+from pydantic import ValidationError
 
 from calfkit.controlplane import ControlPlaneConfig
 from calfkit.controlplane.config import STALE_MULTIPLIER
+from calfkit.tuning import KTableReaderTuning
 
 
 def test_defaults() -> None:
@@ -45,8 +45,28 @@ def test_positive_stale_after_allowed() -> None:
 
 def test_is_frozen() -> None:
     cfg = ControlPlaneConfig()
-    with pytest.raises(dataclasses.FrozenInstanceError):
+    with pytest.raises(ValidationError):
         cfg.heartbeat_interval = 10.0  # type: ignore[misc]
+
+
+def test_reader_tuning_defaults_to_empty() -> None:
+    assert ControlPlaneConfig().reader_tuning == KTableReaderTuning()
+
+
+def test_accepts_reader_tuning() -> None:
+    cfg = ControlPlaneConfig(reader_tuning=KTableReaderTuning(poll_timeout_ms=20, fetch_max_wait_ms=10))
+    assert cfg.reader_tuning.as_kwargs() == {"poll_timeout_ms": 20, "fetch_max_wait_ms": 10}
+
+
+def test_reader_tuning_is_validated() -> None:
+    # Nested validation: a bad cadence value is rejected when built from a dict.
+    with pytest.raises(ValidationError):
+        ControlPlaneConfig(reader_tuning={"poll_timeout_ms": 0})
+
+
+def test_forbids_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        ControlPlaneConfig(heatbeat_interval=10.0)  # typo must raise, not silently no-op
 
 
 def test_rejects_nonfinite_fields() -> None:

@@ -138,6 +138,15 @@ so a consumer can wait for the log to replay before its first read, and it passe
 through the table's `status`/`failure` so a degraded reader is *observable*
 rather than silently serving an empty map.
 
+The reader's **cadence is tunable** for latency. An idle `barrier()` costs roughly
+`max(fetch_max_wait_ms, poll_timeout_ms)` — ~500 ms at ktables' defaults, ~30 ms with both
+lowered — which matters because by-name tool/MCP/agent-mesh resolution barriers against this
+(usually quiet) view. Pass
+`ControlPlaneConfig(reader_tuning=KTableReaderTuning(poll_timeout_ms=…, fetch_max_wait_ms=…))`
+to trade more broker fetches for a lower idle-barrier floor. Both knobs default to `None`
+(ktables' own defaults), so the substrate is unchanged unless you opt in. The same
+`KTableReaderTuning` tunes fan-out stores via `Worker(fanout=FanoutConfig(reader_tuning=…))`.
+
 ## The worker drives liveness; the node owns content
 
 The publisher is **worker-owned** — one loop and one tombstone pass per worker,

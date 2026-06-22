@@ -76,7 +76,15 @@ class OfflineFanoutBatchStore(FakeFanoutBatchStore):
     in-memory store has no cluster to reach.
     """
 
-    def __init__(self, *, bootstrap_servers: str, node_id: str, catchup_timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        bootstrap_servers: str,
+        node_id: str,
+        reader_tuning: object | None = None,
+        catchup_timeout: float | None = None,
+        barrier_timeout: float = 30.0,
+    ) -> None:
         super().__init__()
 
     async def start(self) -> None:

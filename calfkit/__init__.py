@@ -7,6 +7,7 @@ from calfkit.models import ErrorReport, FaultTypes, ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, Tools, agent_tool, consumer
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
+from calfkit.tuning import FanoutConfig, KTableReaderTuning
 from calfkit.worker import LifecycleContext, ResourceSetupContext, ServingContext, Worker
 
 __version__ = version("calfkit")
@@ -47,6 +48,9 @@ __all__ = [
     "ControlPlaneStamp",
     "ControlPlaneView",
     "advertises",
+    # ktables tuning
+    "FanoutConfig",
+    "KTableReaderTuning",
     # exceptions
     "DeserializationError",
     "LifecycleConfigError",

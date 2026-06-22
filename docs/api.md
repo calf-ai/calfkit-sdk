@@ -13,6 +13,7 @@ from calfkit import (
     OpenAIModelClient, OpenAIResponsesModelClient, AnthropicModelClient,  # providers
     Worker, LifecycleContext, ResourceSetupContext, ServingContext,       # worker + lifecycle
     ProvisioningConfig,                                  # provisioning (config only)
+    KTableReaderTuning, FanoutConfig,                    # ktables tuning (config only)
     NodeFaultError, ErrorReport, FaultTypes,             # faults
     DeserializationError, LifecycleConfigError,          # exceptions
 )
@@ -84,6 +85,15 @@ The definition types that node authoring produces or builds on.
 | Symbol | Purpose |
 | --- | --- |
 | `ProvisioningConfig` | Opt-in configuration for best-effort Kafka topic auto-creation. The full provisioning surface lives at `calfkit.provisioning`. |
+
+### Ktables tuning
+
+Optional worker-level tuning for the ktables-backed substrates (the control-plane capability view and fan-out stores). All knobs default to ktables' own values, so omitting them changes nothing.
+
+| Symbol | Purpose |
+| --- | --- |
+| `KTableReaderTuning` | Reader-cadence knobs (`poll_timeout_ms`, `fetch_max_wait_ms`) for a ktables reader. Lower both to cut idle `barrier()` latency (`~ max(fetch_max_wait_ms, poll_timeout_ms)`). Composed by `ControlPlaneConfig` (view) and `FanoutConfig`. |
+| `FanoutConfig` | Worker-level tuning for fan-out agents' durable batch stores (reader cadence, catch-up + barrier timeouts). Passed as `Worker(fanout=...)`. |
 
 ### Exceptions
 
