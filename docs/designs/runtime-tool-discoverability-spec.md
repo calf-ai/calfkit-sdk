@@ -1,6 +1,7 @@
 # Runtime Tool Discoverability Spec
 
-- **Status:** Implemented (2026-06-20) on branch `feat/runtime-tool-discoverability` — built TDD per the §10 build order; review rounds 1 & 2 folded (§13); offline suite + full kafka lane green. Decision recorded in ADR-0013.
+- **Status:** §1–§13 (the by-name feature) **MERGED to main** (PR #266, `930286a`); built TDD per the §10 build order; review rounds 1 & 2 folded (§13); offline suite + full kafka lane green. Decision recorded in ADR-0013. **Note:** the `node_kind` work described in §6.4/§9/§10 (presented in this doc as work the spec adds) **already shipped with that PR** — the discover extension below touches none of it and adds no wire surface.
+- **Extension — Discover mode (Implemented, 2026-06-21):** §15 specifies an open-ended `Tools(discover=True)` mode (the promotion of the §14.2 deferred item). Built TDD on branch `feat/discover-mode` (off `origin/main` with #269); decision recorded in ADR-0014, with the MCP tool-name namespacing prerequisite shipped as ADR-0018 (#269). The §1–§13 by-name feature above is unchanged by it. See §13 for its review status.
 - **Date:** 2026-06-19
 - **Depends on:** the control-plane substrate (`calfkit/controlplane/`, ADR-0010/0011) and the MCP capability plane migration (ADR-0012). This feature is a second *adopter* of the same substrate, sharing the capability plane with MCP.
 - **Relationship to prior specs:** consumes the machinery defined in `docs/designs/control-plane-substrate-spec.md` and reuses the wire model from the (now-migrated) `docs/designs/mcp-capability-discovery-spec.md`. It does **not** introduce a new control plane.
@@ -39,7 +40,7 @@ The eager path is **kept** unchanged. `Tools` is purely additive: the same tool 
 
 ### Non-goals
 - **No `strict` mode.** Removed from MCP in ADR-0012; not added for `Tools`. Unresolved selections warn and degrade.
-- **No open-ended discovery.** An agent discovers exactly the names it declares. There is no "discover whatever tool nodes are online" mode (§14).
+- **No open-ended discovery** *(v1 non-goal; lifted by the §15 extension).* In the by-name feature an agent discovers exactly the names it declares. The **Discover mode** extension (§15, ADR-0014) adds `Tools(discover=True)` — "discover whatever tool nodes are online" — as an opt-in mode on the same handle.
 - **No new control plane / topic / record type.** Tool nodes share `calf.capabilities` and `CapabilityRecord`.
 - **No protocol merge.** Collapsing `ToolProvider` + `ToolSelector` is an orthogonal refactor, out of scope (L9).
 - **No opt-in advertising in v1.** Every tool node advertises (L7). Opt-in is designed and recorded as future work (§14.1).
@@ -467,6 +468,17 @@ No wire-format break to `CapabilityRecord`/`CapabilityToolDef` content (MCP and 
 | L13 | Required `node_kind: str` discriminator on `ControlPlaneStamp` (worker-stamped from `_node_kind`); breaking wire change (recreate `calf.capabilities`), no compat default. | Canonical home for worker-stamped node metadata; powers the over-pull guard (L5) and C1 observability; free via the stamp. Required (not defaulted) matches the sibling stamp fields and fails loud on a missing stamp; pre-1.0 hard break, no deployments to preserve. |
 | L14 | C1 (heterogeneous-owner collision): document + tie to the existing global `node_id`-uniqueness contract, **plus** a dedup'd **cross-kind** mixed-`node_kind` view warning for observability (same-kind collisions stay silent — covered by the contract). | A facet of an already-required contract; namespacing the key would break L2/L6. |
 
+### Discover mode (§15, ADR-0014) — additional locked decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| L15 | Open-ended discovery is a **mode on `Tools`** — `Tools(discover=True)` — not a new `AllTools` type and not an `Agent` flag. `discover: bool` field; invariant *exactly one of {non-empty names, `discover=True`}* (both, or neither, raises). Empty `Tools()` still raises. | One handle, one concept; stays a `ToolSelector` so it trips the existing view trigger with zero new wiring; the empty-raises rail blocks an accidental empty splat becoming "everything". |
+| L16 | Discover binds **`node_kind == "tool"` only**, via a new bulk kernel `resolve_all_capabilities(view, *, node_kind)` over the view's existing `snapshot()` — a **positive filter**, not the over-pull *guard* (a non-tool record is out of scope, not `wrong_kind_targets`). | Symmetric with named `Tools`; never absorbs a toolbox; reuses the view primitive that already exists. |
+| L17 | Enumeration via a **second protocol** `EnumerableCapabilityView(CapabilityLookup)` (adds `snapshot()`); the point kernel/`MCPToolbox` keep the narrow `CapabilityLookup`. | Interface Segregation: point-lookup clients must not depend on a `snapshot()` they never call. The real view satisfies both for free. |
+| L18 | One **tool-surface contract**, enforced at construction (ctor + `add_tools`) over the **raw `tools=` entries** (types intact before the split flattens them): (1) **no duplicate tool names** across eager + named sources; (2) **discover owns the tool-node surface** — `Tools(discover=True)` forbids any eager tool node or named `Tools(...)` alongside it; (3) `MCPToolbox` (a `toolbox` kind) and non-tool-node providers compose freely (narrow). | Enforcing upstream where the raw types are known kills the runtime collision policy, the `ToolBinding` `source_kind` provenance field, and `Tools.merge` — all of which were artifacts of trying to resolve collisions downstream after the split flattened the types. `MCPToolbox` name-disjointness is guaranteed by the ADR-0018 namespacing prerequisite. |
+| L19 | **No runtime collision machinery and no `Tools.merge`.** A duplicate name is caught at construction by L18(1); the per-turn binding-assembly merge is unchanged but, given L18, no tool-node name collision can reach it. Do **not** add `source_kind` to `ToolBinding`, **not** unify `ToolBinding`/`ToolSelector` types, and **not** resolve collisions at the binding merge. | The contract makes the illegal combinations unreachable at runtime, so the downstream machinery has nothing to do. Keeping it would be solving a prevented problem. |
+| L20 | **Prerequisite: MCP tool-name namespacing (ADR-0018)** — `<server>__<tool>` — lands first as its own isolated PR. | Makes the cluster tool namespace collision-free (tool-node names unique by contract; MCP names disjoint), which is what lets a toolbox compose with discover/named `Tools` per L18(3). Orthogonal to discover; improves named MCP use on its own. |
+
 ---
 
 ## 13. Review status
@@ -474,6 +486,13 @@ No wire-format break to `CapabilityRecord`/`CapabilityToolDef` content (MCP and 
 - **Round 1 (2026-06-19): complete, folded in.** Four lenses (correctness/runtime, architecture, gaps/blast-radius, type-design), all source-grounded. No CRITICAL architecture breaks. Verified: `Tool(func, name=)` works; §7 parity holds empirically; frozen-dataclass-custom-`__init__` is sound; `@advertises` MRO collection + topic-uniqueness OK; worker triggers fire. Folded: C1→L14 (`node_kind` + mixed-kind warning), structural over-pull guard (`expected_kind`/`wrong_kind_targets`), name dedupe, `SelectorResult.bindings`→tuple, collision-log-via-selector, reject mixed/empty, validation-taxonomy precision, `add_tools` caveat, identity-collision note, replica-equivalence note, `subscribe_topics[0]` guard, fail-loud comment retention, blast-radius checklist (§9), test scenarios (§11).
 - **Round 2 (2026-06-19): complete, folded in.** Three lenses (wire/schema-evolution, regression/C1-completeness, consistency/gaps), source-grounded; all converged on one CRITICAL — adding `node_kind` to an existing wire model means pre-change records lacking it fail `model_validate_json`, and ktables' poison-tolerance skips them (orphaning the node from the view). Verified empirically. **Resolution (Ryan): accept the breaking change** — `node_kind` is **required** (no compat default); the `calf.capabilities` topic is recreated on upgrade (pre-1.0, no deployments; a default shim was explicitly rejected as it would mask a missing stamp and conflicts with the hard-breaks stance). Also folded: C1 partial-coverage honesty (cross-kind only; same-kind silent) + dedup key `(node_id, frozenset(kinds))`; blast-radius extended to every stamp/record construction site + field-set assertions + the `calfkit` export; §10/§11 wording. No redesign — the `node_kind`-on-stamp architecture is sound. All four round-1 fixes re-verified with no regression.
 - **Round 3: pending.** A light confirm pass over the round-2 edits (the default, the `wrong_kind_targets` transient semantics, the blast-radius additions) to declare convergence before implementation.
+
+### Discover mode (§15) review
+
+- **Round 1 (2026-06-20): complete, folded.** Four lenses over the first §15 draft (which used a `Tools.merge` algebra + a `_has_eager_tool_node`/`source_kind` provenance scheme + a runtime binding-merge collision policy). Found 1 CRITICAL (`Tools.merge` defined but never invoked) + provenance/over-reject MAJORs. **Resolution (Ryan):** the "no local tool" insight (eager vs discovered = validated-at-origin vs validated-at-node; both dispatch over Kafka) collapsed the design — §15 was **rewritten** around a construction-time tool-surface contract (no-duplicate-names + discover-owns-the-tool-node-surface), deleting `Tools.merge`, the `source_kind` provenance, and the runtime collision policy; MCP tool-name namespacing was split out as the ADR-0018 prerequisite.
+- **Round 2 (2026-06-20): complete, folded.** Three lenses (contract logic, staleness/consistency, grounding/engineering-quality) over the rewritten §15. Architecture affirmed (moving enforcement upstream genuinely removed the complexity). Fixed: **CRITICAL** — `_eager_tool_node_names` uninitialized (`AttributeError` on first `|=`) → now initialized in `__init__` via the shared enforce-then-commit `_add_tools` path; **MAJOR** — `add_tools` mutated state before validating (corrupt agent on caught `ValueError`) → now validates the prospective surface and commits only on success; **MAJOR** — ADR number collision (two `0015`) → MCP namespacing renumbered to **ADR-0018**; **MAJOR** — ADR-0018 underspecified the shared `record_to_bindings` kernel → now states namespacing is `node_kind=="toolbox"`-scoped and dispatch strips via `removeprefix(f"{node_id}__")`. Folded MINORs: eager-set keys on tool name (not `node_id`); the `_eager_tool_node_names` "only for `add_tools`" rationale + the deferred "don't-flatten-at-split" alternative (ADR-0014); the intra-handle-vs-cross-source asymmetry rationale; the `node_kind`-already-shipped note (§1). **Convergence:** no CRITICAL/MAJOR remaining; ready for a TDD impl plan pending Ryan's sign-off.
+- **Round 3 (2026-06-20): tool-surface factoring pass.** Question raised: is the retained eager-tool-node state a symptom of `tools=` heterogeneity, and would a unified abstraction remove it? Two grounded passes (design + adversarial) on two reshapes: (a) a third `eager_tool_nodes` bucket from `split_tool_declarations`, and (b) a unified `ToolSource` protocol collapsing `ToolBinding`/`ToolProvider`/`ToolSelector`. **Both rejected.** The retained state is **inherent to incremental `add_tools`** (it accumulates cumulative provenance regardless of the split), not an artifact of flattening; (a) adds a model→node layering edge + a duck-typed-provisioner silent-break risk; (b) is a wash/regression (the eager/deferred partition resurfaces as `view_dependent` + an eager-bindings cache, the frozen wire `ToolBinding` needs a ceremony adapter, the provisioner regresses, `resolve()` drops `SelectorResult` diagnostics) and re-opens the locked "no protocol merge" (L9/L19, non-goal §3). **Folded:** §15.3 switched from a re-derived `_eager_tool_node_names: set[str]` to the typed `self._eager_tool_nodes: list[BaseToolNodeDef]` (agent-local extraction, split unchanged) — the one improvement that survived; ADR-0014's deferred-option reasoning corrected (the prior "shipped paths consume the split" claim was false — two callers, both in `agent.py`) and the `ToolSource` rejection recorded.
+- **Round 4 — plan review + implementation (2026-06-21): complete.** Three lenses over the TDD impl plan (code-grounding, commit-3 regression blast-radius, completeness) found 1 CRITICAL (the plan wrongly claimed `agent.py` already imported `BaseToolNodeDef` — it imports neither it nor `Tools`; both added) + folded MAJORs (`_FakeView` placement; `docs/tool-discovery.md` doc-drift correction; regression sweep made a gating green bar; keep the runtime collision branch); the blast-radius was confirmed smaller than first framed (no existing test newly raises — one comment re-anchor + added tests). **Implemented TDD in 6 commits** (kernel → `Tools(discover=True)` → contract → diagnostics → kafka roundtrip → docs); offline suite + the cross-process kafka roundtrip green; `make check` clean. The api.md export level follows `resolve_capability` (documented in the spec, not added to `calfkit.__all__` nor api.md).
 
 ---
 
@@ -495,6 +514,168 @@ A plain `ToolNodeDef` has empty `_adverts` → contributes nothing → eager-onl
 
 ### 14.2 Other deferred items
 - **Extended `CapabilityToolDef` fidelity** — carry `requires_approval`/`strict`/`sequential`/`timeout`/`metadata` if the tool-node surface grows (§7). Additive.
-- **Open-ended discovery** — an agent that discovers tool nodes it did not pre-name (needs a new view-registration trigger, e.g. a `discover=True` agent flag). Out of scope (§3).
+- **Open-ended discovery** — **PROMOTED.** Now specified as **Discover mode** in §15 (ADR-0014). The "needs a new view-registration trigger" concern dissolved by modeling it as a `ToolSelector` (`Tools(discover=True)`) rather than an agent flag, so it trips the existing `_tool_selectors` trigger.
 - **Protocol merge** — collapse `ToolProvider` + `ToolSelector` (L9).
 - **Multi-tool tool nodes** — `CapabilityRecord.tools` is already a list; a future multi-tool node would advertise N entries and `Tools` would need an `include` filter, converging with `MCPToolbox`. (The `expected_kind="tool"` guard already admits it — it filters by kind, not count.)
+
+---
+
+## 15. Discover mode (extension — Proposed, ADR-0014)
+
+**Status:** Implemented (2026-06-21) on branch `feat/discover-mode` — built TDD per the §15.6 build order; the MCP tool-name namespacing prerequisite (ADR-0018) shipped first in #269. This section promotes the §14.2 "open-ended discovery" deferred item to an opt-in mode on the `Tools` handle. It adds **no wire surface** — discover is call-side only, reusing the `node_kind` field shipped with §1–§13.
+
+**Prerequisite — MCP tool-name namespacing (ADR-0018).** Namespacing MCP tool names as `<server>__<tool>` makes the cluster tool namespace collision-free (tool-node names are globally unique by contract; MCP names become disjoint), which is what lets an `MCPToolbox` compose with discover/named `Tools` without a cross-plane clash. It is a separate, isolated change to the MCP surface and lands first; this section assumes it.
+
+### 15.1 Surface — a mode on `Tools`, not a new type
+
+`Tools(discover=True)` selects **every live function tool node** instead of a named set. It is the same `ToolSelector` flowing the same path (§6.5); the only new state is a `discover` flag with a strict either/or invariant:
+
+```python
+@dataclass(frozen=True)
+class Tools:
+    names: tuple[str, ...]
+    discover: bool = False
+
+    def __init__(self, *positional: str, names: Sequence[str] | None = None, discover: bool = False) -> None:
+        # discover is the *absence of names*: passing both is contradictory.
+        if discover and (positional or names is not None):
+            raise ValueError("Tools(discover=True) takes no tool names")
+        if not discover:
+            collected = tuple(positional) if positional else tuple(names or ())
+            collected = tuple(dict.fromkeys(collected))            # order-preserving dedupe
+            if not collected:
+                # Empty STILL raises — never an implicit "everything". The fail-loud rail:
+                # an accidental empty splat (Tools(*[])) must not silently become all-tools.
+                raise ValueError("Tools requires at least one tool name, or discover=True")
+            if any(not n for n in collected):
+                raise ValueError("Tools names must be non-empty")
+            object.__setattr__(self, "names", collected)
+        else:
+            object.__setattr__(self, "names", ())
+        object.__setattr__(self, "discover", discover)
+```
+
+Invariant: **exactly one of {non-empty `names`, `discover=True`}**. `Tools()`, `Tools(*[])`, `Tools(names=[])`, and `Tools(discover=False)` (no names) all raise — the empty handle is a construction error (L15). `discover` is a real field so `Tools(discover=True) == Tools(discover=True)` and the handle appears in the collision-log `selector` repr.
+
+### 15.2 Resolution — a bulk kernel over an enumerable view (ISP)
+
+The point kernel `resolve_capability` consumes only `view.get(target_id)`. Discover needs to walk *all* live records, which the real view already exposes as `snapshot()` (`view.py:98` — one-clock-consistent, collapsed to one live record per node, staleness + schema filtered). Per **Interface Segregation** (L17), enumeration is a *second* role, not a widening of the point-lookup surface:
+
+```python
+# calfkit/models/capability.py
+class EnumerableCapabilityView(CapabilityLookup, Protocol):
+    """CapabilityLookup + bulk enumeration. Satisfied by ControlPlaneView (snapshot
+    already exists) and the test _FakeView. The point-lookup path (resolve_capability,
+    MCPToolbox.resolve_tools) keeps the narrow CapabilityLookup — it never enumerates."""
+    def snapshot(self) -> dict[str, CapabilityRecord]: ...
+
+
+def resolve_all_capabilities(view: EnumerableCapabilityView, *, node_kind: str) -> SelectorResult:
+    """Discover-mode kernel: bind EVERY live record of `node_kind`.
+
+    A POSITIVE FILTER, not the over-pull *guard*: a record of another kind is out of
+    scope, not an error — so missing_targets / missing_tools / wrong_kind_targets are
+    always empty. Only a poisoned record of the RIGHT kind (e.g. empty dispatch_topic)
+    degrades to invalid_targets; it never crashes the turn (mirrors resolve_capability).
+    """
+    bindings: list[ToolBinding] = []
+    invalid: list[str] = []
+    for node_id, record in view.snapshot().items():
+        if record.node_kind != node_kind:
+            continue                                     # out of scope, not wrong-kind
+        try:
+            # name= is required since ADR-0018 (MCP namespacing). For node_kind=="tool"
+            # the _namespace_prefix is "" so node_id adds no prefix — but pass it anyway
+            # (the snapshot key IS the node_id), so this kernel is correct for any kind.
+            bindings.extend(record_to_bindings(record, name=node_id))
+        except ValidationError:
+            invalid.append(node_id)
+    return SelectorResult(bindings=tuple(bindings), invalid_targets=tuple(invalid))
+```
+
+`Tools.resolve_tools` branches on the mode; its param widens to `EnumerableCapabilityView` (the agent always hands selectors the real, enumerable view). `MCPToolbox.resolve_tools` keeps `CapabilityLookup` — sound (a parameter may accept a supertype) and it documents "MCP never enumerates". The named branch is unchanged (an enumerable view *is* a `CapabilityLookup`):
+
+```python
+def resolve_tools(self, view: EnumerableCapabilityView) -> SelectorResult:
+    if self.discover:
+        return resolve_all_capabilities(view, node_kind="tool")
+    # named branch: the §6.3 loop, unchanged (resolve_capability needs only get()).
+    ...
+```
+
+The `ToolSelector` protocol's `resolve_tools` param becomes `EnumerableCapabilityView`. This is **not breaking for custom selectors**: a user-authored `ToolSelector` typed `resolve_tools(view: CapabilityLookup)` still conforms (a parameter may accept a supertype — sound contravariance, verified with mypy), and the agent always supplies the real, enumerable view at runtime. Only the **discover-path** `Tools` test fakes need a one-line `_FakeView(dict)` that adds `.snapshot()` (the named path never calls it); the MCP/point-lookup test fakes keep their bare dicts. Note `tests/` is outside the `make check` mypy gate, so this is a strict-typing/IDE concern and a discover-test requirement, not a `make check` break.
+
+### 15.3 The tool-surface contract (enforced at construction)
+
+The agent's `tools=[...]` surface obeys one contract, checked when the agent is built (and on every `add_tools`). It is enforced over the **raw `tools=` entries**, where the types are still intact (`BaseToolNodeDef` / `Tools` instances) — *before* `split_tool_declarations` flattens a tool node into a bare `ToolBinding`. So there is **no provenance field on `ToolBinding`** and **no runtime collision policy**: the illegal combinations never reach a turn.
+
+1. **No duplicate tool names.** Across every developer-provided source — eager tool nodes, eager bindings/providers, and named `Tools(...)` — no tool name may appear twice. Order-independent. Raises.
+2. **Discover owns the tool-node surface.** If `Tools(discover=True)` is present, no eager tool node and no named `Tools(...)` may sit alongside it. Raises.
+3. **`MCPToolbox` is orthogonal.** A toolbox is `node_kind == "toolbox"`, not a tool, so it composes freely with discover *and* with named `Tools` (the narrow rule). MCP names are made disjoint by the namespacing prerequisite (ADR-0018), so an MCP tool can never duplicate a tool-node name.
+
+`__init__` initializes the empty surface — including `self._eager_tool_nodes: list[BaseToolNodeDef] = []` — then routes through the **same** enforce-then-commit path as the public `add_tools`. Both validate the *prospective* combined surface and mutate instance state **only after both checks pass**, so a caught `ValueError` on `add_tools` leaves a live agent unchanged (an `__init__` raise discards the half-built object):
+
+```python
+# calfkit/nodes/agent.py — the shared path behind __init__ and add_tools.
+def _add_tools(self, raw_tools):
+    bindings, selectors = split_tool_declarations(raw_tools)   # split UNCHANGED: tool nodes still flatten into bindings
+    # The eager tool nodes, kept TYPED — extracted from the raw entries (agent.py already imports
+    # BaseToolNodeDef). The split flattens these into `self.tools` too (so the dup check / provisioner
+    # see their bindings); this typed list exists only so the discover check can ask "any tool node?".
+    new_nodes = [t for t in raw_tools if isinstance(t, BaseToolNodeDef)]
+    eager_nodes = self._eager_tool_nodes + new_nodes
+    selectors_all = self._tool_selectors + selectors
+    named = [s for s in selectors_all if isinstance(s, Tools) and not s.discover]
+    discover = any(isinstance(s, Tools) and s.discover for s in selectors_all)
+
+    # (2) discover owns the tool-node surface — a typed query, no name-set reconstruction
+    if discover and (eager_nodes or named):
+        raise ValueError("Tools(discover=True) owns the agent's tool-node surface: no eager "
+                         "tool node or named Tools(...) may accompany it (MCPToolbox may).")
+    # (1) no duplicate tool names across the statically-named sources
+    static = [b.name for b in self.tools + bindings] + [n for s in named for n in s.names]
+    dupes = sorted({n for n in static if static.count(n) > 1})
+    if dupes:
+        raise ValueError(f"duplicate tool name(s) in tools=: {dupes}; each tool may be referenced once")
+
+    self.tools += bindings                       # commit only after both checks pass
+    self._tool_selectors += selectors
+    self._eager_tool_nodes = eager_nodes
+```
+
+- The duplicate check (1) reads **names**, which the split preserves on `self.tools` (tool-node bindings included, since the split is unchanged), so it needs no provenance and runs identically in `__init__` and `add_tools` over the accumulated surface.
+- The discover-exclusivity (2) needs to know which references are *tool nodes* (only those overlap discover). `self._eager_tool_nodes` (the typed node objects, not a re-derived name set) carries that across the incremental `add_tools` path — it exists **only** because the split discards the `BaseToolNodeDef` type before `add_tools` runs; in `__init__` alone the raw list would suffice. `MCPToolbox` and non-tool-node providers are never in that list, so they compose with discover as the narrow rule intends. (The deeper reshapes that would remove this small retained list — a third split bucket, or a unified `ToolSource` protocol — were investigated and rejected as wash/regression; see ADR-0014.)
+- **`Tools.merge` is gone.** Multiple `Tools` handles no longer collapse via a merge algebra — they are ordinary selectors, and a repeated name trips the duplicate check (1); the named+discover contradiction is caught by (2). There is no `Tools.merge`, no `_has_eager_tool_node` bool, no `source_kind` on `ToolBinding`, and no per-turn binding-merge collision policy. The complexity in earlier drafts came from trying to resolve collisions *downstream* (after the split flattened the types); enforcing the contract *upstream* on the raw list removes it.
+
+> **Intra-handle dedupe is unchanged.** The shipped `Tools("a", "a")` constructor de-dupes *within one handle* (`dict.fromkeys`, §6.3). That ergonomic stays; the "no duplicates" contract above is the *cross-source* rule (two handles, or eager + named). A name repeated within a single handle is *one selection stated twice* (one resolution, one binding) — safely collapsed. A name repeated across sources is *two competing intents* under one name, which can carry different validation/dispatch semantics (an eager binding validates args locally; a discovered one defers to the fault rail), so silently picking one is unsafe — it raises.
+
+### 15.4 Diagnostics
+
+Discover names nothing, so the named diagnostics do not apply: `missing_targets` / `missing_tools` / `wrong_kind_targets` are always empty, and `unresolved` is true only when a poisoned tool record lands in `invalid_targets` — which rides the **existing** unresolved-selector WARNING (`agent.py`), no new code. A degraded/failed view still logs the existing WARNING. The one new state, **healthy view + zero tool nodes**, is *silent by design* (a legitimate empty cluster). To aid the "why does my agent have no tools?" case without crying wolf, add a **DEBUG** count, emitted once for the discover selector in the resolution loop:
+
+```python
+if isinstance(selector, Tools) and selector.discover:
+    logger.debug("agent=%s discover mode resolved %d tool node(s)", self.name, len(result.bindings))
+```
+
+No new `SelectorResult` fields; no WARNING on a healthy empty cluster.
+
+### 15.5 What does not change
+
+- **No wire surface.** No `CapabilityRecord` field, no `schema_version` bump; `node_kind` (shipped §6.4) is reused.
+- **Worker wiring.** `Tools(discover=True)` is a `ToolSelector`, so the read-side view trigger (keyed on `_tool_selectors`) fires unchanged — the deferred note's "needs a new trigger" concern dissolves.
+- **Per-run overrides.** Selector resolution (discover included) is uniformly skipped when `override_agent_tools` pins a turn (`agent.py`) — discovery must not widen a scoped-down turn. No discover-specific handling.
+- **Eager path / named path / the per-turn registry build.** Untouched. (With the §15.3 contract enforced at construction, no tool-node name collision can reach the registry build, so its existing collision branch is never exercised by a discover/named tool-node duplicate.)
+
+### 15.6 Build order (TDD), test scenarios & docs
+
+Build order (each step TDD, red→green):
+
+1. `Tools(discover=True)` construction: valid; `discover` + names raises; empty raises; `discover=False` no-names raises; equality/hash; intra-handle dedupe still holds.
+2. `EnumerableCapabilityView` + `resolve_all_capabilities`: kind filter (tool vs toolbox records present); poisoned record → `invalid_targets`; empty view → zero bindings, not unresolved. `_FakeView(dict)` helper.
+3. The tool-surface contract at **construction**: duplicate names raise (`[Tools('a'), Tools('a')]`; `[add, Tools('add')]`; `[Tools('add'), add]`); discover + eager tool node raises; discover + named `Tools` raises; discover + `MCPToolbox` is allowed; discover + a non-tool-node provider is allowed.
+4. The contract on **`add_tools`**: the raises fire incrementally — `add_tools(Tools(discover=True))` on an agent built with an eager tool node raises; `add_tools(add_node)` on an agent built with `Tools('add')` raises.
+5. Agent resolution: discover binds all live tool nodes; the DEBUG count; per-run overrides skip discover.
+6. Kafka lane: deploy N tool nodes; an agent with `Tools(discover=True)` discovers all N and dispatches one (agent-POV: the model sees the advertised schemas).
+
+Docs deliverables: a "discover everything" how-to section in `docs/tool-discovery.md`; `Tools(discover=True)`, `resolve_all_capabilities`, and `EnumerableCapabilityView` in `docs/api.md`; ADR-0014 flips `proposed → accepted` at the implementing PR (mirroring ADR-0013); ADR-0018 (MCP namespacing) ships first as its own PR.
