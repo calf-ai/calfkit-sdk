@@ -10,9 +10,9 @@ from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 
 if TYPE_CHECKING:
-    # Type-only: the Capability View lookup the resolver consumes lives a layer up
+    # Type-only: the Capability View the resolver consumes lives a layer up
     # (it references CapabilityRecord). A runtime import would cycle; this does not.
-    from calfkit.models.capability import CapabilityLookup
+    from calfkit.models.capability import EnumerableCapabilityView
 
 ArgsValidator = Callable[[dict[str, Any]], Any]
 """Validates LLM-emitted tool args pre-dispatch; raises ``pydantic.ValidationError`` on mismatch."""
@@ -105,12 +105,13 @@ class ToolSelector(Protocol):
     :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode` that delegates to it, and by
     :class:`~calfkit.nodes.tool.Tools` for function tool nodes: passing any of them
     to an agent extracts only a lookup key — no session contact, no deployment. The
-    ``view`` is a :class:`~calfkit.models.capability.CapabilityLookup` (anything with
-    ``get(target_id) -> CapabilityRecord | None``), so the agent layer needs no
-    ktables import and tests can use plain dicts.
+    ``view`` is an :class:`~calfkit.models.capability.EnumerableCapabilityView` (``get``
+    + ``snapshot``), so the agent layer needs no ktables import. A by-name selector uses
+    only ``get(target_id)`` (so plain ``dict``s suffice in its tests); a discover selector
+    enumerates via ``snapshot()``.
     """
 
-    def resolve_tools(self, view: "CapabilityLookup") -> SelectorResult: ...
+    def resolve_tools(self, view: "EnumerableCapabilityView") -> SelectorResult: ...
 
 
 def split_tool_declarations(

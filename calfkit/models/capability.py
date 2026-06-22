@@ -179,3 +179,40 @@ def resolve_capability(
         bindings = [b for bare, b in tagged if bare in wanted]
         missing_tools = tuple(n for n in include if n not in present_bare)
     return SelectorResult(bindings=tuple(bindings), missing_tools=missing_tools)
+
+
+class EnumerableCapabilityView(CapabilityLookup, Protocol):
+    """:class:`CapabilityLookup` plus bulk enumeration: ``snapshot() -> {node_id: record}``.
+
+    The discover-mode read surface. Satisfied by a ``ControlPlaneView[CapabilityRecord]``
+    (which already exposes ``snapshot()``) and by the tests' ``_FakeView``. The
+    single-target path (:func:`resolve_capability`, ``MCPToolbox``) keeps the narrower
+    :class:`CapabilityLookup` — it never enumerates (Interface Segregation): point-lookup
+    clients must not depend on a ``snapshot()`` they never call.
+    """
+
+    def snapshot(self) -> dict[str, CapabilityRecord]: ...
+
+
+def resolve_all_capabilities(view: EnumerableCapabilityView, *, node_kind: str) -> SelectorResult:
+    """Bind every live record of ``node_kind`` (the discover-mode kernel).
+
+    A POSITIVE FILTER, not the over-pull guard: a record of another kind is out of scope
+    (skipped), not ``wrong_kind_targets`` — so ``missing_targets`` / ``missing_tools`` /
+    ``wrong_kind_targets`` are always empty. Only a poisoned record of the RIGHT kind (e.g.
+    an empty ``dispatch_topic`` failing ``ToolBinding``'s ``min_length``) degrades to
+    ``invalid_targets``; one bad record never crashes the turn (mirrors
+    :func:`resolve_capability`).
+    """
+    bindings: list[ToolBinding] = []
+    invalid: list[str] = []
+    for node_id, record in view.snapshot().items():
+        if record.node_kind != node_kind:
+            continue
+        try:
+            # ``name`` is required since ADR-0018; for ``node_kind == "tool"`` the prefix is
+            # "" so the snapshot key adds no namespace (and it stays correct for any kind).
+            bindings.extend(record_to_bindings(record, name=node_id))
+        except ValidationError:
+            invalid.append(node_id)
+    return SelectorResult(bindings=tuple(bindings), invalid_targets=tuple(invalid))
