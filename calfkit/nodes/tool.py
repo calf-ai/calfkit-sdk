@@ -14,7 +14,14 @@ from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.controlplane import ControlPlaneStamp, advertises
 from calfkit.models import SessionRunContext, State, ToolContext
 from calfkit.models.actions import NodeResult, ReturnCall
-from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityLookup, CapabilityRecord, CapabilityToolDef, resolve_capability
+from calfkit.models.capability import (
+    CAPABILITY_TOPIC,
+    CapabilityRecord,
+    CapabilityToolDef,
+    EnumerableCapabilityView,
+    resolve_all_capabilities,
+    resolve_capability,
+)
 from calfkit.models.payload import retry_text_part
 from calfkit.models.tool_dispatch import SelectorResult, ToolBinding, ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
@@ -197,37 +204,59 @@ def agent_tool(func: Callable[..., Any] | None = None, *, name: str | None = Non
 
 @dataclass(frozen=True)
 class Tools:
-    """Identity-only handle to one or more function tool nodes, resolved per agent turn.
+    """Identity-only handle to function tool nodes, resolved per agent turn.
 
     The call-side counterpart to deployed tool nodes (mirrors :class:`~calfkit.mcp.MCPToolbox`):
     constructible anywhere with just the tool names — no schema, no import of the tool's code.
-    Each name is a tool node's identity (its ``node_id``, which equals the LLM-facing tool name).
-    Resolution reuses :func:`~calfkit.models.capability.resolve_capability` with
-    ``expected_kind="tool"`` (the over-pull guard), so a name that resolves to a toolbox record is
-    rejected rather than absorbed. Frozen value semantics: names are order-preserving-deduped, so
-    equal handles compare and hash equal.
+    Two modes, mutually exclusive on one handle:
 
-    Accepts either ``Tools("add", "subtract")`` or ``Tools(names=[...])`` (not both). There is no
-    ``strict`` knob — an unresolved selection warns and degrades (mirrors MCP).
+    - **named** — ``Tools("add", "subtract")`` / ``Tools(names=[...])``: each name is a tool node's
+      identity (its ``node_id``, which equals the LLM-facing tool name). Resolution reuses
+      :func:`~calfkit.models.capability.resolve_capability` with ``expected_kind="tool"`` (the
+      over-pull guard), so a name that resolves to a toolbox record is rejected rather than absorbed.
+    - **discover** — ``Tools(discover=True)``: selects *every* live tool node (``node_kind == "tool"``),
+      resolved fresh each turn via :func:`~calfkit.models.capability.resolve_all_capabilities`. It
+      carries no names; the empty handle is a construction error, never an implicit "everything".
+
+    Exactly one of {non-empty names, ``discover=True``} — both, or neither, raise. Frozen value
+    semantics: names are order-preserving-deduped, so equal handles compare and hash equal. There is
+    no ``strict`` knob — an unresolved selection warns and degrades (mirrors MCP).
     """
 
     names: tuple[str, ...]
+    discover: bool = False
 
     # ``*positional`` varargs (the common case) plus a keyword-only ``names=`` list; no name
     # collision because the varargs param is ``positional`` while the stored field is ``names``.
-    def __init__(self, *positional: str, names: Sequence[str] | None = None) -> None:
-        if positional and names is not None:
-            raise ValueError("Tools: pass tool names positionally or via names=, not both")
-        source = positional if positional else tuple(names or ())
-        collected = tuple(dict.fromkeys(source))  # order-preserving dedupe
-        if not collected:
-            raise ValueError("Tools requires at least one tool name")
-        if any(not n for n in collected):
-            raise ValueError("Tools names must be non-empty")
-        object.__setattr__(self, "names", collected)
+    def __init__(self, *positional: str, names: Sequence[str] | None = None, discover: bool = False) -> None:
+        # ``discover`` IS the absence of names (it takes every live tool node), so pairing it with
+        # names is contradictory: exactly one of {non-empty names, discover=True}.
+        if discover and (positional or names is not None):
+            raise ValueError("Tools(discover=True) takes no tool names")
+        if discover:
+            object.__setattr__(self, "names", ())
+        else:
+            if positional and names is not None:
+                raise ValueError("Tools: pass tool names positionally or via names=, not both")
+            source = positional if positional else tuple(names or ())
+            collected = tuple(dict.fromkeys(source))  # order-preserving dedupe
+            if not collected:
+                # Empty STILL raises — never an implicit "everything" (the fail-loud rail: an
+                # accidental empty splat ``Tools(*[])`` must not silently become all-tools).
+                raise ValueError("Tools requires at least one tool name, or discover=True")
+            if any(not n for n in collected):
+                raise ValueError("Tools names must be non-empty")
+            object.__setattr__(self, "names", collected)
+        object.__setattr__(self, "discover", discover)
 
-    def resolve_tools(self, view: CapabilityLookup) -> SelectorResult:
-        """Resolve each name against the capability view and aggregate (one binding per tool node)."""
+    def resolve_tools(self, view: EnumerableCapabilityView) -> SelectorResult:
+        """Resolve against the capability view.
+
+        Discover mode binds every live tool node (``resolve_all_capabilities``); named mode
+        resolves each name (one binding per tool node).
+        """
+        if self.discover:
+            return resolve_all_capabilities(view, node_kind="tool")
         bindings: list[ToolBinding] = []
         missing: list[str] = []
         invalid: list[str] = []

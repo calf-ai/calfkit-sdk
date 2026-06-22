@@ -18,6 +18,7 @@ from calfkit.controlplane import ControlPlaneView
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord, CapabilityToolDef, SelectorResult
 from calfkit.models.tool_dispatch import ToolBinding, ToolSelector, split_tool_declarations
 from calfkit.nodes.tool import Tools
+from tests._capability_fakes import _FakeView  # dict-backed EnumerableCapabilityView (adds snapshot())
 from tests.test_controlplane_view import _FakeTable  # the substrate's dict-backed GroupedTableReader fake
 
 
@@ -158,6 +159,49 @@ class TestToolsThroughAgent:
         assert registry["add"] is static  # existing (eager) wins; discovered never shadows it
         assert registry["add"].validator is not None  # local fail-fast validation preserved
         assert any("add" in r.message for r in caplog.records)
+
+
+class TestToolsDiscoverMode:
+    """``Tools(discover=True)`` — open-ended discovery of every live tool node (spec §15.1)."""
+
+    def test_discover_constructs_with_no_names(self) -> None:
+        t = Tools(discover=True)
+        assert t.discover is True
+        assert t.names == ()
+
+    def test_discover_with_positional_names_raises(self) -> None:
+        with pytest.raises(ValueError, match="no tool names"):
+            Tools("add", discover=True)
+
+    def test_discover_with_names_kwarg_raises(self) -> None:
+        with pytest.raises(ValueError, match="no tool names"):
+            Tools(names=["add"], discover=True)
+
+    def test_named_handle_defaults_to_discover_false(self) -> None:
+        assert Tools("add").discover is False
+
+    def test_empty_with_discover_false_raises(self) -> None:
+        # The fail-loud rail: a bare/empty handle is never an implicit "everything".
+        with pytest.raises(ValueError, match="at least one"):
+            Tools(discover=False)
+
+    def test_discover_value_semantics(self) -> None:
+        assert Tools(discover=True) == Tools(discover=True)
+        assert len({Tools(discover=True), Tools(discover=True)}) == 1
+        assert Tools(discover=True) != Tools("add")
+
+    def test_discover_resolves_all_tool_nodes_excluding_toolboxes(self) -> None:
+        view = _FakeView(
+            {
+                "add": make_tool_record("add"),
+                "sub": make_tool_record("sub"),
+                "github": make_tool_record("search", dispatch="mcp_server.github", node_kind="toolbox"),
+            }
+        )
+        result = Tools(discover=True).resolve_tools(view)
+        assert sorted(b.name for b in result.bindings) == ["add", "sub"]  # toolbox record excluded
+        assert all(b.validator is None for b in result.bindings)  # discovered = schema-only
+        assert not result.unresolved
 
 
 class TestToolsExport:
