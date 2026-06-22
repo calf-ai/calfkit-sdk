@@ -70,14 +70,21 @@ jobs:
         # Non-coverage entries run the offline suite only (FunctionModel +
         # in-memory TestKafkaBroker; the default `-m "not kafka and not live"`),
         # needing no Docker, network, or credentials. The coverage entry (3.10)
-        # also runs the real-broker `kafka` lane in the SAME process —
-        # `-m "not live"` overrides the default deselection — so the uploaded
-        # coverage is the union of both; Redpanda comes from testcontainers
-        # (ADR 0007). The live model-API lane runs separately (integration-live.yml).
+        # also runs the real-broker `kafka` lane (Redpanda via testcontainers,
+        # ADR 0007) as a SECOND pytest run whose coverage is appended
+        # (`--cov-append`) to the offline run's, so the uploaded number stays the
+        # union of both. That kafka run is parallel (`-n auto` on ONE shared
+        # broker) and scoped to `tests/integration` so the xdist controller
+        # registers the shared-broker hook (see tests/integration/conftest.py).
+        # Broker size/worker count are env-tunable (CALF_TEST_REDPANDA_SMP/_MEMORY,
+        # KAFKA_XDIST) if a runner contends. The live lane runs separately
+        # (integration-live.yml).
         run: |
           if [ "${{ matrix.python-version }}" = "3.10" ]; then
-            uv run pytest tests/ -v --tb=short --timeout=180 -m "not live" \
-              --cov=calfkit --cov-report=term-missing --cov-report=xml
+            uv run pytest tests/ -m "not kafka and not live" --tb=short --timeout=180 \
+              --cov=calfkit --cov-report=
+            uv run --group integration pytest tests/integration -m kafka -n auto --tb=short --timeout=180 \
+              --cov=calfkit --cov-append --cov-report=term-missing --cov-report=xml
           else
             uv run pytest tests/ -v --tb=short
           fi

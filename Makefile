@@ -10,7 +10,7 @@ help:
 	@echo "    make format-check - Check code formatting (ruff format --check)"
 	@echo "    make type-check   - Run type checker (mypy)"
 	@echo "    make test         - Run tests (pytest; opt-in kafka + live lanes deselected)"
-	@echo "    make test-kafka   - Run real-broker tests only (needs Docker; -m kafka)"
+	@echo "    make test-kafka   - Run real-broker tests in parallel (needs Docker; -m kafka; KAFKA_XDIST=N)"
 	@echo "    make test-live    - Run live model-API tests only (needs OPENAI_API_KEY + TEST_LLM_MODEL_NAME; -m live)"
 	@echo ""
 	@echo "  Fixes:"
@@ -50,9 +50,15 @@ test:
 	@echo "Running tests (opt-in 'kafka' and 'live' lanes deselected by default)..."
 	@uv run pytest tests/ -v
 
+# Real-broker lane runs in parallel on ONE shared Redpanda by default. Override the worker
+# count with KAFKA_XDIST (e.g. `make test-kafka KAFKA_XDIST=4`; KAFKA_XDIST=0 runs serially).
+# Broker config is env-overridable: CALF_TEST_KAFKA_BOOTSTRAP (reuse an external broker, no
+# container), CALF_TEST_REDPANDA_IMAGE, CALF_TEST_REDPANDA_SMP, CALF_TEST_REDPANDA_MEMORY.
+KAFKA_XDIST ?= auto
+
 test-kafka:
-	@echo "Running real-broker (Redpanda) tests... (requires Docker)"
-	@uv run --group integration pytest -m kafka -v --timeout=120
+	@echo "Running real-broker (Redpanda) tests... (requires Docker; -n $(KAFKA_XDIST))"
+	@uv run --group integration pytest tests/integration -m kafka -n $(KAFKA_XDIST) --timeout=120
 
 test-live:
 	@echo "Running live model-API tests... (requires OPENAI_API_KEY + TEST_LLM_MODEL_NAME)"
