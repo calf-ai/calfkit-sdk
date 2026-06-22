@@ -270,6 +270,19 @@ class TestToolSurfaceContract:
         with pytest.raises(ValueError, match="duplicate tool name"):
             agent.add_tools(make_tool_node("add"))
 
+    def test_add_tools_discover_onto_named_raises(self) -> None:
+        # The contract re-validates the FULL accumulated surface: a discover handle added onto
+        # an agent that already holds a named Tools is the discover-exclusivity violation.
+        agent = make_agent(Tools("add"))
+        with pytest.raises(ValueError, match="tool-node surface"):
+            agent.add_tools(Tools(discover=True))
+
+    def test_add_tools_named_onto_discover_raises(self) -> None:
+        # ...and the reverse: a named Tools added onto an agent already in discover mode.
+        agent = make_agent(Tools(discover=True))
+        with pytest.raises(ValueError, match="tool-node surface"):
+            agent.add_tools(Tools("add"))
+
     def test_add_tools_accumulates_disjoint_surfaces(self) -> None:
         agent = make_agent(make_tool_node("add"))
         agent.add_tools(make_tool_node("sub"))
@@ -278,12 +291,14 @@ class TestToolSurfaceContract:
         assert agent._tool_selectors == [Tools("mul")]
 
     def test_add_tools_raise_leaves_surface_unchanged(self) -> None:
-        # validate-before-commit: a failed add must not mutate the live surface.
+        # validate-before-commit: a failed add must not mutate the live surface — all three
+        # pieces of tool-surface state (bindings, selectors, eager tool nodes) stay as they were.
         agent = make_agent(make_tool_node("add"))
         with pytest.raises(ValueError, match="duplicate tool name"):
             agent.add_tools(make_tool_node("add"))
         assert [b.name for b in agent.tools] == ["add"]
         assert agent._tool_selectors == []
+        assert [n.name for n in agent._eager_tool_nodes] == ["add"]
 
 
 class TestDiscoverDiagnostics:
@@ -314,6 +329,21 @@ class TestDiscoverDiagnostics:
         assert any("discover mode resolved 0 tool node(s)" in r.getMessage() for r in caplog.records)
         # An empty cluster is a legitimate state, not a misconfiguration — no WARNING (don't cry wolf).
         assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_discover_with_poisoned_record_warns_and_binds_the_healthy(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A poisoned tool record (empty dispatch_topic fails ToolBinding expansion) degrades to
+        # invalid_targets: the healthy node still binds, the unresolved WARNING names the poisoned
+        # one, and the DEBUG count reflects the successfully-resolved nodes.
+        agent = make_agent(Tools(discover=True))
+        registry: dict[str, ToolBinding] = {}
+        # Override dispatch_topic to "" directly: make_tool_record's `dispatch=` param coalesces ""
+        # to the default, so poison it via the override (empty topic fails ToolBinding expansion).
+        view = _FakeView({"add": make_tool_record("add"), "broken": make_tool_record("broken", dispatch_topic="")})
+        with caplog.at_level("DEBUG"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
+        assert "add" in registry and "broken" not in registry  # healthy survives, poisoned dropped
+        assert any("discover mode resolved 1 tool node(s)" in r.getMessage() for r in caplog.records)
+        assert any(r.levelname == "WARNING" and "broken" in r.getMessage() for r in caplog.records)
 
     def test_discover_against_degraded_view_still_warns_and_binds(self, caplog: pytest.LogCaptureFixture) -> None:
         class _DegradedView(_FakeView):

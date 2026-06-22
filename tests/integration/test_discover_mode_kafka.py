@@ -88,15 +88,15 @@ async def _wait(predicate: Callable[[], bool], *, timeout: float, what: str) -> 
     raise AssertionError(f"timed out after {timeout}s waiting for: {what}")
 
 
-async def _await_capability(bootstrap: str, node_id: str, *, timeout: float) -> None:
-    """Block until ``node_id``'s CapabilityRecord is live on ``calf.capabilities``, so the
-    agent's view catch-up includes it and ``Tools(discover=True)`` enumerates it."""
+async def _await_view(bootstrap: str, predicate: Callable[[ControlPlaneView[CapabilityRecord]], bool], *, timeout: float, what: str) -> None:
+    """Open a transient capability view, wait for ``predicate`` over it, then close it — so the
+    agent's view catch-up will include whatever the predicate confirmed is live."""
     view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
         bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
     )
     try:
         await view.start()
-        await _wait(lambda: view.get(node_id) is not None, timeout=timeout, what=f"capability record {node_id!r}")
+        await _wait(lambda: predicate(view), timeout=timeout, what=what)
     finally:
         await view.stop()
 
@@ -121,6 +121,17 @@ async def test_discover_finds_all_separately_deployed_tool_nodes(kafka_bootstrap
         tools=[Tools(discover=True)],  # no names — discover every live tool node
     )
 
+    advertised: dict[str, Any] = {}  # bare tool name -> parameters_json_schema, read straight from the view records
+
+    def _both_advertised(view: ControlPlaneView[CapabilityRecord]) -> bool:
+        records = [view.get(add_name), view.get(mul_name)]
+        if any(record is None for record in records):
+            return False
+        advertised.clear()
+        for record in records:
+            advertised.update({t.name: t.parameters_json_schema for t in record.tools or []})
+        return True
+
     driver = Client.connect(kafka_bootstrap)
     # SEPARATE workers per tool node — the cross-process property under test.
     add_worker = _worker(kafka_bootstrap, nodes=[_add_tool(add_name)], control_plane=control_plane)
@@ -128,9 +139,9 @@ async def test_discover_finds_all_separately_deployed_tool_nodes(kafka_bootstrap
     agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
 
     async with add_worker, mul_worker:
-        # the agent's view must materialize BOTH separately-published records before it runs
-        await _await_capability(kafka_bootstrap, add_name, timeout=60)
-        await _await_capability(kafka_bootstrap, mul_name, timeout=60)
+        # the agent's view must materialize BOTH separately-published records before it runs;
+        # capture what each node advertised (the source of truth the agent reads) in the same pass
+        await _await_view(kafka_bootstrap, _both_advertised, timeout=60, what=f"advertised tools for {add_name!r} and {mul_name!r}")
         async with agent_worker:
             result = await driver.execute("add 2 and 3", agent_in, timeout=120)
 
@@ -144,6 +155,11 @@ async def test_discover_finds_all_separately_deployed_tool_nodes(kafka_bootstrap
     assert pov, "the model never captured the agent's tool POV"
     mine = {name for name in pov if name.startswith(topic_namespace)}
     assert mine == {add_name, mul_name}
+
+    # 3) the model's POV SCHEMAS == what each tool node advertised on the view, discovered at
+    #    runtime (nothing baked in). For a tool node the LLM-facing name is the bare node_id, so
+    #    pov[name] and advertised[name] key alike.
+    assert {n: pov[n].parameters_json_schema for n in mine} == {n: advertised[n] for n in mine}
 
     await driver.close()
     await add_worker._client.close()
