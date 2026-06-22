@@ -20,7 +20,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from calfkit.nodes._projection import project
+from calfkit.nodes._projection import project, structured_output_preamble
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
@@ -226,6 +226,133 @@ def test_native_prompted_surface_is_text():
     out = project(history, viewer="scheduler")
 
     assert '<researcher>\n{"flights": 3}' in _user_prompt_texts(out)
+
+
+def test_multi_output_union_final_result_is_surfaced():
+    """A multi-output union renames the tool final_result_<Type>; it must still surface cross-agent.
+
+    pydantic-ai sets ``multiple=True`` for a 2+-output union and renames each output tool
+    ``final_result_<TypeName>`` (``_output.py`` ``OutputToolset.build``). The exact-name match
+    used to drop the renamed tool, omitting the whole structured turn.
+    """
+    history: list[ModelMessage] = [
+        _response(TextPart(content="scheduler text"), name="scheduler"),
+        _response(
+            ToolCallPart(tool_name="final_result_SomeModel", args={"b": 2, "a": 1}, tool_call_id="c1"),
+            name="researcher",
+        ),
+    ]
+
+    out = project(history, viewer="scheduler")
+
+    assert '<researcher>\n{"a":1,"b":2}' in _user_prompt_texts(out)
+
+
+def test_multi_output_union_preamble_is_detected():
+    """structured_output_preamble must detect a renamed final_result_<Type> tool call (tool mode).
+
+    A union output is still tool mode, so the response's TextPart is a genuine preamble distinct
+    from the structured answer. The exact-name match used to miss the renamed tool and wrongly
+    return "" (treating it as native/prompted, dropping the preamble on the client path).
+    """
+    new_messages: list[ModelMessage] = [
+        _response(
+            TextPart(content="On it."),
+            ToolCallPart(tool_name="final_result_SomeModel", args={"flights": 3}, tool_call_id="c1"),
+            name="researcher",
+        ),
+    ]
+
+    assert structured_output_preamble(new_messages) == "On it."
+
+
+def test_structured_output_preamble_no_response_returns_empty():
+    """No ModelResponse in the run's new messages → no preamble (defensive guard)."""
+    assert structured_output_preamble([_user("hello")]) == ""
+
+
+def test_handoff_shaped_union_member_is_surfaced():
+    """The agent-mesh case: a final_result_HandoffRequest union member surfaces cross-agent.
+
+    A handoff models control transfer as a structured-output union member; in tool mode it is a
+    renamed output tool whose args carry the member's fields directly. The handing agent's
+    structured handoff output must reach the receiving agent.
+    """
+    history: list[ModelMessage] = [
+        _response(
+            ToolCallPart(
+                tool_name="final_result_HandoffRequest",
+                args={"name": "refunds", "message": "escalating"},
+                tool_call_id="h1",
+            ),
+            name="triage",
+        ),
+    ]
+
+    out = project(history, viewer="refunds")
+
+    assert '<triage>\n{"message":"escalating","name":"refunds"}' in _user_prompt_texts(out)
+
+
+def test_ordinary_function_tool_call_is_not_surfaced():
+    """An ordinary (non-output) function tool call is internal → never surfaced cross-agent.
+
+    Guards the ``final_result*`` prefix heuristic: only the output-tool namespace surfaces. A
+    function tool (here ``search``) has its own name and stays dropped.
+    """
+    history: list[ModelMessage] = [
+        _response(TextPart(content="scheduler text"), name="scheduler"),
+        _response(
+            ToolCallPart(tool_name="search", args={"q": "flights"}, tool_call_id="c1"),
+            name="researcher",
+        ),
+    ]
+
+    out = project(history, viewer="scheduler")
+
+    # the search tool call produces no surface → no <researcher> request emitted
+    assert not any("<researcher>" in t for t in _user_prompt_texts(out))
+
+
+def test_prefix_lookalike_function_tool_is_not_surfaced():
+    """A function tool sharing the 'final_result' prefix WITHOUT the '_' separator
+    (e.g. 'final_results') must NOT be mistaken for an output tool.
+
+    Guards the ``startswith(_FINAL_RESULT_TOOL_NAME + "_")`` separator: dropping the
+    ``+ "_"`` would silently start surfacing such a function tool cross-agent (a leak).
+    """
+    history: list[ModelMessage] = [
+        _response(TextPart(content="scheduler text"), name="scheduler"),
+        _response(
+            ToolCallPart(tool_name="final_results", args={"q": "x"}, tool_call_id="c1"),
+            name="researcher",
+        ),
+    ]
+
+    out = project(history, viewer="scheduler")
+
+    assert not any("<researcher>" in t for t in _user_prompt_texts(out))
+
+
+def test_renamed_union_tool_empty_args_is_omitted():
+    """A renamed (union) output tool with falsy args produces no surface → turn omitted (§5.5).
+
+    Locks the ``if p.args:`` truthiness branch for the renamed namespace — the agent-mesh
+    handoff case (an empty ``final_result_HandoffRequest`` must still be omitted, not
+    surfaced as ``<author>\\n{}``).
+    """
+    for empty in (None, {}):
+        history: list[ModelMessage] = [
+            _response(TextPart(content="scheduler text"), name="scheduler"),
+            _response(
+                ToolCallPart(tool_name="final_result_SomeModel", args=empty, tool_call_id="c1"),
+                name="researcher",
+            ),
+        ]
+
+        out = project(history, viewer="scheduler")
+
+        assert not any("<researcher>" in t for t in _user_prompt_texts(out))
 
 
 def test_user_prefix_no_name():

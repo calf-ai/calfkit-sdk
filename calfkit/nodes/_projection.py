@@ -18,8 +18,8 @@ the viewer would miss a single other-agent's history.)
 
 ``structured_output_preamble`` is the client-facing sibling (§7): given a run's
 new messages it returns the tool-mode text preamble that accompanies a structured
-answer. It lives here because it shares the ``final_result``/``TextPart`` shape
-with the projection surface (``_surface``).
+answer. It lives here because it shares the output-tool (``final_result*``, via
+``_is_output_tool``) / ``TextPart`` shape with the projection surface (``_surface``).
 """
 
 from __future__ import annotations
@@ -40,15 +40,33 @@ from calfkit._vendor.pydantic_ai.messages import (
 
 logger = logging.getLogger(__name__)
 
-# The default name pydantic-ai gives the structured-output tool (§5.5). A user
-# who customizes it via ``ToolOutput(Model, name=...)`` is a documented
-# limitation (§16): its structured answer is not surfaced cross-agent.
+# The base name pydantic-ai gives the structured-output tool (§5.5). For a single
+# output it is exactly ``final_result``; for a 2+-output union it sets
+# ``multiple=True`` and renames each output tool ``final_result_<TypeName>``
+# (``_output.py`` ``OutputToolset.build``). ``_is_output_tool`` recognizes both. A
+# user who customizes it via ``ToolOutput(Model, name=...)`` falls outside this
+# namespace and is the documented limitation (§16): not surfaced cross-agent.
 _FINAL_RESULT_TOOL_NAME = "final_result"
 
 # Fallback author for an un-``name``d ``ModelResponse`` (legacy / pre-feature
 # histories). Treated as "other"; the prefix becomes ``<unknown>`` once the
 # author is wrapped in angle brackets (§5.3, §5.4).
 _UNKNOWN_AUTHOR = "unknown"
+
+
+def _is_output_tool(tool_name: str) -> bool:
+    """True for the auto-named structured-output tool(s) (§5.5).
+
+    pydantic-ai names the output tool ``final_result`` for a single output, and
+    ``final_result_<TypeName>`` for each member of a multi-output union
+    (``_output.py`` ``OutputToolset.build``, ``multiple=True``). Both must be
+    surfaced cross-agent. ``final_result*`` is treated as pydantic-ai's reserved
+    output-tool namespace: a user-customized ``ToolOutput(name=...)`` falls outside
+    it and remains the documented limitation (§16, not surfaced), while a *function*
+    tool a user names ``final_result_*`` would be matched here and mis-surfaced — so
+    keep function-tool names out of that namespace (§16).
+    """
+    return tool_name == _FINAL_RESULT_TOOL_NAME or tool_name.startswith(_FINAL_RESULT_TOOL_NAME + "_")
 
 
 def project(history: list[ModelMessage], viewer: str) -> list[ModelMessage]:
@@ -83,11 +101,12 @@ def structured_output_preamble(new_messages: list[ModelMessage]) -> str:
     """Text preamble accompanying a **tool-mode** structured final output (§7).
 
     Returns the concatenated ``TextPart`` text of the run's last ``ModelResponse``
-    **only** when that response also carries a ``final_result`` tool call — i.e.
-    tool mode (the default), where the text is a genuine preamble distinct from the
-    structured answer. In ``native``/``prompted`` mode the response's ``TextPart``
-    *is* the JSON answer (no ``final_result`` call), so this returns ``""`` to avoid
-    duplicating the structured value alongside the ``DataPart``.
+    **only** when that response also carries an output tool call
+    (``final_result`` or, for a multi-output union, ``final_result_<Type>`` — see
+    ``_is_output_tool``) — i.e. tool mode (the default), where the text is a genuine
+    preamble distinct from the structured answer. In ``native``/``prompted`` mode the
+    response's ``TextPart`` *is* the JSON answer (no output tool call), so this returns
+    ``""`` to avoid duplicating the structured value alongside the ``DataPart``.
 
     Reads via the vendored ``TextPart`` because ``new_messages`` are vendored
     message objects; ``calfkit.models.payload.TextPart`` is a different type.
@@ -95,7 +114,7 @@ def structured_output_preamble(new_messages: list[ModelMessage]) -> str:
     final_resp = next((m for m in reversed(new_messages) if isinstance(m, ModelResponse)), None)
     if final_resp is None:
         return ""
-    has_final_result = any(p.tool_name == _FINAL_RESULT_TOOL_NAME for p in final_resp.tool_calls)
+    has_final_result = any(_is_output_tool(p.tool_name) for p in final_resp.tool_calls)
     if not has_final_result:
         return ""  # native/prompted: the TextPart is the answer, not a preamble
     return "".join(p.content for p in final_resp.parts if isinstance(p, TextPart))
@@ -233,7 +252,8 @@ def _prefix_user_prompt(p: UserPromptPart) -> UserPromptPart:
 def _surface(m: ModelResponse) -> str:
     """Compute the public surface of an other-agent ``ModelResponse`` (§5.5).
 
-    surface = concatenated ``TextPart`` text(s) + rendered ``final_result`` args,
+    surface = concatenated ``TextPart`` text(s) + rendered output-tool args
+    (``final_result`` / ``final_result_<Type>``, see ``_is_output_tool``),
     non-empty components joined with a single ``"\\n"``.
     """
     components: list[str] = []
@@ -241,7 +261,7 @@ def _surface(m: ModelResponse) -> str:
         if isinstance(p, TextPart):
             if p.content:
                 components.append(p.content)
-        elif isinstance(p, ToolCallPart) and p.tool_name == _FINAL_RESULT_TOOL_NAME:
+        elif isinstance(p, ToolCallPart) and _is_output_tool(p.tool_name):
             # Branch on truthiness of args directly (NOT the rendered string, and
             # NOT has_content() which drops {"x": 0}). (§5.5)
             if p.args:
@@ -254,7 +274,8 @@ def _surface(m: ModelResponse) -> str:
                     components.append(_render_structured_args(p))
                 except Exception:
                     logger.warning(
-                        "could not render final_result args for projection surface (tool_call_id=%s); omitting structured component",
+                        "could not render output-tool args for projection surface (tool_name=%s tool_call_id=%s); omitting structured component",
+                        p.tool_name,
                         p.tool_call_id,
                         exc_info=True,
                     )
