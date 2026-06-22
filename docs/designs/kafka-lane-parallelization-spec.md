@@ -1,7 +1,7 @@
 # Spec: parallelize the real-broker (`kafka`) integration lane
 
-Status: **proposed** (design converged 2026-06-22). Test-infrastructure change; no production
-code changes.
+Status: **accepted** — implemented in PR #278 (2026-06-22). Test-infrastructure change; no
+production code changes.
 
 ## 1. Summary
 
