@@ -35,7 +35,9 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
 
     * each entry of ``subscribe_topics`` (the node's public inbox(es)),
     * the node's framework-private ``_return_topic`` (tool ReturnCall /
-      built-in TailCall inbox — issue #141), and
+      built-in TailCall inbox — issue #141),
+    * the node's framework-private ``_private_input_topic`` (the deterministic
+      name-scoped inbound inbox every node subscribes to — ADR-0017), and
     * ``publish_topic`` when set.
 
     Agent nodes additionally contribute each tool binding's dispatch topic
@@ -57,6 +59,7 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
         for topic in node.subscribe_topics:
             _add(topic)
         _add(node._return_topic)
+        _add(node._private_input_topic)
         _add(node.publish_topic)
 
         tools = getattr(node, "tools", None)
@@ -65,6 +68,27 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
                 _add(binding.dispatch_topic)
 
     return list(seen)
+
+
+def framework_topics_for_nodes(nodes: Iterable[Any]) -> set[str]:
+    """The framework-owned topics referenced by ``nodes`` (the single authority).
+
+    **Experimental** (part of the opt-in provisioning API; pre-1.0).
+
+    Framework-private topics are the ones that must never receive user
+    ``topic_configs`` (:func:`provision_topics` excludes them from
+    ``cleanup.policy`` / ``retention.ms`` overrides): each node's
+
+    * ``_return_topic`` — the continuation inbox (tool ReturnCall / built-in
+      TailCall, issue #141), and
+    * ``_private_input_topic`` — the deterministic name-scoped inbound inbox
+      every node subscribes to (ADR-0017).
+
+    Every provisioning surface (the worker's startup ensurer and the
+    ``ck topics provision`` CLI) derives its framework set from here, so a new
+    framework-owned topic is added in exactly one place.
+    """
+    return {topic for node in nodes for topic in (node._return_topic, node._private_input_topic)}
 
 
 @dataclass
@@ -397,6 +421,7 @@ __all__ = [
     "ProvisionReport",
     "TopicProvisioner",
     "TopicProvisioningError",
+    "framework_topics_for_nodes",
     "provision_topics",
     "topics_for_nodes",
 ]

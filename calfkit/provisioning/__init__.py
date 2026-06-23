@@ -13,6 +13,7 @@ from calfkit.provisioning.provisioner import (
     ProvisionReport,
     TopicProvisioner,
     TopicProvisioningError,
+    framework_topics_for_nodes,
     provision_topics,
     topics_for_nodes,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "StartupTopicEnsurer",
     "TopicProvisioner",
     "TopicProvisioningError",
+    "framework_topics_for_nodes",
     "provision_topics",
     "topics_for_nodes",
 ]

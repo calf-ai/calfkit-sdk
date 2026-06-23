@@ -14,8 +14,10 @@ from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
+from calfkit.controlplane import ControlPlaneStamp, advertises
 from calfkit.exceptions import DeserializationError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
+from calfkit.models.agents import AGENTS_TOPIC, AgentCard
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.node_result import _extract_text, extract_lenient
 from calfkit.models.payload import RETRY_MARKER, ContentPart, is_retry
@@ -43,6 +45,7 @@ class BaseAgentNodeDef(
         name: str,
         *,
         system_prompt: str = "You are a helpful AI assistant.",
+        description: str | None = None,
         subscribe_topics: str | list[str],
         publish_topic: str | None = None,
         before_node: _SeamArg = None,
@@ -57,6 +60,9 @@ class BaseAgentNodeDef(
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
+        # Public directory blurb (distinct from system_prompt) advertised on the
+        # AgentCard — the only card content beyond identity + liveness (ADR-0015).
+        self._description = description
         self.tools: list[ToolBinding] = []
         self._tool_selectors: list[ToolSelector] = []
         self._eager_tool_nodes: list[BaseToolNodeDef] = []
@@ -91,6 +97,20 @@ class BaseAgentNodeDef(
             # @resource never runs under the synchronous TestKafkaBroker — offline, the test harness
             # injects a fake into the bag instead (tests/providers.py::prepare_worker).
             self.resource(name=FANOUT_STORE_KEY)(self._fanout_store_resource)
+
+    @advertises(topic=AGENTS_TOPIC, record=AgentCard)
+    def _agent_card_advert(self, stamp: ControlPlaneStamp) -> AgentCard:
+        """Advertise this agent on the shared ``calf.agents`` plane (always-on, no opt-out — L7).
+
+        Static-content advertiser: the directory ``description`` is fixed at construction, so
+        the factory reads ``self._description`` directly — no session, nothing that can fail at
+        publish time. Identity (the agent's name) is the wire key, never in the value;
+        ``node_kind`` ("agent") rides on the worker stamp. The card carries no input topic (the
+        caller derives ``agent.{name}.private.input``, ADR-0017), no system prompt, no tool list
+        — the minimal card. Splatting the bare stamp (never a record) honours the
+        ``@advertises`` duplicate-kwarg contract.
+        """
+        return AgentCard(**stamp.model_dump(), description=self._description)
 
     async def _fanout_store_resource(self, ctx: ResourceSetupContext["BaseAgentNodeDef[AgentOutputT]"]) -> AsyncIterator[FanoutBatchStore]:
         """Open this fan-out agent's durable batch store for the worker's lifetime.

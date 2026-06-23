@@ -17,6 +17,7 @@ from calfkit.provisioning import (
     ProvisionReport,
     TopicProvisioner,
     TopicProvisioningError,
+    framework_topics_for_nodes,
     topics_for_nodes,
 )
 from calfkit.provisioning import provisioner as provisioner_mod
@@ -136,6 +137,37 @@ def test_topics_for_nodes_dedupes_order_preserving() -> None:
     # Order-preserving: first-seen wins. "shared.in" precedes a.out which
     # precedes b.out.
     assert topics.index("shared.in") < topics.index("a.out") < topics.index("b.out")
+
+
+def test_topics_for_nodes_includes_private_input_topic() -> None:
+    # ADR-0017: every node's framework-owned inbound inbox is provisioned too.
+    node = _tool_node("echo", sub="echo.in", pub="echo.out")
+
+    topics = topics_for_nodes([node])
+
+    assert node._private_input_topic in topics
+    assert node._private_input_topic == "tool.echo.private.input"
+
+
+def test_framework_topics_for_nodes_returns_return_and_input_inboxes() -> None:
+    # The single authority for framework-owned topics (never user topic_configs):
+    # each node's private return inbox + private input inbox (C1 fix; ADR-0017).
+    node = _tool_node("echo", sub="echo.in", pub="echo.out")
+
+    assert framework_topics_for_nodes([node]) == {node._return_topic, node._private_input_topic}
+    assert framework_topics_for_nodes([node]) == {"echo.private.return", "tool.echo.private.input"}
+
+
+def test_framework_topics_for_nodes_unions_across_nodes() -> None:
+    a = _tool_node("a", sub="a.in", pub="a.out")
+    b = _tool_node("b", sub="b.in", pub="b.out")
+
+    assert framework_topics_for_nodes([a, b]) == {
+        "a.private.return",
+        "tool.a.private.input",
+        "b.private.return",
+        "tool.b.private.input",
+    }
 
 
 # ---------------------------------------------------------------------------

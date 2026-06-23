@@ -96,8 +96,8 @@ def provision(
     release — calfkit is pre-1.0).
 
     Resolves ``--nodes module:attr`` specs, computes the full topic set
-    (subscribe inboxes, framework return inboxes, publish topics, and agent
-    tool inputs), then best-effort creates them.
+    (subscribe inboxes, framework return + name-scoped private input inboxes,
+    publish topics, and agent tool inputs), then best-effort creates them.
 
     This is a **development convenience** (no ACLs; ``--replication-factor 1``
     is the default and is not durable). In production, topics are typically
@@ -107,6 +107,7 @@ def provision(
         ProvisioningConfig,
         TopicProvisioner,
         TopicProvisioningError,
+        framework_topics_for_nodes,
         topics_for_nodes,
     )
 
@@ -115,7 +116,9 @@ def provision(
     validate_nodes(node_list, source_label="--nodes")
 
     topics = topics_for_nodes(node_list)
-    framework_topics = {node._return_topic for node in node_list}
+    # The single framework-topic authority (shared with the worker): each node's
+    # private return + private input inboxes, never given user topic_configs.
+    framework_topics = framework_topics_for_nodes(node_list)
 
     if not topics:
         typer.echo("No topics to provision (no nodes resolved).")

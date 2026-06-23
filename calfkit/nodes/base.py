@@ -1777,3 +1777,33 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         they target the tool's input topic, not ``_return_topic``.
         """
         return f"{self.node_id}.private.return"
+
+    @property
+    def _private_input_topic(self) -> str:
+        """Framework-private, name-scoped INBOUND inbox for this node instance (ADR-0017).
+
+        The inbound parallel to :meth:`_return_topic` (the continuation inbox): a
+        deterministic ``{node_kind}.{name}.private.input`` any caller can derive from
+        this node's name alone — the addressing primitive agent-to-agent messaging
+        builds on (the ``AgentCard`` carries no topic; the caller derives
+        ``agent.{name}.private.input``). It is contributed at registration like
+        ``_return_topic`` — read by :meth:`Worker.register_handlers` and the startup
+        provisioner and flagged **framework-owned** (never receives user
+        ``topic_configs``) — *not* appended into ``subscribe_topics`` in ``__init__``
+        (the ``@dataclass`` tool/MCP node ``__init__``s bypass ``BaseNodeDef.__init__``,
+        so a list-append would silently miss them).
+
+        **Universal, dormant for non-agents in v1.** Every node kind exposes and
+        subscribes to its inbox, but only agents are dispatched to today — for a tool
+        or consumer the inbox is provisioned and consumed yet receives no traffic. The
+        dormancy contract is "no producer targets it," not "it is a safe sink": a stray
+        non-``ToolCallRef`` body delivered here carries no ``x-calf-kind`` header, so it
+        is classified ``"call"`` (run as an invocation), not floored — harmless only
+        because nothing publishes here in v1.
+
+        Recomputed from identity on every access (like ``_return_topic``); do not mutate
+        ``node_id`` after registration. Uses ``self.name``, which aliases ``node_id``
+        today; the divergence from ``_return_topic``'s ``self.node_id`` is intentional
+        name-centric addressing (spec §4.1), not an inconsistency to "fix".
+        """
+        return f"{self._node_kind}.{self.name}.private.input"

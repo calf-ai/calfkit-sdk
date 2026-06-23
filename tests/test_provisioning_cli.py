@@ -314,6 +314,39 @@ def test_partitions_and_replication_factor_flow_to_new_topic(monkeypatch) -> Non
     assert all(nt.replication_factor == 2 for nt in seen)
 
 
+def test_private_input_topic_classified_framework_owned(monkeypatch) -> None:  # noqa: ANN001
+    """C1/ADR-0017: the CLI must classify every node's private INPUT inbox as
+    framework-owned (via the single ``framework_topics_for_nodes`` authority), not as
+    a data topic. The CLI sets no ``topic_configs`` today, so the classification is
+    asserted at the ``provision()`` seam rather than via an observable config."""
+    from typer.testing import CliRunner
+
+    from calfkit.cli.topics import app
+    from calfkit.provisioning import ProvisionReport, TopicProvisioner
+    from tests import provisioning_cli_nodes
+
+    captured: dict[str, set[str]] = {}
+
+    async def _spy_provision(self, topics, *, framework_topics):  # noqa: ANN001, ANN202
+        captured["topics"] = set(topics)
+        captured["framework_topics"] = set(framework_topics)
+        return ProvisionReport()
+
+    monkeypatch.setattr(TopicProvisioner, "provision", _spy_provision)
+
+    result = CliRunner().invoke(
+        app,
+        ["provision", "--nodes", "tests.provisioning_cli_nodes:nodes", "--bootstrap-servers", "localhost:9092"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    expected_inputs = {n._private_input_topic for n in provisioning_cli_nodes.nodes}
+    expected_returns = {n._return_topic for n in provisioning_cli_nodes.nodes}
+    assert expected_inputs <= captured["topics"]  # provisioned at all
+    assert expected_inputs <= captured["framework_topics"]  # AND classified framework-owned
+    assert expected_returns <= captured["framework_topics"]  # return inboxes unchanged
+
+
 def test_unauthorized_report_branch_prints_line(monkeypatch) -> None:  # noqa: ANN001
     """An unauthorized (code 29) topic prints the unauthorized summary line."""
     from typer.testing import CliRunner
