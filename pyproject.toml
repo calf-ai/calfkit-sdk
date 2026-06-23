@@ -35,7 +35,12 @@ dependencies = [
     "typing-inspection>=0.4.0",
     "opentelemetry-api>=1.28.0",
     "genai-prices>=0.0.48",
-    "pydantic-graph>=1.47.0",
+    # pydantic-graph capped to <2: the vendored pydantic-ai (v1.47.0) imports the
+    # BaseNode-based runner and the `pydantic_graph.beta`/`pydantic_graph.nodes`
+    # modules, all of which were removed in 2.0.0 (upstream's own deprecation
+    # warning instructs pinning to `<2` to keep using them). 2.0.0 makes calfkit
+    # entirely unimportable (ModuleNotFoundError: No module named 'pydantic_graph.beta').
+    "pydantic-graph>=1.47.0,<2",
     "exceptiongroup>=1.2.2; python_version < '3.11'",
     # Provider SDKs
     "openai>=1.0.0",
