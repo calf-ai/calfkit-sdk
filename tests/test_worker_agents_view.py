@@ -105,9 +105,11 @@ class TestAgentsViewRegistration:
         assert AGENTS_VIEW_RESOURCE_KEY not in worker_resource_names(worker)
 
     def test_registered_when_a_node_has_peers(self) -> None:
-        # PR-B sets `_peers`; stub it to prove the gate wires the resource.
-        agent = make_agent()
-        agent._peers = [object()]  # type: ignore[attr-defined]
+        # PR-B: a real `Messaging` handle sets `_peers`, activating the dormant gate.
+        from calfkit.nodes.agent import Agent
+        from calfkit.nodes.peers import Messaging
+
+        agent = Agent("planner", subscribe_topics="planner.in", model_client=_FakeModel(), peers=[Messaging("billing")])
         worker = Worker(Client.connect("kafka:9092"), nodes=[agent])
         worker._maybe_register_agents_view()
         assert AGENTS_VIEW_RESOURCE_KEY in worker_resource_names(worker)

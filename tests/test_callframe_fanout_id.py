@@ -85,3 +85,46 @@ def test_invoke_frame_sets_caller_tag_on_frame() -> None:
     ws = WorkflowState(call_stack=Stack())
     ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb", tag="tc1")
     assert ws.current_frame.tag == "tc1"
+
+
+# ── ADR-0016: per-frame caller identity for the messaging cycle guard ─────────
+
+
+def test_callframe_caller_node_defaults_none() -> None:
+    f = CallFrame(target_topic="t", callback_topic="cb")
+    assert f.caller_node_id is None and f.caller_node_kind is None
+
+
+def test_callframe_carries_caller_node() -> None:
+    f = CallFrame(target_topic="t", callback_topic="cb", caller_node_id="planner", caller_node_kind="agent")
+    assert f.caller_node_id == "planner" and f.caller_node_kind == "agent"
+
+
+def test_invoke_frame_stamps_caller_node() -> None:
+    # ADR-0016: the cycle guard records the DISPATCHING node's identity on the pushed callee frame, so
+    # the accumulated inbound stack carries the ancestor chain. invoke_frame takes caller_node_id/kind.
+    ws = WorkflowState(call_stack=Stack())
+    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb", caller_node_id="planner", caller_node_kind="agent")
+    assert ws.current_frame.caller_node_id == "planner"
+    assert ws.current_frame.caller_node_kind == "agent"
+
+
+def test_invoke_frame_caller_node_defaults_none() -> None:
+    ws = WorkflowState(call_stack=Stack())
+    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb")
+    assert ws.current_frame.caller_node_id is None and ws.current_frame.caller_node_kind is None
+
+
+def test_mark_fanout_preserves_caller_node() -> None:
+    # replace() preserves unlisted fields, so the cycle-guard identity survives fan-out marking
+    # (the caller is NEVER re-stamped to self — that would manufacture a false self-cycle).
+    ws = WorkflowState(call_stack=Stack())
+    ws.invoke_frame(Call(target_topic="t", state=State()), callback_topic="cb", frame_id="A", caller_node_id="planner", caller_node_kind="agent")
+    ws.mark_fanout()
+    assert ws.current_frame.caller_node_id == "planner" and ws.current_frame.fanout_id == "A"
+
+
+def test_workflowstate_roundtrips_caller_node() -> None:
+    ws = WorkflowState(call_stack=Stack([CallFrame(target_topic="t", callback_topic="cb", caller_node_id="planner", caller_node_kind="agent")]))
+    rt = WorkflowState.model_validate_json(ws.model_dump_json())
+    assert rt.current_frame.caller_node_id == "planner" and rt.current_frame.caller_node_kind == "agent"

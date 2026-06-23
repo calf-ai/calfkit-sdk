@@ -141,3 +141,16 @@ class TestAgentResolveSlot:
         result = ctx.state.get_tool_result("t1")
         assert isinstance(result, RetryPromptPart)
         assert result.content == "the real error"  # the MARKED text, never the unmarked "preamble"
+
+    def test_message_agent_reply_serializes_all_parts(self) -> None:
+        # A message_agent peer reply is serialized WHOLE — every part (Text verbatim + Data JSON),
+        # newline-joined — NOT extract_lenient (which returns the DataPart's dict FIRST and drops the
+        # Text preamble). Discriminated at fold time via state.tool_calls[tag].tool_name == "message_agent"
+        # (§5.2 / L3). Here a [TextPart preamble + DataPart] reply must keep both.
+        ctx = _seam_ctx()
+        ctx.state.add_tool_call(ToolCallPart(tool_name="message_agent", args={"name": "b", "message": "hi"}, tool_call_id="t1"))
+        parts = [TextPart(text="Balance:"), DataPart(data={"balance": 42})]
+        _agent()._resolve_slot(ctx, _SlotResolved(frame_id="f1", tag="t1", target_topic="agent.b.private.input", parts=parts, handled=False))
+        result = ctx.state.get_tool_result("t1")
+        assert isinstance(result, ToolReturn)
+        assert result.return_value == 'Balance:\n{"balance":42}'  # both parts, not just the DataPart dict

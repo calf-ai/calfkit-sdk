@@ -74,3 +74,14 @@ class AgentCard(ControlPlaneRecord):
 
     schema_version: int = AGENT_CARD_SCHEMA_VERSION
     description: str | None = Field(default=None, max_length=AGENT_CARD_DESCRIPTION_MAX)
+
+
+def derive_input_topic(name: str) -> str:
+    """The private input topic for an agent peer, derived from its name alone (ADR-0017).
+
+    A caller addresses a peer it found in the ``calf.agents`` directory without being told the topic
+    (the :class:`AgentCard` carries no topic field — it is derivable). Hard-codes the ``agent.`` kind
+    because only agents advertise on ``calf.agents`` (the agent-to-agent addressing contract); parallels
+    the base node's ``_private_input_topic`` (``{node_kind}.{name}.private.input``) for the agent kind.
+    """
+    return f"agent.{name}.private.input"

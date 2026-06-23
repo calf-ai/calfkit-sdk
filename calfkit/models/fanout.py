@@ -49,10 +49,12 @@ class FanoutOpen(BaseModel):
     node_id: str
     """Diagnostic/self-describing record field, not read at runtime: the batch is
     namespaced by topic (``calf.fanout.{node_id}.*``) and keyed by ``fanout_id``."""
-    expected: list[SlotRef] = Field(..., min_length=2)
-    """The full slot set, fixed at OPEN. Only a true fan-out (N >= 2) registers; a
-    single ``Call`` / batch-of-one is never registered (it is a stateless continuation).
-    ``min_length=2`` makes an empty/singleton batch unrepresentable at the type."""
+    expected: list[SlotRef] = Field(..., min_length=1)
+    """The full slot set, fixed at OPEN. A batch registers iff the caller's state must survive the call
+    independently of the round-trip: a true fan-out (N >= 2), OR a single ``isolate_state`` call (a lone
+    ``message_agent`` — a degenerate one-element batch that snapshots/restores the caller's state, L13).
+    An *unflagged* single ``Call`` / 1-element ``list`` stays a stateless continuation and never registers
+    here. ``min_length=1`` keeps an empty batch unrepresentable while admitting the singleton."""
 
 
 class FanoutOutcome(BaseModel):

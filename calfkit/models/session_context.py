@@ -66,6 +66,19 @@ class CallFrame:
     ``None`` on every non-sibling frame (single calls, escalation hops); the closure
     re-entry is built from the pre-stamp snapshot, so the continuation is unmarked by
     construction."""
+    caller_node_id: str | None = field(default=None)
+    """The id of the node that *dispatched* this call (ADR-0016), recorded for the messaging
+    cycle guard — **not** the callee this frame targets, and distinct from
+    ``ctx.emitter_node_id`` (the immediate-hop sender, overwritten every hop). Stamped **only**
+    at the genuine ``invoke_frame`` push (the dispatching node's id, the same value on
+    ``x-calf-emitter``) and **preserved verbatim** by ``replace()`` in ``mark_fanout`` / the
+    ``TailCall`` retarget — never re-stamped to self, or a self-retry would manufacture a false
+    self-cycle. ``prepare_context`` derives ``ctx.ancestor_callers`` from the inbound stack's
+    ``(caller_node_id, caller_node_kind)`` pairs; the agent's resolver rejects a ``message_agent``
+    whose target is already an ancestor. ``None`` on frames not stamped with a caller."""
+    caller_node_kind: str | None = field(default=None)
+    """The kind (one of ``NodeKind``) of :attr:`caller_node_id`'s node, completing the identity
+    matched against ``ctx.ancestor_callers`` (a ``(name, "agent")`` pair for an agent peer)."""
 
 
 CallFrameStack = Stack[CallFrame]
@@ -101,7 +114,15 @@ class WorkflowState(BaseModel):
         return self.call_stack.pop()
 
     def invoke_frame(
-        self, call: _Call, callback_topic: str | None, payload: Any = None, *, frame_id: str | None = None, tag: str | None = None
+        self,
+        call: _Call,
+        callback_topic: str | None,
+        payload: Any = None,
+        *,
+        frame_id: str | None = None,
+        tag: str | None = None,
+        caller_node_id: str | None = None,
+        caller_node_kind: str | None = None,
     ) -> None:
         if call.target_topic is None:
             raise Exception("")
@@ -109,12 +130,29 @@ class WorkflowState(BaseModel):
         # published callee frame *is* that id and a reply's ``in_reply_to`` matches the
         # registered slot directly; ``None`` keeps the default fresh-uuid7 mint. ``tag``
         # (the caller's tool_call_id) rides the callee frame and is echoed on its reply,
-        # making a sibling reply self-describing. ``invoke_frame`` never sets the
-        # ``fanout_id`` marker — that rides the node's OWN frame, not the pushed callee.
+        # making a sibling reply self-describing. ``caller_node_id``/``caller_node_kind``
+        # record the DISPATCHING node's identity for the messaging cycle guard (ADR-0016) —
+        # stamped here at the genuine push, never on a ``replace()`` retarget. ``invoke_frame``
+        # never sets the ``fanout_id`` marker — that rides the node's OWN frame, not the callee.
         if frame_id is None:
-            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, tag=tag)
+            frame = CallFrame(
+                target_topic=call.target_topic,
+                callback_topic=callback_topic,
+                payload=payload,
+                tag=tag,
+                caller_node_id=caller_node_id,
+                caller_node_kind=caller_node_kind,
+            )
         else:
-            frame = CallFrame(target_topic=call.target_topic, callback_topic=callback_topic, payload=payload, frame_id=frame_id, tag=tag)
+            frame = CallFrame(
+                target_topic=call.target_topic,
+                callback_topic=callback_topic,
+                payload=payload,
+                frame_id=frame_id,
+                tag=tag,
+                caller_node_id=caller_node_id,
+                caller_node_kind=caller_node_kind,
+            )
         return self.call_stack.push(frame)
 
     def mark_fanout(self) -> None:
@@ -142,6 +180,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     _emitter_node_id: str | None = PrivateAttr(default=None)
     _emitter_node_kind: str | None = PrivateAttr(default=None)
     _frame_id: str | None = PrivateAttr(default=None)
+    _ancestor_callers: frozenset[tuple[str, str]] = PrivateAttr(default_factory=frozenset)
     _resources: Mapping[str, Any] | None = PrivateAttr(default=None)
     _reply: ReturnMessage | FaultMessage | None = PrivateAttr(default=None)
 
@@ -201,6 +240,19 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         spoofed via the model constructor.
         """
         return self._frame_id
+
+    @property
+    def ancestor_callers(self) -> frozenset[tuple[str, str]]:
+        """The ``(caller_node_id, caller_node_kind)`` identities of the nodes that dispatched the calls
+        currently suspended on the inbound stack — the messaging cycle guard's ancestor chain (ADR-0016).
+
+        Derived by ``BaseNodeDef.prepare_context`` from the inbound ``call_stack`` (frames with no caller
+        — e.g. the public entry — filtered). The agent's resolver rejects a ``message_agent`` whose target
+        ``(name, "agent")`` is already in this set (a ring), while a legitimate diamond (distinct branches,
+        each a separate inbound stack) is allowed. Matching by *identity* (not topic) catches public-entry
+        cycles. Backed by a ``PrivateAttr`` so it never rides on the wire and cannot be spoofed via the
+        model constructor (the :attr:`frame_id` twin)."""
+        return self._ancestor_callers
 
     @property
     def resources(self) -> Mapping[str, Any]:

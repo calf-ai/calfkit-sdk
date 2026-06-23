@@ -9,29 +9,52 @@ from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
-from calfkit._vendor.pydantic_ai.messages import RetryPromptPart, ToolReturn
+from calfkit._vendor.pydantic_ai.messages import ModelRequest, RetryPromptPart, ToolCallPart, ToolReturn
 from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
-from calfkit._vendor.pydantic_ai.tools import DeferredToolResults
+from calfkit._vendor.pydantic_ai.tools import DeferredToolResults, ToolDefinition
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.controlplane import ControlPlaneStamp, advertises
 from calfkit.exceptions import DeserializationError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
-from calfkit.models.agents import AGENTS_TOPIC, AgentCard
+from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard, derive_input_topic
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.node_result import _extract_text, extract_lenient
-from calfkit.models.payload import RETRY_MARKER, ContentPart, is_retry
+from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
+from calfkit.nodes._peer_directory import render_peer_directory, resolve_live_peers
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
+from calfkit.nodes.peers import Messaging
 from calfkit.nodes.tool import BaseToolNodeDef, Tools
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
 logger = logging.getLogger(__name__)
+
+_MESSAGE_AGENT_TOOL = "message_agent"
+
+
+def _serialize_message_reply(parts: list[ContentPart] | None) -> str:
+    """Serialize ALL parts of a peer's reply into one string (message_agent fold, §5.2): Text verbatim,
+    Data JSON-encoded, File as a placeholder; newline-joined; empty -> "(no content)". extract_lenient
+    would drop a peer's text preamble before its structured data."""
+    if not parts:
+        return "(no content)"
+    rendered: list[str] = []
+    for p in parts:
+        if isinstance(p, TextPart):
+            rendered.append(p.text)
+        elif isinstance(p, DataPart):
+            rendered.append(pydantic_core.to_json(p.data).decode())
+        elif isinstance(p, FilePart):
+            rendered.append(f"[file: {p.media_type} {p.uri or '<inline>'}]")
+        else:
+            rendered.append(pydantic_core.to_json(p).decode())
+    return "\n".join(rendered)
 
 
 class BaseAgentNodeDef(
@@ -57,6 +80,7 @@ class BaseAgentNodeDef(
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
         model_settings: ModelSettings | dict[str, Any] | None = None,
+        peers: Sequence[Messaging] | None = None,
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
@@ -68,6 +92,37 @@ class BaseAgentNodeDef(
         self._eager_tool_nodes: list[BaseToolNodeDef] = []
         self._add_tools(tools)  # enforce the tool-surface contract, then commit (raises before agent-loop build)
         self.sequential_only_mode = sequential_only_mode
+        # peers= (ADR-0015): capability handles for agent-to-agent reach, validated + stored BEFORE the
+        # fan-out store @resource gate below (decision 1(b): `_needs_durable_batch` reads `self._peers`,
+        # so a `sequential_only_mode` messaging agent gets the store for its lone `message_agent`). The
+        # own-name reject lives here — a handle can't see the enclosing agent's name (M2); `peers=`
+        # type-validates each element is a `Messaging` handle (M4: no cross-absorption with `tools=`).
+        peer_handles = tuple(peers or ())
+        for peer in peer_handles:
+            if not isinstance(peer, Messaging):
+                raise TypeError(f"peers= elements must be Messaging handles, got {type(peer).__name__}: {peer!r}")
+            if name in peer.names:
+                raise ValueError(f"agent {name!r} cannot message itself — remove its own name from the Messaging handle")
+        # §5.1 discover-exclusivity (per capability): a `discover=True` handle is the exclusive author of
+        # its capability's scope — no named handle of the same kind may accompany it (mirrors the shipped
+        # `Tools(discover=True)` rule). Scoped to `Messaging` so it stays per-capability when PR-C adds `Handoff`.
+        messaging = [h for h in peer_handles if isinstance(h, Messaging)]
+        if any(h.discover for h in messaging) and len(messaging) > 1:
+            raise ValueError("Messaging(discover=True) is the exclusive author of the messaging scope — no other Messaging handle may accompany it")
+        self._peers: tuple[Messaging, ...] = peer_handles
+        # Reserve the built-in tool name against the construction-time tool surface (§5.2): the built-in
+        # is injected into the ExternalToolset OUTSIDE tools_registry, so the intra-registry collision
+        # guard would not see it. Checked against eager/static tools (self.tools, set by _add_tools above)
+        # and named `Tools` selectors (self._tool_selectors). (A discover-resolved tool node of this name
+        # is a deferred follow-up, not reserved here.)
+        if self._peers:
+            reserved = _MESSAGE_AGENT_TOOL in {b.name for b in self.tools} or any(
+                isinstance(sel, Tools) and _MESSAGE_AGENT_TOOL in sel.names for sel in self._tool_selectors
+            )
+            if reserved:
+                raise ValueError(
+                    f"tool name {_MESSAGE_AGENT_TOOL!r} is reserved for the built-in messaging tool when peers= is set; rename the user tool"
+                )
 
         if not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
@@ -91,9 +146,12 @@ class BaseAgentNodeDef(
             model_settings=cast(ModelSettings | None, model_settings),
         )
 
-        if not self.sequential_only_mode:
-            # A true fan-out agent owns its durable batch store as a node @resource (opened by the
-            # worker lifecycle before serving; mirrors the worker's Capability View resource). The
+        if self._needs_durable_batch:
+            # An agent that needs the durable batch machinery owns its store as a node @resource (opened
+            # by the worker lifecycle before serving; mirrors the worker's Capability View resource).
+            # `_needs_durable_batch` (decision 1(b)) is true for a true fan-out agent OR a messaging agent
+            # (a `peers` handle) — so a `sequential_only_mode` messaging agent still gets the store for its
+            # lone `message_agent`'s degenerate batch, while its tool routing stays one-at-a-time. The
             # @resource never runs under the synchronous TestKafkaBroker — offline, the test harness
             # injects a fake into the bag instead (tests/providers.py::prepare_worker).
             self.resource(name=FANOUT_STORE_KEY)(self._fanout_store_resource)
@@ -196,7 +254,15 @@ class BaseAgentNodeDef(
             )
             ctx.state.add_tool_result(tag, retry)
             return
-        tool_return = ToolReturn(return_value=extract_lenient(outcome.parts), metadata={"tool_call_id": tag})
+        # message_agent folds the WHOLE peer reply (all parts serialized) — a peer authors its own
+        # multi-part sub-conversation answer, and the generic single-part extract_lenient would drop a
+        # text preamble before its structured data (§5.2). Discriminated by the registered tool call's
+        # name (None-guarded — a tag without a registered call falls back to the generic codec).
+        call = ctx.state.tool_calls.get(tag)
+        if call is not None and call.tool_name == _MESSAGE_AGENT_TOOL:
+            tool_return = ToolReturn(return_value=_serialize_message_reply(outcome.parts), metadata={"tool_call_id": tag})
+        else:
+            tool_return = ToolReturn(return_value=extract_lenient(outcome.parts), metadata={"tool_call_id": tag})
         # defensive belt-and-suspenders (I4); wire-safety already enforced upstream in _resolve_callee/_coerce_to_parts
         pydantic_core.to_json(tool_return)
         ctx.state.add_tool_result(tag, tool_return)
@@ -222,6 +288,83 @@ class BaseAgentNodeDef(
             return _extract_text(parts or [])
         except DeserializationError:
             return str(extract_lenient(parts))
+
+    @property
+    def _messaging_handles(self) -> list[Messaging]:
+        return [h for h in self._peers if isinstance(h, Messaging)]
+
+    def _message_agent_tool_def(self, ctx: SessionRunContext) -> ToolDefinition | None:
+        """The runtime-rendered ``message_agent`` external tool def (§5.2), or ``None`` when the agent
+        carries no ``Messaging`` handle. The description renders the live, Messaging-scoped, self-excluded
+        peer directory fresh each turn (so it self-heals); the tool is still produced with a "none
+        reachable" body when no peer is live, so the model keeps the capability."""
+        handles = self._messaging_handles
+        if not handles:
+            return None
+        view = ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY)
+        directory = render_peer_directory(resolve_live_peers(view, handles, self_name=self.name))
+        return ToolDefinition(
+            name=_MESSAGE_AGENT_TOOL,
+            description=(
+                "Send a message to another agent and get its reply — a consultation: the peer answers on "
+                "a fresh conversation (it sees only your message) and you keep control of this one.\n"
+                f"Available agents (name — description):\n{directory}"
+            ),
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The agent to message (a name from the list above)."},
+                    "message": {"type": "string", "description": "Your message or question for that agent."},
+                },
+                "required": ["name", "message"],
+                "additionalProperties": False,
+            },
+        )
+
+    def _message_agent_target_error(self, name: str, ctx: SessionRunContext) -> str | None:
+        """The model-visible reason a ``message_agent`` target is invalid, or ``None`` when it is OK to
+        dispatch: self (§5.1 M2), a messaging cycle (the target already an ancestor caller, §8/ADR-0016),
+        or offline/out-of-scope (re-reading the live view at dispatch). Identity-matched against
+        ``ctx.ancestor_callers`` so a public-entry ring is caught while a legitimate diamond is allowed."""
+        if name == self.name:
+            return f"You cannot message yourself ({name!r})."
+        if (name, self._node_kind) in ctx.ancestor_callers:
+            return f"Cannot message {name!r}: it is already awaiting your reply (this would create a messaging cycle)."
+        reachable = {n for n, _ in resolve_live_peers(ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY), self._messaging_handles, self_name=self.name)}
+        if name not in reachable:
+            return f"Agent {name!r} is not currently reachable — it is offline or not in your messaging scope. Choose from the agents listed in the tool description."  # noqa: E501
+        return None
+
+    def _message_agent_retry(self, tool_call: ToolCallPart, ctx: SessionRunContext, content: str) -> None:
+        """Land a model-visible ``RetryPromptPart`` for a bad ``message_agent`` call (so the slot completes
+        and never dispatches), keyed by ``tool_call_id`` like any tool result."""
+        ctx.state.add_tool_result(
+            tool_call.tool_call_id, RetryPromptPart(content=content, tool_name=tool_call.tool_name, tool_call_id=tool_call.tool_call_id)
+        )
+
+    def _validate_message_agent(self, tool_call: ToolCallPart, ctx: SessionRunContext) -> None:
+        """Validate a message_agent call's target; RetryPromptPart on failure, else leave it pending
+        (no tools_registry binding) so the dispatch builds the peer Call. View re-read at dispatch."""
+        try:
+            args = tool_call.args_as_dict()
+        except Exception as e:  # noqa: BLE001
+            self._message_agent_retry(tool_call, ctx, f"Malformed message_agent arguments: {type(e).__name__}: {safe_exc_message(e)}")
+            return
+        name, message = args.get("name"), args.get("message")
+        if not isinstance(name, str) or not name.strip() or not isinstance(message, str) or not message.strip():
+            self._message_agent_retry(tool_call, ctx, "message_agent requires non-empty string 'name' and 'message' arguments.")
+            return
+        error = self._message_agent_target_error(name, ctx)
+        if error is not None:
+            self._message_agent_retry(tool_call, ctx, error)
+
+    def _message_agent_call(self, tool_call: ToolCallPart) -> Call[State]:
+        """Build the peer Call: a fresh seeded sub-state (message staged as a user turn) to the peer's
+        derived input topic, isolate_state=True so the caller snapshots/restores (C1)."""
+        args = tool_call.args_as_dict()
+        seed = State()
+        seed.stage_message(ModelRequest.user_text_prompt(args["message"]))
+        return Call[State](derive_input_topic(args["name"]), seed, tag=tool_call.tool_call_id, isolate_state=True)
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool
@@ -344,6 +487,8 @@ class BaseAgentNodeDef(
                         target_tool_call.tool_name,
                         self.name,
                     )
+                    if target_tool_call.tool_name == _MESSAGE_AGENT_TOOL:
+                        return self._message_agent_call(target_tool_call)
                     return Call[State](
                         tools_registry[target_tool_call.tool_name].dispatch_topic,
                         ctx.state,
@@ -371,10 +516,18 @@ class BaseAgentNodeDef(
         # (docs/designs/agent-pov-projection.md §6.1). ``project()`` returns a fresh list;
         # the canonical ``ctx.state.message_history`` is left untouched for storage,
         # republishing, and dispatch logic (which keys on canonical, §6.2).
+        external_defs = [binding.tool_def for binding in tools_registry.values()]
+        # Inject the built-in message_agent tool as a REAL ExternalToolset member (L1): a name absent from
+        # the toolset is classified `unknown` and auto-retried INSIDE the model run (pydantic-ai
+        # ModelRetry), never reaching calfkit dispatch. `_message_agent_tool_def` returns None when the
+        # agent carries no Messaging handle, so a non-messaging agent's toolset is unchanged.
+        message_agent_def = self._message_agent_tool_def(ctx)
+        if message_agent_def is not None:
+            external_defs.append(message_agent_def)
         result = await self._agent_loop.run(
             message_history=project(ctx.state.message_history, viewer=self.name),
             instructions=ctx.state.temp_instructions,
-            toolsets=[ExternalToolset([binding.tool_def for binding in tools_registry.values()])],
+            toolsets=[ExternalToolset(external_defs)],
             deps=ctx.deps,
             deferred_tool_results=tool_results,
             model_settings=run_model_settings,
@@ -393,6 +546,14 @@ class BaseAgentNodeDef(
 
             for tool_call in result.output.calls:
                 ctx.state.add_tool_call(tool_call)
+
+                # message_agent forks BEFORE the tools_registry lookup (it is never a registry binding):
+                # validate the target (RetryPromptPart on self/cycle/offline/malformed), else leave it
+                # pending so the dispatch path below builds the peer Call. add_tool_call above is still
+                # load-bearing for the completion check (KeyError on an unregistered id).
+                if tool_call.tool_name == _MESSAGE_AGENT_TOOL:
+                    self._validate_message_agent(tool_call, ctx)
+                    continue
 
                 binding = tools_registry.get(tool_call.tool_name)
                 if binding is None:
@@ -505,6 +666,8 @@ class BaseAgentNodeDef(
                     target_tool_call.tool_name,
                     self.name,
                 )
+                if target_tool_call.tool_name == _MESSAGE_AGENT_TOOL:
+                    return self._message_agent_call(target_tool_call)
                 return Call[State](
                     tools_registry[target_tool_call.tool_name].dispatch_topic,
                     ctx.state,
@@ -519,7 +682,12 @@ class BaseAgentNodeDef(
                 # records the outcome under it. The handler's _handle_fanout_open opens the durable
                 # batch from this list — replacing the old in-process _pending_batches registration.
                 parallel_tool_calls = [
-                    Call[State](
+                    # Per-kind sibling construction (§5.4 / L13): a message_agent gets a fresh-seeded
+                    # isolate_state Call to the peer's derived topic (no ToolCallRef body); a tool gets a
+                    # deep-copied caller state + its ToolCallRef. They open one durable batch and fold by tag.
+                    self._message_agent_call(tc)
+                    if tc.tool_name == _MESSAGE_AGENT_TOOL
+                    else Call[State](
                         tools_registry[tc.tool_name].dispatch_topic,
                         ctx.state.model_copy(deep=True),
                         body=ToolCallRef.from_tool_call_part(tc),
