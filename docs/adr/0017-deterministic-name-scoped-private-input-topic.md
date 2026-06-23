@@ -16,8 +16,9 @@ level: `_private_input_topic = f"{node_kind}.{name}.private.input"`. It is contr
 at registration the same way `{node_id}.private.return` is — a property read by
 `register_handlers` and `topics_for_nodes` and **flagged framework-owned** (so it
 never receives user topic configs) — *not* appended into the `subscribe_topics` list
-in `__init__` (the `@dataclass` node `__init__`s bypass `BaseNodeDef.__init__`, so a
-list-append would silently miss tool/MCP nodes). It parallels the private return
+in `__init__` (the `@dataclass` tool-node `__init__` bypasses `BaseNodeDef.__init__`, so a
+list-append there would be silently missed; a property sidesteps the init-time divergence
+across every node kind). It parallels the private return
 topic: that is the continuation inbox, this is the inbound inbox.
 
 The point is the **deterministic `name → topic` mapping**, and we make it **universal

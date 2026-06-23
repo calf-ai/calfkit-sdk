@@ -1790,16 +1790,19 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         ``_return_topic`` — read by :meth:`Worker.register_handlers` and the startup
         provisioner and flagged **framework-owned** (never receives user
         ``topic_configs``) — *not* appended into ``subscribe_topics`` in ``__init__``
-        (the ``@dataclass`` tool/MCP node ``__init__``s bypass ``BaseNodeDef.__init__``,
-        so a list-append would silently miss them).
+        (the ``@dataclass`` tool-node ``__init__`` bypasses ``BaseNodeDef.__init__``, so a
+        list-append there would be silently missed; a property sidesteps init-time
+        divergence across every node kind, regardless of which ``__init__`` ran).
 
         **Universal, dormant for non-agents in v1.** Every node kind exposes and
         subscribes to its inbox, but only agents are dispatched to today — for a tool
-        or consumer the inbox is provisioned and consumed yet receives no traffic. The
-        dormancy contract is "no producer targets it," not "it is a safe sink": a stray
-        non-``ToolCallRef`` body delivered here carries no ``x-calf-kind`` header, so it
-        is classified ``"call"`` (run as an invocation), not floored — harmless only
-        because nothing publishes here in v1.
+        or consumer the inbox is provisioned and consumed yet receives no traffic. A
+        stray non-``ToolCallRef`` body delivered here is **not** silently swallowed: a
+        caller-capable node classifies it ``"call"`` (no ``x-calf-kind`` header) and
+        enters the body, where it declines / schema-rejects and is disposed (a DEBUG
+        no-op, or a WARNING auto-fault if the delivery is reply-owing); a consumer
+        observes it (ERROR-floored on failure). Harmless in v1 only because no producer
+        targets it — the dormancy contract is "no producer," not "a safe sink".
 
         Recomputed from identity on every access (like ``_return_topic``); do not mutate
         ``node_id`` after registration. Uses ``self.name``, which aliases ``node_id``

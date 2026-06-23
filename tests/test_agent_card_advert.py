@@ -83,3 +83,51 @@ class TestDescriptionCtorParam:
     def test_description_defaults_to_none(self) -> None:
         agent = Agent("noblurb", subscribe_topics="noblurb.in", model_client=_FakeModel())
         assert agent._description is None
+
+
+class _FakeWriter:
+    def __init__(self) -> None:
+        self.sets: list[tuple[str, str, AgentCard]] = []
+
+    async def set(self, group: str, member: str, value: AgentCard) -> None:
+        self.sets.append((group, member, value))
+
+    async def delete(self, group: str, member: str) -> None:
+        return None
+
+
+class _FakeCtx:
+    def __init__(self, resources: dict[str, _FakeWriter]) -> None:
+        self.resources = resources
+
+
+class TestPublisherDrivenCard:
+    """The full production path: the worker-owned ControlPlanePublisher builds a bare
+    ControlPlaneStamp (node_kind from _node_kind="agent") and splats it into
+    AgentCard(**stamp.model_dump(), description=...). Exercised offline here (the kafka
+    lane covers the real wire) so a future stamp field that collides with the description
+    splat — the duplicate-kwarg TypeError the type checker can't see (advert.py) — fails
+    a unit test, not only a broker test."""
+
+    async def test_publisher_publishes_a_well_formed_agent_card(self) -> None:
+        from calfkit.controlplane import ControlPlaneConfig
+        from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
+
+        agent = make_agent("planner", description="Plans things")
+        writer = _FakeWriter()
+        pub = ControlPlanePublisher(
+            worker_id="wkr",
+            adverts=[(agent, type(agent)._adverts[AGENTS_TOPIC])],
+            config=ControlPlaneConfig(heartbeat_interval=3600.0),
+        )
+        ctx = _FakeCtx({control_plane_writer_key(AGENTS_TOPIC): writer})
+        await pub.start(ctx)  # fail-loud first publish
+        try:
+            assert len(writer.sets) == 1
+            group, member, record = writer.sets[0]
+            assert (group, member) == ("planner", "wkr")  # name × worker is the wire key
+            assert isinstance(record, AgentCard)
+            assert record.description == "Plans things"
+            assert record.node_kind == "agent"
+        finally:
+            await pub.stop(ctx)

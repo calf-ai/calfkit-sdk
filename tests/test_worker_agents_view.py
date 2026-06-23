@@ -201,3 +201,23 @@ class TestAgentsViewResource:
         with pytest.raises(RuntimeError, match="ControlPlaneConfig"):
             await drive(worker)
         assert fake_table.instances == []  # failed before construction
+
+    async def test_stale_after_and_reader_tuning_are_forwarded(self, fake_table: type[FakeGroupedTable]) -> None:
+        # Both are behavior-affecting: reader_tuning lowers convergence latency (reaches
+        # the table), stale_after sets when a card expires (held on the view). A regression
+        # dropping either would otherwise pass every other test.
+        from calfkit.tuning import KTableReaderTuning
+
+        worker = Worker(
+            Client.connect("kafka:9092"),
+            control_plane=ControlPlaneConfig(
+                stale_after=12.0,
+                reader_tuning=KTableReaderTuning(poll_timeout_ms=20, fetch_max_wait_ms=10),
+            ),
+        )
+        gen, view = await drive(worker)
+        kwargs = fake_table.instances[0].kwargs
+        assert kwargs["poll_timeout_ms"] == 20  # reader_tuning -> table
+        assert kwargs["fetch_max_wait_ms"] == 10
+        assert view._stale_after == 12.0  # stale_after -> view
+        await close(gen)

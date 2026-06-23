@@ -82,9 +82,10 @@ def _open_view(bootstrap: str) -> ControlPlaneView[AgentCard]:
     return ControlPlaneView.open(bootstrap_servers=bootstrap, topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False)
 
 
-async def test_agent_advertises_and_view_roundtrip_and_clean_tombstone(kafka_bootstrap: str, topic_namespace: str) -> None:
+@pytest.mark.parametrize("description", ["Plans the work", None])
+async def test_agent_advertises_and_view_roundtrip_and_clean_tombstone(kafka_bootstrap: str, topic_namespace: str, description: str | None) -> None:
     name = f"{topic_namespace}-planner"
-    agent = _agent(name, description="Plans the work")
+    agent = _agent(name, description=description)
     writer, pub, ctx = await _start_publisher(kafka_bootstrap, agent, "w1", ensure_topic=True)
     view = _open_view(kafka_bootstrap)
     await view.start()
@@ -93,7 +94,7 @@ async def test_agent_advertises_and_view_roundtrip_and_clean_tombstone(kafka_boo
         assert await _poll(view.barrier, lambda: view.get(name) is not None)
         card = view.get(name)
         assert card is not None
-        assert card.description == "Plans the work"
+        assert card.description == description  # incl. the common bare-card None case over the wire
         assert card.node_kind == "agent"
         assert name in view.online_nodes()
 

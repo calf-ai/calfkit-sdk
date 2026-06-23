@@ -35,7 +35,10 @@ factory and the reader's ``ControlPlaneView[AgentCard]`` both bind to it. Provis
 
 AGENT_CARD_DESCRIPTION_MAX = 512
 """Max chars for the directory ``description`` — a short blurb, not a system prompt.
-Bounded loudly: an over-long value fails at construction (L12)."""
+Bounded loudly: an over-long value fails when the card is built — the fail-loud first
+advert at worker startup — not silent truncation (L12; the cap lives on ``AgentCard``,
+not the ``Agent`` ctor, by design, so an over-long blurb surfaces at boot, not at
+``Agent()``)."""
 
 AGENTS_VIEW_RESOURCE_KEY = "calfkit.controlplane.agents_view"
 """Worker resource-bag key under which the Agents View (a
@@ -53,7 +56,9 @@ class AgentCard(ControlPlaneRecord):
     prompt, no tool list — the minimal card (L7).
 
     ``description`` is bounded **loudly** (``Field(max_length=…)``, L12): an over-long
-    value raises at construction, so the fail-loud first advert surfaces it rather than
+    value raises when the card is built — which is the fail-loud first advert at worker
+    startup (the cap lives on ``AgentCard``, not the ``Agent`` ctor, by design, so an
+    over-long ``Agent(description=…)`` surfaces at boot, not at ``Agent()``) — rather than
     silently truncating or emitting an oversize record that decode-fails (which would drop
     the agent from every reader's view).
 

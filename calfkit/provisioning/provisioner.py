@@ -190,7 +190,7 @@ def _build_new_topic(topic: str, framework_topics: set[str], config: Provisionin
 
     # NewTopic(num_partitions=-1, ...) raises client-side (XOR validator), so
     # always supply concrete positive values. User ``topic_configs`` apply to
-    # data topics only — never to framework inboxes (reply / *.private.return).
+    # data topics only — never to framework inboxes (reply / *.private.return / *.private.input).
     topic_configs = None
     if topic not in framework_topics and config.topic_configs:
         topic_configs = dict(config.topic_configs)
@@ -291,7 +291,7 @@ async def provision_topics(
     **not** closed here), so this runs against FastStream's broker-managed admin
     client or a standalone one alike. The create/classify/retry loop is bounded
     by ``config.create_timeout_ms``; ``topic_configs`` apply to data topics only,
-    never to ``framework_topics`` (reply / ``*.private.return`` inboxes).
+    never to ``framework_topics`` (reply / ``*.private.return`` / ``*.private.input`` inboxes).
 
     Raises:
         TopicProvisioningError: on a non-retriable per-topic error, or when the
@@ -381,8 +381,8 @@ class TopicProvisioner:
         ``config.create_timeout_ms`` — a per-phase cap (worst case ~2× total), so
         an unreachable broker can't hang the connect. ``topic_configs`` from the
         config are applied to data topics only, never to ``framework_topics``
-        (reply / ``*.private.return`` inboxes), for which overrides like
-        ``cleanup.policy=compact`` would be semantically wrong.
+        (reply / ``*.private.return`` / ``*.private.input`` inboxes), for which overrides
+        like ``cleanup.policy=compact`` would be semantically wrong.
 
         Raises:
             TopicProvisioningError: On a non-retriable per-topic error, or when
