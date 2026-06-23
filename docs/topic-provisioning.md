@@ -15,8 +15,10 @@
 
 A calfkit deployment is a mesh of nodes that publish to and subscribe from named
 Kafka topics: agent inboxes (`subscribe_topics`), framework-private return
-inboxes (`*.private.return`, issue #141), agent `publish_topic`s, and per-tool
-input topics. For any of this traffic to flow, the topics have to **exist**.
+inboxes (`*.private.return`, issue #141), framework-private name-scoped input
+inboxes (`{kind}.{name}.private.input`, ADR-0017), agent `publish_topic`s, and
+per-tool input topics. For any of this traffic to flow, the topics have to
+**exist**.
 
 Today that "just works" locally only because the
 [calfkit-broker](https://github.com/calf-ai/calfkit-broker) dev image ships with
@@ -88,7 +90,9 @@ references. For each node:
 
 - every entry of `subscribe_topics` (the node's public inbox(es)),
 - the node's framework-private `_return_topic` (tool `ReturnCall` / built-in
-  `TailCall` inbox — issue #141), and
+  `TailCall` inbox — issue #141),
+- the node's framework-private `_private_input_topic` (the deterministic
+  name-scoped inbound inbox every node subscribes to — ADR-0017), and
 - `publish_topic` when set.
 
 **Agent nodes** additionally contribute *all* of each tool's `subscribe_topics`
@@ -142,8 +146,10 @@ await worker.run()
 When enabled, the worker's FastStream `on_startup` hook runs `provision_topics()`
 **after** `register_handlers()` and **before** `broker.start()` (so every
 subscriber's inbox exists before consumption begins). The topic set is `topics_for_nodes()` over exactly the nodes
-that were registered; each node's `_return_topic` is passed as a framework topic
-so `topic_configs` is never applied to it. A provisioning failure aborts startup.
+that were registered; each node's framework-private inboxes (`_return_topic` and
+`_private_input_topic`) are passed as framework topics — via the single
+`framework_topics_for_nodes()` authority — so `topic_configs` is never applied to
+them. A provisioning failure aborts startup.
 
 For a manual `register_handlers()`-without-`run()` deployment (which bypasses the
 worker's startup hook), provision out-of-band — the CLI (`ck topics provision`,

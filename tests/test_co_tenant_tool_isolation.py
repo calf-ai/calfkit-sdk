@@ -403,11 +403,19 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
 
     dedup_calls = [c for c in spy.call_args_list if c.kwargs.get("group_id") == "dedup_agent"]
     assert len(dedup_calls) == 1, f"expected one subscriber registration for dedup_agent; got {len(dedup_calls)}"
-    assert dedup_calls[0].args == ("dedup_agent.private.return", "dedup_chan.in"), (
+    # The deduped set: the explicitly-listed return topic (registered ONCE, not twice),
+    # the public inbox, and the framework-private name-scoped input inbox every node now
+    # also subscribes to (ADR-0017, appended at registration after _return_topic).
+    assert dedup_calls[0].args == (
+        "dedup_agent.private.return",
+        "dedup_chan.in",
+        "agent.dedup_agent.private.input",
+    ), (
         f"worker registered subscriber with topics={dedup_calls[0].args}; "
-        f"expected deduped 2-tuple ('dedup_agent.private.return', 'dedup_chan.in'). "
-        f"Without dict.fromkeys, the private return topic would appear twice in registration "
-        f"logs / AsyncAPI / observability — silently tolerated by Kafka clients but noisy."
+        f"expected deduped 3-tuple ('dedup_agent.private.return', 'dedup_chan.in', "
+        f"'agent.dedup_agent.private.input'). Without dict.fromkeys, the private return topic "
+        f"would appear twice in registration logs / AsyncAPI / observability — silently "
+        f"tolerated by Kafka clients but noisy."
     )
 
 

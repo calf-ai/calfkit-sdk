@@ -1777,3 +1777,36 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         they target the tool's input topic, not ``_return_topic``.
         """
         return f"{self.node_id}.private.return"
+
+    @property
+    def _private_input_topic(self) -> str:
+        """Framework-private, name-scoped INBOUND inbox for this node instance (ADR-0017).
+
+        The inbound parallel to :meth:`_return_topic` (the continuation inbox): a
+        deterministic ``{node_kind}.{name}.private.input`` any caller can derive from
+        this node's name alone — the addressing primitive agent-to-agent messaging
+        builds on (the ``AgentCard`` carries no topic; the caller derives
+        ``agent.{name}.private.input``). It is contributed at registration like
+        ``_return_topic`` — read by :meth:`Worker.register_handlers` and the startup
+        provisioner and flagged **framework-owned** (never receives user
+        ``topic_configs``) — *not* appended into ``subscribe_topics`` in ``__init__``
+        (the ``@dataclass`` tool-node ``__init__`` bypasses ``BaseNodeDef.__init__``, so a
+        list-append there would be silently missed; a property sidesteps init-time
+        divergence across every node kind, regardless of which ``__init__`` ran).
+
+        **Universal, dormant for non-agents in v1.** Every node kind exposes and
+        subscribes to its inbox, but only agents are dispatched to today — for a tool
+        or consumer the inbox is provisioned and consumed yet receives no traffic. A
+        stray non-``ToolCallRef`` body delivered here is **not** silently swallowed: a
+        caller-capable node classifies it ``"call"`` (no ``x-calf-kind`` header) and
+        enters the body, where it declines / schema-rejects and is disposed (a DEBUG
+        no-op, or a WARNING auto-fault if the delivery is reply-owing); a consumer
+        observes it (ERROR-floored on failure). Harmless in v1 only because no producer
+        targets it — the dormancy contract is "no producer," not "a safe sink".
+
+        Recomputed from identity on every access (like ``_return_topic``); do not mutate
+        ``node_id`` after registration. Uses ``self.name``, which aliases ``node_id``
+        today; the divergence from ``_return_topic``'s ``self.node_id`` is intentional
+        name-centric addressing (spec §4.1), not an inconsistency to "fix".
+        """
+        return f"{self._node_kind}.{self.name}.private.input"

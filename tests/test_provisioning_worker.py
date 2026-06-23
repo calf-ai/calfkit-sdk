@@ -172,3 +172,38 @@ def test_declares_only_registered_nodes_not_later_additions() -> None:
     assert "echo.in" in names
     assert "late.in" not in names
     assert "late.out" not in names
+
+
+# ---------------------------------------------------------------------------
+# ADR-0017: the name-scoped private input inbox is registered framework-owned
+# ---------------------------------------------------------------------------
+
+
+def test_private_input_topic_is_provisioned_framework_owned() -> None:
+    # The inbound inbox is provisioned but framework-owned: never carries user
+    # topic_configs (declared via framework_topics_for_nodes — the C1 fix).
+    cfg = ProvisioningConfig(enabled=True, topic_configs={"retention.ms": "604800000"})
+    client = _make_client(cfg)
+    node = _tool_node("echo", "echo.in", "echo.out")
+    worker = Worker(client, nodes=[node])
+
+    asyncio.run(worker._on_startup())
+    by_name = _by_name(_run_ensurer(client))
+
+    assert node._private_input_topic in by_name  # provisioned
+    assert by_name[node._private_input_topic].topic_configs == {}  # framework-owned
+    assert by_name["echo.in"].topic_configs == {"retention.ms": "604800000"}  # data topic still configured
+
+
+def test_node_subscribes_to_its_private_input_topic() -> None:
+    # Every node CONSUMES its inbound inbox (contributed at registration like
+    # _return_topic — not appended into user-facing subscribe_topics).
+    client = _make_client()
+    node = _tool_node("echo", "echo.in", "echo.out")
+    worker = Worker(client, nodes=[node])
+
+    worker.register_handlers()
+
+    node_topics = next(s.topics for s in worker._client._connection._subscribers if node._return_topic in (s.topics or []))
+    assert node._private_input_topic in node_topics
+    assert node._private_input_topic not in node.subscribe_topics

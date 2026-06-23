@@ -92,12 +92,16 @@ class TestControlPlaneWriterRegistration:
         from calfkit.controlplane.publisher import control_plane_writer_key
         from calfkit.models.capability import CAPABILITY_TOPIC
 
-        # An agent declares a tool selector but advertises nothing — only the toolbox
-        # (host) advertises. A worker hosting just the agent wires no control-plane writer.
+        # An agent that references a toolbox via a tool selector does not itself advertise
+        # on the CAPABILITY plane — only the hosted toolbox would. (The agent DOES advertise
+        # on the agents plane since ADR-0015, so a publisher exists; this pins the
+        # capability writer specifically as absent.)
         worker = Worker(Client.connect("kafka:9092"), nodes=[make_agent(make_toolbox())])
         worker._maybe_register_control_plane()
         assert control_plane_writer_key(CAPABILITY_TOPIC) not in worker_resource_names(worker)
-        assert worker._control_plane_publisher is None
+        publisher = worker._control_plane_publisher
+        assert publisher is not None  # the agent advertises its AgentCard on calf.agents
+        assert CAPABILITY_TOPIC not in [info.topic for _, info in publisher._adverts]
 
 
 class FakeGroupedTable:

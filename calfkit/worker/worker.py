@@ -12,10 +12,11 @@ from calfkit.client import Client
 from calfkit.controlplane.config import ControlPlaneConfig
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.controlplane.view import ControlPlaneView
+from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard
 from calfkit.models.capability import CAPABILITY_TOPIC, CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
 from calfkit.models.tool_dispatch import ToolSelector
 from calfkit.nodes import BaseNodeDef
-from calfkit.provisioning import topics_for_nodes
+from calfkit.provisioning import framework_topics_for_nodes, topics_for_nodes
 from calfkit.tuning import FanoutConfig
 from calfkit.worker.lifecycle import (
     PHASE_PAIRS,
@@ -221,6 +222,54 @@ class Worker(LifecycleHookMixin):
         yield view
         await view.stop()
 
+    def _maybe_register_agents_view(self) -> None:
+        """Auto-register the Agents View resource (spec §6 / L11).
+
+        Zero user wiring: iff any hosted node declares a ``peers`` handle, ONE
+        worker-level ``ControlPlaneView[AgentCard]`` resource is registered
+        (idempotent — guarded by resource-name lookup) under a **distinct** key
+        (``AGENTS_VIEW_RESOURCE_KEY`` ≠ the capability view's). The gate is
+        ``_peers``, which the ``peers=`` ctor param sets — absent until the
+        messaging surface lands (PR-B), so this is **dormant** today; the view
+        resource + decode are nonetheless fully exercised now. Mirrors
+        :meth:`_maybe_register_capability_view` (which gates on ``_tool_selectors``).
+        """
+        if not any(getattr(node, "_peers", None) for node in self._nodes):
+            return
+        if any(name == AGENTS_VIEW_RESOURCE_KEY for name, _ in self._resource_cms()):
+            return
+        self.resource(name=AGENTS_VIEW_RESOURCE_KEY)(self._agents_view_resource)
+
+    async def _agents_view_resource(self, ctx: ResourceSetupContext["Worker"]) -> AsyncIterator[Any]:
+        """Open the Agents View (``ControlPlaneView[AgentCard]``) for this worker's lifetime.
+
+        Mirrors :meth:`_capability_view_resource`: ``view.start()`` IS the boot gate (the
+        grouped table replays ``calf.agents`` to its start-time end offsets, bounded by
+        ``catchup_timeout``, serving degraded-but-loud on expiry), so an agent never sees a
+        half-built directory. The view collapses the instance-keyed cards to one live card
+        per agent name and owns staleness + schema-version filtering.
+        """
+        cfg = self._control_plane
+        bootstrap = cfg.bootstrap_servers or self._derive_bootstrap_servers()
+        if not bootstrap:
+            raise RuntimeError(
+                "cannot derive Kafka bootstrap servers for the Agents View "
+                "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
+            )
+        view: ControlPlaneView[AgentCard] = ControlPlaneView.open(
+            bootstrap_servers=bootstrap,
+            topic=AGENTS_TOPIC,
+            record_type=AgentCard,
+            catchup_timeout=cfg.catchup_timeout,
+            # Readers ensure only in dev/CI; production topics are ops-governed.
+            ensure_topic=self._client._provisioning.enabled,
+            stale_after=cfg.stale_after,
+            reader_tuning=cfg.reader_tuning,
+        )
+        await view.start()
+        yield view
+        await view.stop()
+
     def _derive_bootstrap_servers(self) -> str | None:
         """The Kafka bootstrap address for this worker's client, or ``None`` if underivable.
 
@@ -296,6 +345,7 @@ class Worker(LifecycleHookMixin):
             logger.debug("register_handlers() called again; skipping (already prepared)")
             return
         self._maybe_register_capability_view()
+        self._maybe_register_agents_view()
         self._maybe_register_control_plane()
         # Record the nodes we are about to register as the single source of
         # truth for ``_declare_startup_topics``. Snapshot (not alias) so later
@@ -304,16 +354,18 @@ class Worker(LifecycleHookMixin):
         self._registered_nodes = list(self._nodes)
         for node in self._nodes:
             group_id = self._group_id or node.name
-            # Subscribe to the node's public inboxes plus its
-            # framework-private return inbox. The latter is where tool
-            # ``Call`` returns and ``TailCall`` self-retries are addressed
-            # exclusively to this node instance — see
-            # ``BaseNodeDef._return_topic`` (issue #141). ``dict.fromkeys``
-            # preserves declared order while removing duplicates, so a
-            # user who manually lists ``f'{node_id}.private.return'`` in
-            # ``subscribe_topics`` doesn't end up with a duplicate entry
-            # in registration logs / AsyncAPI / observability tooling.
-            topics = list(dict.fromkeys([*node.subscribe_topics, node._return_topic]))
+            # Subscribe to the node's public inboxes plus its two framework-private
+            # inboxes: the return inbox (``_return_topic`` — tool ``Call`` returns and
+            # ``TailCall`` self-retries addressed to this instance, issue #141) and the
+            # name-scoped input inbox (``_private_input_topic`` — the deterministic
+            # ``{kind}.{name}.private.input`` every node consumes, ADR-0017; dormant for
+            # non-agents in v1). Both are contributed here at registration, never via
+            # ``subscribe_topics`` (the ``@dataclass`` node ``__init__``s bypass
+            # ``BaseNodeDef.__init__``). ``dict.fromkeys`` preserves declared order while
+            # removing duplicates, so a user who manually lists one of these in
+            # ``subscribe_topics`` doesn't end up with a duplicate entry in registration
+            # logs / AsyncAPI / observability tooling.
+            topics = list(dict.fromkeys([*node.subscribe_topics, node._return_topic, node._private_input_topic]))
             logger.info(
                 "registering node=%s subscribe=%s publish=%s",
                 node.name,
@@ -363,16 +415,17 @@ class Worker(LifecycleHookMixin):
 
         The topic set is :func:`~calfkit.provisioning.topics_for_nodes` over the
         nodes recorded by :meth:`register_handlers` (the single source of truth):
-        each node's ``subscribe_topics``, its framework-private ``_return_topic``,
-        its ``publish_topic``, and — for agent nodes — each tool's input
-        ``subscribe_topics``. Every node's ``_return_topic`` is declared
-        ``framework=True`` so user ``topic_configs``
-        (retention / compaction) are never applied to those correlation-keyed
-        return inboxes.
+        each node's ``subscribe_topics``, its framework-private ``_return_topic``
+        and ``_private_input_topic``, its ``publish_topic``, and — for agent nodes —
+        each tool's input ``subscribe_topics``. The framework-private inboxes are
+        re-declared ``framework=True`` via
+        :func:`~calfkit.provisioning.framework_topics_for_nodes` (the single
+        framework-topic authority) so user ``topic_configs`` (retention / compaction)
+        are never applied to those correlation-keyed / name-scoped inboxes.
         """
         ensurer = self._client._startup_ensurer
         ensurer.declare(topics_for_nodes(self._registered_nodes))
-        ensurer.declare({node._return_topic for node in self._registered_nodes}, framework=True)
+        ensurer.declare(framework_topics_for_nodes(self._registered_nodes), framework=True)
 
     async def _on_startup(self) -> None:
         """Register handlers + declare topics, before the broker starts.

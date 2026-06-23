@@ -35,7 +35,9 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
 
     * each entry of ``subscribe_topics`` (the node's public inbox(es)),
     * the node's framework-private ``_return_topic`` (tool ReturnCall /
-      built-in TailCall inbox — issue #141), and
+      built-in TailCall inbox — issue #141),
+    * the node's framework-private ``_private_input_topic`` (the deterministic
+      name-scoped inbound inbox every node subscribes to — ADR-0017), and
     * ``publish_topic`` when set.
 
     Agent nodes additionally contribute each tool binding's dispatch topic
@@ -57,6 +59,7 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
         for topic in node.subscribe_topics:
             _add(topic)
         _add(node._return_topic)
+        _add(node._private_input_topic)
         _add(node.publish_topic)
 
         tools = getattr(node, "tools", None)
@@ -65,6 +68,27 @@ def topics_for_nodes(nodes: Iterable[Any]) -> list[str]:
                 _add(binding.dispatch_topic)
 
     return list(seen)
+
+
+def framework_topics_for_nodes(nodes: Iterable[Any]) -> set[str]:
+    """The framework-owned topics referenced by ``nodes`` (the single authority).
+
+    **Experimental** (part of the opt-in provisioning API; pre-1.0).
+
+    Framework-private topics are the ones that must never receive user
+    ``topic_configs`` (:func:`provision_topics` excludes them from
+    ``cleanup.policy`` / ``retention.ms`` overrides): each node's
+
+    * ``_return_topic`` — the continuation inbox (tool ReturnCall / built-in
+      TailCall, issue #141), and
+    * ``_private_input_topic`` — the deterministic name-scoped inbound inbox
+      every node subscribes to (ADR-0017).
+
+    Every provisioning surface (the worker's startup ensurer and the
+    ``ck topics provision`` CLI) derives its framework set from here, so a new
+    framework-owned topic is added in exactly one place.
+    """
+    return {topic for node in nodes for topic in (node._return_topic, node._private_input_topic)}
 
 
 @dataclass
@@ -166,7 +190,7 @@ def _build_new_topic(topic: str, framework_topics: set[str], config: Provisionin
 
     # NewTopic(num_partitions=-1, ...) raises client-side (XOR validator), so
     # always supply concrete positive values. User ``topic_configs`` apply to
-    # data topics only — never to framework inboxes (reply / *.private.return).
+    # data topics only — never to framework inboxes (reply / *.private.return / *.private.input).
     topic_configs = None
     if topic not in framework_topics and config.topic_configs:
         topic_configs = dict(config.topic_configs)
@@ -267,7 +291,7 @@ async def provision_topics(
     **not** closed here), so this runs against FastStream's broker-managed admin
     client or a standalone one alike. The create/classify/retry loop is bounded
     by ``config.create_timeout_ms``; ``topic_configs`` apply to data topics only,
-    never to ``framework_topics`` (reply / ``*.private.return`` inboxes).
+    never to ``framework_topics`` (reply / ``*.private.return`` / ``*.private.input`` inboxes).
 
     Raises:
         TopicProvisioningError: on a non-retriable per-topic error, or when the
@@ -357,8 +381,8 @@ class TopicProvisioner:
         ``config.create_timeout_ms`` — a per-phase cap (worst case ~2× total), so
         an unreachable broker can't hang the connect. ``topic_configs`` from the
         config are applied to data topics only, never to ``framework_topics``
-        (reply / ``*.private.return`` inboxes), for which overrides like
-        ``cleanup.policy=compact`` would be semantically wrong.
+        (reply / ``*.private.return`` / ``*.private.input`` inboxes), for which overrides
+        like ``cleanup.policy=compact`` would be semantically wrong.
 
         Raises:
             TopicProvisioningError: On a non-retriable per-topic error, or when
@@ -397,6 +421,7 @@ __all__ = [
     "ProvisionReport",
     "TopicProvisioner",
     "TopicProvisioningError",
+    "framework_topics_for_nodes",
     "provision_topics",
     "topics_for_nodes",
 ]
