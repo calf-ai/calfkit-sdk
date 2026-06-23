@@ -107,7 +107,7 @@ class TestAgentsViewRegistration:
     def test_registered_when_a_node_has_peers(self) -> None:
         # PR-B: a real `Messaging` handle sets `_peers`, activating the dormant gate.
         from calfkit.nodes.agent import Agent
-        from calfkit.nodes.peers import Messaging
+        from calfkit.peers import Messaging
 
         agent = Agent("planner", subscribe_topics="planner.in", model_client=_FakeModel(), peers=[Messaging("billing")])
         worker = Worker(Client.connect("kafka:9092"), nodes=[agent])

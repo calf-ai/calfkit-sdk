@@ -1,4 +1,4 @@
-"""The live, scoped, self-excluded peer directory render (PR-B Item 4 / §5.2).
+"""The live, scoped, self-excluded peer directory render (§5.2).
 
 ``resolve_live_peers`` reads a ``ControlPlaneView[AgentCard]`` (via ``view.snapshot()``) and a list of
 capability handles (``Messaging`` in PR-B; ``Handoff`` reuses this in PR-C) and returns the in-scope,
@@ -16,7 +16,7 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from calfkit.nodes.peers import Messaging
+from calfkit.peers.messaging import Messaging
 
 if TYPE_CHECKING:
     from calfkit.controlplane.view import ControlPlaneView

@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from calfkit.models.agents import derive_input_topic
-from calfkit.nodes._peer_directory import render_peer_directory, resolve_live_peers
-from calfkit.nodes.peers import Messaging
+from calfkit.peers import Messaging
+from calfkit.peers.directory import render_peer_directory, resolve_live_peers
 
 
 def _view(cards: dict[str, str | None]) -> object:

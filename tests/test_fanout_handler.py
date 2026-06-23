@@ -355,6 +355,40 @@ async def test_sequential_messaging_node_opens_degenerate_batch() -> None:
     assert await fake.read_basestate("A") is not None
 
 
+async def test_degenerate_batch_snapshots_the_caller_state_not_the_seed() -> None:
+    # C1 precision, composed on a NON-empty state (the tests above use an empty State()): the degenerate
+    # batch must snapshot the CALLER's state — the one carrying the message_agent registration — NOT the
+    # isolate_state Call's fresh seed. The basestate snapshot carries the caller; the published sibling
+    # carries the seed. Restore at close therefore resumes on the caller's own history, not the peer's.
+    class _SeededIsolateNode(NodeDef[Any]):
+        @property
+        def _is_fanout_capable(self) -> bool:
+            return True
+
+        async def run(self, ctx: SessionRunContext) -> Any:
+            seed = State()
+            seed.add_tool_call(ToolCallPart(tool_name="t", args={}, tool_call_id="SEED_ONLY"))
+            return Call("agent.peer.private.input", seed, tag="tc1", isolate_state=True)
+
+    node = _SeededIsolateNode(node_id="fan", subscribe_topics=["fan.in"])
+    fake = FakeFanoutBatchStore()
+    node.resources[FANOUT_STORE_KEY] = fake
+    caller_state = State()
+    caller_state.add_tool_call(ToolCallPart(tool_name="message_agent", args={}, tool_call_id="CALLER_ONLY"))
+    own = CallFrame(target_topic="fan.in", callback_topic="caller", frame_id="A")
+    env = Envelope(context=SessionRunContext(state=caller_state, deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([own])))
+    broker = _CaptureBroker()
+    await node.handler(env, correlation_id="c", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+
+    base = await fake.read_basestate("A")
+    assert base is not None
+    assert "CALLER_ONLY" in base.snapshot.state.tool_calls  # the snapshot is the caller's state
+    assert "SEED_ONLY" not in base.snapshot.state.tool_calls
+    sibling_state = broker.published[0][2].context.state  # the published sibling carries the seed
+    assert "SEED_ONLY" in sibling_state.tool_calls
+    assert "CALLER_ONLY" not in sibling_state.tool_calls
+
+
 async def test_unflagged_bare_call_stays_fast_path() -> None:
     # An unflagged BARE Call (a lone tool call) is a stateless continuation: the OPEN trigger's bare->list
     # normalization must NOT batch it — no store opened, callee frame not fan-out-marked. (The unflagged

@@ -33,7 +33,7 @@ from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
 from calfkit.nodes import Agent, ToolNodeDef, agent_tool
-from calfkit.nodes.peers import Messaging
+from calfkit.peers import Messaging
 from calfkit.worker import Worker
 from tests.integration._fault_tools import boom
 from tests.integration._kafka_helpers import fast_control_plane

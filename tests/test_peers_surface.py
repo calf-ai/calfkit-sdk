@@ -10,8 +10,8 @@ import pytest
 
 from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.nodes import Agent
-from calfkit.nodes.peers import Messaging
 from calfkit.nodes.tool import Tools
+from calfkit.peers import Messaging
 
 
 def _agent(**kw: object) -> Agent[str]:
@@ -120,3 +120,13 @@ def test_agent_messaging_discover_exclusivity() -> None:
         _agent(peers=[Messaging("a"), Messaging(discover=True)])
     # multiple CURATED handles are independent (allowed; the directory dedupes by name).
     assert len(_agent(peers=[Messaging("a"), Messaging("b")])._peers) == 2
+
+
+def test_messaging_is_exported_first_class() -> None:
+    # `Messaging` is a first-class export (top-level + its package), mirroring how `Tools` is exported, so
+    # users write `from calfkit import Messaging` rather than reaching into the deep module path.
+    from calfkit import Messaging as TopLevel
+    from calfkit.peers import Messaging as FromPkg
+    from calfkit.peers.messaging import Messaging as FromModule
+
+    assert TopLevel is FromPkg is FromModule

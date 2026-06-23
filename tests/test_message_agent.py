@@ -28,7 +28,7 @@ from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent
 from calfkit.nodes.agent import _serialize_message_reply
-from calfkit.nodes.peers import Messaging
+from calfkit.peers import Messaging
 from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls
 
 
@@ -225,3 +225,50 @@ async def test_message_agent_empty_name_retries() -> None:
     result = ctx.state.tool_results.get("tc1")
     assert isinstance(result, RetryPromptPart)
     assert "non-empty string" in result.content
+
+
+async def test_message_agent_non_ancestor_target_is_allowed() -> None:
+    # The cycle guard rejects only the TARGET being an ancestor — a legitimate diamond (a DIFFERENT agent
+    # suspended in the chain) must still dispatch. `other` is an ancestor, `billing` is the target.
+    agent = Agent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing")]), peers=[Messaging("billing")])
+    ctx = _ctx_with_view(_view({"billing": None}), ancestors=frozenset({("other", "agent")}))
+    result = await agent.run(ctx)
+    assert isinstance(result, Call)
+    assert result.target_topic == "agent.billing.private.input"  # dispatched, not a false cycle
+    assert "tc1" not in ctx.state.tool_results  # no retry
+
+
+async def test_message_agent_invalid_sibling_excluded_from_batch() -> None:
+    # §5.4 / L13: a validation-failed sibling is EXCLUDED so the dispatched-slot set matches the
+    # completion check. [bad message_agent (offline) + good message_agent + a tool] -> the bad is retried
+    # and dropped; the batch dispatches only the two valid siblings (peer + tool), each at its own slot.
+    tool = ToolBinding(
+        dispatch_topic="adder.in",
+        tool_def=ToolDefinition(name="add", description="add", parameters_json_schema={"type": "object", "properties": {}}),
+    )
+    bad = _msg_call("ghost", tool_call_id="bad1")
+    good = _msg_call("billing", tool_call_id="good1")
+    add = ToolCallPart(tool_name="add", args={}, tool_call_id="t1")
+    agent = Agent(
+        "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([bad, good, add]), tools=[tool], peers=[Messaging(discover=True)]
+    )
+    ctx = _ctx_with_view(_view({"billing": None}))  # billing live, ghost offline
+    result = await agent.run(ctx)
+    assert isinstance(ctx.state.tool_results.get("bad1"), RetryPromptPart)  # ghost excluded
+    assert isinstance(result, list) and len(result) == 2  # only the two valid siblings dispatched
+    by_tag = {c.tag: c for c in result}
+    assert by_tag["good1"].target_topic == "agent.billing.private.input" and by_tag["good1"].isolate_state is True
+    assert by_tag["t1"].target_topic == "adder.in" and by_tag["t1"].isolate_state is False
+
+
+async def test_message_agent_absent_without_a_messaging_handle() -> None:
+    # §5.1: no handle -> no surface. An agent with no `peers=` is never given the message_agent tool.
+    captured: dict[str, set[str]] = {}
+
+    def _capture(messages: object, info: AgentInfo) -> ModelResponse:
+        captured["tools"] = {t.name for t in info.function_tools}
+        return ModelResponse(parts=[ModelTextPart("done")])
+
+    agent = Agent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_capture))  # NO peers=
+    await agent.run(_make_ctx(State()))
+    assert "message_agent" not in captured["tools"]

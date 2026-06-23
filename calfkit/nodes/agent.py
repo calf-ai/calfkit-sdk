@@ -25,11 +25,11 @@ from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
-from calfkit.nodes._peer_directory import render_peer_directory, resolve_live_peers
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
-from calfkit.nodes.peers import Messaging
 from calfkit.nodes.tool import BaseToolNodeDef, Tools
+from calfkit.peers import Messaging
+from calfkit.peers.directory import render_peer_directory, resolve_live_peers
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
