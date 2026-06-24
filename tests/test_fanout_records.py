@@ -7,8 +7,9 @@ so every record must round-trip through JSON. The fault rail (4.4) hard-swaps
 a resolved slot carries `parts` (the typed `ContentPart` vocabulary), a failed slot
 carries `fault` (a typed `ErrorReport`) — `parts` XOR `fault`. `SlotRef`/`FanoutOutcome`
 also carry `target_topic` (the per-slot fault-group topology, decision 5).
-`FanoutOpen.expected` enforces the N>=2 fan-out invariant at the type (`min_length=2`)
-— an empty/singleton batch is unrepresentable.
+`FanoutOpen.expected` registers a batch iff the caller's state must survive the call independently of
+the round-trip — a true fan-out (N>=2) OR a lone `isolate_state` call (a degenerate singleton, L13);
+PR-B relaxed `min_length` 2->1, so an empty batch stays unrepresentable but a singleton is admitted.
 """
 
 from typing import TypeVar
@@ -55,10 +56,13 @@ def test_slot_ref_carries_target_topic() -> None:
     assert _roundtrip(ref).target_topic == "tool.a"
 
 
-def test_fanout_open_rejects_singleton_expected() -> None:
-    # The N>=2 invariant is enforced at the type: a single-slot batch is unrepresentable.
-    with pytest.raises(ValidationError):
-        FanoutOpen(fanout_id="x", node_id="agent", expected=[SlotRef(frame_id="f1", tag="tc1", target_topic="tool.a")])
+def test_fanout_open_accepts_singleton_expected() -> None:
+    # PR-B / L13: the N>=2 invariant is generalized to "register a batch iff the caller's state must
+    # survive the call independently of the round-trip". A singleton batch IS registrable now — a lone
+    # `isolate_state` call (e.g. a lone `message_agent`) opens a degenerate one-element durable batch.
+    reg = FanoutOpen(fanout_id="x", node_id="agent", expected=[SlotRef(frame_id="f1", tag="tc1", target_topic="agent.peer.private.input")])
+    assert len(reg.expected) == 1
+    assert _roundtrip(reg).expected[0].frame_id == "f1"
 
 
 def test_fanout_open_rejects_empty_expected() -> None:

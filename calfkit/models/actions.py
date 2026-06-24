@@ -35,15 +35,30 @@ class Call(Generic[StateT], _Call[StateT]):
     caller's opaque correlation token (the agent sets it to ``tool_call_id``); the
     framework carries it on the call frame and echoes it on the reply slot, so a fan-out
     sibling's reply is self-describing (``reply.in_reply_to`` = slot id, ``reply.tag`` =
-    tool_call_id). These live on ``Call`` only — ``TailCall``/``ReturnCall`` never carry a
-    route. ``init=False`` keeps the custom keyword-only ``route``/``body``/``tag``
-    constructor while letting them participate in ``__eq__``/``__repr__``."""
+    tool_call_id). ``isolate_state`` marks a call whose callee runs on a state **isolated**
+    from the caller's (a fresh seed — e.g. a ``message_agent`` peer that authors its own
+    ``message_history``): the framework opens a durable snapshot/restore batch for it (even
+    when lone) instead of the single-``Call`` fast path, so the caller resumes on its **own**
+    state, not the callee's return (L13). These live on ``Call`` only —
+    ``TailCall``/``ReturnCall`` never carry a route. ``init=False`` keeps the custom
+    keyword-only ``route``/``body``/``tag``/``isolate_state`` constructor while letting them
+    participate in ``__eq__``/``__repr__``."""
 
     route: str | None = None
     body: Any | None = None
     tag: str | None = None
+    isolate_state: bool = False
 
-    def __init__(self, target_topic: str, state: StateT, *, route: str | None = None, body: Any | None = None, tag: str | None = None) -> None:
+    def __init__(
+        self,
+        target_topic: str,
+        state: StateT,
+        *,
+        route: str | None = None,
+        body: Any | None = None,
+        tag: str | None = None,
+        isolate_state: bool = False,
+    ) -> None:
         if route is not None and not is_concrete_route_key(route):
             raise ValueError(
                 f"Call route {route!r} must be a concrete key — non-empty, '.'-delimited words, no empty "
@@ -56,6 +71,7 @@ class Call(Generic[StateT], _Call[StateT]):
         self.route = route
         self.body = body
         self.tag = tag
+        self.isolate_state = isolate_state
 
 
 class TailCall(Generic[StateT], _Call[StateT]):

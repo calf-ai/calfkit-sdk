@@ -423,6 +423,15 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
         ctx._resources = self._effective_resources()
         ctx._frame_id = frame.frame_id if frame is not None else None
+        # Derive the messaging cycle guard's ancestor chain (ADR-0016): the (caller_node_id,
+        # caller_node_kind) of every suspended call on the inbound stack. The agent's resolver rejects a
+        # message_agent whose target is already here (a ring). Frames with no caller (the public entry,
+        # escalation hops) are filtered. Workflow-state-sourced like _frame_id, so stamped here.
+        ctx._ancestor_callers = frozenset(
+            (f.caller_node_id, f.caller_node_kind)
+            for f in envelope.internal_workflow_state.call_stack._internal_list
+            if f.caller_node_id is not None and f.caller_node_kind is not None
+        )
         # Stamp the per-delivery reply AFTER the copy and UNCONDITIONALLY: model_copy
         # preserves private attrs, and on a fresh deserialize the inbound context's
         # _reply is None anyway, so source it from the envelope's reply field — setting
@@ -506,7 +515,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             # Parallel fan-out: publish each Call with independent workflow_state
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
-                wf_copy.invoke_frame(call, self._return_topic, payload=call.body, tag=call.tag)
+                wf_copy.invoke_frame(
+                    call, self._return_topic, payload=call.body, tag=call.tag, caller_node_id=self.node_id, caller_node_kind=self._node_kind
+                )
                 publish_envelope = Envelope(
                     context=SessionRunContext(state=call.state, deps=envelope.context.deps),
                     internal_workflow_state=wf_copy,
@@ -526,7 +537,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
 
         elif isinstance(output, Call):
             # push to callstack and call the target topic
-            envelope.internal_workflow_state.invoke_frame(output, self._return_topic, payload=output.body, tag=output.tag)
+            envelope.internal_workflow_state.invoke_frame(
+                output, self._return_topic, payload=output.body, tag=output.tag, caller_node_id=self.node_id, caller_node_kind=self._node_kind
+            )
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
@@ -840,6 +853,19 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         staged handler's fan-out recognition and the OPEN dispatch path."""
         return False
 
+    @property
+    def _needs_durable_batch(self) -> bool:
+        """Whether this node needs the durable fan-out snapshot/restore machinery (decision 1(b)).
+
+        True iff the node can parallel fan out (:attr:`_is_fanout_capable`) **or** it can dispatch an
+        ``isolate_state`` call — i.e. it carries a ``peers`` handle (set by ``Agent(peers=…)``). This
+        decouples "needs the snapshot machinery" from "does parallel fan-out", so a
+        ``sequential_only_mode`` messaging agent still snapshots/restores the caller's state for a lone
+        ``message_agent`` (a degenerate one-element batch) while keeping its tool routing one-at-a-time.
+        For non-messaging nodes (no ``_peers``) it equals :attr:`_is_fanout_capable`. Gates the store
+        ``@resource``, ``_classify_fanout``, and the OPEN trigger."""
+        return self._is_fanout_capable or bool(getattr(self, "_peers", None))
+
     def _resolve_fanout_store(self, ctx: SessionRunContext) -> FanoutBatchStore:
         """The node's durable fan-out store, from the resource bag.
 
@@ -1113,14 +1139,16 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         return self._no_reply_mirror(envelope)
 
     def _classify_fanout(self, envelope: Envelope) -> Literal["sibling", "reentry"] | None:
-        """Recognize a fan-out continuation on a fan-out-capable node.
+        """Recognize a fan-out continuation on a node that needs the durable batch machinery.
 
         ``"sibling"`` (a marked sibling reply → fold), ``"reentry"`` (the self-published
         closure → close), or ``None`` (normal ingress / single-call continuation). The
         marker rides the node's OWN frame (``fanout_id`` set), so it is the top frame when
         a fan-out continuation re-enters; the reply slot's ``in_reply_to`` then tells a
-        sibling callee (≠ the frame id) from the re-entry (== it)."""
-        if not self._is_fanout_capable:
+        sibling callee (≠ the frame id) from the re-entry (== it). Gated on
+        ``_needs_durable_batch`` (decision 1(b)) so a sequential messaging agent's
+        degenerate-batch continuations classify + fold, not just a parallel-fan-out agent's."""
+        if not self._needs_durable_batch:
             return None
         frame = envelope.internal_workflow_state.current_frame_or_none
         if frame is None or frame.fanout_id is None:
@@ -1155,7 +1183,15 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             for call, slot_id in zip(calls, slot_ids):
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
                 wf_copy.mark_fanout()  # mark the node's OWN (current top) frame, before the callee push
-                wf_copy.invoke_frame(call, self._return_topic, payload=call.body, frame_id=slot_id, tag=call.tag)
+                wf_copy.invoke_frame(
+                    call,
+                    self._return_topic,
+                    payload=call.body,
+                    frame_id=slot_id,
+                    tag=call.tag,
+                    caller_node_id=self.node_id,
+                    caller_node_kind=self._node_kind,
+                )
                 sibling = Envelope(
                     context=SessionRunContext(state=call.state, deps=envelope.context.deps),
                     internal_workflow_state=wf_copy,
@@ -1716,16 +1752,26 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             # on the pre-mutation snapshot — the same report, unwrapped (§4.4).
             return await self._fault_response(output.report, snapshot, envelope, correlation_id, broker)
 
-        # Fan-out OPEN: a fan-out-capable node whose body returned a parallel batch (N >= 2 Calls)
-        # registers the durable batch + publishes the marked siblings. A non-capable node's
-        # list[Call] stays the plain parallel publish in _publish_action; a 1-element list is a
-        # single stateless continuation (not a durable batch) and reroutes there too.
-        if self._is_fanout_capable and isinstance(output, list) and len(output) >= 2 and all(isinstance(c, Call) for c in output):
+        # Fan-out OPEN: register a durable batch + publish the marked siblings when the caller's state
+        # must survive the call independently of the round-trip (decision 1(b) / L13) — a true fan-out
+        # (N >= 2 Calls) OR any `isolate_state` Call (a lone `message_agent` whose peer authors its own
+        # history). A bare Call is normalized to a one-element list first so a flagged bare Call cannot
+        # slip through to _publish_action's bare-Call fast path (which would skip the snapshot, C1). An
+        # *unflagged* single Call / 1-element list stays a stateless continuation and reroutes to the
+        # plain publish in _publish_action below. Gated on `_needs_durable_batch` (not `_is_fanout_capable`),
+        # so a `sequential_only_mode` messaging agent also opens the degenerate batch for its lone peer message.
+        fanout_calls = [output] if isinstance(output, Call) else output
+        if (
+            self._needs_durable_batch
+            and isinstance(fanout_calls, list)
+            and all(isinstance(c, Call) for c in fanout_calls)
+            and (len(fanout_calls) >= 2 or any(c.isolate_state for c in fanout_calls))
+        ):
             # The OPEN dispatch is a terminal-publish path; guard it like the publish guard below so a
             # raise that _handle_fanout_open's own abort somehow missed still faults the caller on the
             # pre-mutation snapshot, never escapes to FastStream (C1 / P1 — defense-in-depth).
             try:
-                return await self._handle_fanout_open(ctx, output, envelope, correlation_id, broker)
+                return await self._handle_fanout_open(ctx, fanout_calls, envelope, correlation_id, broker)
             except Exception as exc:
                 report = self._fault_from_exception(exc, seam_ctx, snapshot, correlation_id)
                 return await self._fault_response(report, snapshot, envelope, correlation_id, broker)
