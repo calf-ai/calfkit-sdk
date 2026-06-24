@@ -757,6 +757,24 @@ class TestTailCallFrameIdentity:
         assert frame.fanout_id is None  # cleared — a TailCall is never fan-out-marked
         assert headers[HDR_KIND] == "call"
 
+    async def test_tailcall_clear_overrides_nulls_frame_overrides(self) -> None:
+        # §5.3/C2 (genuine handoff): TailCall(clear_overrides=True) NULLS frame.overrides on the retargeted
+        # frame so the tailcallee (a DIFFERENT agent) uses its own tools/model — while still preserving
+        # frame_id/tag/callback_topic. (The default above PRESERVES overrides — the self-retry to self.)
+        node = _node()
+        stack = CallFrameStack()
+        stack.push(CallFrame(target_topic="agent.in", callback_topic="caller.return", frame_id="F1", tag="t1", overrides=OverridesState()))
+        envelope = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
+        broker = _CaptureBroker()
+
+        await node._publish_action(TailCall(target_topic="next.topic", state=State(), clear_overrides=True), envelope, "cid", broker)
+
+        frame = broker.published[0][1].internal_workflow_state.current_frame
+        assert frame.overrides is None  # CLEARED for the genuine handoff (C2)
+        assert frame.frame_id == "F1" and frame.tag == "t1"  # identity still preserved
+        assert frame.callback_topic == "caller.return"  # caller inheritance preserved
+        assert frame.target_topic == "next.topic"  # retargeted
+
 
 class TestUnknownKind:
     async def test_unknown_kind_delivery_is_ignored_not_run_as_work(self, caplog: pytest.LogCaptureFixture) -> None:

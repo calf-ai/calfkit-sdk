@@ -75,6 +75,23 @@ def test_tailcall_does_not_accept_route_or_body() -> None:
         TailCall("topic", object(), route="x")  # type: ignore[call-arg]
 
 
+def test_tailcall_clear_overrides_defaults_false() -> None:
+    # Opt-in (PR-C/§5.3/C2): the existing self-retry TailCall (no flag) stays a no-op on overrides.
+    assert TailCall("topic", object()).clear_overrides is False
+    assert TailCall(target_topic="topic", state=object()).clear_overrides is False  # kw form too
+
+
+def test_tailcall_clear_overrides_opt_in() -> None:
+    assert TailCall("topic", object(), clear_overrides=True).clear_overrides is True
+
+
+def test_tailcall_clear_overrides_participates_in_eq_and_repr() -> None:
+    # @dataclass(init=False) (mirroring Call's flags) keeps clear_overrides in __eq__/__repr__.
+    assert TailCall("t", 1) != TailCall("t", 1, clear_overrides=True)
+    assert TailCall("t", 1, clear_overrides=True) == TailCall("t", 1, clear_overrides=True)
+    assert "clear_overrides" in repr(TailCall("t", 1, clear_overrides=True))
+
+
 def test_call_rejects_malformed_route_at_construction() -> None:
     # Peer Call validation is symmetric with the client path.
     with pytest.raises(ValueError):

@@ -590,7 +590,15 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             # payload (TailCall carries no body — the traveling State is its input) and fanout_id (a
             # TailCall is never fan-out-marked). `invoke_frame` would mint a fresh id and drop overrides.
             frame = envelope.internal_workflow_state.unwind_frame()
-            envelope.internal_workflow_state.call_stack.push(replace(frame, target_topic=output.target_topic, payload=None, fanout_id=None))
+            retargeted = replace(frame, target_topic=output.target_topic, payload=None, fanout_id=None)
+            if output.clear_overrides:
+                # Genuine handoff (§5.3/C2): null the frame's per-run overrides so the tailcallee — a
+                # DIFFERENT agent — uses its OWN tools/model. `prepare_context` re-applies `frame.overrides`
+                # onto `state.overrides` at the callee's start, so BOTH channels must be nulled (`run()`
+                # nulls the state channel on the carried State). Default `False` preserves overrides for the
+                # self-retry to self.
+                retargeted = replace(retargeted, overrides=None)
+            envelope.internal_workflow_state.call_stack.push(retargeted)
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
@@ -858,13 +866,15 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         """Whether this node needs the durable fan-out snapshot/restore machinery (decision 1(b)).
 
         True iff the node can parallel fan out (:attr:`_is_fanout_capable`) **or** it can dispatch an
-        ``isolate_state`` call — i.e. it carries a ``peers`` handle (set by ``Agent(peers=…)``). This
-        decouples "needs the snapshot machinery" from "does parallel fan-out", so a
+        ``isolate_state`` call — i.e. it carries a ``Messaging`` handle (set by ``Agent(peers=[Messaging…])``).
+        This decouples "needs the snapshot machinery" from "does parallel fan-out", so a
         ``sequential_only_mode`` messaging agent still snapshots/restores the caller's state for a lone
-        ``message_agent`` (a degenerate one-element batch) while keeping its tool routing one-at-a-time.
-        For non-messaging nodes (no ``_peers``) it equals :attr:`_is_fanout_capable`. Gates the store
+        ``message_agent`` (a degenerate one-element batch) while keeping its tool routing one-at-a-time. A
+        ``Handoff``-only agent needs NO durable batch — a ``HandoffRequest`` is the turn's *output*, never a
+        ``Call``, so it never opens one (keyed on ``_messaging_handles``, not any ``peers`` handle). For
+        non-agent nodes (no ``_messaging_handles``) it equals :attr:`_is_fanout_capable`. Gates the store
         ``@resource``, ``_classify_fanout``, and the OPEN trigger."""
-        return self._is_fanout_capable or bool(getattr(self, "_peers", None))
+        return self._is_fanout_capable or bool(getattr(self, "_messaging_handles", None))
 
     def _resolve_fanout_store(self, ctx: SessionRunContext) -> FanoutBatchStore:
         """The node's durable fan-out store, from the resource bag.

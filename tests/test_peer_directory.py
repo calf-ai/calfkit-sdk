@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from calfkit.models.agents import derive_input_topic
-from calfkit.peers import Messaging
+from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import render_peer_directory, resolve_live_peers
 
 
@@ -80,3 +80,27 @@ def test_render_directory_lines() -> None:
 
 def test_render_empty_is_none_reachable() -> None:
     assert "reachable" in render_peer_directory([]).lower()
+
+
+# ── Handoff handles resolve through the SAME directory (PR-C reuses resolve_live_peers — the body
+# is capability-agnostic, reading only h.names/h.discover; a Handoff satisfies the _PeerScope shape). ──
+
+
+def test_resolve_handoff_curated_intersects_live() -> None:
+    view = _view({"refunds": "Refunds.", "billing": None, "other": "Other."})
+    entries = resolve_live_peers(view, [Handoff("refunds", "billing")], self_name="triage")
+    assert entries == [("billing", None), ("refunds", "Refunds.")]  # sorted by name; 'other' out of scope
+
+
+def test_resolve_handoff_discover_all_live_minus_self() -> None:
+    view = _view({"a": "A.", "b": "B.", "triage": "me"})
+    entries = resolve_live_peers(view, [Handoff(discover=True)], self_name="triage")
+    assert entries == [("a", "A."), ("b", "B.")]  # self excluded; sorted
+
+
+def test_resolve_handoff_curated_absent_warns_and_omits(caplog: pytest.LogCaptureFixture) -> None:
+    view = _view({"refunds": "R."})  # 'ghost' is curated but not live
+    with caplog.at_level(logging.WARNING):
+        entries = resolve_live_peers(view, [Handoff("refunds", "ghost")], self_name="triage")
+    assert entries == [("refunds", "R.")]
+    assert any("ghost" in r.message for r in caplog.records)

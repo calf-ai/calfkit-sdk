@@ -250,7 +250,7 @@ Mostly additive. New: the universal `{node_kind}.{name}.private.input` subscript
 - **[ADR-0015](../adr/0015-agent-messaging-is-a-first-class-capability.md)** — a2a messaging is a first-class capability via one runtime-rendered built-in tool. `accepted` (PR-B).
 - **[ADR-0016](../adr/0016-cycle-detection-bounds-agent-recursion.md)** — messaging recursion bounded by cycle detection via per-frame caller identity. `accepted` (PR-B).
 - **[ADR-0017](../adr/0017-deterministic-name-scoped-private-input-topic.md)** — deterministic, name-scoped private input topic on every node. `accepted` (PR-A).
-- **[ADR-0019](../adr/0019-handoff-transfers-control-via-tailcall.md)** — handoff transfers control via a structured-output union member that emits a TailCall. `proposed`.
+- **[ADR-0019](../adr/0019-handoff-transfers-control-via-tailcall.md)** — handoff transfers control via a structured-output union member that emits a TailCall. `accepted` (PR-C).
 
 (0013/0014 belong to the runtime-tool-discoverability feature; 0018 to the MCP tool-name-namespacing feature — so this feature's ADRs are 0015–0017 and 0019.)
 

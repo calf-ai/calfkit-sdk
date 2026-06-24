@@ -28,7 +28,7 @@ from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent
 from calfkit.nodes.agent import _serialize_message_reply
-from calfkit.peers import Messaging
+from calfkit.peers import Handoff, Messaging
 from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls
 
 
@@ -109,6 +109,18 @@ def test_message_agent_name_reserved_against_user_tool() -> None:
     )
     with pytest.raises(ValueError):
         Agent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[bad], peers=[Messaging("billing")])
+
+
+def test_message_agent_name_not_reserved_for_handoff_only_agent() -> None:
+    # The reservation is MESSAGING-only (gate keyed on _messaging_handles): a Handoff-only agent injects no
+    # message_agent tool, so a user tool named `message_agent` is allowed (no reservation collision).
+    user_tool = ToolBinding(
+        dispatch_topic="t.in",
+        tool_def=ToolDefinition(name="message_agent", description="x", parameters_json_schema={"type": "object", "properties": {}}),
+    )
+    agent = Agent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[user_tool], peers=[Handoff("refunds")])
+    assert agent._handoff_handles == [Handoff("refunds")]
+    assert "message_agent" in {b.name for b in agent.tools}  # the user tool survives, unreserved
 
 
 async def test_message_agent_parallel_mixed_batch_dispatches_per_kind() -> None:
