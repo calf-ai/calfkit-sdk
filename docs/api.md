@@ -7,6 +7,7 @@ from calfkit import (
     Client, InvocationHandle, InvocationResult,          # client
     Agent, agent_tool, consumer,                         # node authoring
     Tools,                                               # reference deployed tool nodes by name
+    Messaging, Handoff,                                  # agent-to-agent peers
     BaseNodeDef, NodeDef, ToolNodeDef, ConsumerNode,     # node types
     ConsumerFn,                                          # node typing helpers
     ToolContext,                                         # tool-side context
@@ -39,6 +40,13 @@ from calfkit import (
 | `agent_tool` | Decorator that turns a function into a deployable tool node (`@agent_tool(name=...)` or `agent_tool(func, name=...)` overrides its name). |
 | `Tools` | Identity-only handle that references deployed tool nodes — by name, or every live one with `discover=True`; pass in `Agent(tools=[...])` to discover their schemas at runtime. |
 | `consumer` | Decorator that turns a function into a deployable consumer node (a terminal sink on a topic). |
+
+### Agent-to-agent (peers)
+
+| Symbol | Purpose |
+| --- | --- |
+| `Messaging` | Identity-only handle declaring peers an agent may **message** — consult and keep control — by name, or every live agent with `discover=True`; pass in `Agent(peers=[...])`. |
+| `Handoff` | Identity-only handle declaring peers an agent may **hand off** to — transfer control — by name, or every live agent with `discover=True`; pass in `Agent(peers=[...])`. |
 
 ### Node types
 
@@ -164,6 +172,7 @@ Agent(
     name: str,
     *,
     system_prompt: str = "You are a helpful AI assistant.",
+    description: str | None = None,
     subscribe_topics: str | list[str],
     publish_topic: str | None = None,
     tools: Sequence[...] | None = None,
@@ -171,10 +180,11 @@ Agent(
     final_output_type: type = str,
     sequential_only_mode: bool = False,
     model_settings: ModelSettings | dict | None = None,
+    peers: Sequence[Messaging | Handoff] | None = None,
 )
 ```
 
-An agent node. Consumes prompts from `subscribe_topics`, calls its `tools`, and publishes its output to `publish_topic` (when set). `final_output_type` enforces a structured output type (default: plain `str`).
+An agent node. Consumes prompts from `subscribe_topics`, calls its `tools`, and publishes its output to `publish_topic` (when set). `final_output_type` enforces a structured output type (default: plain `str`). `description` is a short public blurb (≤512 chars) advertised on the `calf.agents` directory so other agents can discover this one. `peers` declares the agents it may reach — `Messaging` (consult) and `Handoff` (transfer); see [Agent-to-agent messaging & handoff](#agent-to-agent-messaging--handoff).
 
 ### `@agent_tool`
 
@@ -415,6 +425,41 @@ The worker's control-plane configuration (`from calfkit import ControlPlaneConfi
 
 See also: [How to give agents MCP tools](mcp-tool-discovery.md).
 
+## Agent-to-agent messaging & handoff
+
+Let an agent reach other agents discovered at runtime by name. Both handles are re-exported from the top-level `calfkit` package and passed in `Agent(peers=[...])`.
+
+| Symbol | Purpose |
+| --- | --- |
+| `Messaging` | Handle declaring peers an agent may **message** — a consult: the agent keeps control and the peer's reply folds into the call. |
+| `Handoff` | Handle declaring peers an agent may **hand off** to — a transfer: control moves to the peer, which answers the original caller. |
+
+### `Messaging`
+
+```python
+agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+              peers=[Messaging("billing", "support")])   # named: consult specific peers
+# or
+agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+              peers=[Messaging(discover=True)])           # discover: any live agent
+```
+
+A frozen, identity-only handle to peer agents, resolved per turn from the `calf.agents` control plane. Two mutually exclusive modes: **named** — `Messaging("billing", "support")` / `Messaging(names=[...])` lists the messageable peers; **discover** — `Messaging(discover=True)` opens messaging to every live agent, carrying no names. Exactly one of {non-empty names, `discover=True`} holds — both, or the empty handle, raise `ValueError`. Supplies the agent a built-in `message_agent(name, message)` tool whose description lists the live, in-scope peers; the peer answers on a fresh conversation and its reply folds into the tool result.
+
+### `Handoff`
+
+```python
+agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+              peers=[Handoff("refunds")])                 # named: transfer to specific peers
+# or
+agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+              peers=[Handoff(discover=True)])             # discover: any live agent
+```
+
+A frozen, identity-only handle to peer agents, with the same construction rules as `Messaging` (named XOR `discover=True`; both, or the empty handle, raise `ValueError`). Names the peers an agent may transfer control to: the model emits a `HandoffRequest(name, message)` as its turn output, control moves to the named peer, and the handing agent does not regain it. Handles are independent across capabilities, and a `discover=True` handle is the sole author of its own capability's scope (no named handle of the same kind alongside it). Naming the agent's own name in either handle raises `ValueError` at `Agent` construction.
+
+See also: [How to let agents find and reach each other at runtime](agent-peers.md).
+
 ## Other public modules
 
 The top-level package re-exports the symbols above. A few public capabilities live in submodules:
@@ -434,6 +479,7 @@ The top-level package re-exports the symbols above. A few public capabilities li
 - **[How to handle errors and faults](error-handling.md)** — `on_node_error` / `on_callee_error`, minting `NodeFaultError`, and inspecting an `ErrorReport`.
 - **[How to give agents MCP tools](mcp-tool-discovery.md)** — fronting an MCP server as a toolbox.
 - **[How to give agents discoverable tool nodes](tool-discovery.md)** — referencing deployed function tool nodes by name with `Tools`.
+- **[How to let agents find and reach each other at runtime](agent-peers.md)** — agent-to-agent messaging and handoff with `Messaging` / `Handoff`.
 - **[Worker lifecycle & embedding](worker-lifecycle.md)** — `Worker`, the lifecycle contexts, and `@resource`.
 - **[CLI reference](cli.md)** — the `ck run` and `ck topics` commands.
 - **[Topic provisioning](topic-provisioning.md)** — `ProvisioningConfig` and the opt-in topic-creation helper.
