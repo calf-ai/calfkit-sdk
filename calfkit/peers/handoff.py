@@ -85,9 +85,10 @@ class HandoffRequest(BaseModel):
 # top-level description from its per-param descriptions. The preamble keeps only the handoff *semantics* + the
 # directory it points at, so the two are documented once each, not duplicated.
 _HANDOFF_PREAMBLE = (
-    "Use HandoffRequest to transfer this conversation to another agent. You relinquish control and will NOT "
-    "regain it — the chosen agent continues and will have context of the conversation, and answers the "
-    "original caller in your place.\n\n"
+    "Use HandoffRequest to hand the whole conversation to a better-suited agent — when the request belongs to "
+    "another agent's domain and should be handled by them, not just consulted. You relinquish control and will "
+    "NOT regain it: the chosen agent continues with full context of the conversation and answers the original "
+    "caller in your place.\n\n"
     "Agents (name — description):\n"
 )
 

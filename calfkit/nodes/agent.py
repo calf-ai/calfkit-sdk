@@ -317,11 +317,10 @@ class BaseAgentNodeDef(
         return ToolDefinition(
             name=_MESSAGE_AGENT_TOOL,
             description=(
-                "Use this tool to send a message to another agent to ask questions or handle complex, multi-step tasks. "
-                "Each agent has specific capabilities and tools available to it. "
-                "The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters. "
-                "Each message to an agent is a fresh conversation (it sees only your message) so every message must contain adequate context. "
-                "Context is not persisted from turn to turn, each message to an agent is a fresh conversation for that agent.\n"
+                "Use this tool to send a message to another agent to ask questions or handle complex, multi-step tasks, "
+                "and get its reply back as the tool result. You keep control of this conversation and continue after the "
+                "reply (the reply is not shown to the user, so relay what matters). The peer answers on a fresh conversation "
+                "that sees only this message and remembers nothing between calls, so include all the context it needs.\n"
                 f"Available agents (name — description):\n{directory}"
             ),
             parameters_json_schema={
