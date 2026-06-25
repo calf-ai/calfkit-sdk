@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from calfkit._handle_names import normalize_handle_names
+
 
 @dataclass(frozen=True)
 class Messaging:
@@ -32,22 +34,5 @@ class Messaging:
     # ``*positional`` varargs (the common case) plus a keyword-only ``names=`` list; no name collision
     # because the varargs param is ``positional`` while the stored field is ``names`` (mirrors ``Tools``).
     def __init__(self, *positional: str, names: Sequence[str] | None = None, discover: bool = False) -> None:
-        # ``discover`` IS the absence of names (it opens to every live agent), so pairing it with names
-        # is contradictory: exactly one of {non-empty names, discover=True}.
-        if discover and (positional or names is not None):
-            raise ValueError("Messaging(discover=True) takes no agent names")
-        if discover:
-            object.__setattr__(self, "names", ())
-        else:
-            if positional and names is not None:
-                raise ValueError("Messaging: pass agent names positionally or via names=, not both")
-            source = positional if positional else tuple(names or ())
-            collected = tuple(dict.fromkeys(source))  # order-preserving dedupe
-            if not collected:
-                # Empty STILL raises — never an implicit "everything" (the fail-loud rail: an accidental
-                # empty splat ``Messaging(*[])`` must not silently become open mode).
-                raise ValueError("Messaging requires at least one agent name, or discover=True")
-            if any(not n for n in collected):
-                raise ValueError("Messaging names must be non-empty")
-            object.__setattr__(self, "names", collected)
+        object.__setattr__(self, "names", normalize_handle_names("Messaging", "agent", positional=positional, names=names, discover=discover))
         object.__setattr__(self, "discover", discover)

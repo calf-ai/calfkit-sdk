@@ -9,7 +9,7 @@ from calfkit._protocol import NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
-from calfkit._vendor.pydantic_ai.messages import ModelRequest, RetryPromptPart, ToolCallPart, ToolReturn
+from calfkit._vendor.pydantic_ai.messages import ModelRequest, RetryPromptPart, ToolCallPart, ToolReturn, UserPromptPart
 from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults, ToolDefinition
@@ -28,8 +28,9 @@ from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, Ktab
 from calfkit.nodes._projection import project, structured_output_preamble
 from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
 from calfkit.nodes.tool import BaseToolNodeDef, Tools
-from calfkit.peers import Messaging
+from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import render_peer_directory, resolve_live_peers
+from calfkit.peers.handoff import _HANDOFF_NO_PEERS_NOTE, HandoffRequest, _build_handoff_request
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
@@ -80,7 +81,7 @@ class BaseAgentNodeDef(
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
         sequential_only_mode: bool = False,
         model_settings: ModelSettings | dict[str, Any] | None = None,
-        peers: Sequence[Messaging] | None = None,
+        peers: Sequence[Messaging | Handoff] | None = None,
     ):
         self.final_output_type = final_output_type
         self.system_prompt = system_prompt
@@ -92,36 +93,42 @@ class BaseAgentNodeDef(
         self._eager_tool_nodes: list[BaseToolNodeDef] = []
         self._add_tools(tools)  # enforce the tool-surface contract, then commit (raises before agent-loop build)
         self.sequential_only_mode = sequential_only_mode
-        # peers= (ADR-0015): capability handles for agent-to-agent reach, validated + stored BEFORE the
-        # fan-out store @resource gate below (decision 1(b): `_needs_durable_batch` reads `self._peers`,
-        # so a `sequential_only_mode` messaging agent gets the store for its lone `message_agent`). The
-        # own-name reject lives here — a handle can't see the enclosing agent's name (M2); `peers=`
-        # type-validates each element is a `Messaging` handle (M4: no cross-absorption with `tools=`).
+        # peers= (ADR-0015/0019): capability handles for agent-to-agent reach (Messaging — consult; Handoff
+        # — transfer control), validated + stored BEFORE the fan-out store @resource gate below (decision
+        # 1(b): `_needs_durable_batch` reads `self._messaging_handles`, so a `sequential_only_mode` messaging
+        # agent gets the store for its lone `message_agent`; a Handoff-only agent needs none). The own-name
+        # reject lives here — a handle can't see the enclosing agent's name (M2); `peers=` type-validates
+        # each element is a `Messaging`/`Handoff` handle (M4: no cross-absorption with `tools=`).
         peer_handles = tuple(peers or ())
         for peer in peer_handles:
-            if not isinstance(peer, Messaging):
-                raise TypeError(f"peers= elements must be Messaging handles, got {type(peer).__name__}: {peer!r}")
+            if not isinstance(peer, (Messaging, Handoff)):
+                raise TypeError(f"peers= elements must be Messaging or Handoff handles, got {type(peer).__name__}: {peer!r}")
             if name in peer.names:
-                raise ValueError(f"agent {name!r} cannot message itself — remove its own name from the Messaging handle")
-        # §5.1 discover-exclusivity (per capability): a `discover=True` handle is the exclusive author of
-        # its capability's scope — no named handle of the same kind may accompany it (mirrors the shipped
-        # `Tools(discover=True)` rule). Scoped to `Messaging` so it stays per-capability when PR-C adds `Handoff`.
+                raise ValueError(f"agent {name!r} cannot name itself in a peers= handle — remove its own name")
+        # §5.1 discover-exclusivity, PER CAPABILITY: a `discover=True` handle is the exclusive author of its
+        # OWN capability's scope — no named handle OF THE SAME KIND may accompany it (mirrors the shipped
+        # `Tools(discover=True)` rule). Independent ACROSS capabilities: a discover Messaging coexists with a
+        # named Handoff, and vice versa.
         messaging = [h for h in peer_handles if isinstance(h, Messaging)]
         if any(h.discover for h in messaging) and len(messaging) > 1:
             raise ValueError("Messaging(discover=True) is the exclusive author of the messaging scope — no other Messaging handle may accompany it")
-        self._peers: tuple[Messaging, ...] = peer_handles
-        # Reserve the built-in tool name against the construction-time tool surface (§5.2): the built-in
-        # is injected into the ExternalToolset OUTSIDE tools_registry, so the intra-registry collision
-        # guard would not see it. Checked against eager/static tools (self.tools, set by _add_tools above)
-        # and named `Tools` selectors (self._tool_selectors). (A discover-resolved tool node of this name
-        # is a deferred follow-up, not reserved here.)
-        if self._peers:
+        handoff = [h for h in peer_handles if isinstance(h, Handoff)]
+        if any(h.discover for h in handoff) and len(handoff) > 1:
+            raise ValueError("Handoff(discover=True) is the exclusive author of the handoff scope — no other Handoff handle may accompany it")
+        self._peers: tuple[Messaging | Handoff, ...] = peer_handles
+        # Reserve the built-in tool name against the construction-time tool surface (§5.2) — MESSAGING-only:
+        # the built-in is injected into the ExternalToolset OUTSIDE tools_registry, so the intra-registry
+        # collision guard would not see it. Only a `Messaging` handle injects `message_agent`, so a
+        # Handoff-only agent reserves nothing. Checked against eager/static tools (self.tools, set by
+        # _add_tools above) and named `Tools` selectors (self._tool_selectors). (A discover-resolved tool
+        # node of this name is a deferred follow-up, not reserved here.)
+        if self._messaging_handles:
             reserved = _MESSAGE_AGENT_TOOL in {b.name for b in self.tools} or any(
                 isinstance(sel, Tools) and _MESSAGE_AGENT_TOOL in sel.names for sel in self._tool_selectors
             )
             if reserved:
                 raise ValueError(
-                    f"tool name {_MESSAGE_AGENT_TOOL!r} is reserved for the built-in messaging tool when peers= is set; rename the user tool"
+                    f"tool name {_MESSAGE_AGENT_TOOL!r} is reserved for the built-in messaging tool (a Messaging handle is set); rename the user tool"
                 )
 
         if not isinstance(subscribe_topics, (list, tuple)):
@@ -293,6 +300,10 @@ class BaseAgentNodeDef(
     def _messaging_handles(self) -> list[Messaging]:
         return [h for h in self._peers if isinstance(h, Messaging)]
 
+    @property
+    def _handoff_handles(self) -> list[Handoff]:
+        return [h for h in self._peers if isinstance(h, Handoff)]
+
     def _message_agent_tool_def(self, ctx: SessionRunContext) -> ToolDefinition | None:
         """The runtime-rendered ``message_agent`` external tool def (§5.2), or ``None`` when the agent
         carries no ``Messaging`` handle. The description renders the live, Messaging-scoped, self-excluded
@@ -320,6 +331,61 @@ class BaseAgentNodeDef(
                 "additionalProperties": False,
             },
         )
+
+    def _handoff_output_override(self, ctx: SessionRunContext) -> tuple[OutputSpec[Any] | None, str | None]:
+        """The per-run handoff ``output_type`` override + the empty-set ephemeral instruction (§5.3), or
+        ``(None, None)`` when the agent carries no ``Handoff`` handle (the run is left unchanged).
+
+        With >=1 live in-scope peer: ``([final_output_type, <HandoffRequest subclass>, DeferredToolRequests],
+        None)`` — the override REPLACES the construction-time type, so it carries the FULL list (dropping
+        ``DeferredToolRequests`` would break tool dispatch). With a ``Handoff`` handle but NO live peer:
+        ``(None, <no-peers note>)`` — the member is OMITTED (an empty ``Literal`` is unbuildable) and the note
+        conveys the dormant capability via the request-level ``instructions`` (self-heals when a peer comes
+        online). The live directory is the SAME ``resolve_live_peers`` render messaging uses, Handoff-scoped."""
+        handles = self._handoff_handles
+        if not handles:
+            return None, None
+        live = tuple(resolve_live_peers(ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY), handles, self_name=self.name))
+        if not live:
+            return None, _HANDOFF_NO_PEERS_NOTE
+        return [self.final_output_type, _build_handoff_request(live), DeferredToolRequests], None
+
+    def _dispatch_handoff(self, handoff: HandoffRequest, ctx: SessionRunContext) -> TailCall[State]:
+        """Route a model-produced ``HandoffRequest`` (§5.3/§5.4) — A's output is ALREADY persisted (the
+        final-output branch ran ``extend_with_responses``); this only routes, thin + drop-in.
+
+        The target is re-checked LIVE (the render->dispatch staleness race is the only case calfkit handles):
+        - **live** -> null ``state.overrides`` (C2: the agent reads the state channel) + ``TailCall`` to the
+          peer's input topic with ``clear_overrides=True`` (nulls the frame channel — ``prepare_context``
+          re-applies ``frame.overrides`` onto ``state.overrides`` at B's start, so BOTH must be nulled). The
+          frame retargets preserving frame_id/tag/callback_topic + caller_node_id, so B inherits A's ORIGINAL
+          caller + full conversation and A drops out; B uses its own tools/model.
+        - **stale** (gone between render and dispatch) -> do NOT relinquish: append a FEEDBACK TURN (a
+          user-role ``ModelRequest``) so the history tail is a ``ModelRequest`` and the re-entered model is
+          forced to re-decide against a fresh ``Literal``, then ``TailCall`` to SELF (no ``clear_overrides`` —
+          keep A's surface). Without the feedback turn a ``ModelResponse``-tail history + empty instructions
+          hits pydantic-ai's ``UserPromptNode`` no-model-call shortcut and the stale handoff output would be
+          returned as A's answer in native/prompted mode. Mirrors the all-invalid self-retry *pattern* (a
+          different branch); unbounded in v1 (#251)."""
+        reachable = {n for n, _ in resolve_live_peers(ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY), self._handoff_handles, self_name=self.name)}
+        if handoff.name in reachable:
+            logger.debug("[%s] handoff: relinquishing control to %r node=%s", ctx.correlation_id[:8], handoff.name, self.name)
+            ctx.state.overrides = None
+            return TailCall[State](target_topic=derive_input_topic(handoff.name), state=ctx.state, clear_overrides=True)
+        # The stale self-retry is the entry to an unbounded loop (#251); WARN so an operator can see a
+        # stale-handoff ring (the only signal until #251 lands a bound).
+        logger.warning(
+            "[%s] handoff target %r went offline between render and dispatch; self-retrying (unbounded in v1, #251) node=%s",
+            ctx.correlation_id[:8],
+            handoff.name,
+            self.name,
+        )
+        feedback = (
+            f"The agent {handoff.name!r} you tried to hand off to is no longer available. "
+            "Choose another agent that is online, or answer the user directly."
+        )
+        ctx.state.message_history.append(ModelRequest(parts=[UserPromptPart(content=feedback)]))
+        return TailCall[State](target_topic=self._return_topic, state=ctx.state)
 
     def _message_agent_target_error(self, name: str, ctx: SessionRunContext) -> str | None:
         """The model-visible reason a ``message_agent`` target is invalid, or ``None`` when it is OK to
@@ -524,9 +590,24 @@ class BaseAgentNodeDef(
         message_agent_def = self._message_agent_tool_def(ctx)
         if message_agent_def is not None:
             external_defs.append(message_agent_def)
+        # Handoff (§5.3): override the per-run output_type to add the HandoffRequest union member built over
+        # the live in-scope directory (so the model MAY transfer control); an empty live set omits the member
+        # and instead injects an ephemeral "no agents online" note into the request-level instructions
+        # (a None-FILTERED list — a bare [None, note] raises TypeError). `(None, None)` for a non-handoff
+        # agent leaves both output_type (construction-time default) and instructions unchanged.
+        handoff_output_type, handoff_note = self._handoff_output_override(ctx)
+        instructions: str | list[str] | None
+        if handoff_note is None:
+            instructions = ctx.state.temp_instructions
+        else:
+            instructions = [s for s in (ctx.state.temp_instructions, handoff_note) if s]
         result = await self._agent_loop.run(
             message_history=project(ctx.state.message_history, viewer=self.name),
-            instructions=ctx.state.temp_instructions,
+            instructions=instructions,
+            # `run`'s overloads accept either a strict `None` or a non-`None` OutputSpec; a `None`-able value
+            # matches neither, but the impl signature accepts `None` (-> construction-time default, no
+            # rebuild). Cast to bridge the overload — `None` here is the no-override / member-omitted path.
+            output_type=cast("OutputSpec[Any]", handoff_output_type),
             toolsets=[ExternalToolset(external_defs)],
             deps=ctx.deps,
             deferred_tool_results=tool_results,
@@ -698,10 +779,17 @@ class BaseAgentNodeDef(
                 return parallel_tool_calls
 
         else:
-            logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
             new_messages = result.new_messages()
             # stamp author identity onto the agent's own responses (§4, §6.1)
             ctx.state.extend_with_responses(new_messages, self.name)
+            # Handoff (§5.3/§5.4): A produced a HandoffRequest as its turn output (already persisted above —
+            # do NOT extend again). Transfer control to the live peer via a TailCall, or self-retry on the
+            # render->dispatch staleness race. Invalid/self/hallucinated names never reach here (the per-turn
+            # Literal + pydantic-ai auto-retry handle them). Discriminated by isinstance (mode-agnostic).
+            # `_dispatch_handoff` logs its own disposition; this branch's log below is the ReturnCall path only.
+            if isinstance(result.output, HandoffRequest):
+                return self._dispatch_handoff(result.output, ctx)
+            logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
             if isinstance(result.output, str):
                 parts: list[ContentPart] = [TextPart(text=result.output)]
             else:

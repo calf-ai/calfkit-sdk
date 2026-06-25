@@ -5,7 +5,7 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, Control
 from calfkit.exceptions import DeserializationError, LifecycleConfigError, NodeFaultError
 from calfkit.models import ErrorReport, FaultTypes, ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, Tools, agent_tool, consumer
-from calfkit.peers import Messaging
+from calfkit.peers import Handoff, Messaging
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.tuning import FanoutConfig, KTableReaderTuning
@@ -33,6 +33,7 @@ __all__ = [
     "agent_tool",
     "consumer",
     # peers (agent-to-agent)
+    "Handoff",
     "Messaging",
     # providers
     "AnthropicModelClient",

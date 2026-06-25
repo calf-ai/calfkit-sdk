@@ -221,17 +221,18 @@ def test_call_isolate_state_field() -> None:
 
 
 def test_needs_durable_batch_decouples_from_fanout_capability() -> None:
-    # PR-B / decision 1(b): the durable-batch machinery is needed iff the node can parallel-fan-out
-    # (`_is_fanout_capable`) OR can dispatch an `isolate_state` call (it carries a `peers` handle).
-    # Decoupled so a `sequential_only_mode` messaging agent still gets the machinery for a lone
-    # `message_agent`; for non-messaging nodes it equals `_is_fanout_capable`.
-    plain = NodeDef(node_id="n", subscribe_topics=["n.in"])  # not fan-out-capable, no peers
+    # decision 1(b), NARROWED in PR-C: the durable-batch machinery is needed iff the node can parallel-
+    # fan-out (`_is_fanout_capable`) OR can dispatch an `isolate_state` call (it carries a `Messaging`
+    # handle, signalled by `_messaging_handles`). Decoupled so a `sequential_only_mode` messaging agent
+    # still gets the machinery for a lone `message_agent`; for non-messaging nodes — incl. a Handoff-only
+    # agent (a HandoffRequest is the turn's OUTPUT, never a Call) — it equals `_is_fanout_capable`.
+    plain = NodeDef(node_id="n", subscribe_topics=["n.in"])  # not fan-out-capable, no messaging
     assert plain._needs_durable_batch is False
     fanout = _SingleCallFanoutNode(node_id="f", subscribe_topics=["f.in"])  # fan-out-capable
     assert fanout._needs_durable_batch is True
-    plain._peers = ("messaging-handle",)  # a sequential agent with a peers handle
+    plain._messaging_handles = ("messaging-handle",)  # type: ignore[attr-defined]  # a sequential messaging agent
     assert plain._needs_durable_batch is True
-    plain._peers = ()  # empty peers handle => no machinery
+    plain._messaging_handles = ()  # type: ignore[attr-defined]  # no messaging handle => no machinery
     assert plain._needs_durable_batch is False
 
 
@@ -313,10 +314,11 @@ class _IsolateStateBareCallNode(NodeDef[Any]):
 
 
 class _SequentialMessagingNode(NodeDef[Any]):
-    """A NON-fan-out-capable node (a ``sequential_only_mode`` analog) carrying a ``peers`` handle, whose
-    body returns a BARE ``Call(isolate_state=True)``: ``_needs_durable_batch`` is True via ``_peers`` (1(b))."""
+    """A NON-fan-out-capable node (a ``sequential_only_mode`` analog) carrying a ``Messaging`` handle, whose
+    body returns a BARE ``Call(isolate_state=True)``: ``_needs_durable_batch`` is True via
+    ``_messaging_handles`` (1(b), narrowed to messaging in PR-C — a Handoff-only agent needs no batch)."""
 
-    _peers = ("messaging-handle",)
+    _messaging_handles = ("messaging-handle",)
 
     async def run(self, ctx: SessionRunContext) -> Any:
         return Call("agent.peer.private.input", State(), tag="tc1", isolate_state=True)
@@ -346,8 +348,8 @@ async def test_lone_isolate_state_call_opens_degenerate_batch() -> None:
 
 
 async def test_sequential_messaging_node_opens_degenerate_batch() -> None:
-    # decision 1(b): a NON-fan-out-capable node (sequential_only_mode analog) carrying a peers handle is
-    # `_needs_durable_batch`, so it still opens the degenerate batch for a lone isolate_state call.
+    # decision 1(b): a NON-fan-out-capable node (sequential_only_mode analog) carrying a Messaging handle
+    # is `_needs_durable_batch`, so it still opens the degenerate batch for a lone isolate_state call.
     node = _SequentialMessagingNode(node_id="seq", subscribe_topics=["seq.in"])
     assert node._is_fanout_capable is False and node._needs_durable_batch is True
     fake, _ = await _drive_open(node)
@@ -409,7 +411,7 @@ async def test_unflagged_bare_call_stays_fast_path() -> None:
 
 def test_classify_fanout_uses_needs_durable_batch() -> None:
     # decision 1(b): the fold/close continuation gate keys on `_needs_durable_batch`, not
-    # `_is_fanout_capable` — so a sequential messaging agent (peers handle, not fan-out-capable)
+    # `_is_fanout_capable` — so a sequential messaging agent (Messaging handle, not fan-out-capable)
     # classifies + folds its marked sibling/re-entry continuations.
     node = _SequentialMessagingNode(node_id="seq", subscribe_topics=["seq.in"])
     marked = CallFrame(target_topic="seq.in", callback_topic="caller", frame_id="A", fanout_id="A")

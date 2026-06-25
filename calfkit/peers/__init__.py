@@ -8,10 +8,12 @@ dedupe, no merge) and deliberately do **not** implement the tool protocols, so t
 ``tools=`` (M4); the agent's-own-name reject lives in the ``Agent`` ctor, where ``peers=`` is processed (a
 handle can't see its enclosing agent's name, M2).
 
-(PR-B introduces :class:`Messaging`; the ``Handoff`` handle — transfer control via a structured-output
-union — is added by PR-C, ADR-0019.)
+Two capabilities ship: :class:`Messaging` (PR-B) feeds the runtime-rendered ``message_agent`` tool (a Peer
+message — consult and keep control); :class:`Handoff` (PR-C, ADR-0019) feeds the per-turn ``HandoffRequest``
+structured-output option (transfer of conversation control — the handing agent relinquishes).
 """
 
+from calfkit.peers.handoff import Handoff
 from calfkit.peers.messaging import Messaging
 
-__all__ = ["Messaging"]
+__all__ = ["Handoff", "Messaging"]
