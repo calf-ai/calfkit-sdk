@@ -478,7 +478,7 @@ The top-level package re-exports the symbols above. A few public capabilities li
 - **[How to guard and transform node invocations](policy-seams.md)** — `before_node` / `after_node` recipes.
 - **[How to handle errors and faults](error-handling.md)** — `on_node_error` / `on_callee_error`, minting `NodeFaultError`, and inspecting an `ErrorReport`.
 - **[How to give agents MCP tools](mcp-tool-discovery.md)** — fronting an MCP server as a toolbox.
-- **[How to give agents discoverable tool nodes](tool-discovery.md)** — referencing deployed function tool nodes by name with `Tools`.
+- **[How to let agents discover and use tools at runtime](tool-discovery.md)** — referencing deployed function tool nodes by name (or every live one with `discover=True`) with `Tools`.
 - **[How to let agents find and reach each other at runtime](agent-peers.md)** — agent-to-agent messaging and handoff with `Messaging` / `Handoff`.
 - **[Worker lifecycle & embedding](worker-lifecycle.md)** — `Worker`, the lifecycle contexts, and `@resource`.
 - **[CLI reference](cli.md)** — the `ck run` and `ck topics` commands.

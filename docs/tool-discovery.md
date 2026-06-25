@@ -1,4 +1,4 @@
-# How to give agents discoverable tool nodes
+# How to let agents discover and use tools at runtime, without importing their code
 
 A function tool node (`@agent_tool`) can be given to an agent two ways. Pass the
 live node in `tools=[...]` and the agent bakes its schema in at construction (the
