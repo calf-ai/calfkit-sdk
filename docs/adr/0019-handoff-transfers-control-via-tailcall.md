@@ -27,7 +27,8 @@ Handoff is a thin addition built on two things:
   `output_type = [final_output_type, HandoffRequest, DeferredToolRequests]` — built
   per run via a **memoized `create_model`** (`__base__=HandoffRequest` so `isinstance`
   discrimination survives the per-turn rebuild; `__doc__` = the freshly rendered
-  directory; `name: Literal[<live agents>]`; `message` is `Field(min_length=1)`). Producing
+  directory; `name: Literal[<live agents>]`; `message` is `Field(min_length=1)` plus a validator
+  rejecting a whitespace-only value, for `message_agent` parity). Producing
   the output **ends the run**, so handoff is **terminal**; *exclusivity* (not running a
   sibling tool call) is **mode-dependent, not by construction** — in tool mode
   `end_strategy='early'` (calfkit's default, never overridden) stubs siblings once a final
@@ -72,7 +73,7 @@ Handoff is a thin addition built on two things:
   in tool mode the union renames the output tool `final_result_HandoffRequest`, which the
   pre-#276 exact-`final_result` renderer dropped. See spec §5.3/§17.) `TailCall` pops-and-re-pushes the *same* frame retargeted to the peer's input
   topic, preserving `frame_id`/`tag`/**`callback_topic`** (and the `caller_node_id`)
-  (`base.py:573`) — "the tailcallee inherits the callback commitment." So the peer
+  (`_publish_action`'s TailCall arm) — "the tailcallee inherits the callback commitment." So the peer
   inherits the original caller's return address and the full conversation, continues,
   and returns to the original caller; the handing agent drops out. The stack depth is
   unchanged. **The caller's per-run overrides are cleared on handoff** so B uses its own

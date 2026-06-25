@@ -244,6 +244,14 @@ def test_agent_per_capability_discover_scopes_are_independent() -> None:
     assert b._messaging_handles == [Messaging("billing")]
 
 
+def test_same_name_in_messaging_and_handoff_is_allowed_and_partitioned() -> None:
+    # Per-capability independence: the SAME peer may be both messageable AND a handoff target — the handles
+    # partition by type (no dedupe across kinds), so the agent can consult billing OR transfer to it.
+    a = _agent(peers=[Messaging("billing"), Handoff("billing")])
+    assert a._messaging_handles == [Messaging("billing")]
+    assert a._handoff_handles == [Handoff("billing")]
+
+
 def test_sequential_handoff_only_agent_registers_no_fanout_store() -> None:
     # decision 1(b), NARROWED for PR-C: `_needs_durable_batch` keys on MESSAGING handles, not any peer. A
     # Handoff-only agent never dispatches an isolate_state Call (a HandoffRequest is the turn's OUTPUT, not
