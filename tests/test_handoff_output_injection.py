@@ -11,7 +11,7 @@ when a peer comes online). A non-handoff agent's run is unchanged.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
@@ -91,3 +91,61 @@ async def test_live_peer_does_not_inject_the_note() -> None:
     agent = _agent(FunctionModel(_capture), peers=[Handoff("billing")])
     await agent.run(_ctx_with_view(_view({"billing": "Billing."})))  # peer live -> member offered, no note
     assert _HANDOFF_NO_PEERS_NOTE not in str(captured["instructions"])
+
+
+# ── the directory the model SEES is live + rebuilt EVERY invocation (a join/leave changes it) ──
+
+
+def _literal_names(member: type) -> tuple[str, ...]:
+    """The names in the per-turn HandoffRequest subclass's ``name: Literal[...]`` field."""
+    return get_args(member.model_fields["name"].annotation)
+
+
+async def test_model_receives_the_live_directory_names_and_descriptions() -> None:
+    # The agent SEES the live names+descriptions: the handoff output member's model-facing description (its
+    # __doc__) carries the rendered directory. Symmetric to the empty-case `output_tools` absence assertion.
+    captured: dict[str, Any] = {}
+
+    def _capture(messages: list[Any], info: AgentInfo) -> ModelResponse:
+        captured["descs"] = " | ".join(t.description or "" for t in info.output_tools)
+        return ModelResponse(parts=[ModelTextPart("ok")])
+
+    agent = _agent(FunctionModel(_capture), peers=[Handoff(discover=True)])  # agent is "triage"
+    await agent.run(_ctx_with_view(_view({"billing": "Billing questions.", "refunds": "Refund handling."})))
+    assert "billing — Billing questions." in captured["descs"]  # the model sees the live name + description
+    assert "refunds — Refund handling." in captured["descs"]
+
+
+def _offered_names(agent: Agent[Any], cards: dict[str, str | None]) -> tuple[str, ...]:
+    out, _ = agent._handoff_output_override(_ctx_with_view(_view(cards)))
+    return _literal_names(next(t for t in out if isinstance(t, type) and issubclass(t, HandoffRequest)))
+
+
+def test_directory_is_re_resolved_every_invocation() -> None:
+    # Rebuilt fresh each turn: a peer joining/leaving between invocations changes what the SAME agent is
+    # offered. `_handoff_output_override` reads the live view every call (no agent-level caching) — if that
+    # were cached, a join/leave would silently stop updating and this test would catch it. (Each call reads
+    # its own ctx's view, simulating the live view changing across invocations.)
+    agent = _agent(TestModel(), peers=[Handoff(discover=True)])
+    assert _offered_names(agent, {"billing": None}) == ("billing",)
+    assert _offered_names(agent, {"billing": None, "refunds": None}) == ("billing", "refunds")  # a peer JOINED
+    assert _offered_names(agent, {"refunds": None}) == ("refunds",)  # billing LEFT
+
+
+def test_discover_handoff_offers_all_live_minus_self() -> None:
+    # M1: discover-mode resolves to every live agent minus self, at the override level (not just the directory).
+    agent = _agent(TestModel(), peers=[Handoff(discover=True)])  # agent is "triage"
+    out, note = agent._handoff_output_override(_ctx_with_view(_view({"billing": None, "refunds": None, "triage": "me"})))
+    assert note is None
+    member = next(t for t in out if isinstance(t, type) and issubclass(t, HandoffRequest))
+    assert _literal_names(member) == ("billing", "refunds")  # self (triage) excluded
+
+
+def test_handoff_surface_scoped_to_handoff_handles_not_messaging() -> None:
+    # M2: per-capability independence at the RESOLVED surface — a discover Messaging handle does NOT widen the
+    # handoff surface. With Messaging(discover=True) + Handoff("refunds"), the handoff Literal is "refunds"
+    # only, even though "billing" is messageable-via-discover.
+    agent = _agent(TestModel(), peers=[Messaging(discover=True), Handoff("refunds")])
+    out, _ = agent._handoff_output_override(_ctx_with_view(_view({"billing": None, "refunds": None})))
+    member = next(t for t in out if isinstance(t, type) and issubclass(t, HandoffRequest))
+    assert _literal_names(member) == ("refunds",)  # billing is messageable but NOT a handoff target

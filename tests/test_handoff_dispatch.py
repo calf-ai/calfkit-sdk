@@ -16,16 +16,18 @@ them (covered in tests/test_handoff_request.py).
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from calfkit._vendor.pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
-from calfkit.models.actions import TailCall
+from calfkit.models.actions import ReturnCall, TailCall
 from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY, derive_input_topic
 from calfkit.models.state import OverridesState, State
 from calfkit.nodes import Agent
@@ -102,25 +104,46 @@ def test_dispatch_handoff_stale_target_self_retries_with_feedback_turn() -> None
     assert any(isinstance(p, UserPromptPart) for p in last.parts)
 
 
+def test_dispatch_handoff_stale_target_warns(caplog: pytest.LogCaptureFixture) -> None:
+    # The stale self-retry is the entry to an unbounded loop (#251), so it must be operator-visible: a
+    # WARNING naming the offline target is the only signal of a stale-handoff ring until #251 lands a bound.
+    agent = _agent(TestModel(), peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({}))  # billing offline
+    with caplog.at_level(logging.WARNING):
+        agent._dispatch_handoff(HandoffRequest(name="billing", message="x"), ctx)
+    # the agent's own stale-self-retry WARNING (not the directory's curated-absent warning, which is a
+    # different logger): names the offline target, from calfkit.nodes.agent.
+    assert any(r.levelname == "WARNING" and r.name == "calfkit.nodes.agent" and "billing" in r.message for r in caplog.records)
+
+
 async def test_staleness_self_retry_re_invokes_the_model() -> None:
-    # CRITICAL: the feedback turn makes the history tail a ModelRequest, defeating pydantic-ai's
-    # UserPromptNode no-model-call shortcut — so the re-entered run CALLS the model (a fresh decision)
-    # instead of returning the stale handoff output verbatim (the native/prompted str-fallthrough bug).
+    # CRITICAL regression guard: the feedback turn makes the history tail a ModelRequest, defeating
+    # pydantic-ai's UserPromptNode no-model-call shortcut — so the re-entered run CALLS the model and
+    # returns a FRESH decision, NOT the stale handoff output returned VERBATIM (the native/prompted bug).
+    #
+    # The shortcut only fires when instructions are EMPTY, so this agent has system_prompt="" AND the
+    # re-entry view has the peer live again (no ephemeral note) — making instructions empty so the shortcut
+    # WOULD fire if the history tail were the (terminal) stale ModelResponse. Removing the feedback-turn
+    # append from _dispatch_handoff makes this test FAIL (calls==0, the stale text returned verbatim).
     calls = {"n": 0}
 
     def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
         calls["n"] += 1
-        return ModelResponse(parts=[ModelTextPart("answering the user directly")])
+        return ModelResponse(parts=[ModelTextPart("FRESH")])
 
-    agent = _agent(FunctionModel(_model), peers=[Handoff("billing")])
+    agent = Agent("triage", subscribe_topics="triage.in", system_prompt="", model_client=FunctionModel(_model), peers=[Handoff("billing")])
     view = _view({})  # billing offline -> _dispatch_handoff sees it stale
     ctx = _ctx_with_view(view)
-    # A produced a handoff (native/prompted = a JSON TextPart), already persisted by the final-output branch:
-    ctx.state.extend_with_responses([ModelResponse(parts=[ModelTextPart('{"name":"billing","message":"x"}')])], agent.name)
+    # A produced a handoff (native/prompted = a TERMINAL JSON TextPart), already persisted by the branch:
+    stale = '{"name":"billing","message":"x"}'
+    ctx.state.extend_with_responses([ModelResponse(parts=[ModelTextPart(stale)])], agent.name)
     agent._dispatch_handoff(HandoffRequest(name="billing", message="x"), ctx)  # stale -> appends the feedback turn
-    view.set({"billing": "Billing."})  # billing flaps back online -> re-entry has EMPTY instructions (no note)
-    await agent.run(ctx)  # re-entry: the ModelRequest tail forces the model call
-    assert calls["n"] == 1  # the model WAS re-invoked (not shortcut to returning the stale handoff JSON)
+    view.set({"billing": "Billing."})  # peer flaps back online -> re-entry has EMPTY instructions (no note)
+    result = await agent.run(ctx)  # re-entry: the ModelRequest tail must force the model call
+    assert calls["n"] == 1  # the model WAS re-invoked (the no-model-call shortcut did NOT fire)
+    assert isinstance(result, ReturnCall)
+    answer = "".join(getattr(p, "text", "") for p in result.value)
+    assert "FRESH" in answer and stale not in answer  # the FRESH decision, NOT the stale handoff verbatim
 
 
 # ── end-to-end: the model produces a HandoffRequest output (str + structured agents) ──

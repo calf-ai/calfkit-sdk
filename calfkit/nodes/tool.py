@@ -6,6 +6,7 @@ from typing import Any, ClassVar, overload
 import pydantic_core
 from typing_extensions import Self
 
+from calfkit._handle_names import normalize_handle_names
 from calfkit._protocol import NodeKind
 from calfkit._registry import handler
 from calfkit._vendor.pydantic_ai import Tool
@@ -228,25 +229,9 @@ class Tools:
 
     # ``*positional`` varargs (the common case) plus a keyword-only ``names=`` list; no name
     # collision because the varargs param is ``positional`` while the stored field is ``names``.
+    # The curated-XOR-discover fail-loud rail is shared with ``Messaging``/``Handoff`` via ``normalize_handle_names``.
     def __init__(self, *positional: str, names: Sequence[str] | None = None, discover: bool = False) -> None:
-        # ``discover`` IS the absence of names (it takes every live tool node), so pairing it with
-        # names is contradictory: exactly one of {non-empty names, discover=True}.
-        if discover and (positional or names is not None):
-            raise ValueError("Tools(discover=True) takes no tool names")
-        if discover:
-            object.__setattr__(self, "names", ())
-        else:
-            if positional and names is not None:
-                raise ValueError("Tools: pass tool names positionally or via names=, not both")
-            source = positional if positional else tuple(names or ())
-            collected = tuple(dict.fromkeys(source))  # order-preserving dedupe
-            if not collected:
-                # Empty STILL raises — never an implicit "everything" (the fail-loud rail: an
-                # accidental empty splat ``Tools(*[])`` must not silently become all-tools).
-                raise ValueError("Tools requires at least one tool name, or discover=True")
-            if any(not n for n in collected):
-                raise ValueError("Tools names must be non-empty")
-            object.__setattr__(self, "names", collected)
+        object.__setattr__(self, "names", normalize_handle_names("Tools", "tool", positional=positional, names=names, discover=discover))
         object.__setattr__(self, "discover", discover)
 
     def resolve_tools(self, view: EnumerableCapabilityView) -> SelectorResult:

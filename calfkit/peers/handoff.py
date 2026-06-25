@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, field_validator
 
+from calfkit._handle_names import normalize_handle_names
 from calfkit.peers.directory import render_peer_directory
 
 
@@ -39,25 +40,9 @@ class Handoff:
 
     # ``*positional`` varargs (the common case) plus a keyword-only ``names=`` list; no name collision
     # because the varargs param is ``positional`` while the stored field is ``names`` (mirrors ``Tools``).
+    # The curated-XOR-discover fail-loud rail is shared with ``Tools``/``Messaging`` via ``normalize_handle_names``.
     def __init__(self, *positional: str, names: Sequence[str] | None = None, discover: bool = False) -> None:
-        # ``discover`` IS the absence of names (it opens to every live agent), so pairing it with names
-        # is contradictory: exactly one of {non-empty names, discover=True}.
-        if discover and (positional or names is not None):
-            raise ValueError("Handoff(discover=True) takes no agent names")
-        if discover:
-            object.__setattr__(self, "names", ())
-        else:
-            if positional and names is not None:
-                raise ValueError("Handoff: pass agent names positionally or via names=, not both")
-            source = positional if positional else tuple(names or ())
-            collected = tuple(dict.fromkeys(source))  # order-preserving dedupe
-            if not collected:
-                # Empty STILL raises — never an implicit "everything" (the fail-loud rail: an accidental
-                # empty splat ``Handoff(*[])`` must not silently become open mode).
-                raise ValueError("Handoff requires at least one agent name, or discover=True")
-            if any(not n for n in collected):
-                raise ValueError("Handoff names must be non-empty")
-            object.__setattr__(self, "names", collected)
+        object.__setattr__(self, "names", normalize_handle_names("Handoff", "agent", positional=positional, names=names, discover=discover))
         object.__setattr__(self, "discover", discover)
 
 
@@ -79,6 +64,16 @@ class HandoffRequest(BaseModel):
 
     name: str
     message: str = Field(min_length=1)
+
+    @field_validator("message")
+    @classmethod
+    def _message_not_blank(cls, v: str) -> str:
+        # Parity with `message_agent` (which rejects via `not message.strip()`): a whitespace-only message
+        # is blank, not content. `Field(min_length=1)` stays as the model-visible JSON-schema hint; this
+        # enforces the strip semantics so an auto-retry fires just like an out-of-`Literal` `name`.
+        if not v.strip():
+            raise ValueError("message must not be blank (whitespace-only)")
+        return v
 
 
 _HANDOFF_PREAMBLE = (

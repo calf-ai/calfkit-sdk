@@ -369,8 +369,17 @@ class BaseAgentNodeDef(
           different branch); unbounded in v1 (#251)."""
         reachable = {n for n, _ in resolve_live_peers(ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY), self._handoff_handles, self_name=self.name)}
         if handoff.name in reachable:
+            logger.debug("[%s] handoff: relinquishing control to %r node=%s", ctx.correlation_id[:8], handoff.name, self.name)
             ctx.state.overrides = None
             return TailCall[State](target_topic=derive_input_topic(handoff.name), state=ctx.state, clear_overrides=True)
+        # The stale self-retry is the entry to an unbounded loop (#251); WARN so an operator can see a
+        # stale-handoff ring (the only signal until #251 lands a bound).
+        logger.warning(
+            "[%s] handoff target %r went offline between render and dispatch; self-retrying (unbounded in v1, #251) node=%s",
+            ctx.correlation_id[:8],
+            handoff.name,
+            self.name,
+        )
         feedback = (
             f"The agent {handoff.name!r} you tried to hand off to is no longer available. "
             "Choose another agent that is online, or answer the user directly."
@@ -587,7 +596,11 @@ class BaseAgentNodeDef(
         # (a None-FILTERED list — a bare [None, note] raises TypeError). `(None, None)` for a non-handoff
         # agent leaves both output_type (construction-time default) and instructions unchanged.
         handoff_output_type, handoff_note = self._handoff_output_override(ctx)
-        instructions = [s for s in (ctx.state.temp_instructions, handoff_note) if s] if handoff_note is not None else ctx.state.temp_instructions
+        instructions: str | list[str] | None
+        if handoff_note is None:
+            instructions = ctx.state.temp_instructions
+        else:
+            instructions = [s for s in (ctx.state.temp_instructions, handoff_note) if s]
         result = await self._agent_loop.run(
             message_history=project(ctx.state.message_history, viewer=self.name),
             instructions=instructions,
@@ -766,7 +779,6 @@ class BaseAgentNodeDef(
                 return parallel_tool_calls
 
         else:
-            logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
             new_messages = result.new_messages()
             # stamp author identity onto the agent's own responses (§4, §6.1)
             ctx.state.extend_with_responses(new_messages, self.name)
@@ -774,8 +786,10 @@ class BaseAgentNodeDef(
             # do NOT extend again). Transfer control to the live peer via a TailCall, or self-retry on the
             # render->dispatch staleness race. Invalid/self/hallucinated names never reach here (the per-turn
             # Literal + pydantic-ai auto-retry handle them). Discriminated by isinstance (mode-agnostic).
+            # `_dispatch_handoff` logs its own disposition; this branch's log below is the ReturnCall path only.
             if isinstance(result.output, HandoffRequest):
                 return self._dispatch_handoff(result.output, ctx)
+            logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
             if isinstance(result.output, str):
                 parts: list[ContentPart] = [TextPart(text=result.output)]
             else:

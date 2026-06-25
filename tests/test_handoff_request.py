@@ -38,6 +38,15 @@ def test_handoff_request_message_required_non_empty() -> None:
         HandoffRequest(name="billing", message="")
 
 
+def test_handoff_request_message_rejects_whitespace_only() -> None:
+    # Parity with message_agent (which rejects via `not message.strip()`): a whitespace-only message is
+    # blank, not content. The per-turn subclass inherits this (the validator is on the base).
+    with pytest.raises(ValidationError):
+        HandoffRequest(name="billing", message="   \t ")
+    with pytest.raises(ValidationError):
+        _build_handoff_request((("billing", None),))(name="billing", message="  ")
+
+
 # ── the memoized per-turn builder ──
 
 

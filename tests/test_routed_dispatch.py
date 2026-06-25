@@ -71,8 +71,14 @@ def test_call_eq_and_repr_include_route_and_body() -> None:
 
 
 def test_tailcall_does_not_accept_route_or_body() -> None:
+    # A TailCall carries no route/body/tag (it adds only clear_overrides over _Call) — all three are
+    # call-arg errors, pinning the docstring's exclusion list.
     with pytest.raises(TypeError):
         TailCall("topic", object(), route="x")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        TailCall("topic", object(), body={"x": 1})  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        TailCall("topic", object(), tag="t")  # type: ignore[call-arg]
 
 
 def test_tailcall_clear_overrides_defaults_false() -> None:
