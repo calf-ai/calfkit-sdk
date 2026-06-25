@@ -255,13 +255,17 @@ $ python serve_tool.py
 
 In-repo documentation lives under [`docs/`](docs/).
 
+**New to building a system of agents?** Start with the tutorial **[Build a multi-agent support desk](docs/multi-agent-support-desk.md)** — build and run three agents that discover each other and collaborate by messaging and handoff.
+
 **How-to guides** — goal-oriented walkthroughs:
 
 - **[How to call nodes from a client](docs/client-features.md)** — the three invocation patterns (`execute` / `start` / `send`), multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, fire-and-forget, and bounding reply memory with `reply_ttl`.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
 - **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.
+- **[How to let agents discover and use tools at runtime](docs/tool-discovery.md)** — reference deployed function tool nodes by name (or every live one with `discover=True`) with `Tools`; agents discover their schemas at runtime, so an agent's deployment never imports the tool's code.
 - **[How to give agents MCP tools](docs/mcp-tool-discovery.md)** — deploy an `MCPToolboxNode` fronting an MCP server and pass it to agents like a tool node; tools are discovered and kept fresh across processes automatically.
+- **[How to let agents find and reach each other at runtime](docs/agent-peers.md)** — agents discover each other by name (no hardcoded addresses) and collaborate two ways: consult a peer and keep control (`Messaging`), or transfer control to a specialist (`Handoff`).
 - **[Worker lifecycle & embedding](docs/worker-lifecycle.md)** — open long-lived resources at startup and close them on shutdown, publish presence events, and run with `run()`, the embeddable `start()`/`stop()`, or `async with worker:`.
 
 **Reference:**
