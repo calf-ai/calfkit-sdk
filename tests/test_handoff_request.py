@@ -47,6 +47,15 @@ def test_handoff_request_message_rejects_whitespace_only() -> None:
         _build_handoff_request((("billing", None),))(name="billing", message="  ")
 
 
+def test_handoff_request_message_field_carries_a_description() -> None:
+    # The base `message` Field(description=...) rides into the schema's `properties` (pydantic-ai forwards
+    # it to the provider) — the structured-output analog of message_agent's per-param descriptions. Asserts
+    # presence (not exact prose, which is copy that may be tuned) so the field-level guidance can't silently
+    # regress to a bare `title`-only property.
+    msg = HandoffRequest.model_json_schema()["properties"]["message"]
+    assert msg.get("description")
+
+
 # ── the memoized per-turn builder ──
 
 
@@ -70,6 +79,17 @@ def test_build_handoff_request_doc_is_the_handoff_directory() -> None:
     assert built.__doc__ is not None
     assert "billing — Billing questions." in built.__doc__
     assert "refunds" in built.__doc__
+
+
+def test_build_handoff_request_fields_carry_descriptions() -> None:
+    # Both fields the model fills carry a `description` in the per-turn subclass's schema `properties`: the
+    # inherited `message` one + the re-declared `name` one (the base `name` is bare, and the `Literal`
+    # override would discard a base description, so it must be re-declared in the create_model call). The
+    # `name` Literal stays intact alongside the description.
+    props = _build_handoff_request((("billing", "Billing."), ("refunds", None))).model_json_schema()["properties"]
+    assert props["name"].get("description")
+    assert props["message"].get("description")
+    assert props["name"]["enum"] == ["billing", "refunds"]
 
 
 def test_build_handoff_request_inherits_message_min_length() -> None:

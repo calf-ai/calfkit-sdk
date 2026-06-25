@@ -60,10 +60,14 @@ class HandoffRequest(BaseModel):
     - ``name`` — the peer to hand off to (validated against the live ``Literal`` in the per-turn subclass).
     - ``message`` — the handing agent's summary/context for the peer, required non-empty (``min_length=1``),
       so an empty value is auto-retried by pydantic-ai like an out-of-``Literal`` ``name`` (L5/C2).
+
+    Both fields carry a model-facing ``Field(description=...)`` that pydantic-ai forwards inside the schema's
+    ``properties`` (the per-turn subclass inherits ``message``'s and re-declares ``name``'s alongside the
+    ``Literal``); this is the structured-output analog of the ``message_agent`` tool's per-param descriptions.
     """
 
     name: str
-    message: str = Field(min_length=1)
+    message: str = Field(min_length=1, description="Your summary or context for the peer, so it can continue the conversation.")
 
     @field_validator("message")
     @classmethod
@@ -76,10 +80,15 @@ class HandoffRequest(BaseModel):
         return v
 
 
+# The per-field "how to fill this" guidance lives in the field descriptions (`name`/`message` below), which
+# pydantic-ai forwards inside the schema's `properties` — mirroring how the `message_agent` tool splits its
+# top-level description from its per-param descriptions. The preamble keeps only the handoff *semantics* + the
+# directory it points at, so the two are documented once each, not duplicated.
 _HANDOFF_PREAMBLE = (
-    "Transfer this conversation to another agent. You relinquish control and will NOT regain it — the "
-    "chosen agent continues the full conversation and answers the original caller in your place. Choose by "
-    "exact name from the agents below, and put any summary or context the agent needs in `message`.\n\n"
+    "Use HandoffRequest to hand the whole conversation to a better-suited agent — when the request belongs to "
+    "another agent's domain and should be handled by them, not just consulted. You relinquish control and will "
+    "NOT regain it: the chosen agent continues with full context of the conversation and answers the original "
+    "caller in your place.\n\n"
     "Agents (name — description):\n"
 )
 
@@ -107,5 +116,7 @@ def _build_handoff_request(live: tuple[tuple[str, str | None], ...]) -> type[Han
         "HandoffRequest",
         __base__=HandoffRequest,
         __doc__=_HANDOFF_PREAMBLE + render_peer_directory(live),
-        name=(Literal[names], ...),  # names is a runtime tuple -> a dynamic Literal over the live directory
+        # The Literal carries the allowed values; the description is re-declared here (the base's `name` has
+        # none, and this override would discard it anyway) so it rides into the schema's `properties`.
+        name=(Literal[names], Field(description="The peer to hand off to (a name from the list of available agents).")),
     )

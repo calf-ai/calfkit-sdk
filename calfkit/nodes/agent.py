@@ -317,15 +317,17 @@ class BaseAgentNodeDef(
         return ToolDefinition(
             name=_MESSAGE_AGENT_TOOL,
             description=(
-                "Send a message to another agent and get its reply — a consultation: the peer answers on "
-                "a fresh conversation (it sees only your message) and you keep control of this one.\n"
+                "Use this tool to send a message to another agent to ask questions or handle complex, multi-step tasks. "
+                "The agent's reply comes back to you as the tool result. You keep control of this conversation and continue "
+                "after the reply (the reply is not shown to the user, so relay what matters). The agent answers on a fresh "
+                "conversation that sees only this message and remembers nothing between calls, so include all the context it needs.\n"
                 f"Available agents (name — description):\n{directory}"
             ),
             parameters_json_schema={
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "The agent to message (a name from the list above)."},
-                    "message": {"type": "string", "description": "Your message or question for that agent."},
+                    "name": {"type": "string", "description": "The agent to message (a name from the list of available agents)."},
+                    "message": {"type": "string", "description": "Your message or question for that agent, including any necessary context."},
                 },
                 "required": ["name", "message"],
                 "additionalProperties": False,
