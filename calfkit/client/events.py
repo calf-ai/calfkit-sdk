@@ -7,13 +7,20 @@ intermediate emission ships (spec §9.1) — so v1 yields exactly the terminal.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from calfkit.models.error_report import ErrorReport
 
 if TYPE_CHECKING:
+    from calfkit.client.hub import _Hub
     from calfkit.models.envelope import Envelope
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_FIREHOSE_BUFFER_SIZE = 1024
 """Default per-observer firehose buffer bound, in events (spec §2.1 / §5.4).
@@ -51,3 +58,72 @@ class RunFailed:
 RunEvent = RunCompleted | RunFailed
 """The closed v1 terminal union — a run's stream ends in exactly one of these. Widened when
 intermediate emission ships (spec §3.3 / §9.1)."""
+
+
+class EventStream:
+    """The cross-run firehose (spec §3.2/§5.4) — an async context manager AND async iterator over
+    **every** event on the client's one configured inbox while open. The caller demuxes by
+    ``correlation_id`` and is responsible for its own dedup / terminal handling.
+
+    **Best-effort, not lossless.** Each open stream is the hub's own bounded **drop-oldest** outlet
+    (``buffer_size`` events): a reader that falls behind drops its *oldest* buffered events — signaled
+    by the cumulative ``dropped`` counter (+ a WARNING) — so it can **never block the hub**. For
+    guaranteed delivery, hold the run's handle (``start``/``execute``) or run a ``@consumer`` node.
+    """
+
+    def __init__(
+        self,
+        hub: _Hub,
+        *,
+        terminal_only: bool = False,
+        buffer_size: int = DEFAULT_FIREHOSE_BUFFER_SIZE,
+        on_enter: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._hub = hub
+        self._terminal_only = terminal_only
+        self._buffer: deque[RunEvent] = deque(maxlen=buffer_size)
+        self._wake = asyncio.Event()
+        self.dropped: int = 0
+        self._warned: bool = False
+        # The client passes its guarded broker start here: a pure-observer client brings the broker up
+        # via its first events() (else the subscriber never starts and the stream would hang, §5.1).
+        self._on_enter = on_enter
+
+    async def __aenter__(self) -> EventStream:
+        if self._on_enter is not None:
+            await self._on_enter()
+        self._hub._add_outlet(self)
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._hub._remove_outlet(self)
+
+    def __aiter__(self) -> EventStream:
+        return self
+
+    async def __anext__(self) -> RunEvent:
+        # The firehose is open-ended: park until an event is buffered, then drain in order. The reader
+        # exits via the async-CM (or its own timeout), never StopAsyncIteration.
+        while True:
+            if self._buffer:
+                return self._buffer.popleft()
+            self._wake.clear()
+            await self._wake.wait()
+
+    def _offer(self, event: RunEvent) -> None:
+        """Append an event to this outlet — called **synchronously** by the hub tee (await-free,
+        non-blocking; spec §5.4). A full buffer drops the **oldest** to admit the newest (the deque's
+        ``maxlen``), counted on ``dropped`` and WARNING'd once per outlet (then rate-limited)."""
+        if self._terminal_only and not isinstance(event, (RunCompleted, RunFailed)):
+            return  # v1: every RunEvent is terminal, so this never filters yet (forward-compat, §3.3)
+        if len(self._buffer) == self._buffer.maxlen:  # full → this append evicts the oldest
+            self.dropped += 1
+            if not self._warned:
+                logger.warning(
+                    "events() firehose outlet overflowed (buffer_size=%s) — dropping oldest; "
+                    "drain faster or use a @consumer node for guaranteed delivery (spec §5.4)",
+                    self._buffer.maxlen,
+                )
+                self._warned = True
+        self._buffer.append(event)
+        self._wake.set()

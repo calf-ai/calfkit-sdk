@@ -22,7 +22,7 @@ from faststream import Context
 from faststream.kafka import KafkaBroker
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, decode_header_str
-from calfkit.client.events import RunCompleted, RunEvent, RunFailed
+from calfkit.client.events import EventStream, RunCompleted, RunEvent, RunFailed
 from calfkit.exceptions import ClientClosedError
 from calfkit.models.envelope import Envelope  # runtime: FastDepends needs it for the handler arg
 from calfkit.models.error_report import ErrorReport, FaultTypes
@@ -119,6 +119,15 @@ class _Hub:
 
     def __init__(self) -> None:
         self._runs: WeakValueDictionary[str, InvocationHandle] = WeakValueDictionary()
+        self._firehose: set[EventStream] = set()
+
+    def _add_outlet(self, outlet: EventStream) -> None:
+        """Register a firehose outlet (an open ``events()`` stream). Mutated only between handler
+        invocations (on enter/exit), so the await-free tee never iterates a changing set mid-push."""
+        self._firehose.add(outlet)
+
+    def _remove_outlet(self, outlet: EventStream) -> None:
+        self._firehose.discard(outlet)
 
     def track(self, handle: InvocationHandle) -> None:
         """Register a run's handle before its call is published (the single sync step of ``start()``,
@@ -198,17 +207,27 @@ class _Hub:
         return RunFailed(report=report, correlation_id=cid)
 
     def _dispatch(self, cid: str, event: RunEvent) -> None:
+        # Per-run demux FIRST (spec §5.4 decision: hub-demux, then firehose; both non-blocking).
         handle = self._runs.get(cid)
         if handle is not None:
             handle._channel.push(event)  # synchronous, non-blocking (spec §5.1/§5.4)
-            return
         # No live handle (a shared-inbox / send() reply, or a dropped handle). A return drops with a
         # WARNING (benign, firehose-recoverable); a fault is ERROR-floored with the full report — never
-        # silently dropped (spec §5.1, fault-rail §11). (Commit 3 will also tee to the firehose here.)
-        if isinstance(event, RunFailed):
+        # silently dropped (spec §5.1, fault-rail §11).
+        elif isinstance(event, RunFailed):
             logger.error("[%s] fault reply with no pending handle: %s", (cid or "n/a")[:8], event.report.model_dump_json())
         else:
             logger.warning("[%s] return reply with no pending handle — dropped (firehose-recoverable)", (cid or "n/a")[:8])
+        # Firehose SECOND: every decodable reply is surfaced raw on the firehose (demux'd or not — on a
+        # shared inbox it carries ids this client never dispatched). Best-effort, non-blocking (§5.4).
+        self._tee(event)
+
+    def _tee(self, event: RunEvent) -> None:
+        # Snapshot the outlet set — registration mutates it only between handler calls, but a list copy
+        # keeps the await-free push safe regardless. Each push is non-blocking (drop-oldest), so a slow
+        # firehose reader can never stall the hub or another run.
+        for outlet in list(self._firehose):
+            outlet._offer(event)
 
     def fail_run(self, correlation_id: str, report: ErrorReport) -> None:
         """The Option-B undecodable-sink target (§5.8): the decode floor calls this for an undecodable

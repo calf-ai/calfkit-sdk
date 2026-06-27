@@ -14,7 +14,7 @@ import logging
 import pytest
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
-from calfkit.client.events import RunCompleted, RunFailed
+from calfkit.client.events import EventStream, RunCompleted, RunFailed
 from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel
 from calfkit.exceptions import ClientClosedError
 from calfkit.models import CallFrameStack, Envelope, SessionRunContext, WorkflowState
@@ -24,6 +24,7 @@ from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.state import State
 
 _HUB_LOGGER = "calfkit.client.hub"
+_EVENTS_LOGGER = "calfkit.client.events"
 
 
 def _env() -> Envelope:
@@ -405,3 +406,94 @@ async def test_node_topic_undecodable_does_not_touch_a_same_cid_client_run() -> 
         with pytest.raises(ValidationError):
             await broker.publish(b'{"not": "an envelope"}', "node.topic", correlation_id="cid-shared")
     assert not handle._channel.closed  # the client run is untouched — no cid-conflation across topics
+
+
+# ── Commit 3: the firehose — one reader tee'd to bounded, best-effort drop-oldest outlets (§5.4) ──
+
+
+async def test_open_events_stream_receives_a_dispatched_event() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    async with EventStream(hub, terminal_only=False, buffer_size=8) as stream:
+        hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"))
+        ev = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert isinstance(ev, RunCompleted)
+    assert ev.correlation_id == "cid-1"
+    assert ev.output == "hi"
+    assert handle.correlation_id == "cid-1"  # keep the run alive to here
+
+
+async def test_firehose_drops_oldest_keeps_newest_and_counts_drops_with_a_warning_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    hub = _Hub()
+    async with EventStream(hub, terminal_only=False, buffer_size=2) as stream:
+        with caplog.at_level(logging.WARNING, logger=_EVENTS_LOGGER):
+            for i in range(5):  # 5 events into a size-2 outlet → the 3 oldest are dropped
+                hub._on_reply(_reply_env(parts=[TextPart(text=str(i))]), f"c-{i}", _headers("return"))
+        assert stream.dropped == 3  # signaled, never silent (spec §5.4)
+        kept = [(await asyncio.wait_for(anext(stream), timeout=1.0)).output for _ in range(2)]
+        assert kept == ["3", "4"]  # drop-oldest / keep-newest-N — a catching-up reader sees the latest
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == _EVENTS_LOGGER]
+    assert len(warnings) == 1  # WARNING once per outlet, then rate-limited (never per-drop spam)
+
+
+async def test_undrained_firehose_never_blocks_the_per_run_channel() -> None:
+    # CRITICAL standing regression (ADR-0023): a slow/undrained firehose drops its OWN oldest events;
+    # it must never stall the hub. Open events(), never drain it, flood the inbox far past its buffer —
+    # a tracked run's terminal still pushes and resolves. (A blocking outlet would deadlock this.)
+    hub = _Hub()
+    async with EventStream(hub, terminal_only=False, buffer_size=4) as _firehose:  # never drained
+        for i in range(100):  # flood 25x the buffer with foreign returns
+            hub._on_reply(_reply_env(parts=[TextPart(text=str(i))]), f"foreign-{i}", _headers("return"))
+        handle = _tracked(hub, "cid-real")
+        hub._on_reply(_reply_env(parts=[TextPart(text="done")]), "cid-real", _headers("return"))
+        ev = await asyncio.wait_for(handle._channel.await_terminal(), timeout=1.0)
+    assert ev.output == "done"  # the lossless per-run channel resolved despite the overflowing firehose
+    assert _firehose.dropped >= 96  # the firehose shed its own oldest (best-effort), nobody else's
+
+
+async def test_terminal_only_yields_terminal_events() -> None:
+    hub = _Hub()
+    async with EventStream(hub, terminal_only=True, buffer_size=8) as stream:
+        hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"))
+        ev = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert isinstance(ev, RunCompleted)  # a terminal passes the filter (v1: every event is terminal)
+
+
+async def test_two_open_streams_each_receive_every_event() -> None:
+    hub = _Hub()
+    async with EventStream(hub, buffer_size=8) as s1, EventStream(hub, buffer_size=8) as s2:
+        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "c-1", _headers("return"))
+        e1 = await asyncio.wait_for(anext(s1), timeout=1.0)
+        e2 = await asyncio.wait_for(anext(s2), timeout=1.0)
+    assert e1.output == "x" and e2.output == "x"  # one read tee'd to every open outlet (§5.4)
+
+
+async def test_exited_stream_is_unregistered_and_receives_no_more_events() -> None:
+    hub = _Hub()
+    stream = EventStream(hub, buffer_size=8)
+    async with stream:
+        pass  # enter registers the outlet; exit unregisters + the outlet is dropped
+    assert stream not in hub._firehose
+    hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "c-1", _headers("return"))
+    assert len(stream._buffer) == 0  # a post-exit event is never offered to the closed stream
+
+
+async def test_firehose_surfaces_a_fault_as_a_raw_run_failed() -> None:
+    hub = _Hub()
+    async with EventStream(hub, buffer_size=8) as stream:
+        hub._on_reply(_reply_env(error=ErrorReport(error_type="x.y")), "c-1", _headers("fault"))
+        ev = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert isinstance(ev, RunFailed)  # raw — the caller maps/branches itself (§4.5)
+    assert ev.report.error_type == "x.y"
+
+
+async def test_firehose_surfaces_a_reply_with_no_pending_handle() -> None:
+    # The send()/shared-inbox case: a reply this client registered no handle for is still observable on
+    # the firehose (demuxed by the caller via correlation_id) — that is how send() results are seen.
+    hub = _Hub()  # nothing tracked
+    async with EventStream(hub, buffer_size=8) as stream:
+        hub._on_reply(_reply_env(parts=[TextPart(text="foreign")]), "foreign-cid", _headers("return"))
+        ev = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert ev.correlation_id == "foreign-cid"
