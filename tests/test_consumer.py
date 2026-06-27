@@ -744,13 +744,6 @@ def test_strict_mode_raises_on_empty_reply():
         InvocationResult.from_envelope(envelope, correlation_id="cid-strict-empty")  # strict=True default
 
 
-def test_lenient_mode_returns_none_on_empty_reply():
-    envelope = _envelope()
-    result = InvocationResult.from_envelope(envelope, correlation_id="cid-lenient", strict=False)
-    assert result.output is None
-    assert result.state is envelope.context.state  # client path: no copy in from_envelope
-
-
 async def test_client_execute_result_carries_state(container):
     worker = container.get(Worker)
     agent = Agent(

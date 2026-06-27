@@ -192,6 +192,16 @@ class TestProjectionFromReply:
         assert cc.output is None
         assert cc.output_parts == []
 
+    def test_from_envelope_does_not_expose_a_strict_escape(self) -> None:
+        # InvocationResult is client-only and always strict (spec §2.4): the lenient knob
+        # lives on project_output / ConsumerContext, so output stays non-optional here.
+        with pytest.raises(TypeError):
+            InvocationResult.from_envelope(_reply_env([TextPart(text="x")]), correlation_id="cid", strict=False)  # type: ignore[call-arg]
+
+    def test_from_context_does_not_expose_a_strict_escape(self) -> None:
+        with pytest.raises(TypeError):
+            InvocationResult.from_context(_reply_env([TextPart(text="x")]).context, strict=False)  # type: ignore[call-arg]
+
 
 def _fault_env(report: ErrorReport) -> Envelope:
     """A frameless envelope whose reply slot carries a FaultMessage, stamped as a
@@ -225,8 +235,3 @@ class TestFaultReaderTolerance:
         cc = ConsumerContext.from_run_context(_fault_env(ErrorReport(error_type="x")).context)
         assert cc.output is None
         assert cc.output_parts == []
-
-    def test_invocation_result_tolerates_a_fault_when_lenient(self) -> None:
-        result = InvocationResult.from_context(_fault_env(ErrorReport(error_type="x")).context, strict=False)
-        assert result.output is None
-        assert result.output_parts == []

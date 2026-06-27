@@ -25,10 +25,10 @@ _UNSET: Any = object()
 class InvocationResult(Generic[OutputT]):
     """Client-facing projection of the session state after a node returns.
 
-    A ``InvocationResult`` is what callers receive in two places:
-
-    * :meth:`Client.execute` / :meth:`InvocationHandle.result` — the
-      final reply from an agent invocation.
+    A ``InvocationResult`` is what a client receives from :meth:`Client.execute` /
+    :meth:`InvocationHandle.result` — the final reply from an agent invocation. It is
+    **client-only**: the consumer/runtime path uses a separate
+    :class:`~calfkit.models.consumer_context.ConsumerContext`.
 
     The ``state`` field is the full session :class:`~calfkit.models.State` at
     the moment this envelope was published, exposing message history, in-flight
@@ -43,13 +43,8 @@ class InvocationResult(Generic[OutputT]):
     ``result.deps[...] = ...`` a type error; the runtime object is still that
     shared dict):
 
-    * **Consumer path**: the consumer never republishes (no ``publish_topic``),
-      so mutations have no observable downstream effect. They can still
-      surprise other code holding the same ``InvocationResult`` instance.
-    * **Client path** (:meth:`Client.execute` / :meth:`InvocationHandle.result`):
-      the caller's lifetime owns the instance — mutations are caller-visible
-      and may corrupt any other code holding a parallel reference (caches,
-      retry layers, etc.).
+    The caller's lifetime owns the instance — mutations are caller-visible and may
+    corrupt any other code holding a parallel reference (caches, retry layers, etc.).
 
     ``InvocationResult`` is intentionally unhashable (``__hash__ = None``): the
     underlying ``state`` field is a mutable Pydantic model and cannot be
@@ -62,13 +57,13 @@ class InvocationResult(Generic[OutputT]):
     transport-stamped context.
     """
 
-    output: OutputT | None
-    """Deserialized final output (typed via ``output_type``).
+    output: OutputT
+    """Deserialized final output (typed via ``output_type``), **always populated**.
 
-    ``None`` on intermediate hops — call-kind deliveries with no reply slot (e.g.
-    agent hops mid-tool-call, tool completions). Populated when the upstream node
-    emitted a terminal return carrying reply parts. Client-side strict-mode results
-    (the default) always have ``output`` populated; consumer-side results may not.
+    A client ``result()`` only resolves a *successful* terminal — a fault raises
+    ``NodeFaultError`` and a projection mismatch raises ``DeserializationError`` — so
+    there is no path on which ``output`` is ``None`` (spec §2.4). The consumer path
+    uses a separate ``ConsumerContext`` with its own optional ``output``.
     """
 
     state: State
@@ -136,7 +131,6 @@ class InvocationResult(Generic[OutputT]):
         output_type: type[Any] = _UNSET,
         *,
         correlation_id: str | None = None,
-        strict: bool = True,
         type_adapter: TypeAdapter[Any] | None = None,
         resources: Mapping[str, Any] | None = None,
     ) -> InvocationResult[Any]:
@@ -163,12 +157,6 @@ class InvocationResult(Generic[OutputT]):
                 from the envelope body. When ``None``, falls back to
                 ``ctx.correlation_id`` (which raises if the context was never
                 stamped).
-            strict: When ``True`` (default — client semantics), raises
-                :class:`DeserializationError` if the reply parts are empty or
-                don't contain the expected part type. When ``False`` (consumer
-                semantics), returns ``output=None`` for an empty/absent reply
-                (intermediate hop / tool completion); validation errors on
-                *present* parts still propagate.
             type_adapter: An optional pre-built :class:`pydantic.TypeAdapter` to
                 use for validating ``DataPart.data`` against *output_type*. When
                 ``None`` (default), a new adapter is constructed per call.
@@ -180,19 +168,18 @@ class InvocationResult(Generic[OutputT]):
 
         Returns:
             A ``InvocationResult`` whose ``.output`` is typed according to *output_type*
-            (or ``None`` when ``strict=False`` and no parts are present).
+            (always present — ``InvocationResult`` is client-only and always strict).
 
         Raises:
-            DeserializationError: If the expected content part is not found in
-                the reply parts (and either ``strict=True`` or the parts
-                list is non-empty but lacks the expected shape).
+            DeserializationError: If the expected content part is not found in the reply
+                parts (always strict here — an empty or mismatched reply raises).
             pydantic.ValidationError: If ``output_type`` is provided and the
                 matching ``DataPart.data`` doesn't validate against it.
             pydantic.PydanticSchemaGenerationError: If ``type_adapter`` is ``None``
                 and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
         """
         state = ctx.state
-        output = project_output(ctx._reply, output_type, strict=strict, type_adapter=type_adapter)
+        output = project_output(ctx._reply, output_type, strict=True, type_adapter=type_adapter)
 
         return cls(
             output=output,
@@ -212,7 +199,6 @@ class InvocationResult(Generic[OutputT]):
         output_type: type[Any] = _UNSET,
         *,
         correlation_id: str,
-        strict: bool = True,
         type_adapter: TypeAdapter[Any] | None = None,
         resources: Mapping[str, Any] | None = None,
     ) -> InvocationResult[Any]:
@@ -228,7 +214,6 @@ class InvocationResult(Generic[OutputT]):
             envelope.context,
             output_type,
             correlation_id=correlation_id,
-            strict=strict,
             type_adapter=type_adapter,
             resources=resources,
         )
