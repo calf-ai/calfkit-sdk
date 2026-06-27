@@ -103,9 +103,12 @@ A gateway is minted for **one** destination, addressed **exactly one** of two wa
   topic (e.g. a shared-ingress work topic several agents subscribe to).
 
 "Both" and "neither" are rejected (overloads + a runtime guard). `output_type` binds **once at
-mint** (the per-deployment type); it **defaults to `str`** (extract the text reply). A
-structured-output agent requires `output_type=Model` — omitting it makes a structured (`DataPart`)
-reply a loud `DeserializationError` (§2.5), never a silent `Any`.
+mint** (the per-deployment type); it **defaults to `str`**, which **coerces the whole reply to a
+string** — every part rendered and newline-joined (`TextPart` verbatim, `DataPart` as its JSON
+string; File/ToolCall parts skipped), so a structured (`DataPart`) reply under the default `str`
+comes back as its JSON string, **never** a `DeserializationError`. To get the typed object instead,
+pass `output_type=Model`; a `DataPart` that fails *that* model is the loud `DeserializationError`
+(§2.5). `str` is always a successful projection — it never mismatches.
 
 (The agent's **Private input topic** is the *call destination*; the client's `inbox_topic` (§6) is
 the separate *reply destination* — two different topics. "Inbox" in this spec always means the
@@ -245,7 +248,7 @@ The closed, typed set is over **run outcomes** — the terminal of an *accepted,
 | Condition | Type | Notes |
 |---|---|---|
 | Downstream / run fault (incl. delivery faults like `calf.delivery.undecodable`) | **`NodeFaultError`** | branch on `e.report.find(FaultTypes.X)` / `e.report.error_type` |
-| Successful reply fails `output_type` | **`DeserializationError`** | projection mismatch **only** — a *present-but-wrong* part on a `return` |
+| Successful reply fails a **structured** `output_type` | **`DeserializationError`** | projection mismatch **only** — a *present-but-wrong* `DataPart` on a `return`. (`output_type=str` never mismatches: it coerces every part to a string, §2.2.) |
 | **This client** stopped waiting (`result(timeout=)`) | **`ClientTimeoutError`** | run is unaffected |
 | Client closed with the run in-flight | **`ClientClosedError`** | `aclose()` resolved a pending `result()` (§5.8) |
 

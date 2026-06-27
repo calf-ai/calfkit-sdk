@@ -9,7 +9,7 @@ from pydantic import TypeAdapter
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import DeserializationError
-from calfkit.models.payload import ContentPart, DataPart, TextPart
+from calfkit.models.payload import ContentPart, DataPart, TextPart, render_parts_as_text
 from calfkit.models.reply import ReturnMessage  # runtime: project_output isinstance-guards on it
 from calfkit.models.state import State
 
@@ -238,17 +238,25 @@ def project_output(
 ) -> Any:
     """Project the deserialized output from the delivery's reply slot (spec §4.5).
 
-    Shared by :meth:`InvocationResult.from_context` (client, ``strict=True``) and
-    :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). A
-    ``FaultMessage`` reply has no parts, so it reads as no-parts (never an
-    ``AttributeError``); the typed fault reception is the deferred reception PR's job.
-    With ``strict=False`` an empty/absent reply (an intermediate hop, or a fault) yields
-    ``None``; otherwise the matching part is extracted/validated per ``output_type``
-    (raising ``DeserializationError``/``ValidationError`` on a present-but-mismatched part).
+    The **receive-side** projection — shared by :meth:`InvocationResult.from_context` (client,
+    ``strict=True``) and :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). A
+    ``FaultMessage`` reply has no parts, so it reads as no-parts (never an ``AttributeError``); the
+    typed fault reception is the deferred reception PR's job. With ``strict=False`` an empty/absent
+    reply (an intermediate hop, or a fault) yields ``None``; otherwise the part is extracted/validated
+    per ``output_type`` (raising ``DeserializationError``/``ValidationError`` on a present-but-mismatched
+    part).
+
+    ``output_type=str`` **coerces** the whole reply to a string (spec §2.2) — every part rendered
+    (``TextPart`` verbatim, ``DataPart`` as JSON), File/ToolCall skipped, newline-joined; empty → ``""``
+    — so it never raises a mismatch. This coercion is scoped to the **receive side**: the node
+    output-view seam (``_output_view`` → :func:`_extract_output`) keeps the **strict** ``str``
+    validation of spec §6.3, faulting on a type-breaking node output.
     """
     parts = reply.parts if isinstance(reply, ReturnMessage) else []
     if not parts and not strict:
         return None
+    if output_type is str:
+        return render_parts_as_text(parts, render_other=lambda _p: None, empty="")
     return _extract_output(parts, output_type, type_adapter=type_adapter)
 
 
@@ -290,7 +298,11 @@ def extract_lenient(parts: list[Any] | None) -> Any:
 
 
 def _extract_text(parts: list[Any]) -> str:
-    """Extract the first TextPart.text."""
+    """Extract the first ``TextPart.text`` — the **strict** ``str`` projection (a missing ``TextPart``
+    raises ``DeserializationError``). Used by the node output-view seam (``_output_view`` →
+    :func:`_extract_output`), which must fault on a type-breaking node output (spec §6.3). The
+    *receive-side* coercion (client/consumer ``output_type=str`` stringifies every part) lives in
+    :func:`project_output`, not here."""
     for part in parts:
         if isinstance(part, TextPart):
             return part.text

@@ -20,7 +20,7 @@ from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCa
 from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard, derive_input_topic
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.node_result import _extract_text, extract_lenient
-from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry
+from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry, render_parts_as_text
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
@@ -41,21 +41,19 @@ _MESSAGE_AGENT_TOOL = "message_agent"
 
 def _serialize_message_reply(parts: list[ContentPart] | None) -> str:
     """Serialize ALL parts of a peer's reply into one string (message_agent fold, §5.2): Text verbatim,
-    Data JSON-encoded, File as a placeholder; newline-joined; empty -> "(no content)". extract_lenient
-    would drop a peer's text preamble before its structured data."""
-    if not parts:
-        return "(no content)"
-    rendered: list[str] = []
-    for p in parts:
-        if isinstance(p, TextPart):
-            rendered.append(p.text)
-        elif isinstance(p, DataPart):
-            rendered.append(pydantic_core.to_json(p.data).decode())
-        elif isinstance(p, FilePart):
-            rendered.append(f"[file: {p.media_type} {p.uri or '<inline>'}]")
-        else:
-            rendered.append(pydantic_core.to_json(p).decode())
-    return "\n".join(rendered)
+    Data JSON-encoded, File as a placeholder, anything else JSON-encoded whole; newline-joined; empty ->
+    "(no content)". (extract_lenient would drop a peer's text preamble before its structured data.)
+
+    Shares the canonical newline-join renderer with the client/consumer ``output_type=str`` projection
+    (``models.payload.render_parts_as_text``); this fold differs only in the tail cases — File renders as
+    a placeholder, an unknown part is JSON-encoded whole (never dropped), and empty is a sentinel."""
+
+    def _render_other(p: ContentPart) -> str:
+        if isinstance(p, FilePart):
+            return f"[file: {p.media_type} {p.uri or '<inline>'}]"
+        return pydantic_core.to_json(p).decode()
+
+    return render_parts_as_text(parts, render_other=_render_other, empty="(no content)")
 
 
 class BaseAgentNodeDef(
