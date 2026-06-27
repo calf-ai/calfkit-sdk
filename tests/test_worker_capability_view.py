@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit.client.client import Client
+from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig
 from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters

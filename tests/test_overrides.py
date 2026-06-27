@@ -12,8 +12,8 @@ async def test_agent_tools_overrides_none(container, deploy_function_agent, depl
     client = container.get(Client)
 
     async with TestKafkaBroker(container.get(KafkaBroker)) as _:
-        result = await client.execute(
-            "Hey! Call all your tools concurrently right now", deploy_function_agent.subscribe_topics[0], tool_overrides=None
+        result = await client.agent(topic=deploy_function_agent.subscribe_topics[0]).execute(
+            "Hey! Call all your tools concurrently right now", tool_overrides=None
         )
 
         assert result.output is not None
@@ -30,8 +30,8 @@ async def test_agent_tools_overrides_empty(container, deploy_function_agent, dep
     client = container.get(Client)
 
     async with TestKafkaBroker(container.get(KafkaBroker)) as _:
-        result = await client.execute(
-            "Hey! Call all your tools concurrently right now again.", deploy_function_agent.subscribe_topics[0], tool_overrides=[]
+        result = await client.agent(topic=deploy_function_agent.subscribe_topics[0]).execute(
+            "Hey! Call all your tools concurrently right now again.", tool_overrides=[]
         )
 
         assert result.output is not None and result.output == NO_TOOLS_RESPONSE_TEXT
@@ -44,8 +44,8 @@ async def test_agent_tools_overrides_new_tools(container, deploy_function_agent,
     client = container.get(Client)
 
     async with TestKafkaBroker(container.get(KafkaBroker)) as _:
-        result = await client.execute(
-            "Hey! Call all your tools concurrently right now", deploy_function_agent.subscribe_topics[0], tool_overrides=deploy_no_arg_tools
+        result = await client.agent(topic=deploy_function_agent.subscribe_topics[0]).execute(
+            "Hey! Call all your tools concurrently right now", tool_overrides=deploy_no_arg_tools
         )
 
         assert result.output is not None

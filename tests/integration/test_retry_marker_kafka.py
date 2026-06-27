@@ -47,7 +47,7 @@ async def test_model_retry_round_trips_as_calf_retry_not_a_fault(kafka_bootstrap
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            result = await driver.execute("go", agent_in, timeout=60)
+            result = await driver.agent(topic=agent_in).execute("go", timeout=60)
 
             # The agentic loop resumed past the retry to a clean finalization (a return,
             # not a fault) — the recoverable failure stayed model-visible.
@@ -62,5 +62,5 @@ async def test_model_retry_round_trips_as_calf_retry_not_a_fault(kafka_bootstrap
             with pytest.raises(AssertionError):
                 await tap.next_fault(timeout=5)
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()

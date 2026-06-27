@@ -116,9 +116,9 @@ from calfkit import Client
 
 async def main():
     client = Client.connect("localhost:9092")
-    result = await client.execute("What's the balance on my account?", "triage.input")
+    result = await client.agent("triage").execute("What's the balance on my account?")
     print(result.output)
-    await client.close()
+    await client.aclose()
 
 
 if __name__ == "__main__":
@@ -140,7 +140,7 @@ stayed in control.
 Change the request in `ask.py` to a refund:
 
 ```python
-    result = await client.execute("I'd like a refund for order 1234.", "triage.input")
+    result = await client.agent("triage").execute("I'd like a refund for order 1234.")
 ```
 
 Run it again:

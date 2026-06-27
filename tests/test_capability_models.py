@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from pydantic_core import PydanticUndefined
 
-from calfkit.client.client import Client
+from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneRecord
 from calfkit.models.capability import (
     CAPABILITY_SCHEMA_VERSION,

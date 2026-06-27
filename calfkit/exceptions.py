@@ -31,8 +31,8 @@ class NodeFaultError(Exception):
 
         raise NodeFaultError("billing.quota_exceeded", message="...", retryable=False, details={...})
 
-    **Receive** one at the client edge (the reply dispatcher fails the pending
-    future with ``NodeFaultError(report)``), then branch on the slotted report::
+    **Receive** one at the client edge (the client hub maps a ``fault`` reply to
+    ``NodeFaultError(report)``, raised from ``result()``), then branch on the slotted report::
 
         try:
             result = await handle.result()
@@ -91,8 +91,8 @@ class NodeFaultError(Exception):
     def __reduce__(self) -> tuple[Any, tuple[ErrorReport]]:
         # Reconstruct from the report, not by replaying self.args (a message
         # string) through __init__, which would mis-route the string into the
-        # mint arm and rebuild a different report (cf. ReplyExpiredError, which
-        # carries a custom reduction for the same reason).
+        # mint arm and rebuild a different report (cf. ClientTimeoutError /
+        # ClientClosedError, which carry custom reductions for the same reason).
         return (self.__class__, (self.report,))
 
 
@@ -141,25 +141,41 @@ class RegistryConfigError(Exception):
     """
 
 
-class ReplyExpiredError(Exception):
-    """Raised when an awaited reply does not arrive within the dispatcher's
-    ``reply_ttl`` and the pending future is evicted.
+class ClientTimeoutError(Exception):
+    """Raised when the client stops waiting for a reply (``result(timeout=)`` /
+    ``execute(timeout=)``).
 
-    Surfacing this (instead of a bare ``CancelledError``) gives callers an
-    actionable signal carrying the offending ``correlation_id`` and the ``ttl``
-    (seconds) that elapsed.
+    A typed, run-survives signal (spec §2.5) — never a bare ``asyncio.TimeoutError``. The run
+    itself is unaffected; only this client gave up waiting. Carries the offending
+    ``correlation_id`` and the ``timeout`` (seconds) that elapsed.
     """
 
-    def __init__(self, correlation_id: str, ttl: float):
+    def __init__(self, correlation_id: str, timeout: float):
         self.correlation_id = correlation_id
-        self.ttl = ttl
-        super().__init__(f"No reply for correlation_id={correlation_id!r} within reply_ttl={ttl}s")
+        self.timeout = timeout
+        super().__init__(f"No reply for correlation_id={correlation_id!r} within timeout={timeout}s")
 
     def __reduce__(self) -> tuple[Any, tuple[str, float]]:
-        # The default reduction replays ``self.args`` (the formatted message
-        # string) through ``__init__``, which would fail because the constructor
-        # requires both positional fields. Reconstruct from the real fields.
-        return (self.__class__, (self.correlation_id, self.ttl))
+        # Required positional args break the default reduction (which replays the formatted
+        # message string); reconstruct from the real fields.
+        return (self.__class__, (self.correlation_id, self.timeout))
+
+
+class ClientClosedError(Exception):
+    """Raised when the client is closed (``aclose()``) with this run's ``result()`` still
+    pending (spec §2.5 / §5.8).
+
+    A typed, run-survives signal — never a bare ``CancelledError``. The run itself is
+    unaffected; the client simply stopped consuming its replies. Carries the ``correlation_id``
+    of the run that was awaiting.
+    """
+
+    def __init__(self, correlation_id: str):
+        self.correlation_id = correlation_id
+        super().__init__(f"client closed while awaiting a reply for correlation_id={correlation_id!r}")
+
+    def __reduce__(self) -> tuple[Any, tuple[str]]:
+        return (self.__class__, (self.correlation_id,))
 
 
 class MissingTopicsError(RuntimeError):

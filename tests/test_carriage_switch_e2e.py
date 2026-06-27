@@ -71,7 +71,7 @@ async def test_single_tool_call_result_materializes_and_agent_resumes(container)
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute("what year", "year_agent.input", timeout=10)
+        result = await client.agent(topic="year_agent.input").execute("what year", timeout=10)
 
     # The agent resumed past the tool call to a final answer that INCLUDES the materialized result.
     assert result.output is not None and "1967" in result.output
@@ -112,7 +112,7 @@ async def test_tool_model_retry_round_trips_as_retry_prompt(container) -> None:
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute("do the thing", "retry_agent.input", timeout=10)
+        result = await client.agent(topic="retry_agent.input").execute("do the thing", timeout=10)
 
     # The model received (and echoed) the raw retry message — the marker was honored, no doubled suffix.
     assert result.output is not None and "please narrow your query" in result.output

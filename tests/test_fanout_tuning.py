@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit.client.client import Client
+from calfkit.client import Client
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.tuning import FanoutConfig, KTableReaderTuning
 from calfkit.worker.worker import Worker

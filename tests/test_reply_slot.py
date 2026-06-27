@@ -29,6 +29,7 @@ from calfkit.models import (
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.node_result import InvocationResult
+from calfkit.models.payload import FilePart
 from calfkit.models.reply import FaultMessage, ReturnMessage, _ReplyBase
 from calfkit.models.state import State
 
@@ -183,6 +184,12 @@ class TestProjectionFromReply:
         assert cc.output == {"k": 1}
         assert cc.output_parts == [DataPart(data={"k": 1})]
 
+    def test_present_but_invalid_data_part_raises_deserialization_error(self) -> None:
+        # A structured output_type whose DataPart is present but fails validation surfaces as the
+        # closed-set DeserializationError (spec §2.5), never a raw pydantic.ValidationError (M2).
+        with pytest.raises(DeserializationError):
+            InvocationResult.from_envelope(_reply_env([DataPart(data={"wrong": "x"})]), _Struct, correlation_id="cid")
+
     def test_strict_empty_reply_raises(self) -> None:
         with pytest.raises(DeserializationError):
             InvocationResult.from_envelope(_reply_env([]), correlation_id="cid")
@@ -191,6 +198,50 @@ class TestProjectionFromReply:
         cc = ConsumerContext.from_run_context(_reply_env([]).context)  # strict=False
         assert cc.output is None
         assert cc.output_parts == []
+
+    def test_from_envelope_does_not_expose_a_strict_escape(self) -> None:
+        # InvocationResult is client-only and always strict (spec §2.4): the lenient knob
+        # lives on project_output / ConsumerContext, so output stays non-optional here.
+        with pytest.raises(TypeError):
+            InvocationResult.from_envelope(_reply_env([TextPart(text="x")]), correlation_id="cid", strict=False)  # type: ignore[call-arg]
+
+    def test_from_context_does_not_expose_a_strict_escape(self) -> None:
+        with pytest.raises(TypeError):
+            InvocationResult.from_context(_reply_env([TextPart(text="x")]).context, strict=False)  # type: ignore[call-arg]
+
+
+class TestStrCoercion:
+    """``output_type=str`` coerces ALL reply parts to one newline-joined string (spec §2.2):
+    ``TextPart`` verbatim, ``DataPart`` as JSON, File/ToolCall skipped — never a
+    ``DeserializationError`` (that is reserved for a *structured* ``output_type`` mismatch)."""
+
+    def test_str_stringifies_a_data_part_as_json(self) -> None:
+        result = InvocationResult.from_envelope(_reply_env([DataPart(data={"k": 1})]), str, correlation_id="cid")
+        assert result.output == pydantic_core.to_json({"k": 1}).decode()
+
+    def test_str_joins_text_and_data_with_a_newline(self) -> None:
+        result = InvocationResult.from_envelope(_reply_env([TextPart(text="lead"), DataPart(data={"k": 1})]), str, correlation_id="cid")
+        assert result.output == "lead\n" + pydantic_core.to_json({"k": 1}).decode()
+
+    def test_str_single_text_part_is_unchanged(self) -> None:
+        result = InvocationResult.from_envelope(_reply_env([TextPart(text="hi")]), str, correlation_id="cid")
+        assert result.output == "hi"
+
+    def test_str_skips_file_and_tool_parts(self) -> None:
+        result = InvocationResult.from_envelope(_reply_env([TextPart(text="hi"), FilePart(media_type="image/png")]), str, correlation_id="cid")
+        assert result.output == "hi"
+
+    def test_str_empty_reply_is_the_empty_string(self) -> None:
+        # Distinct from the _UNSET/auto path, which raises on empty (test_strict_empty_reply_raises):
+        # an explicit str ask coerces, so an empty reply is the empty string, never a raise.
+        result = InvocationResult.from_envelope(_reply_env([]), str, correlation_id="cid")
+        assert result.output == ""
+
+    def test_consumer_str_also_stringifies_a_data_part(self) -> None:
+        # The coercion lives on the SHARED projection, so a @consumer with output_type=str gets the
+        # same string (Ryan-ratified 2026-06-27: shared, not client-only).
+        cc = ConsumerContext.from_run_context(_reply_env([DataPart(data={"k": 1})]).context, str)
+        assert cc.output == pydantic_core.to_json({"k": 1}).decode()
 
 
 def _fault_env(report: ErrorReport) -> Envelope:
@@ -225,8 +276,3 @@ class TestFaultReaderTolerance:
         cc = ConsumerContext.from_run_context(_fault_env(ErrorReport(error_type="x")).context)
         assert cc.output is None
         assert cc.output_parts == []
-
-    def test_invocation_result_tolerates_a_fault_when_lenient(self) -> None:
-        result = InvocationResult.from_context(_fault_env(ErrorReport(error_type="x")).context, strict=False)
-        assert result.output is None
-        assert result.output_parts == []

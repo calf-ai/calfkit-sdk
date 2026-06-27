@@ -22,7 +22,7 @@ import pytest
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
-from calfkit.exceptions import DeserializationError
+from calfkit.exceptions import NodeFaultError
 from calfkit.nodes import Agent
 from tests.integration._fault_kafka import fault_worker
 from tests.integration._fault_tools import boom, ok_a, ok_b
@@ -56,13 +56,13 @@ async def test_large_fanout_folds_and_completes(kafka_bootstrap: str, topic_name
 
     try:
         async with worker:
-            result = await driver.execute("go", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("go", timeout=120)
             assert result.output is not None and FINAL_OUTPUT in result.output
             by_id = returns_by_call_id(result.message_history)
             assert len(by_id) == 2 * n_each  # every slot resolved into its own result
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_concurrent_batches_all_complete(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -78,14 +78,14 @@ async def test_concurrent_batches_all_complete(kafka_bootstrap: str, topic_names
 
     try:
         async with worker:
-            handles = [await driver.start("go", agent_in) for _ in range(m)]
+            handles = [await driver.agent(topic=agent_in).start("go") for _ in range(m)]
             results = await asyncio.gather(*(handle.result(timeout=120) for handle in handles))
         for result in results:
             assert result.output is not None and FINAL_OUTPUT in result.output
             assert len(returns_by_call_id(result.message_history)) == 2
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_mixed_success_and_fault_batches_are_isolated(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -110,16 +110,16 @@ async def test_mixed_success_and_fault_batches_are_isolated(kafka_bootstrap: str
 
     try:
         async with worker:
-            ok_handle = await driver.start("go", healthy_in)
-            bad_handle = await driver.start("go", faulty_in)
+            ok_handle = await driver.agent(topic=healthy_in).start("go")
+            bad_handle = await driver.agent(topic=faulty_in).start("go")
 
             ok_result = await ok_handle.result(timeout=120)
             assert ok_result.output is not None and FINAL_OUTPUT in ok_result.output
 
-            # The faulting batch escalated (a routed fault surfaces today as a
-            # DeserializationError at the client edge — reception deferred, #250).
-            with pytest.raises(DeserializationError):
+            # The faulting batch escalated — the routed fault is RECEIVED as a typed NodeFaultError
+            # (#250 reception); the healthy batch above completed unaffected (isolation).
+            with pytest.raises(NodeFaultError):
                 await bad_handle.result(timeout=120)
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()

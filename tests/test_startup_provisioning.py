@@ -230,7 +230,7 @@ def test_ensurer_declare_marks_framework_topic_to_skip_user_configs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Client.connect() wiring: the reply topic is declared into a StartupTopicEnsurer
+# Client.connect() wiring: the inbox topic is declared into a StartupTopicEnsurer
 # wired as the broker's pre-start hook (no live Kafka).
 # ---------------------------------------------------------------------------
 
@@ -239,15 +239,15 @@ def test_connect_uses_a_pre_start_hook_broker() -> None:
     from calfkit.client import Client
     from calfkit.client._broker import _PreStartHookBroker
 
-    client = Client.connect("localhost:9092", reply_topic="r.reply")
+    client = Client.connect("localhost:9092", inbox_topic="r.reply")
 
     assert isinstance(client.broker, _PreStartHookBroker)
 
 
-def test_connect_enabled_declares_reply_topic_into_ensurer() -> None:
+def test_connect_enabled_declares_inbox_topic_into_ensurer() -> None:
     from calfkit.client import Client
 
-    client = Client.connect("localhost:9092", reply_topic="r.reply", provisioning=ProvisioningConfig(enabled=True))
+    client = Client.connect("localhost:9092", inbox_topic="r.reply", provisioning=ProvisioningConfig(enabled=True))
 
     # Running the wired ensurer (the broker's pre-start hook) against a fake
     # broker provisions exactly the client's reply topic.
@@ -260,7 +260,7 @@ def test_connect_enabled_declares_reply_topic_into_ensurer() -> None:
 def test_connect_disabled_ensurer_is_a_noop() -> None:
     from calfkit.client import Client
 
-    client = Client.connect("localhost:9092", reply_topic="r.reply")  # provisioning off (default)
+    client = Client.connect("localhost:9092", inbox_topic="r.reply")  # provisioning off (default)
 
     admin = _Admin([[]])
     broker = _Broker(admin)
@@ -270,9 +270,9 @@ def test_connect_disabled_ensurer_is_a_noop() -> None:
     assert admin.create_calls == []
 
 
-def test_client_wired_ensurer_provisions_reply_topic_before_subscribers(monkeypatch) -> None:
+def test_client_wired_ensurer_provisions_inbox_topic_before_subscribers(monkeypatch) -> None:
     # End-to-end wiring: the client's OWN ensurer, run as the REAL broker's
-    # pre-start hook, provisions the reply topic strictly BEFORE super().start()
+    # pre-start hook, provisions the inbox topic strictly BEFORE super().start()
     # starts the subscribers — the #180 ordering guarantee, asserted through the
     # real _PreStartHookBroker.start (not the two halves in isolation).
     from faststream.kafka import KafkaBroker
@@ -281,7 +281,7 @@ def test_client_wired_ensurer_provisions_reply_topic_before_subscribers(monkeypa
     from calfkit.client._broker import _PreStartHookBroker
     from calfkit.provisioning import ensurer as ensurer_mod
 
-    client = Client.connect("localhost:9092", reply_topic="r.reply", provisioning=ProvisioningConfig(enabled=True))
+    client = Client.connect("localhost:9092", inbox_topic="r.reply", provisioning=ProvisioningConfig(enabled=True))
     broker = client.broker
     assert isinstance(broker, _PreStartHookBroker)
 

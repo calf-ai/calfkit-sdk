@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from ktables import GroupedKafkaTableWriter
 
-from calfkit.client.client import Client
+from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneView
 from calfkit.controlplane.advert import AdvertInfo
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from calfkit.client.client import Client
+from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, advertises
 from calfkit.controlplane.publisher import control_plane_writer_key
 from calfkit.nodes import BaseNodeDef

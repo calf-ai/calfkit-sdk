@@ -17,6 +17,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from pydantic import BaseModel, ValidationError
 
 from calfkit.client.middleware import DecodeFloorMiddleware
+from calfkit.models.error_report import ErrorReport, FaultTypes
 
 _MW_LOGGER = "calfkit.client.middleware"
 
@@ -98,11 +99,12 @@ async def test_valid_body_passes_through_without_flooring(caplog: pytest.LogCapt
 
 
 def test_decode_floor_is_registered_outermost_on_the_connect_broker(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The shim is installed broker-wide by Client.connect, and OUTERMOST so its consume_scope wraps
+    # The floor is installed broker-wide by Client.connect — now via its configured BUILDER (carrying
+    # the {inbox: hub.fail_run} undecodable-sink registry), still OUTERMOST so its consume_scope wraps
     # the whole chain (ahead of ContextInjectionMiddleware) — every node + reply subscriber covered.
     from calfkit.client import Client
     from calfkit.client._broker import _PreStartHookBroker
-    from calfkit.client.middleware import ContextInjectionMiddleware
+    from calfkit.client.middleware import ContextInjectionMiddleware, _DecodeFloorBuilder
 
     captured: dict[str, object] = {}
     orig_init = _PreStartHookBroker.__init__
@@ -112,9 +114,52 @@ def test_decode_floor_is_registered_outermost_on_the_connect_broker(monkeypatch:
         orig_init(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(_PreStartHookBroker, "__init__", spy_init)
-    Client.connect(server_urls="localhost:9092")
+    client = Client.connect(server_urls="localhost:9092")
 
     mws = captured.get("middlewares")
     assert isinstance(mws, list)
-    assert DecodeFloorMiddleware in mws
-    assert mws.index(DecodeFloorMiddleware) < mws.index(ContextInjectionMiddleware)  # outermost
+    assert isinstance(mws[0], _DecodeFloorBuilder)  # the floor builder is OUTERMOST
+    assert mws[1] is ContextInjectionMiddleware
+    assert client.inbox_topic in mws[0]._registry  # the inbox→hub.fail_run undecodable seam is wired
+
+
+# ── Option-B undecodable-sink seam: a configured builder holding a {topic: sink} registry ──
+
+
+async def test_floor_seam_calls_the_registered_sink_with_cid_and_report(caplog: pytest.LogCaptureFixture) -> None:
+    calls: list[tuple[str, ErrorReport]] = []
+    registry = {"inbox.topic": lambda cid, report: calls.append((cid, report))}
+    broker = KafkaBroker(middlewares=[DecodeFloorMiddleware.builder(registry)])
+
+    @broker.subscriber("inbox.topic")
+    async def node(body: _Body) -> None: ...
+
+    async with TestKafkaBroker(broker):
+        with caplog.at_level(logging.ERROR, logger=_MW_LOGGER):
+            with pytest.raises(ValidationError):
+                await broker.publish(b'{"not": "valid"}', "inbox.topic", correlation_id="cid-1")
+
+    assert "calf.delivery.undecodable" in caplog.text  # still synthesizes + ERROR-logs (unchanged)
+    assert len(calls) == 1  # the seam handed the synthesized report to the topic's sink
+    cid, report = calls[0]
+    assert cid == "cid-1"  # the surviving transport correlation id
+    assert report.error_type == FaultTypes.DELIVERY_UNDECODABLE
+
+
+async def test_floor_seam_skips_a_topic_not_in_the_registry(caplog: pytest.LogCaptureFixture) -> None:
+    # Topic-key scoping: an undecodable on a topic with NO registered sink (e.g. a node hop in a
+    # co-located Worker, carrying the run's correlation_id) must never reach the client's sink (§5.8).
+    calls: list[tuple[str, ErrorReport]] = []
+    registry = {"inbox.topic": lambda cid, report: calls.append((cid, report))}
+    broker = KafkaBroker(middlewares=[DecodeFloorMiddleware.builder(registry)])
+
+    @broker.subscriber("node.topic")  # NOT in the registry
+    async def node(body: _Body) -> None: ...
+
+    async with TestKafkaBroker(broker):
+        with caplog.at_level(logging.ERROR, logger=_MW_LOGGER):
+            with pytest.raises(ValidationError):
+                await broker.publish(b'{"not": "valid"}', "node.topic", correlation_id="cid-1")
+
+    assert "calf.delivery.undecodable" in caplog.text  # the floor still synthesizes + ERROR-logs
+    assert calls == []  # but the seam did not call the inbox sink — topic-scoped

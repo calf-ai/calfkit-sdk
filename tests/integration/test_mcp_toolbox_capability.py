@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 from mcp.types import ListToolsResult, Tool
 
-from calfkit.client.client import Client
+from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.controlplane.publisher import control_plane_writer_key
 from calfkit.mcp.mcp_toolbox import MCPToolboxNode

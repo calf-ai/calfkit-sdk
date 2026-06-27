@@ -4,12 +4,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import DeserializationError
-from calfkit.models.payload import ContentPart, DataPart, TextPart
+from calfkit.models.payload import ContentPart, DataPart, TextPart, render_parts_as_text
 from calfkit.models.reply import ReturnMessage  # runtime: project_output isinstance-guards on it
 from calfkit.models.state import State
 
@@ -25,10 +25,10 @@ _UNSET: Any = object()
 class InvocationResult(Generic[OutputT]):
     """Client-facing projection of the session state after a node returns.
 
-    A ``InvocationResult`` is what callers receive in two places:
-
-    * :meth:`Client.execute` / :meth:`InvocationHandle.result` — the
-      final reply from an agent invocation.
+    A ``InvocationResult`` is what a client receives from :meth:`Client.execute` /
+    :meth:`InvocationHandle.result` — the final reply from an agent invocation. It is
+    **client-only**: the consumer/runtime path uses a separate
+    :class:`~calfkit.models.consumer_context.ConsumerContext`.
 
     The ``state`` field is the full session :class:`~calfkit.models.State` at
     the moment this envelope was published, exposing message history, in-flight
@@ -43,13 +43,8 @@ class InvocationResult(Generic[OutputT]):
     ``result.deps[...] = ...`` a type error; the runtime object is still that
     shared dict):
 
-    * **Consumer path**: the consumer never republishes (no ``publish_topic``),
-      so mutations have no observable downstream effect. They can still
-      surprise other code holding the same ``InvocationResult`` instance.
-    * **Client path** (:meth:`Client.execute` / :meth:`InvocationHandle.result`):
-      the caller's lifetime owns the instance — mutations are caller-visible
-      and may corrupt any other code holding a parallel reference (caches,
-      retry layers, etc.).
+    The caller's lifetime owns the instance — mutations are caller-visible and may
+    corrupt any other code holding a parallel reference (caches, retry layers, etc.).
 
     ``InvocationResult`` is intentionally unhashable (``__hash__ = None``): the
     underlying ``state`` field is a mutable Pydantic model and cannot be
@@ -62,13 +57,13 @@ class InvocationResult(Generic[OutputT]):
     transport-stamped context.
     """
 
-    output: OutputT | None
-    """Deserialized final output (typed via ``output_type``).
+    output: OutputT
+    """Deserialized final output (typed via ``output_type``), **always populated**.
 
-    ``None`` on intermediate hops — call-kind deliveries with no reply slot (e.g.
-    agent hops mid-tool-call, tool completions). Populated when the upstream node
-    emitted a terminal return carrying reply parts. Client-side strict-mode results
-    (the default) always have ``output`` populated; consumer-side results may not.
+    A client ``result()`` only resolves a *successful* terminal — a fault raises
+    ``NodeFaultError`` and a projection mismatch raises ``DeserializationError`` — so
+    there is no path on which ``output`` is ``None`` (spec §2.4). The consumer path
+    uses a separate ``ConsumerContext`` with its own optional ``output``.
     """
 
     state: State
@@ -136,7 +131,6 @@ class InvocationResult(Generic[OutputT]):
         output_type: type[Any] = _UNSET,
         *,
         correlation_id: str | None = None,
-        strict: bool = True,
         type_adapter: TypeAdapter[Any] | None = None,
         resources: Mapping[str, Any] | None = None,
     ) -> InvocationResult[Any]:
@@ -163,12 +157,6 @@ class InvocationResult(Generic[OutputT]):
                 from the envelope body. When ``None``, falls back to
                 ``ctx.correlation_id`` (which raises if the context was never
                 stamped).
-            strict: When ``True`` (default — client semantics), raises
-                :class:`DeserializationError` if the reply parts are empty or
-                don't contain the expected part type. When ``False`` (consumer
-                semantics), returns ``output=None`` for an empty/absent reply
-                (intermediate hop / tool completion); validation errors on
-                *present* parts still propagate.
             type_adapter: An optional pre-built :class:`pydantic.TypeAdapter` to
                 use for validating ``DataPart.data`` against *output_type*. When
                 ``None`` (default), a new adapter is constructed per call.
@@ -180,19 +168,20 @@ class InvocationResult(Generic[OutputT]):
 
         Returns:
             A ``InvocationResult`` whose ``.output`` is typed according to *output_type*
-            (or ``None`` when ``strict=False`` and no parts are present).
+            (always present — ``InvocationResult`` is client-only and always strict).
 
         Raises:
-            DeserializationError: If the expected content part is not found in
-                the reply parts (and either ``strict=True`` or the parts
-                list is non-empty but lacks the expected shape).
-            pydantic.ValidationError: If ``output_type`` is provided and the
-                matching ``DataPart.data`` doesn't validate against it.
+            DeserializationError: when projection fails — no matching content part for a
+                structured / auto-detect ``output_type`` (an empty/absent reply raises here,
+                always strict), OR a present ``DataPart`` that fails a structured
+                ``output_type`` (the closed-set error per spec §2.5 — :func:`project_output`
+                wraps the raw ``pydantic.ValidationError``). ``output_type=str`` never raises
+                here: it coerces any reply to a string (even an empty reply → ``""``).
             pydantic.PydanticSchemaGenerationError: If ``type_adapter`` is ``None``
                 and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
         """
         state = ctx.state
-        output = project_output(ctx._reply, output_type, strict=strict, type_adapter=type_adapter)
+        output = project_output(ctx._reply, output_type, strict=True, type_adapter=type_adapter)
 
         return cls(
             output=output,
@@ -212,7 +201,6 @@ class InvocationResult(Generic[OutputT]):
         output_type: type[Any] = _UNSET,
         *,
         correlation_id: str,
-        strict: bool = True,
         type_adapter: TypeAdapter[Any] | None = None,
         resources: Mapping[str, Any] | None = None,
     ) -> InvocationResult[Any]:
@@ -228,7 +216,6 @@ class InvocationResult(Generic[OutputT]):
             envelope.context,
             output_type,
             correlation_id=correlation_id,
-            strict=strict,
             type_adapter=type_adapter,
             resources=resources,
         )
@@ -253,18 +240,33 @@ def project_output(
 ) -> Any:
     """Project the deserialized output from the delivery's reply slot (spec §4.5).
 
-    Shared by :meth:`InvocationResult.from_context` (client, ``strict=True``) and
-    :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). A
-    ``FaultMessage`` reply has no parts, so it reads as no-parts (never an
-    ``AttributeError``); the typed fault reception is the deferred reception PR's job.
-    With ``strict=False`` an empty/absent reply (an intermediate hop, or a fault) yields
-    ``None``; otherwise the matching part is extracted/validated per ``output_type``
-    (raising ``DeserializationError``/``ValidationError`` on a present-but-mismatched part).
+    The **receive-side** projection — shared by :meth:`InvocationResult.from_context` (client,
+    ``strict=True``) and :meth:`ConsumerContext.from_run_context` (consumer, ``strict=False``). A
+    ``FaultMessage`` reply has no parts, so it reads as no-parts (never an ``AttributeError``); the
+    typed fault reception is the deferred reception PR's job. With ``strict=False`` an empty/absent
+    reply (an intermediate hop, or a fault) yields ``None``; otherwise the part is extracted/validated
+    per ``output_type`` (raising ``DeserializationError``/``ValidationError`` on a present-but-mismatched
+    part).
+
+    ``output_type=str`` **coerces** the whole reply to a string (spec §2.2) — every part rendered
+    (``TextPart`` verbatim, ``DataPart`` as JSON), File/ToolCall skipped, newline-joined; empty → ``""``
+    — so it never raises a mismatch. This coercion is scoped to the **receive side**: the node
+    output-view seam (``_output_view`` → :func:`_extract_output`) keeps the **strict** ``str``
+    validation of spec §6.3, faulting on a type-breaking node output.
     """
     parts = reply.parts if isinstance(reply, ReturnMessage) else []
     if not parts and not strict:
         return None
-    return _extract_output(parts, output_type, type_adapter=type_adapter)
+    if output_type is str:
+        return render_parts_as_text(parts, render_other=lambda _p: None, empty="")
+    try:
+        return _extract_output(parts, output_type, type_adapter=type_adapter)
+    except ValidationError as exc:
+        # A present-but-invalid DataPart fails the structured output_type → surface the closed-set
+        # DeserializationError (spec §2.5), never a raw pydantic.ValidationError. Receive-side only:
+        # the node output-view seam calls _extract_output directly (not via project_output), so it
+        # keeps the raw error it converts to a §6.3 fault — this wrap doesn't touch it. (M2)
+        raise DeserializationError(f"reply DataPart failed output_type={getattr(output_type, '__name__', output_type)!r}: {exc}") from exc
 
 
 def _extract_output(parts: list[Any], output_type: type[Any], type_adapter: TypeAdapter[Any] | None = None) -> Any:
@@ -305,7 +307,11 @@ def extract_lenient(parts: list[Any] | None) -> Any:
 
 
 def _extract_text(parts: list[Any]) -> str:
-    """Extract the first TextPart.text."""
+    """Extract the first ``TextPart.text`` — the **strict** ``str`` projection (a missing ``TextPart``
+    raises ``DeserializationError``). Used by the node output-view seam (``_output_view`` →
+    :func:`_extract_output`), which must fault on a type-breaking node output (spec §6.3). The
+    *receive-side* coercion (client/consumer ``output_type=str`` stringifies every part) lives in
+    :func:`project_output`, not here."""
     for part in parts:
         if isinstance(part, TextPart):
             return part.text

@@ -211,7 +211,7 @@ async def test_sync_consumer_receives_context_from_agent_output(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
+        await client.agent(topic=agent.subscribe_topics[0]).execute("hi", timeout=5)
 
     final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
     assert final, f"consumer never saw a terminal envelope; saw={received}"
@@ -232,7 +232,7 @@ async def test_async_consumer_receives_context_from_agent_output(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
+        await client.agent(topic=agent.subscribe_topics[0]).execute("hi", timeout=5)
 
     final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
     assert final
@@ -251,7 +251,7 @@ async def test_consumer_sees_upstream_emitter_identity(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
+        await client.agent(topic=agent.subscribe_topics[0]).execute("hi", timeout=5)
 
     final = [c for c in received if any(isinstance(p, TextPart) for p in c.output_parts)]
     assert final
@@ -282,7 +282,9 @@ async def test_consumer_deserializes_output_type_dataclass(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("hi", structured_agent.subscribe_topics[0], timeout=5)
+        # The structured agent returns a DataPart, so the client mints with output_type=Report to get
+        # the typed object back (the default str would coerce it to its JSON string instead, spec §2.2).
+        await client.agent(topic=structured_agent.subscribe_topics[0], output_type=Report).execute("hi", timeout=5)
 
     final = [c for c in received if any(isinstance(p, DataPart) for p in c.output_parts)]
     assert final, f"no final DataPart envelope observed; received={received}"
@@ -611,7 +613,7 @@ async def test_deps_round_trip_through_agent_to_consumer(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute("hi", agent.subscribe_topics[0], deps={"discord": {"channel_id": 7}}, timeout=5)
+        result = await client.agent(topic=agent.subscribe_topics[0]).execute("hi", deps={"discord": {"channel_id": 7}}, timeout=5)
 
     assert result.deps == {"discord": {"channel_id": 7}}
     assert received, "consumer saw no envelopes"
@@ -744,13 +746,6 @@ def test_strict_mode_raises_on_empty_reply():
         InvocationResult.from_envelope(envelope, correlation_id="cid-strict-empty")  # strict=True default
 
 
-def test_lenient_mode_returns_none_on_empty_reply():
-    envelope = _envelope()
-    result = InvocationResult.from_envelope(envelope, correlation_id="cid-lenient", strict=False)
-    assert result.output is None
-    assert result.state is envelope.context.state  # client path: no copy in from_envelope
-
-
 async def test_client_execute_result_carries_state(container):
     worker = container.get(Worker)
     agent = Agent(
@@ -767,7 +762,7 @@ async def test_client_execute_result_carries_state(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute("hi there", agent.subscribe_topics[0], timeout=5)
+        result = await client.agent(topic=agent.subscribe_topics[0]).execute("hi there", timeout=5)
 
     assert result.output == "done"
     assert isinstance(result.state, State)

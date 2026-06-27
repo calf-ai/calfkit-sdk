@@ -127,9 +127,9 @@ async def test_triage_messages_billing_and_hands_off_to_refunds(kafka_bootstrap:
         )
         async with triage_worker:
             # MESSAGE path: triage consults billing and keeps control.
-            balance = await driver.execute("What is the balance on my account?", triage_in, timeout=180)
+            balance = await driver.agent(triage).execute("What is the balance on my account?", timeout=180)
             # HANDOFF path: triage transfers to refunds, which answers the original caller.
-            refund = await driver.execute("I'd like a refund for order 1234.", triage_in, timeout=180)
+            refund = await driver.agent(triage).execute("I'd like a refund for order 1234.", timeout=180)
 
     # MESSAGE: triage consulted billing via the built-in message_agent tool and stayed in control
     # (it produced the final answer itself).
@@ -148,6 +148,6 @@ async def test_triage_messages_billing_and_hands_off_to_refunds(kafka_bootstrap:
     assert any(m.name == triage for m in responses), "expected triage's handoff output in the carried conversation"
     assert responses[-1].name == refunds, "expected refunds (not triage) to produce the final answer"
 
-    await driver.close()
-    await specialists._client.close()
-    await triage_worker._client.close()
+    await driver.aclose()
+    await specialists._client.aclose()
+    await triage_worker._client.aclose()

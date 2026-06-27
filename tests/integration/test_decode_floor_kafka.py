@@ -7,9 +7,9 @@ event at ERROR and re-raises — never a silent drop (catalogue FR-26/FR-27):
 
 * **D-1** — a malformed body to a live agent's input topic is floored; the worker keeps
   consuming, proven by a valid invocation that completes afterwards.
-* **D-2** — a malformed body on the client's reply topic is floored and does **not**
-  resolve the pending future (typed reception deferred to #250), so a finite ``reply_ttl``
-  evicts it as ``ReplyExpiredError`` rather than resolving with garbage.
+* **D-2** — a malformed body on the client's inbox with **no surviving correlation id** is floored
+  and cannot be routed to any run, so it does **not** resolve the pending run; the client's
+  ``result(timeout=)`` surfaces a typed ``ClientTimeoutError`` rather than resolving with garbage.
 
 Opt-in (``-m kafka`` / ``make test-kafka``); skips cleanly without Docker.
 """
@@ -24,7 +24,7 @@ from aiokafka import AIOKafkaProducer
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
-from calfkit.exceptions import ReplyExpiredError
+from calfkit.exceptions import ClientTimeoutError
 from calfkit.models.error_report import FaultTypes
 from calfkit.nodes import Agent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
@@ -63,41 +63,43 @@ async def test_undecodable_body_floored_and_worker_survives(kafka_bootstrap: str
                 finally:
                     await producer.stop()
 
-                result = await driver.execute("go", agent_in, timeout=60)
+                result = await driver.agent(topic=agent_in).execute("go", timeout=60)
                 assert result.output is not None and FINAL_OUTPUT in result.output
 
         assert FaultTypes.DELIVERY_UNDECODABLE in caplog.text
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
-async def test_undecodable_reply_floors_and_does_not_resolve_the_future(
+async def test_undecodable_reply_with_no_correlation_id_floors_and_does_not_resolve_the_run(
     kafka_bootstrap: str, topic_namespace: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """D-2: a malformed body on the client's reply topic is floored and does NOT resolve
-    the pending future (typed reception deferred, #250); a finite ``reply_ttl`` evicts it
-    as ``ReplyExpiredError`` instead of resolving the caller with garbage."""
-    reply_topic = f"{topic_namespace}.d2.reply"
-    await ensure_topic(kafka_bootstrap, reply_topic)
-    # No worker runs, so a real reply never arrives; the only thing on the reply topic is
-    # the malformed message we inject. A short reply_ttl bounds the (correct) hang.
-    driver = Client.connect(kafka_bootstrap, reply_topic=reply_topic, reply_ttl=3.0)
+    """D-2: a malformed body on the client's inbox with **no surviving correlation id** is floored at
+    ERROR and cannot be routed to any run (the floor's ERROR-log is the whole story, §5.8), so the run
+    never resolves and the client's ``result(timeout=)`` patience surfaces a typed ``ClientTimeoutError``
+    rather than resolving with garbage. (A cid-bearing undecodable reply instead raises
+    ``NodeFaultError(calf.delivery.undecodable)`` via the seam — covered offline by the hub suite.)"""
+    inbox_topic = f"{topic_namespace}.d2.reply"
+    await ensure_topic(kafka_bootstrap, inbox_topic)
+    # No worker runs, so a real reply never arrives; the only thing on the inbox is the malformed
+    # message we inject (with no correlation id). A short result(timeout=) bounds the (correct) hang.
+    driver = Client.connect(kafka_bootstrap, inbox_topic=inbox_topic)
 
     try:
         with caplog.at_level(logging.ERROR, logger=_MW_LOGGER):
-            handle = await driver.start("go", f"{topic_namespace}.d2.input")
+            handle = await driver.agent(topic=f"{topic_namespace}.d2.input").start("go")
 
             producer = AIOKafkaProducer(bootstrap_servers=kafka_bootstrap)
             await producer.start()
             try:
-                await producer.send_and_wait(reply_topic, b'{"garbage": true}')
+                await producer.send_and_wait(inbox_topic, b'{"garbage": true}')
             finally:
                 await producer.stop()
 
-            with pytest.raises(ReplyExpiredError):
-                await handle.result()  # floored, never resolved → evicted by reply_ttl
+            with pytest.raises(ClientTimeoutError):
+                await handle.result(timeout=3.0)  # floored + unroutable (no cid) → never resolved
 
         assert FaultTypes.DELIVERY_UNDECODABLE in caplog.text
     finally:
-        await driver.close()
+        await driver.aclose()

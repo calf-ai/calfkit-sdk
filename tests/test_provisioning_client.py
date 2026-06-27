@@ -17,16 +17,16 @@ from calfkit.provisioning import ProvisioningConfig
 def test_default_provisioning_property_is_disabled_config() -> None:
     client = Client.connect("localhost:9092")
 
-    assert isinstance(client.provisioning, ProvisioningConfig)
+    assert isinstance(client._provisioning, ProvisioningConfig)
     # Never None; defaults to a disabled config so .enabled is always safe.
-    assert client.provisioning.enabled is False
+    assert client._provisioning.enabled is False
 
 
 def test_provisioning_property_reflects_passed_config() -> None:
     cfg = ProvisioningConfig(enabled=True, num_partitions=3)
     client = Client.connect("localhost:9092", provisioning=cfg)
 
-    assert client.provisioning is cfg
+    assert client._provisioning is cfg
 
 
 def test_connect_accepts_a_faststream_security_object() -> None:
@@ -36,7 +36,7 @@ def test_connect_accepts_a_faststream_security_object() -> None:
 
     client = Client.connect("localhost:9092", security=SASLPlaintext(username="u", password="p"))
 
-    assert client.provisioning.enabled is False  # constructed without error
+    assert client._provisioning.enabled is False  # constructed without error
 
 
 def test_connect_rejects_raw_security_protocol_kwarg() -> None:
@@ -51,18 +51,17 @@ def test_connect_rejects_raw_sasl_plain_kwargs() -> None:
         Client.connect("localhost:9092", sasl_plain_username="u", sasl_plain_password="p")
 
 
-def test_connect_rejects_illegal_reply_topic_name() -> None:
-    # An explicit reply_topic is the wire callback on EVERY start()/execute()
-    # frame and the client's own subscription — a Kafka-illegal name would
-    # recreate exactly the cross-process metadata stall send(reply_to=...)
-    # validation exists to prevent. Same rule, same loud client-side rejection.
+def test_connect_rejects_illegal_inbox_topic_name() -> None:
+    # An explicit inbox_topic is the wire callback on EVERY start()/execute() frame and the client's
+    # own subscription — a Kafka-illegal name would recreate a cross-process metadata stall, so it is
+    # rejected loudly client-side at connect().
     for bad in ("has space", "foo/bar", "a" * 250, ".", ".."):
         with pytest.raises(ValueError, match="not a valid Kafka topic name"):
-            Client.connect("localhost:9092", reply_topic=bad)
+            Client.connect("localhost:9092", inbox_topic=bad)
 
     # Explicit legal names still work.
-    client = Client.connect("localhost:9092", reply_topic="my-app.replies_1")
-    assert client.reply_topic == "my-app.replies_1"
+    client = Client.connect("localhost:9092", inbox_topic="my-app.replies_1")
+    assert client.inbox_topic == "my-app.replies_1"
 
 
 def test_client_never_captures_security_kwargs() -> None:

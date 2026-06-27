@@ -1,41 +1,27 @@
-"""Unit tests for the optional human ``author`` kwarg on the client (design §8).
+"""Tests for the optional human ``author`` kwarg on the client gateway (design §8).
 
-These tests are pure: they intercept the network boundary (``_start`` /
-``start``) so no Kafka broker or model call is required. They assert that
-``author=`` is mapped onto the staged ``UserPromptPart.name`` by ``start``
-and that ``execute`` forwards it (it must not be silently dropped).
+``author=`` is mapped onto the staged ``UserPromptPart.name`` by the gateway's verbs (it must not
+be silently dropped), and ``execute`` forwards it. These drive the real public flow over an offline
+``TestKafkaBroker`` — a capture subscriber on the agent topic records the published session ``State``.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import Annotated, Any
 
-import pytest
+from faststream import Context
+from faststream.kafka import TestKafkaBroker
 
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
 from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
-from calfkit.client.client import Client
-from calfkit.client.invocation_handle import InvocationHandle
-from calfkit.models import State
-from calfkit.models.node_result import _UNSET
+from calfkit.client import Client
+from calfkit.models import CallFrameStack, Envelope, SessionRunContext, WorkflowState
+from calfkit.models.payload import TextPart
+from calfkit.models.reply import ReturnMessage
+from calfkit.models.state import State
 
-
-class _CaptureClient(Client):
-    """Client subclass that captures the constructed ``State`` instead of
-    publishing it, so ``start`` can be exercised without a broker."""
-
-    def __init__(self) -> None:  # noqa: D107 - test double, skip BaseClient wiring
-        self.captured_state: State | None = None
-        self._reply_topic = "test-reply"
-
-    async def _start(self, *, topic: str, correlation_id: str, state: State, **_: Any) -> InvocationHandle:  # type: ignore[override]
-        self.captured_state = state
-        return InvocationHandle(
-            correlation_id=correlation_id,
-            topic=topic,
-            reply_topic=self._reply_topic,
-            _future=None,  # type: ignore[arg-type]
-            _output_type=_UNSET,
-        )
+_AGENT_TOPIC = "agent.x.private.input"
 
 
 def _staged_user_part(state: State) -> UserPromptPart:
@@ -46,49 +32,45 @@ def _staged_user_part(state: State) -> UserPromptPart:
     return part
 
 
-@pytest.mark.asyncio
+def _register_capture_agent(client: Client, *, reply: bool = False) -> list[State]:
+    """Capture the published session State on the agent topic; optionally echo a return to the inbox
+    (so an ``execute`` round-trip can complete)."""
+    captured: list[State] = []
+
+    @client._broker.subscriber(_AGENT_TOPIC)
+    async def agent_node(env: Envelope, correlation_id: Annotated[str, Context()]) -> None:
+        captured.append(env.context.state)
+        if reply:
+            r = Envelope(
+                context=SessionRunContext(state=State(), deps={}),
+                internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+                reply=ReturnMessage(in_reply_to=None, tag=None, parts=[TextPart(text="ok")]),
+            )
+            headers: dict[str, Any] = {HDR_KIND: "return", HDR_EMITTER: "agent.x", HDR_EMITTER_KIND: "agent"}
+            await client._broker.publish(r, client.inbox_topic, correlation_id=correlation_id, headers=headers)
+
+    return captured
+
+
 async def test_start_author_stamps_user_prompt_name() -> None:
-    client = _CaptureClient()
+    client = Client.connect("localhost:9092", inbox_topic="inbox")
+    captured = _register_capture_agent(client)
+    async with TestKafkaBroker(client._broker):
+        await client.agent(topic=_AGENT_TOPIC).start("hello", author="Alice")
+    assert _staged_user_part(captured[0]).name == "Alice"
 
-    await client.start("hello", "topic", author="Alice")
 
-    assert client.captured_state is not None
-    assert _staged_user_part(client.captured_state).name == "Alice"
-
-
-@pytest.mark.asyncio
 async def test_start_no_author_leaves_name_none() -> None:
-    client = _CaptureClient()
+    client = Client.connect("localhost:9092", inbox_topic="inbox")
+    captured = _register_capture_agent(client)
+    async with TestKafkaBroker(client._broker):
+        await client.agent(topic=_AGENT_TOPIC).start("hello")
+    assert _staged_user_part(captured[0]).name is None
 
-    await client.start("hello", "topic")
 
-    assert client.captured_state is not None
-    assert _staged_user_part(client.captured_state).name is None
-
-
-@pytest.mark.asyncio
-async def test_execute_forwards_author_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _CaptureClient()
-    captured_kwargs: dict[str, Any] = {}
-
-    real_start = client.start
-
-    async def spy_start(user_prompt: str, topic: str, **kwargs: Any) -> InvocationHandle:
-        captured_kwargs.update(kwargs)
-        return await real_start(user_prompt, topic, **kwargs)
-
-    monkeypatch.setattr(client, "start", spy_start)
-
-    # InvocationHandle.result() would await a real future; monkeypatch it out (it is
-    # restored automatically after the test) so we assert purely on what execute
-    # forwarded down to start.
-    async def _no_result(self: InvocationHandle, *_: Any, **__: Any) -> None:
-        return None
-
-    monkeypatch.setattr(InvocationHandle, "result", _no_result)
-
-    await client.execute("hello", "topic", author="Bob")
-
-    assert captured_kwargs.get("author") == "Bob", "execute dropped author= before forwarding to start"
-    assert client.captured_state is not None
-    assert _staged_user_part(client.captured_state).name == "Bob"
+async def test_execute_forwards_author_to_start() -> None:
+    client = Client.connect("localhost:9092", inbox_topic="inbox")
+    captured = _register_capture_agent(client, reply=True)
+    async with TestKafkaBroker(client._broker):
+        await asyncio.wait_for(client.agent(topic=_AGENT_TOPIC).execute("hello", author="Bob"), timeout=1.0)
+    assert _staged_user_part(captured[0]).name == "Bob"  # execute did not drop author= before publishing

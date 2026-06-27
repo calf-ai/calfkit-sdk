@@ -211,16 +211,16 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     async with toolbox_worker:
         await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
-            result = await driver.execute("add 2 and 3", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)  # keyed by the model-facing (namespaced) name
     assert _ns(server_name, "add") in returns
     assert "5" in _serialized(returns[_ns(server_name, "add")])
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -249,7 +249,7 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     async with toolbox_worker:
         await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
-            result = await driver.execute("trigger the error", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("trigger the error", timeout=120)
 
     # Finalized normally — the isError result was recoverable/model-visible, not a fault.
     assert result.output is not None and FINAL_OUTPUT in result.output
@@ -259,9 +259,9 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     assert _ns(server_name, "domain_error") in returns
     assert "isError" in _serialized(returns[_ns(server_name, "domain_error")])
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -298,7 +298,7 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
             topics = await _topics(kafka_bootstrap)
             assert f"calf.fanout.{agent_id}.state" in topics
             assert f"calf.fanout.{agent_id}.basestate" in topics
-            result = await driver.execute("add 2 and 3, and echo hi", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3, and echo hi", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)
@@ -306,9 +306,9 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     assert "5" in _serialized(returns[_ns(server_name, "add")])
     assert "hi" in _serialized(returns[_ns(server_name, "echo")])
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 # ── Group A: happy paths the real broker uniquely exercises ──────────────────
@@ -343,7 +343,7 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     async with toolbox_worker:
         await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
-            result = await driver.execute("add 2+3 and 10+20", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2+3 and 10+20", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     by_id = returns_by_call_id(result.message_history)
@@ -351,9 +351,9 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     assert "5" in _serialized(by_id["call-a"])
     assert "30" in _serialized(by_id["call-b"])
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -388,7 +388,7 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     async with toolbox_worker:
         await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
-            result = await driver.execute("add then echo", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add then echo", timeout=120)
             topics = await _topics(kafka_bootstrap)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
@@ -399,9 +399,9 @@ async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, t
     assert f"calf.fanout.{agent_id}.state" not in topics
     assert f"calf.fanout.{agent_id}.basestate" not in topics
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -439,7 +439,7 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
         await _await_capability(kafka_bootstrap, server_a_name, timeout=60)
         await _await_capability(kafka_bootstrap, server_b_name, timeout=60)
         async with agent_worker:
-            result = await driver.execute("add 2+3 and mul 4*5", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2+3 and mul 4*5", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)
@@ -447,9 +447,9 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
     assert "5" in _serialized(returns[_ns(server_a_name, "add")])  # only server A could produce 5
     assert "20" in _serialized(returns[_ns(server_b_name, "mul")])  # only server B could produce 20
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -485,8 +485,8 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     async with toolbox_worker:
         await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
-            h1 = await driver.start("agent 1 add 2+3", a1_in)
-            h2 = await driver.start("agent 2 add 10+20", a2_in)
+            h1 = await driver.agent(topic=a1_in).start("agent 1 add 2+3")
+            h2 = await driver.agent(topic=a2_in).start("agent 2 add 10+20")
             r1 = await h1.result(timeout=120)
             r2 = await h2.result(timeout=120)
 
@@ -496,9 +496,9 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     assert "5" in _serialized(tool_returns(r1.message_history)[_ns(server_name, "add")])
     assert "30" in _serialized(tool_returns(r2.message_history)[_ns(server_name, "add")])
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 # ── Group B: contract / edge paths ───────────────────────────────────────────
@@ -529,7 +529,7 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     async with toolbox_worker:
         await _await_capability(kafka_bootstrap, server_name, timeout=60)
         async with agent_worker:
-            result = await driver.execute("call danger", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("call danger", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     # danger never reached the server / never round-tripped (check the namespaced key it WOULD have had).
@@ -537,9 +537,9 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     # The agent told the model the tool does not exist (retry text carries the emitted name).
     assert any("danger" in text for text in retry_prompt_texts(result.message_history))
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -581,7 +581,7 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
 
         # 1) Trigger the runtime tool registration + list_changed notification.
         async with enable_worker:
-            r1 = await driver.execute("enable the bonus tool", enable_in, timeout=120)
+            r1 = await driver.agent(topic=enable_in).execute("enable the bonus tool", timeout=120)
         assert r1.output is not None and FINAL_OUTPUT in r1.output
         assert "enabled" in _serialized(tool_returns(r1.message_history)[_ns(server_name, "enable_bonus")])
 
@@ -591,14 +591,14 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
 
         # 3) A fresh agent's view catch-up now includes 'bonus' deterministically.
         async with bonus_worker:
-            r2 = await driver.execute("use the bonus tool", bonus_in, timeout=120)
+            r2 = await driver.agent(topic=bonus_in).execute("use the bonus tool", timeout=120)
         assert r2.output is not None and FINAL_OUTPUT in r2.output
         assert "bonus-result" in _serialized(tool_returns(r2.message_history)[_ns(server_name, "bonus")])
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await enable_worker._client.close()
-    await bonus_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await enable_worker._client.aclose()
+    await bonus_worker._client.aclose()
 
 
 # ── Group C: the agent's point of view of its advertised tools ───────────────
@@ -672,7 +672,7 @@ async def test_agent_pov_is_namespaced_and_strips_to_bare_on_dispatch(
         # The source of truth the agent reads: what the toolbox advertised on the view (BARE names).
         await _await_view(kafka_bootstrap, _capture_advertised, timeout=60, what=f"advertised tools for {server_name!r}")
         async with agent_worker:
-            result = await driver.execute("add 2 and 3, and echo hi", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3, and echo hi", timeout=120)
 
     returns = tool_returns(result.message_history)  # keyed by the model-facing (namespaced) name
 
@@ -697,6 +697,6 @@ async def test_agent_pov_is_namespaced_and_strips_to_bare_on_dispatch(
     assert "5" in _serialized(returns[_ns(server_name, "add")])
     assert "hi" in _serialized(returns[_ns(server_name, "echo")])
 
-    await driver.close()
-    await toolbox_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()

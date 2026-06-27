@@ -10,9 +10,8 @@ channels:
   ``x-calf-kind=fault`` / ``x-calf-error-type`` headers.
 * **Channel B** — an ``on_callee_error`` recorder (``_fault_tools.CalleeErrorRecorder``)
   that sees the live fault in-process, then declines so it still escalates.
-* **Channel C** — the client edge as it behaves today: a routed fault resolves the
-  pending future and surfaces as ``DeserializationError`` (the typed ``NodeFaultError``
-  reception is deferred to #250).
+* **Channel C** — the client edge: a routed fault is received as a typed ``NodeFaultError``
+  (#250 reception), so ``await handle.result()`` raises it carrying the verbatim ``ErrorReport``.
 
 The agents run ``sequential_only_mode=True``: every case dispatches a single tool call,
 so the fault path is identical to a fan-out-capable agent's, and the durable fan-out
@@ -32,7 +31,7 @@ from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
-from calfkit.exceptions import DeserializationError
+from calfkit.exceptions import NodeFaultError
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, WorkflowState
 from calfkit.models.error_report import FaultTypes
 from calfkit.nodes import Agent
@@ -63,7 +62,7 @@ def _agent(node_id: str, *, agent_in: str, agent_pub: str, tool, call: ToolCallP
 async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str, topic_namespace: str) -> None:
     """F-1: a tool's generic exception → the agent escalates a ``calf.unhandled``
     ``FaultMessage`` on its ``publish_topic`` mirror (typed report + filterable
-    headers), and the client's routed reply surfaces as ``DeserializationError``."""
+    headers), and the client's routed reply is received as a typed ``NodeFaultError``."""
     agent_in = f"{topic_namespace}.f1.input"
     agent_pub = f"{topic_namespace}.f1.mirror"
     agent = _agent(
@@ -79,7 +78,7 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            handle = await driver.start("go", agent_in)
+            handle = await driver.agent(topic=agent_in).start("go")
 
             fault, headers = await tap.next_fault(timeout=60)
             assert headers[HDR_KIND] == "fault"
@@ -89,13 +88,14 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
             assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) == "ValueError"
             assert len(fault.error.frame_chain) >= 1  # the faulting hop's topology is captured
 
-            # Channel C — current client-edge behavior: a routed fault resolves the
-            # future and fails strict output projection (typed reception deferred, #250).
-            with pytest.raises(DeserializationError):
+            # Channel C — the routed fault is RECEIVED as a typed NodeFaultError (#250 reception):
+            # result() raises it carrying the verbatim escalated ErrorReport.
+            with pytest.raises(NodeFaultError) as exc_info:
                 await handle.result(timeout=60)
+            assert exc_info.value.report.find(FaultTypes.UNHANDLED) is not None
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_callee_error_seam_observes_fault_then_escalates(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -119,12 +119,12 @@ async def test_callee_error_seam_observes_fault_then_escalates(kafka_bootstrap: 
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=60)
             assert fault.error.error_type == FaultTypes.UNHANDLED
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
     # Capture-in-callback, assert-in-test-body (the seam fired once, in the worker
     # process, before it produced the mirror this test just observed).
@@ -153,15 +153,15 @@ async def test_tool_mint_escalates_verbatim_typed_fault(kafka_bootstrap: str, to
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, headers = await tap.next_fault(timeout=60)
             assert fault.error.error_type == "billing.quota_exceeded"
             assert headers[HDR_ERROR_TYPE] == "billing.quota_exceeded"
             assert fault.error.retryable is False
             assert fault.error.details.get("x") == 42
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_fire_and_forget_fault_mirrors_without_callback(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -183,15 +183,15 @@ async def test_fire_and_forget_fault_mirrors_without_callback(kafka_bootstrap: s
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            correlation_id = await driver.send("go", agent_in)  # one-way: returns the id, no future
+            correlation_id = (await driver.agent(topic=agent_in).send("go")).correlation_id  # one-way: returns the id, no future
             assert isinstance(correlation_id, str)
 
             fault, headers = await tap.next_fault(timeout=60)
             assert headers[HDR_KIND] == "fault"
             assert fault.error.error_type == FaultTypes.UNHANDLED
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_stray_fault_does_not_disturb_the_live_worker(kafka_bootstrap: str, topic_namespace: str, caplog: pytest.LogCaptureFixture) -> None:
@@ -238,10 +238,10 @@ async def test_stray_fault_does_not_disturb_the_live_worker(kafka_bootstrap: str
                     await producer.stop()
 
                 # The worker survived the stray: a valid invocation still completes.
-                result = await driver.execute("go", agent_in, timeout=60)
+                result = await driver.agent(topic=agent_in).execute("go", timeout=60)
                 assert result.output is not None and FINAL_OUTPUT in result.output
 
         assert any("stray" in record.getMessage().lower() for record in caplog.records)
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()

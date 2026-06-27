@@ -19,9 +19,8 @@ async def test_concurrent_tool_calling(container, deploy_function_agent, deploy_
         random_num = random.randint(1, 100)
         random_str = "".join(random.choices(string.ascii_letters, k=20))  # 20 char random string
         random_city = Faker().city()
-        result = await client.execute(
+        result = await client.agent(topic=deploy_function_agent.subscribe_topics[0]).execute(
             "Hey! Call all your tools concurrently right now",
-            deploy_function_agent.subscribe_topics[0],
             deps={"random_number": random_num, "random_string": random_str, "random_city": random_city},
         )
 

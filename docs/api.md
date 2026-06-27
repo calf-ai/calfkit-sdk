@@ -4,7 +4,8 @@ The full public surface is re-exported from the top-level `calfkit` package:
 
 ```python
 from calfkit import (
-    Client, InvocationHandle, InvocationResult,          # client
+    Client, AgentGateway, InvocationHandle, InvocationResult,   # client
+    Dispatch, EventStream, RunEvent, RunCompleted, RunFailed,   # client — fire token + firehose events
     Agent, agent_tool, consumer,                         # node authoring
     Tools,                                               # reference deployed tool nodes by name
     Messaging, Handoff,                                  # agent-to-agent peers
@@ -16,7 +17,7 @@ from calfkit import (
     ProvisioningConfig,                                  # provisioning (config only)
     KTableReaderTuning, FanoutConfig,                    # ktables tuning (config only)
     NodeFaultError, ErrorReport, FaultTypes,             # faults
-    DeserializationError, LifecycleConfigError,          # exceptions
+    DeserializationError, ClientTimeoutError, ClientClosedError, LifecycleConfigError,   # exceptions
 )
 ```
 
@@ -28,9 +29,13 @@ from calfkit import (
 
 | Symbol | Purpose |
 | --- | --- |
-| `Client` | High-level client for invoking nodes over the broker. |
-| `InvocationHandle` | Handle returned by `Client.start()`; its `result()` awaits the reply. |
-| `InvocationResult` | Client-facing projection of a node's session state after it returns (`output`, `state`, `correlation_id`, …). |
+| `Client` | High-level client. `connect()` once, then mint a gateway per agent with `client.agent(name)`; `events()` is the cross-run firehose. |
+| `AgentGateway` | A typed gateway to one agent (from `client.agent(...)`); speaks the verb triad `send` / `start` / `execute`. |
+| `Dispatch` | What `send()` returns — a fire token carrying `.correlation_id` (deliberately not a handle: no `result()`). |
+| `InvocationHandle` | Handle returned by `gateway.start()`; its `result()` awaits the reply and `stream()` yields the run's events. |
+| `InvocationResult` | Client-facing projection of a node's session state after it returns (`output`, `state`, `correlation_id`, `message_history`, …). |
+| `EventStream` | The `client.events()` firehose — an async context manager + async iterator of every reply on the inbox; `.dropped` counts shed events. |
+| `RunEvent` | The closed terminal union `RunCompleted \| RunFailed` yielded by `stream()` / `events()`. |
 
 ### Node authoring
 
@@ -107,9 +112,11 @@ Optional worker-level tuning for the ktables-backed substrates (the control-plan
 
 | Symbol | Purpose |
 | --- | --- |
-| `DeserializationError` | Raised when client-side output deserialization fails. |
+| `NodeFaultError` | A terminal typed fault. `raise NodeFaultError(error_type, ...)` from node or seam code to mint one; the client surfaces a run's fault by raising it (`except NodeFaultError`, branch on `e.report.find(...)`). Carries an `ErrorReport` on `.report`. See [Errors & faults](#errors--faults). |
+| `DeserializationError` | A successful reply was present but failed a **structured** `output_type` (`output_type=str` never raises this — it coerces). |
+| `ClientTimeoutError` | A client `result(timeout=)` / `execute(timeout=)` elapsed. A typed, run-survives signal (never a bare `asyncio.TimeoutError`); carries `.correlation_id` + `.timeout`. |
+| `ClientClosedError` | The client was closed (`aclose()`) with a run's `result()` still pending. A typed, run-survives signal; carries `.correlation_id`. |
 | `LifecycleConfigError` | Raised when a node or worker lifecycle configuration is invalid. |
-| `NodeFaultError` | A terminal typed fault — `raise NodeFaultError(error_type, ...)` from node or seam code to mint one; carries an `ErrorReport` on `.report`. See [Errors & faults](#errors--faults). |
 
 ## Key entry points
 
@@ -118,52 +125,55 @@ Optional worker-level tuning for the ktables-backed substrates (the control-plan
 ```python
 Client.connect(
     server_urls: str | Iterable[str] | None = None,
-    reply_topic: str | None = None,
-    reply_ttl: float | None = None,
     *,
+    inbox_topic: str | None = None,
+    deps_factory: Callable[[], dict] | None = None,
+    firehose_buffer_size: int = DEFAULT_FIREHOSE_BUFFER_SIZE,
     provisioning: ProvisioningConfig | None = None,
     **broker_kwargs,
 ) -> Client
 ```
 
-Connect to the broker and return a `Client`. `server_urls` defaults to the `CALF_HOST_URL` environment variable, then `"localhost"`. `reply_topic` defaults to a generated per-client reply inbox. `reply_ttl` bounds how long an un-answered reply future is retained before it expires.
+Build a `Client` — **synchronous and lazy**: no I/O until the first dispatch / `events()`, so a connection error surfaces there, not from `connect()`. `server_urls` defaults to the `CALF_HOST_URL` environment variable, then `"localhost"`. `inbox_topic` is the named topic this client receives its runs' replies on and routes callbacks to — `None` gives an ephemeral per-client inbox; set it for a durable, shareable one. `deps_factory` seeds ambient `deps` merged under each call's `deps`. `firehose_buffer_size` bounds each `events()` observer's drop-oldest buffer. Configure auth with a FastStream `security=` object in `broker_kwargs` (raw security kwargs are rejected).
 
-### `Client.execute`
-
-```python
-await Client.execute(
-    user_prompt: str,
-    topic: str,
-    *,
-    author=None, tool_overrides=None, output_type=..., correlation_id=None,
-    temp_instructions=None, message_history=None, deps=None, model_settings=None,
-    route=None, body=None, timeout=None,
-) -> InvocationResult
-```
-
-Request/reply: publish `user_prompt` to `topic` and await the `InvocationResult`. `output_type` selects how the reply is deserialized; when omitted, the type is auto-detected.
-
-### `Client.start`
+### `Client.agent`
 
 ```python
-await Client.start(...) -> InvocationHandle
+client.agent(name: str, *, output_type: type[OutT] = str) -> AgentGateway[OutT]
+client.agent(*, topic: str, output_type: type[OutT] = str) -> AgentGateway[OutT]
 ```
 
-The async-handle variant of `execute`. Takes the same arguments except `timeout`, and returns an `InvocationHandle` whose `result()` is awaited separately for the reply.
+Mint a typed gateway to one destination, addressed **exactly one** of two ways: by `name` (a deployed agent — the name derives its private input topic) or by `topic=` (the escape hatch for a non-derived topic). `output_type` binds once at mint and defaults to `str` (which coerces the reply to a string); pass `output_type=Model` for a typed, validated object.
 
-### `Client.send`
+### The verb triad — `send` / `start` / `execute`
 
 ```python
-await Client.send(
-    user_prompt: str,
-    topic: str,
-    *,
-    reply_to: str | None = None,
-    ...,
-) -> str
+await gateway.execute(prompt: str, *, timeout=None, correlation_id=None,
+    message_history=None, deps=None, model_settings=None, temp_instructions=None,
+    tool_overrides=None, author=None) -> InvocationResult[OutT]
+await gateway.start(prompt: str, *, <same knobs, no timeout>) -> InvocationHandle[OutT]
+await gateway.send(prompt: str, *, <same knobs, no timeout>) -> Dispatch
 ```
 
-One-way send. Publishes `user_prompt` to `topic` and returns the correlation id; no reply future is created. Pass `reply_to` to route any reply to another address for a different node or consumer to handle.
+`execute` is request/reply — dispatch and await the result; `timeout` bounds *the client's* patience (→ `ClientTimeoutError`; the run survives). `start` dispatches and returns a handle to await later. `send` dispatches without awaiting and returns a `Dispatch` (`.correlation_id`); its reply lands on the inbox, observed via `events()`.
+
+### `InvocationHandle`
+
+```python
+handle.correlation_id: str
+await handle.result(*, timeout=None) -> InvocationResult[OutT]
+handle.stream() -> AsyncIterator[RunEvent]
+```
+
+The per-run handle from `start()` — the **only** way to get this run's result by id (hold it for the run's lifetime; there is no reattach-by-`correlation_id`). `result()` awaits the terminal and maps it to the typed `InvocationResult` (or raises `NodeFaultError` / `DeserializationError` / `ClientTimeoutError`). `stream()` yields the run's events, terminal-bearing.
+
+### `client.events`
+
+```python
+client.events(*, terminal_only: bool = False) -> EventStream
+```
+
+The cross-run firehose over the client's one inbox — every reply while open, demuxed by the caller. Best-effort (bounded drop-oldest, signaled by `EventStream.dropped`); for guaranteed delivery hold the handle (`start`/`execute`) or run a [`@consumer` node](consumer-nodes.md).
 
 ### `Agent`
 
@@ -251,7 +261,7 @@ Registration and recipes: [How to guard and transform node invocations](policy-s
 
 ## Errors & faults
 
-A failure surfaces as a typed [`ErrorReport`](#errorreport) that travels the result rail and escalates up the call chain. Faults are handled **inside a node** (the `on_node_error` / `on_callee_error` seams) or **observed** on a `publish_topic` tap; there is no client-side typed fault reception yet.
+A failure surfaces as a typed [`ErrorReport`](#errorreport) that travels the result rail and escalates up the call chain. Faults are handled **inside a node** (the `on_node_error` / `on_callee_error` seams), **observed** on a `publish_topic` tap, or **received at the client** — a run's fault raises `NodeFaultError` from `result()` / `execute()` (see [Client-side errors](error-handling.md#client-side-errors)).
 
 ### `NodeFaultError`
 
@@ -469,11 +479,11 @@ The top-level package re-exports the symbols above. A few public capabilities li
 | `calfkit.models` | `ConsumerContext` — the value passed to a `@consumer` function (`output`, `correlation_id`, `deps`, `resources`) — plus the wire/state models (`State`, `Envelope`, `ToolBinding`, …). |
 | `calfkit.mcp` | `MCPToolboxNode`, `MCPToolbox`, `StdioServerParameters`, `StreamableHttpParameters` — see [MCP toolboxes](#mcp-toolboxes). |
 | `calfkit.provisioning` | The full topic-provisioning surface: `TopicProvisioner`, `provision_topics`, `topics_for_nodes`, `ProvisionReport`, `StartupTopicEnsurer`, `MissingTopicsError`. |
-| `calfkit.exceptions` | The complete exception set, including `ReplyExpiredError` (raised by `execute` / `start` when a `reply_ttl` elapses), `RegistryConfigError`, and `MissingTopicsError`. |
+| `calfkit.exceptions` | The complete exception set, including the client run-outcome errors (`NodeFaultError`, `DeserializationError`, `ClientTimeoutError`, `ClientClosedError`), `RegistryConfigError`, and `MissingTopicsError`. |
 
 ## See also
 
-- **[How to call nodes from a client](client-features.md)** — the `execute` / `start` / `send` patterns, multi-turn conversations, dependency injection, and reply memory.
+- **[How to call nodes from a client](client-features.md)** — the `agent(name)` gateway, the `send` / `start` / `execute` triad, multi-turn conversations, dependency injection, the `events()` firehose, and the typed client errors.
 - **[How to tap a topic with a consumer node](consumer-nodes.md)** — terminal sinks built with `@consumer`.
 - **[How to guard and transform node invocations](policy-seams.md)** — `before_node` / `after_node` recipes.
 - **[How to handle errors and faults](error-handling.md)** — `on_node_error` / `on_callee_error`, minting `NodeFaultError`, and inspecting an `ErrorReport`.

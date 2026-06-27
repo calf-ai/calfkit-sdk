@@ -108,11 +108,11 @@ async def test_before_node_substitute_short_circuits_body(kafka_bootstrap: str, 
 
     try:
         async with worker:
-            result = await driver.execute("go", agent_in, timeout=60)
+            result = await driver.agent(topic=agent_in).execute("go", timeout=60)
             assert result.output == "substituted"
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_after_node_replaces_output(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -124,11 +124,11 @@ async def test_after_node_replaces_output(kafka_bootstrap: str, topic_namespace:
 
     try:
         async with worker:
-            result = await driver.execute("go", agent_in, timeout=60)
+            result = await driver.agent(topic=agent_in).execute("go", timeout=60)
             assert result.output == "redacted"
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_before_node_accident_recovered_by_on_node_error(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -146,11 +146,11 @@ async def test_before_node_accident_recovered_by_on_node_error(kafka_bootstrap: 
 
     try:
         async with worker:
-            result = await driver.execute("go", agent_in, timeout=60)
+            result = await driver.agent(topic=agent_in).execute("go", timeout=60)
             assert result.output == "recovered"
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_seam_mint_bypasses_on_node_error(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -172,12 +172,12 @@ async def test_seam_mint_bypasses_on_node_error(kafka_bootstrap: str, topic_name
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=60)
             assert fault.error.error_type == "seam.mint"
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
     assert recorder.calls == []  # the mint rule bypassed on_node_error entirely
 
@@ -194,11 +194,11 @@ async def test_before_node_recorder_sees_ingress_seam_context(kafka_bootstrap: s
 
     try:
         async with worker:
-            result = await driver.execute("go", agent_in, timeout=60)
+            result = await driver.agent(topic=agent_in).execute("go", timeout=60)
             assert result.output is not None and FINAL_OUTPUT in result.output
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
     assert len(recorder.calls) >= 1
     ingress = recorder.calls[0]
@@ -225,10 +225,10 @@ async def test_before_node_contract_guard_faults(kafka_bootstrap: str, topic_nam
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=60)
             assert fault.error.error_type == FaultTypes.UNHANDLED
             assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) == "SeamContractError"
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()

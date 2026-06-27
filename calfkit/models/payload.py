@@ -1,5 +1,7 @@
+from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
+import pydantic_core
 from pydantic import BaseModel, Discriminator, Field
 
 
@@ -33,6 +35,37 @@ class ToolCallPart(BaseModel):
 
 
 ContentPart = Annotated[TextPart | FilePart | DataPart | ToolCallPart, Discriminator("kind")]
+
+
+def render_parts_as_text(
+    parts: list[ContentPart] | None,
+    *,
+    render_other: Callable[[ContentPart], str | None],
+    empty: str,
+) -> str:
+    """Render reply parts into one newline-joined string — the canonical "parts → text" routine.
+
+    A ``TextPart`` contributes its ``text`` verbatim; a ``DataPart`` its ``data`` as a JSON string
+    (``pydantic_core.to_json`` — the framework's own serializer, robust across datetime/UUID/Decimal/
+    nested models and consistent with the wire); any other part is passed to ``render_other``, which
+    returns its string form or ``None`` to drop it. An empty/absent ``parts`` returns ``empty``.
+
+    Shared by the client/consumer ``output_type=str`` projection (spec §2.2 — File/ToolCall skipped,
+    ``empty=""``) and the agent's ``message_agent`` peer-reply fold (agent spec §5.2 — File rendered as
+    a placeholder, ``empty="(no content)"``), so the join rule lives in exactly one place."""
+    if not parts:
+        return empty
+    rendered: list[str] = []
+    for part in parts:
+        if isinstance(part, TextPart):
+            rendered.append(part.text)
+        elif isinstance(part, DataPart):
+            rendered.append(pydantic_core.to_json(part.data).decode())
+        else:
+            piece = render_other(part)
+            if piece is not None:
+                rendered.append(piece)
+    return "\n".join(rendered)
 
 
 # ── the calf.retry marker (fault-rail spec §4.5) ─────────────────────────────────────

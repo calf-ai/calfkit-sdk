@@ -119,7 +119,7 @@ async def test_agent_messages_peer_and_resumes_on_own_history(kafka_bootstrap: s
         # A's gated agents view must materialize B's card before A renders the directory + messages it.
         await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's AgentCard {b_name!r}")
         async with a_worker:
-            result = await driver.execute("ask billing for the balance", a_in, timeout=120)
+            result = await driver.agent(topic=a_in).execute("ask billing for the balance", timeout=120)
 
     # B's reply folded into A's message_agent tool result (slot m1).
     assert result.output is not None and FINAL_OUTPUT in result.output
@@ -136,9 +136,9 @@ async def test_agent_messages_peer_and_resumes_on_own_history(kafka_bootstrap: s
     )
     assert b_name not in retry_prompt_texts(result.message_history)  # B was reachable, not a bad target
 
-    await driver.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
 
 
 # NOTE: replica load-balance is NOT re-tested here — it is already proven by
@@ -203,7 +203,7 @@ async def test_public_entry_ring_is_rejected(kafka_bootstrap: str, topic_namespa
         await _await_agents_view(
             kafka_bootstrap, lambda v: v.get(a_name) is not None and v.get(b_name) is not None, timeout=60, what="both A and B cards"
         )
-        result = await driver.execute("kick off the ring", a_in, timeout=120)
+        result = await driver.agent(topic=a_in).execute("kick off the ring", timeout=120)
 
     # The ring TERMINATED (without the guard B<->A recurses until the envelope blows past 1MB) and B's
     # cycle rejection surfaced cross-agent through A's fold — A messaged B, B's attempt to message A back
@@ -212,9 +212,9 @@ async def test_public_entry_ring_is_rejected(kafka_bootstrap: str, topic_namespa
     folded = str(returns_by_call_id(result.message_history)["m1"])
     assert "cycle" in folded.lower()
 
-    await driver.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
 
 
 def _echo_tool(name: str) -> ToolNodeDef:
@@ -253,16 +253,16 @@ async def test_parallel_mixed_batch_folds_message_agent_and_tool_per_kind(kafka_
     async with b_worker:
         await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's AgentCard {b_name!r}")
         async with a_worker:
-            result = await driver.execute("message B and call the tool", a_in, timeout=120)
+            result = await driver.agent(topic=a_in).execute("message B and call the tool", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     rets = returns_by_call_id(result.message_history)
     assert "B reply" in str(rets["m1"])  # the message_agent (peer) fold
     assert rets["t1"] == "TOOL_OK"  # the tool fold, in its own slot
 
-    await driver.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
 
 
 async def test_non_live_curated_peer_is_excluded_and_retried(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -291,7 +291,7 @@ async def test_non_live_curated_peer_is_excluded_and_retried(kafka_bootstrap: st
     async with b_worker:
         await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's AgentCard {b_name!r}")
         async with a_worker:
-            result = await driver.execute("message the ghost", a_in, timeout=120)
+            result = await driver.agent(topic=a_in).execute("message the ghost", timeout=120)
 
     # The non-live ghost is excluded from the directory; targeting it is model-visible feedback, not a
     # dispatch. The rejection text reaches the conversation (as a retry or, post-round-trip, a tool-return
@@ -300,9 +300,9 @@ async def test_non_live_curated_peer_is_excluded_and_retried(kafka_bootstrap: st
     feedback = retry_prompt_texts(result.message_history) + [str(v) for v in returns_by_call_id(result.message_history).values()]
     assert any("not currently reachable" in t for t in feedback)
 
-    await driver.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
 
 
 async def test_peer_fault_runs_callers_on_callee_error(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -338,12 +338,12 @@ async def test_peer_fault_runs_callers_on_callee_error(kafka_bootstrap: str, top
     async with b_worker:
         await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's AgentCard {b_name!r}")
         async with a_worker:
-            result = await driver.execute("ask B to do it", a_in, timeout=120)
+            result = await driver.agent(topic=a_in).execute("ask B to do it", timeout=120)
 
     # A's on_callee_error substituted for B's escalated fault; the substitute folded into A's m1 slot.
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert "PEER_FAULT_HANDLED" in str(returns_by_call_id(result.message_history)["m1"])
 
-    await driver.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()

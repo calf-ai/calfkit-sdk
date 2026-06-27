@@ -14,10 +14,11 @@ you called failed) or `on_node_error` (your own body failed) — or you observe 
 tapping a `publish_topic` with a [consumer](consumer-nodes.md).
 
 Two things to know up front: a report's `retryable` flag is **advisory** (the
-framework never retries for you), and a typed client-side `except NodeFaultError`
-surface is planned but not yet available — so handle faults in-node today. For the
-design rationale, see the [fault rail & policy seams
-spec](designs/fault-rail-and-policy-seams-spec.md).
+framework never retries for you), and a fault surfaces in **two** places — in-node
+via the error seams (below), and at the **client**, where a run's fault raises
+`NodeFaultError` from `result()` / `execute()` (see [Client-side
+errors](#client-side-errors)). For the design rationale, see the [fault rail &
+policy seams spec](designs/fault-rail-and-policy-seams-spec.md).
 
 Seam handlers follow the same three moves as every seam: **return `None`** to let
 the failure continue (escalate), **return a value** to recover, or **raise** to
@@ -98,6 +99,36 @@ be non-empty, and the `calf.` prefix is **framework-reserved** — you cannot mi
 `calf.*` `error_type` or use a `calf.*` `details` key (so callers can trust those
 codes are the framework's). The framework's own codes are constants on
 [`FaultTypes`](api.md#faulttypes).
+
+## Client-side errors
+
+A [client](client-features.md) that calls a node and awaits its reply sees the run's
+fault as a raised exception — the same `ErrorReport`, now on the caller's side. The
+typed set over run outcomes:
+
+| Condition | Type |
+| --- | --- |
+| The run (or a node it called) faulted | **`NodeFaultError`** — `e.report` is the verbatim `ErrorReport`; branch with `.find(...)` |
+| A successful reply fails a **structured** `output_type` | **`DeserializationError`** (`output_type=str` never raises this — it coerces) |
+| This client's `result(timeout=)` / `execute(timeout=)` elapsed | **`ClientTimeoutError`** — the run is unaffected |
+| The client was closed (`aclose()`) with the run in flight | **`ClientClosedError`** — the run is unaffected |
+
+```python
+from calfkit import NodeFaultError, ClientTimeoutError, FaultTypes
+
+try:
+    result = await client.agent("billing").execute("refund order 1234", timeout=30)
+except NodeFaultError as e:
+    if e.report.find(FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED):
+        ...                       # branch on the slotted report (find(), never ==)
+except ClientTimeoutError:
+    ...                           # this client gave up; the run still runs
+```
+
+`ClientTimeoutError` / `ClientClosedError` are **run-survives** signals — never a bare
+`asyncio.TimeoutError` / `CancelledError`. A `send()` registers no handle, so its
+fault is not raised to the caller; observe it on the `events()` firehose (a fault with
+no pending handle is also ERROR-logged, never silently dropped).
 
 See also: the [Errors & faults reference](api.md#errors--faults) for the full
 `ErrorReport` fields and `FaultTypes` catalogue, and [How to guard and transform

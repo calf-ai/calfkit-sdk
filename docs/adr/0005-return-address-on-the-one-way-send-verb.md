@@ -1,5 +1,15 @@
 # Return address rides the one-way send verb; request verbs reply only to the caller's inbox
 
+> **Partially superseded by [ADR-0022](0022-send-replies-to-callers-inbox-via-firehose.md) (2026-06-24).**
+> The premise below — that a `send` reply has nowhere to resolve because the dispatcher is future-only —
+> no longer holds: the [client caller-surface redesign](../designs/client-caller-surface-spec.md) adds a
+> hub + firehose that consumes the inbox **independently of any per-run future**, so a futureless `send`
+> reply is now *observed* (via `client.events()`), not silently dropped. ADR-0022 therefore lifts the
+> **bar on `send`→own-inbox**: `send()` routes its terminal to the caller's **own inbox** like
+> `start`/`execute`, and the per-call `reply_to` third-party Return Address is **dropped from the client
+> surface** (wire-level fire-and-forget stays a node concept). What still stands: the verb names
+> (`send`/`start`/`execute`) and the invariant "a reply future resolves **iff** its callback is the inbox."
+
 With one `callback_topic` slot on the wire, "await a reply future" and "deliver
 the reply elsewhere" are mutually exclusive: the client's reply dispatcher
 consumes exactly one topic (its own inbox), so a future is resolvable **iff**

@@ -133,13 +133,13 @@ async def test_single_tool_node_roundtrips_with_args(kafka_bootstrap: str, topic
     worker = _worker(kafka_bootstrap, nodes=[agent, add])
 
     async with worker:
-        result = await driver.execute("add 2 and 3", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("add 2 and 3", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert tool_returns(result.message_history)["add"] == 5
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 @pytest.mark.parametrize(
@@ -166,13 +166,13 @@ async def test_scalar_arg_and_return_types_round_trip(
     worker = _worker(kafka_bootstrap, nodes=[agent, shout, scale])
 
     async with worker:
-        result = await driver.execute(f"call {tool_name}", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute(f"call {tool_name}", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert tool_returns(result.message_history)[tool_name] == expected
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 async def test_structured_list_arg_and_dict_return_round_trip(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -190,13 +190,13 @@ async def test_structured_list_arg_and_dict_return_round_trip(kafka_bootstrap: s
     worker = _worker(kafka_bootstrap, nodes=[agent, stats])
 
     async with worker:
-        result = await driver.execute("summarize 1..4", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("summarize 1..4", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert tool_returns(result.message_history)["stats"] == {"sum": 10, "count": 4, "max": 4}
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 async def test_no_arg_tool_node_roundtrips(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -214,13 +214,13 @@ async def test_no_arg_tool_node_roundtrips(kafka_bootstrap: str, topic_namespace
     worker = _worker(kafka_bootstrap, nodes=[agent, motd])
 
     async with worker:
-        result = await driver.execute("motd", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("motd", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert tool_returns(result.message_history)["motd"] == "calfkit-rocks"
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 # ── Group B: concurrency / topology ──────────────────────────────────────────
@@ -249,7 +249,7 @@ async def test_concurrent_tool_nodes_roundtrip_via_fanout_with_args(kafka_bootst
     worker = _worker(kafka_bootstrap, nodes=[agent, add, mul])
 
     async with worker:
-        result = await driver.execute("add 2+3 and mul 4*5", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("add 2+3 and mul 4*5", timeout=120)
         topics = await _topics(kafka_bootstrap)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
@@ -259,8 +259,8 @@ async def test_concurrent_tool_nodes_roundtrip_via_fanout_with_args(kafka_bootst
     assert f"calf.fanout.{agent_id}.state" in topics
     assert f"calf.fanout.{agent_id}.basestate" in topics
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 async def test_duplicate_tool_node_concurrent_slots_route_by_call_id(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -284,15 +284,15 @@ async def test_duplicate_tool_node_concurrent_slots_route_by_call_id(kafka_boots
     worker = _worker(kafka_bootstrap, nodes=[agent, add])
 
     async with worker:
-        result = await driver.execute("add 2+3 and 10+20", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("add 2+3 and 10+20", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     by_id = returns_by_call_id(result.message_history)
     assert by_id["call-a"] == 5
     assert by_id["call-b"] == 30
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 async def test_tool_nodes_in_separate_workers_route_correctly(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -318,17 +318,17 @@ async def test_tool_nodes_in_separate_workers_route_correctly(kafka_bootstrap: s
     agent_worker = _worker(kafka_bootstrap, nodes=[agent])
 
     async with add_worker, mul_worker, agent_worker:
-        result = await driver.execute("add and mul", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("add and mul", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)
     assert returns["add"] == 5  # serviced by add_worker
     assert returns["mul"] == 20  # serviced by mul_worker
 
-    await driver.close()
-    await add_worker._client.close()
-    await mul_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await add_worker._client.aclose()
+    await mul_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_two_agents_share_one_tool_node_replies_route_per_caller(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -357,8 +357,8 @@ async def test_two_agents_share_one_tool_node_replies_route_per_caller(kafka_boo
     agent_worker = _worker(kafka_bootstrap, nodes=[agent1, agent2])
 
     async with tool_worker, agent_worker:
-        h1 = await driver.start("agent 1 add 2+3", a1_in)
-        h2 = await driver.start("agent 2 add 10+20", a2_in)
+        h1 = await driver.agent(topic=a1_in).start("agent 1 add 2+3")
+        h2 = await driver.agent(topic=a2_in).start("agent 2 add 10+20")
         r1 = await h1.result(timeout=120)
         r2 = await h2.result(timeout=120)
 
@@ -368,9 +368,9 @@ async def test_two_agents_share_one_tool_node_replies_route_per_caller(kafka_boo
     assert tool_returns(r1.message_history)["add"] == 5
     assert tool_returns(r2.message_history)["add"] == 30
 
-    await driver.close()
-    await tool_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await tool_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 # ── Group C: modes / multi-turn ──────────────────────────────────────────────
@@ -400,7 +400,7 @@ async def test_sequential_mode_dispatches_tool_nodes_without_fanout(kafka_bootst
     worker = _worker(kafka_bootstrap, nodes=[agent, add, shout])
 
     async with worker:
-        result = await driver.execute("add then shout", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("add then shout", timeout=120)
         topics = await _topics(kafka_bootstrap)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
@@ -411,8 +411,8 @@ async def test_sequential_mode_dispatches_tool_nodes_without_fanout(kafka_bootst
     assert f"calf.fanout.{agent_id}.state" not in topics
     assert f"calf.fanout.{agent_id}.basestate" not in topics
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 async def test_multi_turn_tool_use_feeds_result_into_next_call(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -440,15 +440,15 @@ async def test_multi_turn_tool_use_feeds_result_into_next_call(kafka_bootstrap: 
     worker = _worker(kafka_bootstrap, nodes=[agent, add, mul])
 
     async with worker:
-        result = await driver.execute("add then multiply", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("add then multiply", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     returns = tool_returns(result.message_history)
     assert returns["add"] == 5
     assert returns["mul"] == 20  # mul(5, 4): the add result fed the second call
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
 
 
 # ── Group D: agent-side guard ─────────────────────────────────────────────────
@@ -471,7 +471,7 @@ async def test_invalid_tool_node_args_rejected_before_dispatch(kafka_bootstrap: 
     worker = _worker(kafka_bootstrap, nodes=[agent, add])
 
     async with worker:
-        result = await driver.execute("add with bad args", agent_in, timeout=120)
+        result = await driver.agent(topic=agent_in).execute("add with bad args", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     history = result.message_history
@@ -483,5 +483,5 @@ async def test_invalid_tool_node_args_rejected_before_dispatch(kafka_bootstrap: 
     surfaced = f"{tool_returns(history).get('add')} {' '.join(retry_prompt_texts(history))}"
     assert "int_parsing" in surfaced or "valid integer" in surfaced.lower()
 
-    await driver.close()
-    await worker._client.close()
+    await driver.aclose()
+    await worker._client.aclose()
