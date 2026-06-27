@@ -1,18 +1,3 @@
-<!--
-README REWRITE — SCAFFOLD (legacy-copy sections filled in; new-writing sections still noted)
-
-Locked decisions:
-- Value prop: "team of coworkers" framing — agents discover each other and
-  collaborate like a real team. Decentralized agent swarms = the technical descriptor.
-- No teaser snippet. Jump straight into a progressive Quickstart (code-first).
-- Broker/infra is IMPLIED in the run section (LiveKit-style), never a "Prerequisites" gate.
-- ck run accepts multiple targets in one worker → run section is a 2-terminal story.
-- Removed: Roadmap, Contact, ⭐-star CTA, social links.
-- Guiding examples: LiveKit (infra implied + CLI run progression) + ADK (brevity, fast time-to-example).
-
-STILL TO WRITE: (optional) Quickstart intro line. All sections drafted.
--->
-
 <h1 align="center">🐮 Calfkit</h1>
 
 <h3 align="center">
@@ -97,14 +82,13 @@ import asyncio
 from calfkit import Client
 
 async def main():
-    client = Client.connect("<calfkit_agent_mesh>")
-    result = await client.execute("Do I have enough money to afford a new car?", "general.input")
-    
-    print(result.output)
-    # LOL nah twin
+    async with Client.connect("<calfkit_agent_mesh>") as client:
+        result = await client.agent("general").execute("Do I have enough money to afford a new car?")
+        print(result.output)
+        # LOL nah twin
 
 if __name__ == "__main__":
-     asyncio.run(main())
+    asyncio.run(main())
 ```
 
 ```bash
@@ -144,7 +128,7 @@ In-repo documentation lives under [`docs/`](docs/).
 
 **How-to guides** — goal-oriented walkthroughs:
 
-- **[How to call agents from a client](docs/client-features.md)** — the three invocation patterns (`execute` / `start` / `send`), multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, fire-and-forget, and bounding reply memory with `reply_ttl`.
+- **[How to call agents from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, the `events()` firehose, and the typed client errors.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
 - **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.
