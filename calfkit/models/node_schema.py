@@ -1,4 +1,5 @@
 from dataclasses import KW_ONLY, dataclass
+from typing import ClassVar
 
 from calfkit._protocol import is_topic_safe
 
@@ -10,19 +11,29 @@ class BaseNodeSchema:
     subscribe_topics: list[str]
     publish_topic: str | None
 
+    # Whether this node kind is reachable with no public ``subscribe_topics``.
+    # Default False: the empty-inbox guard below applies. Overridden True on
+    # ``BaseAgentNodeDef`` — an agent is always reachable via its name-derived
+    # private input inbox (``agent.{name}.private.input``, ADR-0017), so an empty
+    # list is valid for agents while still a silent-zombie error for every other
+    # kind (whose private inbox is dormant in v1 — no producer targets it).
+    _reachable_without_public_inbox: ClassVar[bool] = False
+
     def __post_init__(self) -> None:
         if not isinstance(self.subscribe_topics, (list, tuple)):
             self.subscribe_topics = [self.subscribe_topics]
-        # Reject empty subscribe_topics for every node kind (Agent, Consumer,
-        # Tool, …). Lives here rather than in ``BaseNodeDef.__init__`` because
-        # ``@dataclass`` subclasses like ``BaseToolNodeDef`` get an
-        # auto-generated ``__init__`` that bypasses ``BaseNodeDef.__init__``
-        # entirely; ``__post_init__`` is the one hook every subclass runs.
-        # Without this guard, ``Worker.register_handlers`` would still add
-        # ``_return_topic`` to the subscriber set (issue #141 fix), so the
-        # node would "register" successfully but have no public inbox — a
-        # silent zombie consumer.
-        if not self.subscribe_topics:
+        # Reject empty subscribe_topics for node kinds with no other inbox a
+        # producer targets (Consumer, Tool, …). Lives here rather than in
+        # ``BaseNodeDef.__init__`` because ``@dataclass`` subclasses like
+        # ``BaseToolNodeDef`` get an auto-generated ``__init__`` that bypasses
+        # ``BaseNodeDef.__init__`` entirely; ``__post_init__`` is the one hook
+        # every subclass runs. Without this guard, ``Worker.register_handlers``
+        # would still add ``_return_topic`` to the subscriber set (issue #141
+        # fix), so the node would "register" successfully but have no public
+        # inbox — a silent zombie consumer. Agents are exempt
+        # (``_reachable_without_public_inbox``): they are always addressable on
+        # their private name-derived inbox.
+        if not self.subscribe_topics and not self._reachable_without_public_inbox:
             raise ValueError(f"node {self.node_id!r} requires at least one subscribe_topic; got empty list")
         # node_id is interpolated raw into this node's framework topic
         # ("{node_id}.private.return"), so it must be a legal Kafka topic-name component.

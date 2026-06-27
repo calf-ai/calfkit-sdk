@@ -34,7 +34,6 @@ general = Agent(
     name="general",
     description="Answers simple questions and routes requests to whoever can handle it.",
     system_prompt="You are a general assistant. Defer technical questions to other agents.",
-    subscribe_topics="general.input",
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-mini"),
     peers=[Messaging(discover=True)],   # discover and collaborate w/ any agent at runtime
 )
@@ -49,7 +48,6 @@ finance = Agent(
     name="finance",
     description="Answers the user's personal finance questions.",
     system_prompt="You are the personal finance specialist. Use tools to look up user data.",
-    subscribe_topics="finance.input",
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-mini"),
     tools=[Tools(discover=True)],   # discover and use any tool at runtime
 )

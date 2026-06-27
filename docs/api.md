@@ -183,7 +183,7 @@ Agent(
     *,
     system_prompt: str = "You are a helpful AI assistant.",
     description: str | None = None,
-    subscribe_topics: str | list[str],
+    subscribe_topics: str | list[str] | None = None,
     publish_topic: str | None = None,
     tools: Sequence[...] | None = None,
     model_client: PydanticModelClient,
@@ -194,7 +194,7 @@ Agent(
 )
 ```
 
-An agent node. Consumes prompts from `subscribe_topics`, calls its `tools`, and publishes its output to `publish_topic` (when set). `final_output_type` enforces a structured output type (default: plain `str`). `description` is a short public blurb (≤512 chars) advertised on the `calf.agents` directory so other agents can discover this one. `peers` declares the agents it may reach — `Messaging` (consult) and `Handoff` (transfer); see [Agent-to-agent messaging & handoff](#agent-to-agent-messaging--handoff).
+An agent node. It is always reachable by name — every caller (the [client gateway](#client), `message_agent`, and handoff) addresses it on its name-derived private inbox (`agent.<name>.private.input`), so `subscribe_topics` is **optional**: omit it for a name-addressed agent, or pass one or more topics to also consume from those public inboxes. It calls its `tools` and publishes its output to `publish_topic` (when set). `final_output_type` enforces a structured output type (default: plain `str`). `description` is a short public blurb (≤512 chars) advertised on the `calf.agents` directory so other agents can discover this one. `peers` declares the agents it may reach — `Messaging` (consult) and `Handoff` (transfer); see [Agent-to-agent messaging & handoff](#agent-to-agent-messaging--handoff).
 
 ### `@agent_tool`
 

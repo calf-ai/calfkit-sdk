@@ -284,20 +284,26 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         Args:
             node_id: Unique identifier for the node.
             subscribe_topics: One or more topics the node consumes from.
-                Must be non-empty — a node with no public inbox cannot be
+                Must be non-empty for node kinds whose only inbound traffic
+                arrives here — a Consumer / Tool with no public inbox cannot be
                 invoked by any client or peer. Without the validation in
                 :meth:`BaseNodeSchema.__post_init__`, ``Worker.register_handlers``
                 would still wire the node up to ``_return_topic`` (issue #141
                 fix), so the node would "register" successfully while being
-                functionally unreachable from the outside.
+                functionally unreachable from the outside. Agents are exempt
+                (``BaseNodeSchema._reachable_without_public_inbox``): they are
+                always addressable on their name-derived private input inbox
+                (``agent.{name}.private.input``, ADR-0017), so an empty list is
+                valid for an agent.
             publish_topic: Optional default topic to publish results to.
             before_node, after_node, on_node_error, on_callee_error: Optional policy-seam
                 handlers — a single callable or a list (spec §6.1). Constructor entries
                 precede any decorator-registered handlers in the same chain.
 
         Raises:
-            ValueError: If ``subscribe_topics`` is empty. Enforced uniformly
-                across all node kinds in :meth:`BaseNodeSchema.__post_init__`.
+            ValueError: If ``subscribe_topics`` is empty for a node kind that is
+                not reachable without it. Enforced in
+                :meth:`BaseNodeSchema.__post_init__` (agents are exempt).
         """
         super().__init__(
             node_id=node_id,
