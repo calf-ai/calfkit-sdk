@@ -13,7 +13,7 @@
   <a href="https://deepwiki.com/calf-ai/calfkit-sdk"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
-Calfkit agents dynamically find each other at runtime and choreograph work like a real team. No hard-coded orchestrator or extra wiring. The framework for building free-flowing and powerful multi-agent teams.
+Calfkit agents dynamically find each other at runtime and choreograph work. No hard-coded orchestrator or extra wiring. The framework for building free-flowing and powerful multi-agent teams.
 
 <br>
 
