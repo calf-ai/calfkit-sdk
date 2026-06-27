@@ -107,8 +107,8 @@ Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm
 ## Why Calfkit?
 
 - **Dynamic agent-to-agent discovery and collaboration.** Agents find each other at runtime and work together — messaging each other and handing off tasks — so you build multi-agent systems without complex wiring or orchestration, and extend team capabilities at any time.
-- **No bottleneck, no single point of failure.** Every agent runs and scales as an independent microservice, so the agent teams are resilient and scalable from day one.
-- **Acts on live data in realtime.** Agents are event-driven so they act on realtime data streams, sending live results wherever they're needed — build agents that work like continuous workflows, not one-off requests.
+- **No bottleneck, no single point of failure.** Every agent runs and scales as an independent microservice, so your agent teams are resilient and scalable from day one.
+- **Act on live data in realtime.** Agents are event-driven so they act on realtime data streams, sending live results wherever they're needed — build agents that work like continuous workflows, not one-off requests.
 
 ## Examples
 
