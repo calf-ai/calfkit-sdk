@@ -1,7 +1,7 @@
 <h1 align="center">🐮 Calfkit</h1>
 
 <h3 align="center">
-  Build powerful teams of AI agents that automatically discover each other and collaborate on work.
+  Build powerful teams of AI agents that automatically discover each other and collaborate.
 </h3>
 
 <p align="center">
