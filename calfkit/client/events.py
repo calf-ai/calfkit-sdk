@@ -7,10 +7,13 @@ intermediate emission ships (spec §9.1) — so v1 yields exactly the terminal.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from calfkit.models.error_report import ErrorReport
+
+if TYPE_CHECKING:
+    from calfkit.models.envelope import Envelope
 
 DEFAULT_FIREHOSE_BUFFER_SIZE = 1024
 """Default per-observer firehose buffer bound, in events (spec §2.1 / §5.4).
@@ -22,11 +25,18 @@ whole-turn events at low memory — tunable from the ``EventStream.dropped`` sig
 
 @dataclass(frozen=True)
 class RunCompleted:
-    """A run's successful terminal: the raw (unprojected) output and who produced it (spec §3.3)."""
+    """A run's successful terminal (spec §3.3).
+
+    ``output`` is the **raw, type-agnostic** best-effort value (``extract_lenient``) — the firehose
+    surfaces foreign runs whose ``output_type`` is unknown, so the terminal is never pre-projected.
+    The carried ``_envelope`` (the decoded reply) is what ``result()`` projects to the developer's
+    ``output_type`` → the rich ``InvocationResult`` (``InvocationResult.from_envelope``, spec §5.9).
+    """
 
     output: Any
     correlation_id: str
     agent: str | None
+    _envelope: Envelope = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)

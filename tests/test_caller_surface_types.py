@@ -17,7 +17,16 @@ import pytest
 from calfkit.client.events import DEFAULT_FIREHOSE_BUFFER_SIZE, RunCompleted, RunEvent, RunFailed
 from calfkit.client.gateway import Dispatch
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError
+from calfkit.models import CallFrameStack, Envelope, SessionRunContext, WorkflowState
 from calfkit.models.error_report import ErrorReport
+from calfkit.models.state import State
+
+
+def _env() -> Envelope:
+    return Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+    )
 
 
 def test_dispatch_is_a_frozen_fire_token_carrying_only_correlation_id() -> None:
@@ -34,11 +43,13 @@ def test_dispatch_is_deliberately_not_a_handle() -> None:
     assert not hasattr(d, "stream")
 
 
-def test_run_completed_carries_output_correlation_id_and_agent() -> None:
-    ev = RunCompleted(output={"k": "v"}, correlation_id="cid-1", agent="summarizer")
+def test_run_completed_carries_output_correlation_id_agent_and_reply_envelope() -> None:
+    env = _env()
+    ev = RunCompleted(output={"k": "v"}, correlation_id="cid-1", agent="summarizer", _envelope=env)
     assert ev.output == {"k": "v"}
     assert ev.correlation_id == "cid-1"
     assert ev.agent == "summarizer"
+    assert ev._envelope is env  # the decoded reply, for result()'s typed projection (spec §3.3)
     with pytest.raises(FrozenInstanceError):
         ev.output = "x"  # type: ignore[misc]
 

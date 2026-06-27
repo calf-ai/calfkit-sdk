@@ -55,6 +55,14 @@ class FaultTypes:
     UNHANDLED = "calf.unhandled"
     DELIVERY_REJECTED = "calf.delivery.rejected"
     DELIVERY_UNDECODABLE = "calf.delivery.undecodable"
+    # A reply that DECODED into a valid Envelope but is structurally invalid as a terminal: its
+    # x-calf-kind header and Envelope.reply slot disagree (kind=return with an absent or FaultMessage
+    # slot, or kind=fault with a ReturnMessage). Distinct from DELIVERY_UNDECODABLE, which is an
+    # unreadable body — here the bytes decode fine, but the producer's classification and payload
+    # contradict each other. Minted by the client hub's receive arm (via build_safe, never the public
+    # NodeFaultError ctor) when it cannot materialize a demux'd terminal as its declared kind, so a
+    # waiting result() raises NodeFaultError instead of hanging (caller-surface spec §5.1).
+    DELIVERY_MALFORMED = "calf.delivery.malformed"
     SLOT_MATERIALIZATION_FAILED = "calf.slot.materialization_failed"
     AGENT_SELF_RETRY_EXHAUSTED = "calf.agent.self_retry_exhausted"
     # A fan-out batch could not complete (a node-own infra failure mid-batch, not a callee fault): the

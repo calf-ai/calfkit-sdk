@@ -369,7 +369,7 @@ shared inbox as a **load-balanced worker pool** is deliberately *not* a client m
 ```python
 # Terminal set (settled, v1): a run's stream ends in exactly one of these.
 @dataclass(frozen=True)
-class RunCompleted: output: Any; correlation_id: str; agent: str | None   # success (raw output)
+class RunCompleted: output: Any; correlation_id: str; agent: str | None; _envelope: Envelope   # success
 @dataclass(frozen=True)
 class RunFailed:    report: ErrorReport; correlation_id: str   # the fault value; → NodeFaultError(report) (§5.9)
 # Intermediate types (AgentMessage, ToolCalled, HandoffOccurred) AND RunRejected (an approval
@@ -383,6 +383,12 @@ RunEvent = RunCompleted | RunFailed                 # (v1; widened when those la
   projected `InvocationResult`; **fault** → `NodeFaultError` (§2.5). (Approval *rejection* and its
   error mapping land with the deferred approval feature — §9.1 — not v1.) `stream()`
   yields the terminal **raw** as its last element.
+- **`RunCompleted.output` is raw + type-agnostic; `_envelope` feeds the typed projection.** `output` is
+  a best-effort value view (`extract_lenient`: `DataPart.data`, else `TextPart.text`, else `None`) — the
+  firehose (§4.5) surfaces foreign runs whose `output_type` is unknown, so the terminal cannot be
+  pre-projected. The carried `_envelope` (the decoded reply) is what `result()` projects to the
+  developer's `output_type` → the rich `InvocationResult` (via `InvocationResult.from_envelope`, §5.9).
+  `RunFailed` carries the `ErrorReport` verbatim.
 - **Whole-turn grain, not token deltas.** Token-level streaming is explicitly not this surface.
 - **Honest-naming rule** — ship an event type only once the fabric actually emits it.
 
@@ -721,7 +727,8 @@ with **distinct** roles — do not conflate them:
 **Reception — the outcome discriminator (at the hub).** When the hub reads a reply for a run, it
 classifies on the **`x-calf-kind` header** (not the body field — the header is the framework's
 classifier and survives an undecodable body) and pushes the matching terminal into the run's channel:
-- `return` → **`RunCompleted`** carrying the reply's `parts`.
+- `return` → **`RunCompleted`** carrying the decoded reply `_envelope` (its public `output` is the raw,
+  type-agnostic best-effort value; the `_envelope` feeds the typed projection in `result()`).
 - `fault` → **`RunFailed`** carrying the reply's `ErrorReport` (verbatim — not flattened).
 - undecodable body → the **broker-wide decode floor's** `calf.delivery.undecodable` `ErrorReport`
   (not a client-bespoke synthesis — the same `DecodeFloorMiddleware` every node runs), surfaced as a
@@ -749,8 +756,8 @@ never surface as a `DeserializationError`.
 - `RunFailed(report)` → **`raise NodeFaultError(report)`** — the receive arm wraps the `ErrorReport`
   *verbatim* (the already-built `NodeFaultError(report)` constructor; no synthesized
   `message`/`retryable`/`details` — those are mint-only). The caller branches on the slotted report.
-- `RunCompleted(parts)` → project to `output_type` → `InvocationResult` (or `DeserializationError`
-  only on a *present-but-mismatched* part).
+- `RunCompleted` → `InvocationResult.from_envelope(rc._envelope, output_type)` → project to `output_type`
+  → `InvocationResult` (or `DeserializationError` only on a *present-but-mismatched* part).
 
 **The firehose** surfaces a fault as a raw `RunFailed(report)` event; the caller maps/branches itself
 (the firehose is not error-mapped — §4.5).
