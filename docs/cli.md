@@ -1,14 +1,6 @@
 # Calfkit CLI reference
 
-The `ck` command bundles the SDK's command-line tooling. It is installed
-via the **`cli` optional extra** (it pulls in `typer` and `watchfiles`):
-
-```console
-$ pip install "calfkit[cli]"
-```
-
-If the extra isn't installed, invoking `ck` raises a clear remediation
-message instead of failing obscurely.
+The `ck` command bundles the SDK's command-line tooling.
 
 Commands:
 

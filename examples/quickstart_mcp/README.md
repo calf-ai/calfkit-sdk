@@ -19,7 +19,7 @@ agent one tool — `fetch` (URL → markdown) — so it can read the live web.
 ## Prerequisites
 
 - A running [Calfkit broker](../../README.md#start-a-calfkit-broker) on `localhost:9092`.
-- The CLI extra: `pip install "calfkit[cli]"`.
+- calfkit installed: `pip install calfkit`.
 - [`uv`](https://docs.astral.sh/uv/) on your PATH — the toolbox runs the fetch
   server with `uvx`, which fetches it on first use (no manual install).
 - An LLM API key: `export OPENAI_API_KEY=sk-...`.

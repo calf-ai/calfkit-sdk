@@ -199,8 +199,6 @@ ck topics provision --nodes myapp.workers:all_nodes --dry-run
 - Exit codes: `0` success / dry-run; `2` error (node resolution failed, or a
   topic could not be provisioned).
 
-The CLI requires the `cli` optional extra (typer): `pip install calfkit[cli]`.
-
 ## 5. Behavior details
 
 ### 5.1 Error classification

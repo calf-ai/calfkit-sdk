@@ -7,7 +7,7 @@ single request travel between live agents that find each other at runtime.
 
 You'll need:
 
-- Python 3.10 or later, with calfkit and its CLI installed: `pip install "calfkit[cli]"`.
+- Python 3.10 or later, with calfkit installed: `pip install calfkit`.
 - Docker, to run a local broker.
 - An OpenAI API key.
 
