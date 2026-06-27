@@ -61,6 +61,13 @@ class BaseAgentNodeDef(
     BaseNodeDef,
 ):
     _node_kind: ClassVar[NodeKind] = "agent"
+    # An agent is always reachable via its name-derived private input topic
+    # (``agent.{name}.private.input``, ADR-0017) — the topic every caller (client
+    # gateway, ``message_agent``, handoff) addresses it by. So ``subscribe_topics``
+    # is optional: an empty list is a valid, fully-reachable agent (relaxes the
+    # ``BaseNodeSchema.__post_init__`` non-empty guard, which still applies to the
+    # other node kinds whose private inbox is dormant in v1).
+    _reachable_without_public_inbox: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -68,7 +75,7 @@ class BaseAgentNodeDef(
         *,
         system_prompt: str = "You are a helpful AI assistant.",
         description: str | None = None,
-        subscribe_topics: str | list[str],
+        subscribe_topics: str | list[str] | None = None,
         publish_topic: str | None = None,
         before_node: _SeamArg = None,
         after_node: _SeamArg = None,
@@ -129,7 +136,11 @@ class BaseAgentNodeDef(
                     f"tool name {_MESSAGE_AGENT_TOOL!r} is reserved for the built-in messaging tool (a Messaging handle is set); rename the user tool"
                 )
 
-        if not isinstance(subscribe_topics, (list, tuple)):
+        # Omitted/None → no public inbox (reachable via the private name-derived
+        # inbox, see ``_reachable_without_public_inbox``); a bare string → one topic.
+        if subscribe_topics is None:
+            subscribe_topics = []
+        elif not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
 
         super().__init__(

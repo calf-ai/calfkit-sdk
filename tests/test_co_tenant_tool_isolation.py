@@ -428,15 +428,6 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
     "node_factory",
     [
         pytest.param(
-            lambda: Agent(
-                "empty_agent",
-                system_prompt="x",
-                subscribe_topics=[],
-                model_client=_call_one_tool_then_finalize(),
-            ),
-            id="Agent",
-        ),
-        pytest.param(
             lambda: ConsumerNode(
                 name="empty_consumer",
                 subscribe_topics=[],
@@ -458,13 +449,35 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
 )
 def test_empty_subscribe_topics_raises_value_error(node_factory):
     """The ``BaseNodeSchema.__post_init__`` guard must reject empty
-    ``subscribe_topics`` for every node kind. ``Agent`` and
-    ``ConsumerNode`` reach the guard via ``BaseNodeDef.__init__``'s
-    ``super().__init__(...)`` chain; ``ToolNodeDef`` reaches it via the
-    dataclass-auto-generated ``__init__`` (which bypasses
-    ``BaseNodeDef.__init__`` entirely). A regression that moved the guard
-    back into ``BaseNodeDef.__init__`` would silently re-open the
-    ``ToolNodeDef`` bypass.
+    ``subscribe_topics`` for node kinds whose private inbox is dormant in v1
+    (no producer targets it): a ``ConsumerNode`` / ``ToolNodeDef`` with no
+    public inbox is a silent zombie consumer. ``ConsumerNode`` reaches the
+    guard via ``BaseNodeDef.__init__``'s ``super().__init__(...)`` chain;
+    ``ToolNodeDef`` reaches it via the dataclass-auto-generated ``__init__``
+    (which bypasses ``BaseNodeDef.__init__`` entirely). A regression that
+    moved the guard back into ``BaseNodeDef.__init__`` would silently re-open
+    the ``ToolNodeDef`` bypass.
+
+    ``Agent`` is intentionally **exempt** — it is always reachable via its
+    name-derived private input topic (ADR-0017), so an empty (or omitted)
+    ``subscribe_topics`` is valid. See
+    ``test_agent_allows_omitted_subscribe_topics`` /
+    ``test_agent_allows_explicit_empty_subscribe_topics``.
     """
     with pytest.raises(ValueError, match="requires at least one subscribe_topic"):
         node_factory()
+
+
+def test_agent_allows_omitted_subscribe_topics():
+    """An ``Agent`` is reachable via its name-derived private input topic
+    (ADR-0017), so ``subscribe_topics`` is optional: omitting it constructs a
+    valid agent whose public inbox list is empty."""
+    agent = Agent("bare_agent", model_client=_call_one_tool_then_finalize())
+    assert agent.subscribe_topics == []
+
+
+def test_agent_allows_explicit_empty_subscribe_topics():
+    """Passing an explicit empty list is equivalent to omitting it — the agent
+    carries no public inbox and relies on its private name-derived inbox."""
+    agent = Agent("bare_agent", subscribe_topics=[], model_client=_call_one_tool_then_finalize())
+    assert agent.subscribe_topics == []

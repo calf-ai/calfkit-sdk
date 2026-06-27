@@ -207,3 +207,19 @@ def test_node_subscribes_to_its_private_input_topic() -> None:
     node_topics = next(s.topics for s in worker._client._connection._subscribers if node._return_topic in (s.topics or []))
     assert node._private_input_topic in node_topics
     assert node._private_input_topic not in node.subscribe_topics
+
+
+def test_bare_agent_is_reachable_via_its_private_input_topic() -> None:
+    # An agent with no public subscribe_topics is still reachable: registration
+    # contributes its name-derived private input inbox (ADR-0017), the topic every
+    # caller (client gateway, message_agent, handoff) addresses it by.
+    client = _make_client()
+    agent = Agent("bare", model_client=_FakeModel())
+    assert agent.subscribe_topics == []  # no public inbox declared
+    worker = Worker(client, nodes=[agent])
+
+    worker.register_handlers()
+
+    agent_topics = next(s.topics for s in worker._client._connection._subscribers if agent._return_topic in (s.topics or []))
+    assert agent._private_input_topic in agent_topics
+    assert agent._private_input_topic == "agent.bare.private.input"
