@@ -1,10 +1,10 @@
 [project]
 name = "calfkit"
 version = "0.11.0"
-description = "Build AI workflows and agents as fully-distributed and event-driven microservices."
+description = "A framework to build powerful AI agent teams."
 readme = "README.md"
 license = "Apache-2.0"
-authors = [{ name = "Ryan Yu" }]
+authors = [{ name = "Calf AI" }]
 keywords = ["ai", "agents", "kafka", "event-driven", "workflows", "llm", "distributed", "decoupled"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -46,6 +46,9 @@ dependencies = [
     "dishka>=1.9.1",
     "mcp>=1.27.2",
     "ktables>=0.4.0",
+    # CLI (`ck`): typer powers the console script, watchfiles powers `ck run --reload`.
+    "typer>=0.12",
+    "watchfiles>=0.21",
 ]
 
 [project.urls]
@@ -55,18 +58,12 @@ Issues = "https://github.com/calf-ai/calfkit-sdk/issues"
 
 [project.scripts]
 # Top-level `ck` CLI (the calfkit SDK's command-line tool). Mounts the `topics`
-# (provision) subcommand and the `run` command. Requires the `cli` optional
-# extra (typer); the entry-point's importer surfaces a clear remediation message
-# if typer isn't installed.
+# (provision) subcommand and the `run` command. Its deps (typer, watchfiles)
+# ship in the core install, so `ck` is available right after `pip install calfkit`.
 ck = "calfkit.cli:main"
 
 [project.optional-dependencies]
 dev = []
-# Installed via `pip install calfkit[cli]`. Off the critical install path
-# because the CLI is only invoked at schema-generation / provisioning /
-# dev-run time, not at library runtime. Gates the whole `ck` console
-# script (typer); `watchfiles` powers `ck run --reload`.
-cli = ["typer>=0.12", "watchfiles>=0.21"]
 
 [build-system]
 requires = ["hatchling"]
@@ -121,12 +118,6 @@ dev = [
     "rich>=14.3.2",
     "ruff>=0.14.11",
     "temporalio>=1.23.0",
-    # typer is the dep for the `cli` optional extra; dev includes it
-    # so the CLI tests can run against the same install.
-    "typer>=0.12",
-    # watchfiles powers `ck run --reload`; dev includes it so the
-    # CLI reload tests can import and patch it.
-    "watchfiles>=0.21",
 ]
 examples = [
     "plotext>=5.3.2",

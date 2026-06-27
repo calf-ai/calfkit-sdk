@@ -5,9 +5,6 @@ into a running :class:`~calfkit.worker.Worker`. It is deliberately a
 module-level function taking only picklable arguments (strings / bools) so the
 ``--reload`` supervisor can hand it to ``watchfiles.run_process``, which spawns
 it in a fresh process on every file change.
-
-Requires the ``cli`` optional extra (typer). If typer is not installed, the
-import raises with a clear remediation message rather than silently failing.
 """
 
 from __future__ import annotations
@@ -16,10 +13,7 @@ import asyncio
 import os
 from typing import Any
 
-try:
-    import typer
-except ImportError as e:  # pragma: no cover -- exercised manually
-    raise ImportError("the calfkit CLI requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
+import typer
 
 from calfkit.cli._loader import load_nodes
 

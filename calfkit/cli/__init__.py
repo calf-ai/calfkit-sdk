@@ -17,14 +17,9 @@ def _build_app() -> Any:
     """Construct the top-level ``ck`` typer app with all sub-apps mounted.
 
     typer is imported lazily so calfkit's regular runtime imports
-    (e.g. ``from calfkit import Agent``) don't pay the typer cost. If typer
-    isn't installed (the ``cli`` optional extra wasn't selected), the import
-    error is surfaced with a clear remediation message.
+    (e.g. ``from calfkit import Agent``) don't pay the typer import cost.
     """
-    try:
-        import typer
-    except ImportError as e:
-        raise SystemExit("The calfkit CLI requires the 'cli' optional extra. Install with: pip install \"calfkit[cli]\"") from e
+    import typer
 
     from calfkit.cli.run import run as run_command
     from calfkit.cli.topics import app as topics_app

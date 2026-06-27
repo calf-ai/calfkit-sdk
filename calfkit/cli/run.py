@@ -10,8 +10,7 @@ targets and it starts serving, FastAPI-CLI style::
 Targets are dotted Python import paths (``module:attr``); each ``attr`` may be
 a single node or an iterable of nodes. All resolved nodes run in one worker.
 
-**Development only.** Requires the ``cli`` optional extra (typer + watchfiles).
-If typer is not installed, the import raises with a clear remediation message.
+**Development only.**
 
 Exit codes:
     0 — clean shutdown (Ctrl-C, or the worker stopped on its own)
@@ -30,10 +29,7 @@ from __future__ import annotations
 
 import os
 
-try:
-    import typer
-except ImportError as e:  # pragma: no cover -- exercised manually
-    raise ImportError("the calfkit CLI requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
+import typer
 
 from calfkit.cli._loader import load_nodes
 from calfkit.cli._run import serve

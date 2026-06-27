@@ -8,9 +8,6 @@ of nodes reference and best-effort creates them via the admin client — a
 **development convenience** for getting a local/CI broker into the right shape
 without hand-rolling ``kafka-topics.sh`` invocations.
 
-Requires the ``cli`` optional extra (typer). If typer is not installed, the
-import raises with a clear remediation message rather than silently failing.
-
 Example invocations::
 
     ck topics provision \\
@@ -35,10 +32,7 @@ from __future__ import annotations
 
 import asyncio
 
-try:
-    import typer
-except ImportError as e:  # pragma: no cover -- exercised manually
-    raise ImportError("ck topics provision requires the 'cli' optional extra. Install with: pip install calfkit[cli]") from e
+import typer
 
 from calfkit.cli._loader import resolve_specs, validate_nodes
 

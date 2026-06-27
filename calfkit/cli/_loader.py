@@ -6,9 +6,6 @@ Resolves ``module:attr`` specs into a flat list of node objects. Used by both
 
 Each ``attr`` may resolve to a single node or an iterable of nodes; iterables
 are expanded.
-
-Requires the ``cli`` optional extra (typer). If typer is not installed, the
-import raises with a clear remediation message rather than silently failing.
 """
 
 from __future__ import annotations
@@ -19,10 +16,7 @@ import sys
 from collections.abc import Iterable
 from typing import Any
 
-try:
-    import typer
-except ImportError as e:  # pragma: no cover -- exercised manually
-    raise ImportError("the calfkit CLI requires the 'cli' optional extra. Install with: pip install \"calfkit[cli]\"") from e
+import typer
 
 
 def resolve_specs(specs: list[str], *, app_dir: str | None = None, source_label: str = "target") -> list[Any]:

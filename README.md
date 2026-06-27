@@ -58,12 +58,6 @@ Calfkit shifts the paradigm of agent development from orchestration (centralized
 $ pip install calfkit
 ```
 
-The command-line tools (`ck run`, `ck topics`) live behind an optional extra:
-
-```console
-$ pip install "calfkit[cli]"
-```
-
 ### Prerequisites
 
 - Python 3.10 or later
@@ -119,7 +113,7 @@ def get_weather(location: str) -> str:
     return f"It's sunny in {location}"
 ```
 
-`ck run` points at a `module:attr` target and starts the tool for you — no extra wiring required. This requires the `[cli]` extra installed.
+`ck run` points at a `module:attr` target and starts the tool for you — no extra wiring required.
 
 ```console
 $ ck run weather_tool:get_weather
