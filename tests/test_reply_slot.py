@@ -184,6 +184,12 @@ class TestProjectionFromReply:
         assert cc.output == {"k": 1}
         assert cc.output_parts == [DataPart(data={"k": 1})]
 
+    def test_present_but_invalid_data_part_raises_deserialization_error(self) -> None:
+        # A structured output_type whose DataPart is present but fails validation surfaces as the
+        # closed-set DeserializationError (spec §2.5), never a raw pydantic.ValidationError (M2).
+        with pytest.raises(DeserializationError):
+            InvocationResult.from_envelope(_reply_env([DataPart(data={"wrong": "x"})]), _Struct, correlation_id="cid")
+
     def test_strict_empty_reply_raises(self) -> None:
         with pytest.raises(DeserializationError):
             InvocationResult.from_envelope(_reply_env([]), correlation_id="cid")

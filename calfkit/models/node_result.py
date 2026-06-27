@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
@@ -172,9 +172,10 @@ class InvocationResult(Generic[OutputT]):
 
         Raises:
             DeserializationError: If the expected content part is not found in the reply
-                parts (always strict here — an empty or mismatched reply raises).
-            pydantic.ValidationError: If ``output_type`` is provided and the
-                matching ``DataPart.data`` doesn't validate against it.
+                parts (always strict here — an empty reply raises), OR a structured
+                ``output_type`` is provided and the matching ``DataPart.data`` is present
+                but doesn't validate against it (the closed-set error per spec §2.5 — the
+                raw ``pydantic.ValidationError`` is wrapped by :func:`project_output`).
             pydantic.PydanticSchemaGenerationError: If ``type_adapter`` is ``None``
                 and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
         """
@@ -257,7 +258,14 @@ def project_output(
         return None
     if output_type is str:
         return render_parts_as_text(parts, render_other=lambda _p: None, empty="")
-    return _extract_output(parts, output_type, type_adapter=type_adapter)
+    try:
+        return _extract_output(parts, output_type, type_adapter=type_adapter)
+    except ValidationError as exc:
+        # A present-but-invalid DataPart fails the structured output_type → surface the closed-set
+        # DeserializationError (spec §2.5), never a raw pydantic.ValidationError. Receive-side only:
+        # the node output-view seam calls _extract_output directly (not via project_output), so it
+        # keeps the raw error it converts to a §6.3 fault — this wrap doesn't touch it. (M2)
+        raise DeserializationError(f"reply DataPart failed output_type={getattr(output_type, '__name__', output_type)!r}: {exc}") from exc
 
 
 def _extract_output(parts: list[Any], output_type: type[Any], type_adapter: TypeAdapter[Any] | None = None) -> Any:

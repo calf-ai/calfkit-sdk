@@ -10,9 +10,8 @@ channels:
   ``x-calf-kind=fault`` / ``x-calf-error-type`` headers.
 * **Channel B** — an ``on_callee_error`` recorder (``_fault_tools.CalleeErrorRecorder``)
   that sees the live fault in-process, then declines so it still escalates.
-* **Channel C** — the client edge as it behaves today: a routed fault resolves the
-  pending future and surfaces as ``DeserializationError`` (the typed ``NodeFaultError``
-  reception is deferred to #250).
+* **Channel C** — the client edge: a routed fault is received as a typed ``NodeFaultError``
+  (#250 reception), so ``await handle.result()`` raises it carrying the verbatim ``ErrorReport``.
 
 The agents run ``sequential_only_mode=True``: every case dispatches a single tool call,
 so the fault path is identical to a fan-out-capable agent's, and the durable fan-out
@@ -32,7 +31,7 @@ from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
-from calfkit.exceptions import DeserializationError
+from calfkit.exceptions import NodeFaultError
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, WorkflowState
 from calfkit.models.error_report import FaultTypes
 from calfkit.nodes import Agent
@@ -63,7 +62,7 @@ def _agent(node_id: str, *, agent_in: str, agent_pub: str, tool, call: ToolCallP
 async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str, topic_namespace: str) -> None:
     """F-1: a tool's generic exception → the agent escalates a ``calf.unhandled``
     ``FaultMessage`` on its ``publish_topic`` mirror (typed report + filterable
-    headers), and the client's routed reply surfaces as ``DeserializationError``."""
+    headers), and the client's routed reply is received as a typed ``NodeFaultError``."""
     agent_in = f"{topic_namespace}.f1.input"
     agent_pub = f"{topic_namespace}.f1.mirror"
     agent = _agent(
@@ -89,10 +88,11 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
             assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) == "ValueError"
             assert len(fault.error.frame_chain) >= 1  # the faulting hop's topology is captured
 
-            # Channel C — current client-edge behavior: a routed fault resolves the
-            # future and fails strict output projection (typed reception deferred, #250).
-            with pytest.raises(DeserializationError):
+            # Channel C — the routed fault is RECEIVED as a typed NodeFaultError (#250 reception):
+            # result() raises it carrying the verbatim escalated ErrorReport.
+            with pytest.raises(NodeFaultError) as exc_info:
                 await handle.result(timeout=60)
+            assert exc_info.value.report.find(FaultTypes.UNHANDLED) is not None
     finally:
         await driver.aclose()
         await worker._client.aclose()

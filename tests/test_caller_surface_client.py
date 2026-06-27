@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Annotated, Any
+from unittest.mock import AsyncMock
 
 import pytest
 from faststream import Context
@@ -67,6 +68,30 @@ def test_connect_rejects_raw_security_kwargs() -> None:
         Client.connect("localhost:9092", sasl_mechanism="PLAIN")
 
 
+async def test_ensure_started_starts_the_broker_at_most_once() -> None:
+    # broker.start() is not self-idempotent; _ensure_started must start it once then no-op. The
+    # `_started` flag is load-bearing: TestKafkaBroker (and real brokers) gate via broker.running,
+    # but TestKafkaBroker never flips running, so without the flag we would re-start every dispatch.
+    client = Client.connect("localhost:9092", inbox_topic="i")
+    client._broker.start = AsyncMock()
+    await client._ensure_started()
+    await client._ensure_started()
+    await client._ensure_started()
+    client._broker.start.assert_awaited_once()
+
+
+async def test_ensure_started_skips_start_when_the_broker_is_already_running() -> None:
+    # A co-located Worker's app.start() set broker.running=True before the client dispatched. The
+    # client must detect that via `running` (the subscribers-are-up signal) and NOT re-start —
+    # gating on the producer-only `_connection` would publish into a not-yet-consuming inbox.
+    client = Client.connect("localhost:9092", inbox_topic="i")
+    client._broker.start = AsyncMock()
+    client._broker._connection = object()  # producer connected, but the readiness signal is `running`
+    client._broker.running = True  # the Worker fully started the shared broker (subscribers up)
+    await client._ensure_started()
+    client._broker.start.assert_not_awaited()
+
+
 async def test_events_firehose_yields_a_reply_published_to_the_inbox() -> None:
     client = Client.connect("localhost:9092", inbox_topic="inbox.t")
     async with TestKafkaBroker(client._broker):  # starts the broker in simulation
@@ -76,6 +101,16 @@ async def test_events_firehose_yields_a_reply_published_to_the_inbox() -> None:
     assert isinstance(ev, RunCompleted)
     assert ev.correlation_id == "cid-1"
     assert ev.output == "hello"
+
+
+async def test_events_iterated_without_async_with_raises_not_hangs() -> None:
+    # A bare `async for ev in client.events():` (forgetting `async with`) registers no firehose
+    # outlet and never starts the broker, so iterating un-entered would park forever. It must raise
+    # an actionable error instead of silently hanging (CRITICAL-1).
+    client = Client.connect("localhost:9092", inbox_topic="inbox.t")
+    stream = client.events()
+    with pytest.raises(RuntimeError, match="async with"):
+        await anext(stream)
 
 
 async def test_aclose_resolves_pending_runs_with_client_closed_error() -> None:

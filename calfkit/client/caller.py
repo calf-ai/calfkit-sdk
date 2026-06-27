@@ -80,9 +80,12 @@ class Client:
         # provisioning (worker.py reads `_provisioning` / `_startup_ensurer`).
         self._provisioning = provisioning
         self._startup_ensurer = startup_ensurer
-        # broker.start() is NOT self-idempotent; the base.py:334 check-then-await is non-atomic vs a
-        # co-located Worker's app.start(), so guard the first start with a lock (re-check inside).
+        # broker.start() is NOT self-idempotent; the check-then-await is non-atomic vs a co-located
+        # Worker's app.start(), so guard the first start with a lock (re-check inside). `_started`
+        # records that WE started the broker — see _ensure_started for why the producer-connection
+        # flag alone is the wrong readiness signal.
         self._start_lock = asyncio.Lock()
+        self._started = False
 
     @classmethod
     def connect(
@@ -103,6 +106,10 @@ class Client:
         (§6). Topic existence is an operational contract — the client never *boot-checks* it (§2.7).
         Security is configured the broker's way (a FastStream ``security=`` object in ``broker_kwargs``);
         raw security kwargs are rejected with an actionable error.
+
+        The shared producer is hardened to ``acks="all"`` + ``enable_idempotence=True`` by default (so a
+        broker-acked publish survives leader failover and retries can't duplicate/reorder, per the fault
+        rail). Override either via ``broker_kwargs`` if you must.
 
         ``provisioning`` is an **experimental** opt-in (issue #180; default disabled): when enabled,
         topics are auto-created at broker start. It is a separate, removable concern from the §2.7
@@ -240,15 +247,24 @@ class Client:
         )
 
     async def _ensure_started(self) -> None:
-        """Bring the shared broker up once, idempotently. ``broker.start()`` is not self-idempotent and
-        the check-then-await is non-atomic vs a co-located ``Worker``'s ``app.start()``, so guard it
-        with a lock and re-check the started flag inside (spec §2.7 / plan §6)."""
-        if self._broker._connection:  # fast path: already started (by us, a publish, or a Worker)
+        """Bring the shared broker up once, idempotently, BEFORE the first publish — so the reply
+        subscriber is consuming and a reply can't land below its tail position (spec §2.7 / plan §6).
+
+        The readiness signal is ``broker.running`` (set only after ``super().start()`` runs the
+        subscribers), NOT ``broker._connection`` (set as soon as the *producer* connects, **before**
+        the subscribers start): gating on ``_connection`` would let a dispatch publish into a
+        not-yet-consuming inbox during a co-located ``Worker``'s start or with provisioning enabled.
+        ``broker.running`` covers the co-located case (the Worker's ``app.start()`` set it); our own
+        ``_started`` flag covers the case where we started it (``TestKafkaBroker`` never flips
+        ``running``, so without it we would re-start on every dispatch). ``broker.start()`` is not
+        self-idempotent, so the lock + re-check serialize a concurrent first dispatch + ``events()``."""
+        if self._broker.running or self._started:  # fast path: already started (us, or a co-located Worker)
             return
         async with self._start_lock:
-            if self._broker._connection:  # re-check inside the lock — closes the concurrent-start race
+            if self._broker.running or self._started:  # re-check inside the lock — closes the concurrent-start race
                 return
             await self._broker.start()
+            self._started = True
 
     async def aclose(self) -> None:
         """Graceful shutdown (spec §5.8): resolve every pending ``result()`` with ``ClientClosedError``,
@@ -256,6 +272,7 @@ class Client:
         self._hub.close()
         if self._broker._connection:
             await self._broker.stop()
+        self._started = False
 
     async def __aenter__(self) -> Client:
         return self

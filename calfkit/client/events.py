@@ -88,22 +88,33 @@ class EventStream:
         # The client passes its guarded broker start here: a pure-observer client brings the broker up
         # via its first events() (else the subscriber never starts and the stream would hang, §5.1).
         self._on_enter = on_enter
+        # Outlet registration + the broker start happen in __aenter__; iterating un-entered would
+        # register nothing, never start the broker, and park forever — so guard it (CRITICAL).
+        self._entered = False
+
+    _NOT_ENTERED = "client.events() must be entered before iterating: `async with client.events() as stream:`"
 
     async def __aenter__(self) -> EventStream:
         if self._on_enter is not None:
             await self._on_enter()
         self._hub._add_outlet(self)
+        self._entered = True
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         self._hub._remove_outlet(self)
 
     def __aiter__(self) -> EventStream:
+        if not self._entered:
+            raise RuntimeError(self._NOT_ENTERED)
         return self
 
     async def __anext__(self) -> RunEvent:
         # The firehose is open-ended: park until an event is buffered, then drain in order. The reader
-        # exits via the async-CM (or its own timeout), never StopAsyncIteration.
+        # exits via the async-CM (or its own timeout), never StopAsyncIteration. A bare `async for`
+        # (no `async with`) registered no outlet and never started the broker — raise, don't hang.
+        if not self._entered:
+            raise RuntimeError(self._NOT_ENTERED)
         while True:
             if self._buffer:
                 return self._buffer.popleft()
@@ -113,7 +124,8 @@ class EventStream:
     def _offer(self, event: RunEvent) -> None:
         """Append an event to this outlet — called **synchronously** by the hub tee (await-free,
         non-blocking; spec §5.4). A full buffer drops the **oldest** to admit the newest (the deque's
-        ``maxlen``), counted on ``dropped`` and WARNING'd once per outlet (then rate-limited)."""
+        ``maxlen``); every drop increments ``dropped`` (the ongoing signal), and the **first** drop on
+        this outlet logs a WARNING once (not re-logged — read ``dropped`` for the running total)."""
         if self._terminal_only and not isinstance(event, (RunCompleted, RunFailed)):
             return  # v1: every RunEvent is terminal, so this never filters yet (forward-compat, §3.3)
         if len(self._buffer) == self._buffer.maxlen:  # full → this append evicts the oldest

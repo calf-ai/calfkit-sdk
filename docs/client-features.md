@@ -44,7 +44,7 @@ A gateway offers three verbs:
 | --- | --- | --- |
 | `execute(...)` | Request/reply — dispatch and await the result in one call. | `InvocationResult` |
 | `start(...)` | Dispatch and get a handle; `await handle.result()` later. | `InvocationHandle` |
-| `send(...)` | Dispatch without awaiting; observe the reply on the firehose. | `Dispatch` |
+| `send(...)` | Dispatch without awaiting the *result* (it still awaits the broker's durable accept); observe the reply on the firehose. | `Dispatch` |
 
 `send` returns a **`Dispatch`** (a fire token carrying `.correlation_id`) —
 deliberately *not* a handle, so the type itself tells you the result isn't
@@ -80,10 +80,15 @@ report = (await client.agent("weather_agent", output_type=WeatherReport).execute
 print(report.location)   # "Tokyo"
 ```
 
-With `output_type=str` (the default) you always get a string — a structured agent's
-reply comes back as its JSON string, never an error. Pass the matching
-`output_type=Model` to deserialize into your type; a reply that is present but fails
-that model raises [`DeserializationError`](#errors).
+> **Heads-up — the default `str` is loud about being a string, not silent about your intent.**
+> With `output_type=str` (the default), a **structured agent's reply comes back as its JSON
+> *string*, not an object — and no error is raised.** If you expect a typed object, you **must**
+> pass `output_type=Model`; otherwise `result.output` is a `str` you might accidentally `.upper()`
+> or render raw. (Inspect `result.output_parts` if you're unsure what came back.)
+
+Pass the matching `output_type=Model` to deserialize into your type; a reply that is present but
+fails that model raises [`DeserializationError`](#errors). With `output_type=str` there is never a
+`DeserializationError` — every reply coerces to a string.
 
 ## Multi-turn conversations
 
@@ -169,7 +174,11 @@ async with client.events(terminal_only=True) as stream:
 ```
 
 > **Guaranteed delivery is hold-the-handle (`start`/`execute`) or a `@consumer`
-> node** — the firehose is observation, not a delivery guarantee. For a stateless
+> node** — the firehose is observation, not a delivery guarantee. A held handle is
+> lossless *in-process* and survives a transient reconnect, but it is **not** immune to
+> broker-side loss: a reply that ages out of the inbox's log retention while the client
+> is disconnected longer than that retention is gone (and a `result()` with no `timeout=`
+> would then wait forever — so bound request/reply with `timeout=`). For a stateless
 > deployment (a web handler that can't hold a handle across a request boundary),
 > route replies to a named `inbox_topic` and consume them with a
 > [`@consumer` node](consumer-nodes.md).

@@ -127,8 +127,9 @@ class InvocationHandle(Generic[OutputT]):
             try:
                 terminal = await asyncio.wait_for(self._channel.await_terminal(), timeout)
             except (TimeoutError, asyncio.TimeoutError):
-                # The client gave up; the RUN is unaffected (the channel's future stays pending, a later
-                # terminal still resolves it). A typed signal, never a bare asyncio.TimeoutError (§2.5).
+                # The client gave up; the RUN is unaffected. wait_for cancelled only this waiter — the
+                # channel's Event (not a Future) keeps its state, so a later terminal still resolves a
+                # subsequent result(). A typed signal, never a bare asyncio.TimeoutError (§2.5).
                 raise ClientTimeoutError(self.correlation_id, timeout) from None
         if isinstance(terminal, RunFailed):
             raise NodeFaultError(terminal.report)  # the ErrorReport wrapped verbatim (§5.9)
