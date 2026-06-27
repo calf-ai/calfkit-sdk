@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.12.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.11.0...v0.12.0) (2026-06-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** rename the CLI command from `calfkit` to `ck` ([#273](https://github.com/calf-ai/calfkit-sdk/issues/273))
+* migrate MCP capability plane onto the control-plane substrate ([#260](https://github.com/calf-ai/calfkit-sdk/issues/260))
+
+### Features
+
+* agent discovery + addressing substrate [agent-mesh PR-A] ([#279](https://github.com/calf-ai/calfkit-sdk/issues/279)) ([d48d3a6](https://github.com/calf-ai/calfkit-sdk/commit/d48d3a6efce547ae12dc4ca193be2727a9977b37))
+* agent-to-agent handoff [agent-mesh PR-C] ([#282](https://github.com/calf-ai/calfkit-sdk/issues/282)) ([9652dc5](https://github.com/calf-ai/calfkit-sdk/commit/9652dc5c65b2018c74177cc2486b87e55e38faf9))
+* agent-to-agent peer messaging [agent-mesh PR-B] ([#281](https://github.com/calf-ai/calfkit-sdk/issues/281)) ([689f589](https://github.com/calf-ai/calfkit-sdk/commit/689f58926445d940feaf88173ff095a9001428b3))
+* **cli:** rename the CLI command from `calfkit` to `ck` ([#273](https://github.com/calf-ai/calfkit-sdk/issues/273)) ([3ffcc4f](https://github.com/calf-ai/calfkit-sdk/commit/3ffcc4f6817eef8f1e54ee8a3ee7e3f4f7a17ce5))
+* discover mode — `discover=True` on `Tools`  for open-ended tool-node discovery ([#270](https://github.com/calf-ai/calfkit-sdk/issues/270)) ([60fdf5f](https://github.com/calf-ai/calfkit-sdk/commit/60fdf5fb74915c35dc7643132a4e1777b8a64e1f))
+* HandoffRequest field descriptions + sharper agent-messaging copy ([#284](https://github.com/calf-ai/calfkit-sdk/issues/284)) ([efcee1e](https://github.com/calf-ai/calfkit-sdk/commit/efcee1ea05e0db2ce0d1c39325c0bf3433abf59c))
+* make Agent subscribe_topics ctor argument optional ([#290](https://github.com/calf-ai/calfkit-sdk/issues/290)) ([6a5736b](https://github.com/calf-ai/calfkit-sdk/commit/6a5736bcfe6051af57c24c5500e1817ba011e2dd))
+* migrate MCP capability plane onto the control-plane substrate ([#260](https://github.com/calf-ai/calfkit-sdk/issues/260)) ([2695878](https://github.com/calf-ai/calfkit-sdk/commit/2695878bf24ef9b78f6cc92584802e5499831a9b))
+* namespace MCP tool names by their toolbox node  ([#269](https://github.com/calf-ai/calfkit-sdk/issues/269)) ([7c72232](https://github.com/calf-ai/calfkit-sdk/commit/7c72232cedd98e90d1d921d85f0ad369a07c1cfd))
+* redesign the caller surface: agent gateway + send/start/execute + firehose ([#289](https://github.com/calf-ai/calfkit-sdk/issues/289)) ([24229bb](https://github.com/calf-ai/calfkit-sdk/commit/24229bb9c951c4a8fa08652c536351aebb13cc96))
+* runtime tool discoverability ([#266](https://github.com/calf-ai/calfkit-sdk/issues/266)) ([930286a](https://github.com/calf-ai/calfkit-sdk/commit/930286a98f33270f7545f46b297d0cb1841c8106))
+
+
+### Bug Fixes
+
+* agent-POV projection attributes a single other-agent's history ([#268](https://github.com/calf-ai/calfkit-sdk/issues/268)) ([ac62921](https://github.com/calf-ai/calfkit-sdk/commit/ac629213b6a3f99be217f566e7419ea906fedfae))
+* decode floor catches `JSONDecodeError` and `UnicodeDecodeError`, not just `ValidationError` ([#285](https://github.com/calf-ai/calfkit-sdk/issues/285)) ([4f8953f](https://github.com/calf-ai/calfkit-sdk/commit/4f8953fecfcdd35227ae81a976af8fa8f5192a1b))
+* **deps:** cap pydantic-graph below 2.0.0 ([#280](https://github.com/calf-ai/calfkit-sdk/issues/280)) ([eba69df](https://github.com/calf-ai/calfkit-sdk/commit/eba69dfb5a9f6622e61c98240c82219175f009e8))
+* **projection:** surface final_result-prefixed union/multi-output structured outputs ([#276](https://github.com/calf-ai/calfkit-sdk/issues/276)) ([9f37247](https://github.com/calf-ai/calfkit-sdk/commit/9f37247521f7cfaab620d93d12af4bf6d4e4fa8c))
+
+
+### Documentation
+
+* agent-to-agent peers, messaging & handoff — how-to, tutorial, reference + live test ([#283](https://github.com/calf-ai/calfkit-sdk/issues/283)) ([af99c02](https://github.com/calf-ai/calfkit-sdk/commit/af99c0249de33f914414e3d486502bb975df4cd8))
+* cover policy seams & faults; drop docs for the removed APIs ([#259](https://github.com/calf-ai/calfkit-sdk/issues/259)) ([5b12dac](https://github.com/calf-ai/calfkit-sdk/commit/5b12dac929961112745a0dd7f3a6c547bed7d6e5))
+* MCP: strict Diátaxis cleanup + reference + runnable example ([#265](https://github.com/calf-ai/calfkit-sdk/issues/265)) ([78dfef9](https://github.com/calf-ai/calfkit-sdk/commit/78dfef947300cd0eb181b913d37bdb6ca61859a4))
+* README rewrite ([#287](https://github.com/calf-ai/calfkit-sdk/issues/287)) ([e0daa31](https://github.com/calf-ai/calfkit-sdk/commit/e0daa3103fb82be2420e38b6c0cb86c85a5fd240))
+* relocate internal-implementation docs to docs/dev ([#261](https://github.com/calf-ai/calfkit-sdk/issues/261)) ([89d9850](https://github.com/calf-ai/calfkit-sdk/commit/89d9850e0c2803f3566ca5cbf578eba5a1277bdd))
+
 ## [0.11.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.10.0...v0.11.0) (2026-06-19)
 
 
