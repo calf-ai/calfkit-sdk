@@ -14,19 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Annotated, Any, Generic
 from weakref import WeakValueDictionary
 
 from faststream import Context
 from faststream.kafka import KafkaBroker
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, decode_header_str
+from calfkit._types import OutputT
 from calfkit.client.events import EventStream, RunCompleted, RunEvent, RunFailed
-from calfkit.exceptions import ClientClosedError
+from calfkit.exceptions import ClientClosedError, ClientTimeoutError, NodeFaultError
 from calfkit.models.envelope import Envelope  # runtime: FastDepends needs it for the handler arg
 from calfkit.models.error_report import ErrorReport, FaultTypes
-from calfkit.models.node_result import extract_lenient
+from calfkit.models.node_result import InvocationResult, extract_lenient
 from calfkit.models.reply import FaultMessage, ReturnMessage
 
 logger = logging.getLogger(__name__)
@@ -48,10 +50,14 @@ class _RunChannel:
         self._terminal: RunEvent | None = None
         self._closed: bool = False
         self._closed_error: BaseException | None = None
-        # The "terminal-arrived" signal. Created in the running loop — the channel is always built
-        # in an async context (start() / tests). A Future is not a Task, so it never roots the
-        # handle in the event loop (spec §5.2: the weak map stays the sole owner).
-        self._arrived: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        # The "terminal-arrived" signal — an Event, NOT a Future (§3 decision 1, corrected): a Future
+        # is the shared object the reader awaits, so a ``result(timeout=)`` whose ``asyncio.wait_for``
+        # cancels the awaiting task would cancel that Future and permanently break the channel (a later
+        # terminal could never wake it). An Event is robust to per-waiter cancellation — each waiter
+        # gets its own internal future and the set/unset state persists — so the run survives a timeout
+        # (§4.3). Like a Future it is not a Task, so it never roots the handle in the loop (the weak map
+        # stays the sole owner, §5.2), and it needs no running loop at construction.
+        self._arrived = asyncio.Event()
 
     @property
     def closed(self) -> bool:
@@ -77,14 +83,13 @@ class _RunChannel:
         self._wake()
 
     def _wake(self) -> None:
-        if not self._arrived.done():
-            self._arrived.set_result(None)
+        self._arrived.set()
 
     async def await_terminal(self) -> RunEvent:
         """Park until the channel closes, then return the cached terminal ``RunEvent`` — or raise
         the typed close error (``ClientClosedError``) if it was closed by ``aclose()``. O(1)
         replay once arrived (spec §4.4)."""
-        await self._arrived
+        await self._arrived.wait()
         if self._closed_error is not None:
             raise self._closed_error
         if self._terminal is None:  # defensive: a closed channel always has a terminal or an error
@@ -93,10 +98,11 @@ class _RunChannel:
 
 
 @dataclass
-class InvocationHandle:
+class InvocationHandle(Generic[OutputT]):
     """The per-run handle (spec §3.1/§5.2) — owns the run's in-memory channel; the hub pushes the
     run's terminal into it, demuxed by ``correlation_id``. The caller holds it for the run's
-    lifetime; there is no reattach-by-correlation-id. ``result()``/``stream()`` are added later.
+    lifetime; there is no reattach-by-correlation-id. ``result()`` maps the terminal to a value or a
+    typed outcome; ``stream()`` yields the run's events (terminal-bearing).
 
     A plain (non-slots) dataclass so it is **weak-referenceable** (the hub's routing map holds it
     weakly) and **acyclic** (nothing strong-refs it back) — so it self-GCs the instant the caller
@@ -105,6 +111,42 @@ class InvocationHandle:
 
     correlation_id: str
     _channel: _RunChannel = field(repr=False, compare=False)
+    # The mint-bound output type (``agent(output_type=…)``, default ``str``) — used to project a
+    # successful terminal in ``result()``. The firehose's raw ``RunCompleted.output`` is separate.
+    _output_type: type[Any] = field(default=str, repr=False, compare=False)
+    _stream_active: bool = field(default=False, repr=False, compare=False)
+
+    async def result(self, *, timeout: float | None = None) -> InvocationResult[OutputT]:
+        """Await this run's terminal and map it to a value or a typed outcome (spec §4.3/§5.9): a
+        success projects to the rich ``InvocationResult`` (or raises ``DeserializationError`` on a
+        present-but-mismatched part); a fault raises ``NodeFaultError``. No default timeout — a durable
+        run may legitimately pause; pass ``timeout=`` to bound *this client's* patience."""
+        if timeout is None:
+            terminal = await self._channel.await_terminal()
+        else:
+            try:
+                terminal = await asyncio.wait_for(self._channel.await_terminal(), timeout)
+            except (TimeoutError, asyncio.TimeoutError):
+                # The client gave up; the RUN is unaffected (the channel's future stays pending, a later
+                # terminal still resolves it). A typed signal, never a bare asyncio.TimeoutError (§2.5).
+                raise ClientTimeoutError(self.correlation_id, timeout) from None
+        if isinstance(terminal, RunFailed):
+            raise NodeFaultError(terminal.report)  # the ErrorReport wrapped verbatim (§5.9)
+        return InvocationResult.from_envelope(terminal._envelope, self._output_type, correlation_id=terminal.correlation_id)
+
+    async def stream(self) -> AsyncIterator[RunEvent]:
+        """Yield this run's events in order, **terminal-bearing** — the last element is always the
+        terminal (spec §3.1/§4.4). v1 emits no intermediates yet, so this yields **exactly one**
+        element: the terminal (raw — ``result()`` is the projected face). The terminal is cached, so
+        ``stream()`` is replayable after ``result()``; **at most one** live ``stream()`` per handle (a
+        second concurrent one raises ``RuntimeError``)."""
+        if self._stream_active:
+            raise RuntimeError("at most one live stream() per handle (spec §4.4)")
+        self._stream_active = True
+        try:
+            yield await self._channel.await_terminal()
+        finally:
+            self._stream_active = False
 
 
 class _Hub:

@@ -16,7 +16,7 @@ import pytest
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
 from calfkit.client.events import EventStream, RunCompleted, RunFailed
 from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel
-from calfkit.exceptions import ClientClosedError
+from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, NodeFaultError
 from calfkit.models import CallFrameStack, Envelope, SessionRunContext, WorkflowState
 from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.payload import TextPart
@@ -497,3 +497,129 @@ async def test_firehose_surfaces_a_reply_with_no_pending_handle() -> None:
         hub._on_reply(_reply_env(parts=[TextPart(text="foreign")]), "foreign-cid", _headers("return"))
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
     assert ev.correlation_id == "foreign-cid"
+
+
+# ── Commit 4: the handle — result()/stream() over the channel, typed outcomes (§4.3/§4.4/§5.9) ──
+
+
+async def test_result_projects_a_completed_terminal_to_an_invocation_result() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")  # _output_type defaults to str
+    hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"))
+    res = await asyncio.wait_for(handle.result(), timeout=1.0)
+    assert res.output == "hi"  # str default → first TextPart.text
+    assert res.correlation_id == "cid-1"
+
+
+async def test_result_raises_node_fault_error_verbatim_on_a_fault_terminal() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    report = ErrorReport(error_type="billing.quota", message="over limit")
+    hub._on_reply(_reply_env(error=report), "cid-1", _headers("fault"))
+    with pytest.raises(NodeFaultError) as exc:
+        await asyncio.wait_for(handle.result(), timeout=1.0)
+    assert exc.value.report is report  # the ErrorReport wrapped verbatim (§5.9)
+    assert exc.value.report.find("billing.quota") is report  # branch via find(), never ==
+
+
+async def test_result_timeout_raises_client_timeout_error_and_the_run_survives() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")  # no terminal pushed yet
+    with pytest.raises(ClientTimeoutError) as exc:
+        await handle.result(timeout=0.05)  # this client stops waiting after 50ms
+    assert exc.value.correlation_id == "cid-1"
+    # the run is unaffected — a later terminal still resolves a fresh result()
+    hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "cid-1", _headers("return"))
+    res = await asyncio.wait_for(handle.result(), timeout=1.0)
+    assert res.output == "late"
+
+
+async def test_result_raises_deserialization_error_on_a_present_but_mismatched_part() -> None:
+    # output_type=int but the reply carries a TextPart (no DataPart) → a projection mismatch on a
+    # SUCCESS is a DeserializationError, never disguised as a fault (discriminator before projection).
+    hub = _Hub()
+    handle: InvocationHandle[int] = InvocationHandle(correlation_id="cid-1", _channel=_RunChannel(), _output_type=int)
+    hub.track(handle)
+    hub._on_reply(_reply_env(parts=[TextPart(text="not-an-int")]), "cid-1", _headers("return"))
+    with pytest.raises(DeserializationError):
+        await asyncio.wait_for(handle.result(), timeout=1.0)
+
+
+async def test_result_is_idempotent_when_called_twice() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    hub._on_reply(_reply_env(parts=[TextPart(text="once")]), "cid-1", _headers("return"))
+    first = await asyncio.wait_for(handle.result(), timeout=1.0)
+    second = await asyncio.wait_for(handle.result(), timeout=1.0)  # cached terminal — replayable (§4.4)
+    assert first.output == second.output == "once"
+
+
+async def test_stream_yields_the_terminal_raw_as_its_single_v1_element() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"))
+    events = [ev async for ev in handle.stream()]
+    assert len(events) == 1  # v1: the fabric emits only the terminal (spec §3.1)
+    assert isinstance(events[0], RunCompleted)
+    assert events[0].output == "hi"  # stream() yields the RAW RunEvent (result() projects)
+
+
+async def test_stream_then_result_reads_the_cached_terminal() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"))
+    streamed = [ev async for ev in handle.stream()]
+    res = await asyncio.wait_for(handle.result(), timeout=1.0)  # O(1) cached terminal (§4.4)
+    assert streamed[0].correlation_id == "cid-1"
+    assert res.output == "x"
+
+
+async def test_result_then_stream_replays_the_cached_terminal() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"))
+    await asyncio.wait_for(handle.result(), timeout=1.0)
+    replayed = [ev async for ev in handle.stream()]  # terminal is replayable (§4.4)
+    assert len(replayed) == 1
+    assert replayed[0].output == "x"
+
+
+async def test_second_concurrent_stream_raises_runtime_error() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    s1 = handle.stream()
+    task = asyncio.create_task(anext(s1))  # starts iterating s1 → it parks on await_terminal
+    await asyncio.sleep(0)  # let s1 register as the live listener
+    with pytest.raises(RuntimeError):
+        await anext(handle.stream())  # a second concurrent stream() → RuntimeError (≤1 live, §4.4)
+    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"))
+    assert (await asyncio.wait_for(task, timeout=1.0)).output == "x"  # s1 still completes
+
+
+async def test_result_raises_node_fault_error_on_an_undecodable_inbox_reply() -> None:
+    # The Option-B seam end-to-end at the handle: fail_run(undecodable) → result() raises NodeFaultError
+    # — never hangs, never DeserializationError (§5.8/§5.9).
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    report = ErrorReport.build_safe(error_type=FaultTypes.DELIVERY_UNDECODABLE, message="bad body")
+    hub.fail_run("cid-1", report)
+    with pytest.raises(NodeFaultError) as exc:
+        await asyncio.wait_for(handle.result(), timeout=1.0)
+    assert exc.value.report.find(FaultTypes.DELIVERY_UNDECODABLE) is not None
+
+
+async def test_result_raises_node_fault_error_on_a_malformed_terminal() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    hub._on_reply(_env(), "cid-1", _headers("return"))  # kind=return but reply=None → malformed
+    with pytest.raises(NodeFaultError) as exc:
+        await asyncio.wait_for(handle.result(), timeout=1.0)
+    assert exc.value.report.error_type == FaultTypes.DELIVERY_MALFORMED
+
+
+async def test_result_raises_client_closed_error_after_close() -> None:
+    hub = _Hub()
+    handle = _tracked(hub, "cid-1")
+    hub.close()  # aclose() → close_with(ClientClosedError)
+    with pytest.raises(ClientClosedError):
+        await asyncio.wait_for(handle.result(), timeout=1.0)
