@@ -1,256 +1,132 @@
-# 🐮 Calfkit SDK
+<h1 align="center">🐮 Calfkit</h1>
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/calf-ai/calfkit-sdk)
-[![PyPI version](https://img.shields.io/pypi/v/calfkit)](https://pypi.org/project/calfkit/)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/calfkit?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/calfkit)
-[![Python versions](https://img.shields.io/pypi/pyversions/calfkit)](https://pypi.org/project/calfkit/)
-[![codecov](https://codecov.io/gh/calf-ai/calfkit-sdk/graph/badge.svg?token=ZUP383PSK7)](https://codecov.io/gh/calf-ai/calfkit-sdk)
-[![License](https://img.shields.io/github/license/calf-ai/calfkit-sdk)](LICENSE)
+<h3 align="center">
+  Build powerful teams of AI agents that freely discover each other and collaborate on work, automatically.
+</h3>
 
-Build AI agents as decentralized, event-driven microservices.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/calf-ai/calfkit-sdk" alt="License"></a>
+  <a href="https://pypi.org/project/calfkit/"><img src="https://img.shields.io/pypi/v/calfkit" alt="PyPI version"></a>
+  <a href="https://pepy.tech/project/calfkit"><img src="https://static.pepy.tech/badge/calfkit/month" alt="PyPI downloads"></a>
+  <a href="https://pypi.org/project/calfkit/"><img src="https://img.shields.io/pypi/pyversions/calfkit" alt="Python versions"></a>
+  <a href="https://codecov.io/gh/calf-ai/calfkit-sdk"><img src="https://codecov.io/gh/calf-ai/calfkit-sdk/graph/badge.svg?token=ZUP383PSK7" alt="codecov"></a>
+  <a href="https://deepwiki.com/calf-ai/calfkit-sdk"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+</p>
 
-Agents, tools, and consumers are independently deployable nodes that dynamically route messages to each other and communicate asynchronously. Build and compose AI workflows as a distributed network of interconnected AI agents.
+Calfkit agents dynamically find each other at runtime and choreograph work. No hard-coded orchestrator or extra wiring. The framework for building free-flowing and powerful multi-agent teams.
 
-```console
-$ pip install calfkit
+<br>
+
+## Installation
+
+```bash
+pip install calfkit
 ```
 
-> **Status: Alpha (pre-1.0).** Calfkit is under active development and the public API can change between versions. Pin a version and check the [CHANGELOG](CHANGELOG.md) before big version bumps.
+## Quickstart
 
-<br>
+### An agent (that can discover other agents)
 
-## Table of Contents
+```python
+from calfkit import Agent, Messaging, Tools, OpenAIResponsesModelClient
 
-- [Why Calfkit?](#why-calfkit)
-- [Install](#install)
-  - [Prerequisites](#prerequisites)
-  - [Start a Calfkit broker](#start-a-calfkit-broker)
-- [Usage](#usage)
-  - [1. Define and deploy the tool node](#1-define-and-deploy-the-tool-node)
-  - [2. Deploy the agent node](#2-deploy-the-agent-node)
-  - [3. Invoke the agent](#3-invoke-the-agent)
-  - [Next steps](#next-steps)
-    - [Structured outputs](#structured-outputs)
-    - [Deploying to production](#deploying-to-production)
-- [Documentation](#documentation)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [Contact](#contact)
-- [License](#license)
+general = Agent(
+    name="general",
+    description="Answers simple questions and routes requests to whoever can handle it.",
+    system_prompt="You are a general assistant. Defer technical questions to other agents.",
+    subscribe_topics="general.input",
+    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-mini"),
+    peers=[Messaging(discover=True)],   # discover and collaborate w/ any agent at runtime
+)
+```
 
-<br>
+### Runtime discoverability allows you to add new agents and tools to the team at any time
+
+```python
+from calfkit import Agent, agent_tool, Tools, ToolContext, OpenAIResponsesModelClient
+
+finance = Agent(
+    name="finance",
+    description="Answers the user's personal finance questions.",
+    system_prompt="You are the personal finance specialist. Use tools to look up user data.",
+    subscribe_topics="finance.input",
+    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-mini"),
+    tools=[Tools(discover=True)],   # discover and use any tool at runtime
+)
+
+@agent_tool
+def lookup_account_balance(ctx: ToolContext) -> str:
+    """Look up the user's current account balance in USD."""
+    return f"Account balance: ${ctx.deps.get('balance', '0.00')}"
+```
+
+## Running your agents
+
+Start the general assistant independently. Assuming it's saved in `general_help.py`.
+
+```bash
+# using the ck CLI
+ck run general_help:general
+```
+
+Separately, start the `finance` agent and the `lookup_account_balance` tool node. Assuming it's saved in `finance_help.py`.
+
+```bash
+ck run finance_help:finance finance_help:lookup_account_balance
+```
+
+Ask the general assistant a question. Notice it's able to dynamically discover and consult the `finance` agent for help without any hard-coded configuration of `finance` agent's existence.
+
+```python
+import asyncio
+from calfkit import Client
+
+async def main():
+    async with Client.connect("<calfkit_agent_mesh>") as client:
+        result = await client.agent("general").execute("Do I have enough money to afford a new car?")
+        print(result.output)
+        # LOL nah twin
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+```bash
+python ask.py
+```
+
+Calfkit agents discover and communicate over an agent mesh, provided by either Calfkit Cloud (in alpha) or your own self-hosted version. 
+
+Start one locally with Docker:
+```bash
+git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
+```
+
+Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8) — a fully-managed agent mesh your agents can join from anywhere.
 
 ## Why Calfkit?
 
-Calfkit shifts the paradigm of agent development from orchestration (centralized control) to choreography (decoupled interactions). Building agent teams with traditional agent frameworks rely on tightly coupled, hard-coded interactions. Calfkit allows you to build agents into an interconnected mesh right out of the box.
+- **Dynamic agent-to-agent discovery and collaboration.** Agents find each other at runtime and work together — messaging each other and handing off tasks — so you build multi-agent systems without complex wiring or orchestration, and extend team capabilities at any time.
+- **No bottleneck, no single point of failure.** Every agent runs and scales as an independent microservice, so your agent teams are resilient and scalable from day one.
+- **Act on live data in realtime.** Agents are event-driven so they act on realtime data streams, sending live results wherever they're needed — build agents that work like continuous workflows, not one-off requests.
 
-- **Distributed by default:** Every agent, tool, and consumer is its own node in a connected network — so agents and tools are a distributed system you deploy and scale piece by piece, not a monolith.
+## Examples
 
-- **Stream-native:** Agents communicate on event streams, so consuming live data — market feeds, IoT sensors, user activity — is the default, not a bolted-on integration. Plug into any upstream source and publish to any downstream system: CRMs, warehouses, even other agents.
+See [`examples/`](examples/) for more examples.
 
-- **Composable without coupling:** Build multi-agent teams simply by dropping in agents on shared topics — no extra wiring, no edits to existing code.
-
-<br>
-
-## Install
-
-```console
-$ pip install calfkit
-```
-
-### Prerequisites
-
-- Python 3.10 or later
-- Docker installed and running (for running with a local Calfkit broker)
-- An LLM provider API key
-
-### Start a Calfkit broker
-
-Every Calfkit deployment needs a running broker. 
-
-<details>
-<summary><b>Option A: Local Broker (Requires Docker)</b></summary>
-<br>
-
-Clone the [calfkit-broker](https://github.com/calf-ai/calfkit-broker) repo and start a local broker:
-
-```console
-$ git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
-```
-
-Once it's ready, open a new terminal to continue.
-
-</details>
-
-<details>
-<summary><b>Option B: ☁️ Calfkit Cloud (In Beta)</b></summary>
-<br>
-
-Skip the infrastructure. Calfkit Cloud is a fully-managed broker for Calfkit agents — nothing to self-host, with built-in observability and agent-event tracing. You deploy against a hosted broker endpoint instead of running one locally.
-
-[Sign up for access →](https://forms.gle/Rk61GmHyJzequEPm8)
-
-</details>
-
-<br>
-
-## Usage
-
-A complete, runnable version of this walkthrough lives in [`examples/quickstart/`](examples/quickstart/).
-
-### 1. Define and deploy the tool node
-
-A tool is an independent service, not owned by any agent. Define one with `@agent_tool`; once deployed, any agent can invoke it. Deploy once, use everywhere.
-
-```python
-# weather_tool.py
-from calfkit.nodes import agent_tool
-
-# Define a tool — the @agent_tool decorator turns any function into a deployable tool node
-@agent_tool
-def get_weather(location: str) -> str:
-    """Get the current weather at a location"""
-    return f"It's sunny in {location}"
-```
-
-`ck run` points at a `module:attr` target and starts the tool for you — no extra wiring required.
-
-```console
-$ ck run weather_tool:get_weather
-```
-
-### 2. Deploy the agent node
-
-Provide the `Agent` with a reference to the tool using the same tool definition. This agent listens to the `weather_agent.input` topic.
-
-```python
-# agent_service.py
-from calfkit.nodes import Agent
-from calfkit.providers import OpenAIResponsesModelClient
-from weather_tool import get_weather  # Import the tool definition (reusable)
-
-agent = Agent(
-    "weather_agent",
-    system_prompt="You are a helpful assistant.",
-    subscribe_topics="weather_agent.input",
-    publish_topic="weather_agent.output",  # Stream every agent output here. Other agents and consumers can listen into this stream
-    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
-    tools=[get_weather],  # Register tool definitions with the agent
-)
-```
-
-Set your OpenAI API key:
-
-```console
-$ export OPENAI_API_KEY=sk-...
-```
-
-Start the agent:
-
-```console
-$ ck run agent_service:agent
-```
-
-### 3. Invoke the agent
-
-Send a message to the agent.
-
-```python
-# execute.py
-import asyncio
-from calfkit.client import Client
-
-async def main():
-    client = Client.connect("localhost:9092")  # Connect to the broker
-
-    # Send a request and await the response
-    result = await client.agent("weather_agent").execute(  # address the agent by name
-        "What's the weather in Tokyo?",
-    )
-    print(f"Assistant: {result.output}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Run the file to invoke the agent:
-
-```console
-$ python execute.py
-```
-
-### Next steps
-
-You've completed the quickstart — a tool and an agent deployed as separate services and invoked over Kafka. The rest of this section covers common things to do next.
-
-#### Structured outputs
-
-Set `final_output_type` to enforce structured output from the LLM — it's deserialized into your type automatically on the client side.
-
-```python
-from dataclasses import dataclass
-from calfkit.nodes import Agent
-from calfkit.providers import OpenAIResponsesModelClient
-
-@dataclass
-class WeatherReport:
-    location: str
-    summary: str
-
-agent = Agent(
-    "weather_agent",
-    system_prompt="You are a helpful assistant.",
-    subscribe_topics="weather_agent.input",
-    model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-nano"),
-    final_output_type=WeatherReport,  # Enforce structured output
-)
-```
-
-When minting the gateway, pass the matching `output_type` to deserialize the response:
-
-```python
-result = await client.agent("weather_agent", output_type=WeatherReport).execute(
-    "What's the weather in Tokyo?",
-)
-print(result.output.location)  # "Tokyo"
-print(result.output.summary)   # "It's sunny in Tokyo"
-```
-
-#### Deploying to production
-
-For production, you can deploy each node with an explicit `Worker`, keeping startup, scaling, and lifecycle management under your control:
-
-```python
-# serve_tool.py — deploy the tool as its own service
-import asyncio
-from calfkit.client import Client
-from calfkit.worker import Worker
-from weather_tool import get_weather
-
-async def main():
-    client = Client.connect("localhost:9092")  # Connect to Kafka broker
-    worker = Worker(client, nodes=[get_weather])  # One service per node
-    await worker.run()  # (Blocking) serve until stopped
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-```console
-$ python serve_tool.py
-```
-
-<br>
+- **[Agent, tool & consumer](examples/quickstart/)** — a weather agent and its `get_weather` tool deployed as separate services and invoked over the broker, with a consumer node tapping the agent's output stream.
+- **[Multi-agent panel](examples/multi_agent_panel/)** — three persona agents (`optimist`, `skeptic`, `pragmatist`) debate over one shared transcript, each automatically seeing the thread from its own point of view.
+- **[MCP toolbox](examples/quickstart_mcp/)** — give an agent a live web-`fetch` tool from an MCP server, deployed as its own node and referenced by name — the agent's code never imports it.
 
 ## Documentation
 
 In-repo documentation lives under [`docs/`](docs/).
 
-**New to building a system of agents?** Start with the tutorial **[Build a multi-agent support desk](docs/multi-agent-support-desk.md)** — build and run three agents that discover each other and collaborate by messaging and handoff.
+**New to building agent teams?** Start with the tutorial **[Build a multi-agent support desk](docs/multi-agent-support-desk.md)** — build and run three agents that discover each other and collaborate by messaging and handoff.
 
 **How-to guides** — goal-oriented walkthroughs:
 
-- **[How to call nodes from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, the `events()` firehose, and the typed client errors.
+- **[How to call agents from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, the `events()` firehose, and the typed client errors.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
 - **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.
@@ -265,37 +141,11 @@ In-repo documentation lives under [`docs/`](docs/).
 - **[CLI reference](docs/cli.md)** — the `ck run` and `ck topics` commands.
 - **[Topic provisioning](docs/topic-provisioning.md)** — the experimental, opt-in topic-creation helper for dev/CI.
 
-**Design & background:**
-
-- **[Design documents](docs/designs/)** — accepted and proposed designs.
-
-<br>
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for what's under consideration — listing there isn't a commitment.
-
-<br>
-
 ## Contributing
 
 Issues and pull requests are welcome. Please [open an issue](https://github.com/calf-ai/calfkit-sdk/issues) to discuss substantial changes before sending a PR.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the quality gates (`make fix` / `make check` / `make test`), PR conventions, and how to write and run tests — including the real-broker integration lane.
-
-<br>
-
-## Contact
-
-[![X](https://img.shields.io/badge/Follow-black?logo=x)](https://x.com/ryanyuhater)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-blue?logo=linkedin)](https://www.linkedin.com/company/calfkit)
-
-If you found this project interesting or useful, please consider:
-- ⭐ Starring the repository — it helps others discover it!
-- 🐛 [Reporting issues](https://github.com/calf-ai/calfkit-sdk/issues)
-- 🔀 Submitting PRs
-
-<br>
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the quality gates (`make fix` / `make check` / `make test`), PR conventions, and how to write and run tests — including the real-broker integration tests.
 
 ## License
 
