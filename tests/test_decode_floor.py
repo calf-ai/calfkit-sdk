@@ -9,6 +9,7 @@ through any attached ``@publisher`` — verified by the FastStream 0.7.1 spike).
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -36,6 +37,45 @@ async def test_undecodable_body_is_floored_and_reraised(caplog: pytest.LogCaptur
         with caplog.at_level(logging.ERROR, logger=_MW_LOGGER):
             with pytest.raises(ValidationError):  # re-raised after flooring (no empty-body publish)
                 await broker.publish(b'{"not": "valid"}', "n.in")  # missing x → decode fails
+
+    assert ran == []  # the handler never ran — the decode failed first
+    assert "calf.delivery.undecodable" in caplog.text  # floored, typed
+
+
+async def test_malformed_json_with_json_content_type_is_floored_and_reraised(caplog: pytest.LogCaptureFixture) -> None:
+    # A JSON-content-type body that is not valid JSON raises ``json.JSONDecodeError`` at decode
+    # (FastStream's ``json_loads`` is un-suppressed on the JSON content-type path), which a narrow
+    # ``except ValidationError`` misses. The floor must catch, floor, and re-raise it too.
+    ran: list[_Body] = []
+    broker = KafkaBroker(middlewares=[DecodeFloorMiddleware])
+
+    @broker.subscriber("n.in")
+    async def node(body: _Body) -> None:
+        ran.append(body)
+
+    async with TestKafkaBroker(broker):
+        with caplog.at_level(logging.ERROR, logger=_MW_LOGGER):
+            with pytest.raises(json.JSONDecodeError):  # re-raised after flooring (no empty-body publish)
+                await broker.publish(b"{not valid json", "n.in", headers={"content-type": "application/json"})
+
+    assert ran == []  # the handler never ran — the decode failed first
+    assert "calf.delivery.undecodable" in caplog.text  # floored, typed
+
+
+async def test_bad_utf8_with_text_content_type_is_floored_and_reraised(caplog: pytest.LogCaptureFixture) -> None:
+    # A ``text/plain`` body with invalid UTF-8 raises ``UnicodeDecodeError`` at decode
+    # (``body.decode()``), which a narrow ``except ValidationError`` misses too.
+    ran: list[_Body] = []
+    broker = KafkaBroker(middlewares=[DecodeFloorMiddleware])
+
+    @broker.subscriber("n.in")
+    async def node(body: _Body) -> None:
+        ran.append(body)
+
+    async with TestKafkaBroker(broker):
+        with caplog.at_level(logging.ERROR, logger=_MW_LOGGER):
+            with pytest.raises(UnicodeDecodeError):  # re-raised after flooring (no empty-body publish)
+                await broker.publish(b"\xff\xfe\xfa", "n.in", headers={"content-type": "text/plain"})
 
     assert ran == []  # the handler never ran — the decode failed first
     assert "calf.delivery.undecodable" in caplog.text  # floored, typed

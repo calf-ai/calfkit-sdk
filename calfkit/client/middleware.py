@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -38,13 +39,14 @@ class DecodeFloorMiddleware(BaseMiddleware):
     An inbound message whose body fails to decode/validate never reaches a handler — FastStream
     captures the error, logs generically, and the ack-first offset means the message is gone (the
     silent-drop hole on the decode path, below the chokepoint ``BaseNodeDef.handler``). This shim
-    catches the decode ``ValidationError`` in :meth:`consume_scope` (verified empirically on
-    FastStream 0.7.1: BOTH a non-JSON parser failure and a missing-field validator failure surface
-    there as a pydantic ``ValidationError`` — so a single ``consume_scope`` override suffices, and
-    the §6.7 "parser-stage failures bypass ``consume_scope`` / hook both paths" caveat does not
-    hold on 0.7.1), FLOORS a typed ``calf.delivery.undecodable`` event (ERROR + the transport
-    metadata that survives an unreadable body — the correlation id + the clamped decode error),
-    then **re-raises**.
+    catches decode failures in :meth:`consume_scope` — on FastStream 0.7.1 (verified) these are a
+    pydantic ``ValidationError`` (a schema mismatch, or a non-JSON body with no JSON content-type,
+    which the content-type-less decode path hands to pydantic) **and** a ``json.JSONDecodeError`` /
+    ``UnicodeDecodeError`` (a malformed body carrying a JSON/text content-type, which FastStream
+    decodes un-suppressed before the handler). A single ``consume_scope`` override catching that union
+    suffices, so the §6.7 "parser-stage failures bypass ``consume_scope``" caveat does not bite here.
+    It FLOORS a typed ``calf.delivery.undecodable`` event (ERROR + the transport metadata that
+    survives an unreadable body — the correlation id + the clamped decode error), then **re-raises**.
 
     Re-raising is load-bearing (verified): suppressing lets FastStream treat the hop as success and
     push an empty body (``b''``) through any attached ``@publisher`` (the §6.7 empty-payload trap).
@@ -61,7 +63,7 @@ class DecodeFloorMiddleware(BaseMiddleware):
     ) -> Any:
         try:
             return await super().consume_scope(call_next, msg)
-        except ValidationError as exc:
+        except (ValidationError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             correlation_id = getattr(msg, "correlation_id", None)
             report = ErrorReport.build_safe(
                 error_type=FaultTypes.DELIVERY_UNDECODABLE,

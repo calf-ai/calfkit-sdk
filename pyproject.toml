@@ -21,7 +21,7 @@ classifiers = [
 requires-python = ">=3.10"
 
 dependencies = [
-    "faststream[kafka]>=0.6.6",
+    "faststream[kafka]>0.7",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "uuid-utils>=0.14.0",
