@@ -102,15 +102,13 @@ Start one locally with Docker:
 git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
 ```
 
-Or skip the setup, and enable international, cross-host agents with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8), a fully-managed agent mesh.
+Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8) — a fully-managed agent mesh your agents can join from anywhere.
 
 ## Why Calfkit?
 
-Calfkit teams are alive: agents find each other, call in specialists, and grow more capable on their own.
-
-- **A team that grows itself.** Drop a new specialist or tool onto the network and every agent can use it instantly — discovered at runtime, no redeploys, no rewiring. Your team gets more capable every time you ship.
-- **A decentralized swarm with no central bottleneck.** No orchestrator to choke, no single brain to rewrite — every agent, tool, and consumer is its own microservice, scaling on its own and collaborating peer-to-peer. The team grows without ever getting tangled.
-- **Agents that live on real-time data.** They run on event streams — reacting to market feeds, sensors, or user activity the moment it lands, and piping results anywhere downstream. Always-on and connected, not one-shot prompts.
+- **Dynamic agent-to-agent discovery and collaboration.** Agents find each other at runtime and work together — messaging each other and handing off tasks — so you build multi-agent systems without complex wiring or orchestration, and extend team capabilities at any time.
+- **No bottleneck, no single point of failure.** Every agent runs and scales as an independent microservice, so the agent teams are resilient and scalable from day one.
+- **Acts on live data in realtime.** Agents are event-driven so they act on realtime data streams, sending live results wherever they're needed — build agents that work like continuous workflows, not one-off requests.
 
 ## Examples
 
