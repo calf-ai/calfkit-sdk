@@ -80,8 +80,10 @@ import asyncio
 from calfkit import Client
 
 async def main():
-    async with Client.connect("<calfkit_agent_mesh>") as client:
-        result = await client.agent("general").execute("Do I have enough money to afford a new car?")
+    async with Client.connect("<calfkit_agent_mesh_url>") as client:
+        result = await client.agent(name="general").execute(
+            "Do I have enough money to afford a new car?"
+        )
         print(result.output)
         # LOL nah twin
 
