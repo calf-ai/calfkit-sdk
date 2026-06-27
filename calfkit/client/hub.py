@@ -1,11 +1,7 @@
-"""The client's single inbox reader + per-run demultiplexer — the hub (spec §5.1/§5.2).
-
-Built **standalone** here; wired into ``Client.connect()`` at the Commit-6 cutover (the shipped
-``_ReplyDispatcher`` path is untouched until then). This module owns:
+"""The client's single inbox reader + per-run demultiplexer — the hub (spec §5.1/§5.2). It owns:
 
 - :class:`_RunChannel` — the per-run in-memory channel (lossless, closed-once, replayable terminal);
-- :class:`InvocationHandle` — the channel-bearing per-run handle (``result()``/``stream()`` land in
-  a later commit);
+- :class:`InvocationHandle` — the channel-bearing per-run handle (``result()`` / ``stream()``);
 - the hub — a groupless topic-subscribe FastStream handler that classifies ``x-calf-kind`` and
   demuxes each reply by ``correlation_id`` into the owning handle's channel.
 """
@@ -153,9 +149,8 @@ class InvocationHandle(Generic[OutputT]):
 class _Hub:
     """The client's single inbox reader + per-run demultiplexer (spec §5.1/§5.2).
 
-    Standalone in v1; wired into ``Client.connect()`` at the Commit-6 cutover. Holds a **weak**
-    ``correlation_id → handle`` routing map so a dropped handle self-GCs (memory bounded by the
-    handles the caller holds). The handler classifies ``x-calf-kind`` and pushes the matching
+    Holds a **weak** ``correlation_id → handle`` routing map so a dropped handle self-GCs (memory
+    bounded by the handles the caller holds). The handler classifies ``x-calf-kind`` and pushes the matching
     terminal into the owning handle's channel; pushes are synchronous and non-blocking (no per-run
     ``asyncio`` task — spec §5.2).
     """
@@ -184,7 +179,7 @@ class _Hub:
         """Register the hub's groupless reply subscriber on the inbox — a **topic** subscription with
         ``group_id=None`` (no consumer group / commits / rebalance; aiokafka auto-assigns all partitions)
         and ``auto_offset_reset="latest"`` (tail). Pure bookkeeping; started by the first
-        ``broker.start()`` (spec §2.7/§5.1). Called at ``connect()`` in the Commit-6 cutover."""
+        ``broker.start()`` (spec §2.7/§5.1). Called from ``connect()``."""
 
         @broker.subscriber(inbox_topic, group_id=None, auto_offset_reset="latest")
         async def _handle_reply(
@@ -199,10 +194,9 @@ class _Hub:
     def _on_reply(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any]) -> None:
         """Classify an inbound reply by ``x-calf-kind`` and demux it into the owning run's channel.
 
-        Split out of the FastStream subscriber closure for unit-testability (like the old
-        ``_ReplyDispatcher._on_reply``). Mirrors that stamping so ``result()``'s ``from_envelope``
-        projects correctly: the transport identity + the per-delivery reply slot are stamped onto
-        the context before the terminal is built.
+        Split out of the FastStream subscriber closure for unit-testability. Stamps the transport
+        identity + the per-delivery reply slot onto the context before building the terminal, so
+        ``result()``'s ``from_envelope`` projects correctly.
         """
         kind = decode_header_str(headers.get(HDR_KIND))
         emitter = decode_header_str(headers.get(HDR_EMITTER))

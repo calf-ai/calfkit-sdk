@@ -88,11 +88,14 @@ class EventStream:
         # The client passes its guarded broker start here: a pure-observer client brings the broker up
         # via its first events() (else the subscriber never starts and the stream would hang, §5.1).
         self._on_enter = on_enter
-        # Outlet registration + the broker start happen in __aenter__; iterating un-entered would
-        # register nothing, never start the broker, and park forever — so guard it (CRITICAL).
+        # Outlet registration + the broker start happen in __aenter__, and the outlet is removed on
+        # __aexit__; iterating un-entered (or after exit) would have no registered outlet, so it would
+        # never receive an event and park forever — guard both states (CRITICAL).
         self._entered = False
+        self._closed = False
 
     _NOT_ENTERED = "client.events() must be entered before iterating: `async with client.events() as stream:`"
+    _CLOSED = "client.events() stream is closed (its `async with` block exited); open a new events() stream to keep observing."
 
     async def __aenter__(self) -> EventStream:
         if self._on_enter is not None:
@@ -103,18 +106,24 @@ class EventStream:
 
     async def __aexit__(self, *exc: object) -> None:
         self._hub._remove_outlet(self)
+        self._closed = True
 
-    def __aiter__(self) -> EventStream:
+    def _check_usable(self) -> None:
+        # A bare `async for` (never entered) registered no outlet + never started the broker; a
+        # post-exit iteration lost its outlet. Either way the reader would park forever — raise instead.
+        if self._closed:
+            raise RuntimeError(self._CLOSED)
         if not self._entered:
             raise RuntimeError(self._NOT_ENTERED)
+
+    def __aiter__(self) -> EventStream:
+        self._check_usable()
         return self
 
     async def __anext__(self) -> RunEvent:
         # The firehose is open-ended: park until an event is buffered, then drain in order. The reader
-        # exits via the async-CM (or its own timeout), never StopAsyncIteration. A bare `async for`
-        # (no `async with`) registered no outlet and never started the broker — raise, don't hang.
-        if not self._entered:
-            raise RuntimeError(self._NOT_ENTERED)
+        # exits via the async-CM (or its own timeout), never StopAsyncIteration.
+        self._check_usable()
         while True:
             if self._buffer:
                 return self._buffer.popleft()

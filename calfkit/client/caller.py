@@ -1,13 +1,8 @@
-"""The new caller-surface ``Client`` (spec §2) — built standalone in this module.
+"""The caller-surface ``Client`` (spec §2) — calfkit's client entry point.
 
-This is the redesigned client: a lazy+sync :meth:`Client.connect`, a typed :meth:`agent` gateway
-(Commit 5), the per-run handle (Commit 4), and the cross-run :meth:`events` firehose. It owns one
-unstarted broker + one :class:`~calfkit.client.hub._Hub` (the single groupless inbox reader, tee'd
-to per-run channels and firehose outlets).
-
-It lives **alongside** the shipped ``calfkit.client.base.BaseClient`` / ``client.Client`` until the
-Commit-6 cutover repoints ``calfkit.Client`` here and deletes the old surface (so the old client's
-reply subscriber and this hub never both consume the inbox during the transition).
+A lazy+sync :meth:`Client.connect`, a typed :meth:`agent` gateway, the per-run handle, and the
+cross-run :meth:`events` firehose. It owns one broker + one :class:`~calfkit.client.hub._Hub` (the
+single groupless inbox reader, tee'd to per-run channels and firehose outlets).
 """
 
 from __future__ import annotations
@@ -268,7 +263,13 @@ class Client:
 
     async def aclose(self) -> None:
         """Graceful shutdown (spec §5.8): resolve every pending ``result()`` with ``ClientClosedError``,
-        then stop the broker's reader."""
+        then stop the broker's reader.
+
+        **Co-located ``Worker`` ownership:** the broker is SHARED with a co-located ``Worker``, and
+        this stops it. In co-located mode let the ``Worker`` own the broker lifecycle (``async with
+        worker:``) and do **not** also close the client as a context manager / call ``aclose()`` while
+        the Worker is serving, or you stop the broker out from under it. Standalone clients close
+        normally."""
         self._hub.close()
         if self._broker._connection:
             await self._broker.stop()

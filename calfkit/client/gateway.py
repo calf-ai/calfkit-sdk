@@ -1,7 +1,5 @@
-"""The caller-surface agent gateway (spec §2.2).
-
-v1 lands the ``Dispatch`` fire token here; the ``AgentGateway`` + verb triad
-(``send`` / ``start`` / ``execute``) arrive in a later commit.
+"""The caller-surface agent gateway (spec §2.2): the ``Dispatch`` fire token, the typed
+``AgentGateway``, and the verb triad ``send`` / ``start`` / ``execute``.
 """
 
 from __future__ import annotations

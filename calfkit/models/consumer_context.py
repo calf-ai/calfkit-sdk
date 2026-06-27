@@ -86,8 +86,9 @@ class ConsumerContext(Generic[OutputT]):
         so the consumer needs no separate resources plumbing.
 
         Raises:
-            DeserializationError / pydantic.ValidationError: only when the reply
-            parts are present but don't match ``output_type``.
+            DeserializationError: only when the reply parts are present but don't
+            match ``output_type`` (``project_output`` wraps a structured-output
+            ``pydantic.ValidationError`` into this closed-set error).
         """
         return cls(
             output=project_output(ctx._reply, output_type, strict=False, type_adapter=type_adapter),

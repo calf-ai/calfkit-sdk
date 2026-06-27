@@ -171,11 +171,12 @@ class InvocationResult(Generic[OutputT]):
             (always present — ``InvocationResult`` is client-only and always strict).
 
         Raises:
-            DeserializationError: If the expected content part is not found in the reply
-                parts (always strict here — an empty reply raises), OR a structured
-                ``output_type`` is provided and the matching ``DataPart.data`` is present
-                but doesn't validate against it (the closed-set error per spec §2.5 — the
-                raw ``pydantic.ValidationError`` is wrapped by :func:`project_output`).
+            DeserializationError: when projection fails — no matching content part for a
+                structured / auto-detect ``output_type`` (an empty/absent reply raises here,
+                always strict), OR a present ``DataPart`` that fails a structured
+                ``output_type`` (the closed-set error per spec §2.5 — :func:`project_output`
+                wraps the raw ``pydantic.ValidationError``). ``output_type=str`` never raises
+                here: it coerces any reply to a string (even an empty reply → ``""``).
             pydantic.PydanticSchemaGenerationError: If ``type_adapter`` is ``None``
                 and ``output_type`` cannot be schematized by :class:`TypeAdapter`.
         """

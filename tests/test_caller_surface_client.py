@@ -82,14 +82,56 @@ async def test_ensure_started_starts_the_broker_at_most_once() -> None:
 
 async def test_ensure_started_skips_start_when_the_broker_is_already_running() -> None:
     # A co-located Worker's app.start() set broker.running=True before the client dispatched. The
-    # client must detect that via `running` (the subscribers-are-up signal) and NOT re-start —
-    # gating on the producer-only `_connection` would publish into a not-yet-consuming inbox.
+    # client must detect that via `running` (the subscribers-are-up signal) and NOT re-start. NOTE:
+    # `_connection` is deliberately left unset here so the test isolates the `running` clause — with
+    # `_connection` also set it would pass under the old `_connection`-gate too (non-discriminating).
     client = Client.connect("localhost:9092", inbox_topic="i")
     client._broker.start = AsyncMock()
-    client._broker._connection = object()  # producer connected, but the readiness signal is `running`
     client._broker.running = True  # the Worker fully started the shared broker (subscribers up)
     await client._ensure_started()
     client._broker.start.assert_not_awaited()
+
+
+async def test_ensure_started_starts_when_producer_connected_but_not_yet_running() -> None:
+    # THE discriminating case for the M1 fix: the producer connected (`_connection` set) but the
+    # subscribers are NOT yet consuming (`running` False) — e.g. mid-way through a co-located Worker's
+    # app.start(). The OLD gate (on `_connection`) would fast-return and publish into a not-yet-
+    # consuming inbox (the silent reply-loss bug); the NEW gate (on `running`) starts to bring the
+    # subscribers up. This test PASSES on the fix and FAILS on the old `_connection`-gate.
+    client = Client.connect("localhost:9092", inbox_topic="i")
+    client._broker.start = AsyncMock()
+    client._broker._connection = object()  # producer up...
+    client._broker.running = False  # ...but the subscribers are NOT yet consuming
+    await client._ensure_started()
+    client._broker.start.assert_awaited_once()
+
+
+async def test_ensure_started_is_concurrency_safe() -> None:
+    # A concurrent first dispatch + events() must start the broker EXACTLY once — the lock + the
+    # in-lock re-check serialize them (broker.start() is not self-idempotent).
+    client = Client.connect("localhost:9092", inbox_topic="i")
+    started = 0
+
+    async def _slow_start() -> None:
+        nonlocal started
+        await asyncio.sleep(0)  # yield so the gathered callers actually interleave
+        started += 1
+
+    client._broker.start = AsyncMock(side_effect=_slow_start)
+    await asyncio.gather(client._ensure_started(), client._ensure_started(), client._ensure_started())
+    assert started == 1
+    client._broker.start.assert_awaited_once()
+
+
+async def test_ensure_started_restarts_after_aclose() -> None:
+    # aclose() resets `_started` (the broker is stopped), so a reused client correctly re-starts it
+    # rather than fast-returning into a dead broker.
+    client = Client.connect("localhost:9092", inbox_topic="i")
+    client._broker.start = AsyncMock()
+    await client._ensure_started()  # start #1
+    await client.aclose()  # stops the broker (no-op here) + resets _started
+    await client._ensure_started()  # start #2 — the broker was stopped
+    assert client._broker.start.await_count == 2
 
 
 async def test_events_firehose_yields_a_reply_published_to_the_inbox() -> None:
@@ -111,6 +153,17 @@ async def test_events_iterated_without_async_with_raises_not_hangs() -> None:
     stream = client.events()
     with pytest.raises(RuntimeError, match="async with"):
         await anext(stream)
+
+
+async def test_events_iterated_after_async_with_exits_raises_not_hangs() -> None:
+    # Iterating a stashed events() stream AFTER its `async with` block exited (the outlet was
+    # removed) must raise, not hang — the same hang-class as the bare-async-for, post-exit trigger.
+    client = Client.connect("localhost:9092", inbox_topic="inbox.t")
+    async with TestKafkaBroker(client._broker):
+        async with client.events() as stream:
+            pass  # enter then exit
+        with pytest.raises(RuntimeError, match="closed"):
+            await anext(stream)
 
 
 async def test_aclose_resolves_pending_runs_with_client_closed_error() -> None:
