@@ -15,17 +15,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, overload
 
 import uuid_utils
 from faststream.kafka import KafkaBroker
 
-from calfkit._protocol import is_topic_safe
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, is_topic_safe
+from calfkit._types import OutputT
+from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
+from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client.base import _new_client_emitter_id
 from calfkit.client.events import DEFAULT_FIREHOSE_BUFFER_SIZE, EventStream
+from calfkit.client.gateway import AgentGateway
 from calfkit.client.hub import _Hub
 from calfkit.client.middleware import ContextInjectionMiddleware, DecodeFloorMiddleware
+from calfkit.models.agents import derive_input_topic
+from calfkit.models.envelope import Envelope
+from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
+from calfkit.models.state import OverridesState, State
+from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, normalize_tool_bindings
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +137,32 @@ class Client:
         """The named topic this client receives its runs' events + terminal replies on (spec §6)."""
         return self._inbox_topic
 
+    # Four overloads (spec §2.2): a dedicated no-output_type form per address so the str default is
+    # actually bound — a `= str` parameter default does NOT bind a TypeVar (OutT would fall back to Any).
+    @overload
+    def agent(self, name: str) -> AgentGateway[str]: ...
+    @overload
+    def agent(self, name: str, *, output_type: type[OutputT]) -> AgentGateway[OutputT]: ...
+    @overload
+    def agent(self, *, topic: str) -> AgentGateway[str]: ...
+    @overload
+    def agent(self, *, topic: str, output_type: type[OutputT]) -> AgentGateway[OutputT]: ...
+    def agent(self, name: str | None = None, *, topic: str | None = None, output_type: type[Any] = str) -> AgentGateway[Any]:
+        """Mint a typed gateway to **one** destination (spec §2.2), addressed **exactly one** of two
+        ways: by ``name`` (a deployed agent — derives its Private input topic, ADR-0017) or by
+        ``topic=`` (the escape hatch for a non-derived topic). ``output_type`` binds once at mint
+        (default ``str`` — extract the text reply; a structured-output agent requires
+        ``output_type=Model``, else a ``DataPart`` reply is a loud ``DeserializationError``)."""
+        if name is not None and topic is not None:
+            raise ValueError("agent() takes exactly one of `name` (a deployed agent) or `topic=` (the escape hatch), not both.")
+        if name is not None:
+            resolved = derive_input_topic(name)
+        elif topic is not None:
+            resolved = topic
+        else:
+            raise ValueError("agent() requires exactly one of `name` (a deployed agent) or `topic=` (the escape hatch).")
+        return AgentGateway(self, resolved, output_type)
+
     def events(self, *, terminal_only: bool = False) -> EventStream:
         """The cross-run firehose (spec §3.2) over this client's one configured inbox — every reply on
         it while open, demuxed by the caller. Best-effort (bounded drop-oldest, ``firehose_buffer_size``);
@@ -163,3 +198,65 @@ class Client:
 
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
+
+    # ── shared verb machinery (called by AgentGateway.send/start/execute) ──
+
+    def _merge_deps(self, deps: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Merge per-call ``deps`` **over** the ambient ``deps_factory`` seed (spec §2.3)."""
+        if self._deps_factory is None:
+            return deps
+        merged = self._deps_factory()
+        if deps:
+            merged.update(deps)
+        return merged
+
+    def _build_state_and_overrides(
+        self,
+        user_prompt: str,
+        *,
+        correlation_id: str | None,
+        temp_instructions: str | None,
+        message_history: list[ModelMessage] | None,
+        tool_overrides: Sequence[ToolBinding | ToolProvider] | None,
+        model_settings: ModelSettings | dict[str, Any] | None,
+        author: str | None,
+    ) -> tuple[str, State, OverridesState | None]:
+        """Shape the per-call input: default ``correlation_id`` to a fresh uuid7, build the ``State``
+        from the prompt + history (stamping ``author``), and build the ``OverridesState`` (or ``None``).
+        **No ``model_settings`` JSON pre-flight** (dropped per spec §2.5): a non-serializable ``deps`` /
+        ``model_settings`` bubbles from ``publish``, not a call-site check."""
+        if correlation_id is None:
+            correlation_id = uuid_utils.uuid7().hex
+        state = State(message_history=message_history or [], temp_instructions=temp_instructions)
+        state.stage_message(ModelRequest.user_text_prompt(user_prompt, name=author))
+        overrides = (
+            OverridesState(
+                override_agent_tools=normalize_tool_bindings(tool_overrides) if tool_overrides is not None else None,
+                model_settings=dict(model_settings) if model_settings is not None else None,
+            )
+            if tool_overrides is not None or model_settings is not None
+            else None
+        )
+        return correlation_id, state, overrides
+
+    async def _publish_call(
+        self,
+        *,
+        topic: str,
+        correlation_id: str,
+        state: State,
+        overrides: OverridesState | None,
+        deps: dict[str, Any] | None,
+    ) -> None:
+        """Publish ONE call envelope to *topic* (spec §2.6): an ``Envelope`` carrying the session
+        ``State`` + ``deps`` and a pushed ``CallFrame`` whose ``callback_topic`` is this client's inbox,
+        plus the emitter headers + ``x-calf-kind=call``. Keyed by ``correlation_id``. (No route/body —
+        those stay on the lower-level node-call surface, spec §9.2.)"""
+        call_stack = CallFrameStack()
+        call_stack.push(CallFrame(target_topic=topic, callback_topic=self._inbox_topic, overrides=overrides))
+        envelope = Envelope(
+            internal_workflow_state=WorkflowState(call_stack=call_stack),
+            context=SessionRunContext(state=state, deps={} if deps is None else deps),
+        )
+        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call"}
+        await self._broker.publish(envelope, topic=topic, correlation_id=correlation_id, headers=headers)
