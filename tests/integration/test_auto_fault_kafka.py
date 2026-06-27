@@ -51,6 +51,17 @@ class SchemaNode(NodeDef[State]):
         return ReturnCall(state=ctx.state, value="created")
 
 
+async def _publish_routed(driver: Client, topic: str, prompt: str, *, route: str, body: object = None) -> None:
+    """Send a reply-owing routed call via the internal lower-level path: route/body are NOT on the
+    public gateway verbs (spec §9.2), so a routed client dispatch goes through ``_publish_call``
+    directly. ``callback_topic`` is the client's inbox, so the delivery is reply-owing."""
+    cid, state, overrides = driver._build_state_and_overrides(
+        prompt, correlation_id=None, temp_instructions=None, message_history=None, tool_overrides=None, model_settings=None, author=None
+    )
+    await driver._ensure_started()
+    await driver._publish_call(topic=topic, correlation_id=cid, state=state, overrides=overrides, deps=None, route=route, body=body)
+
+
 async def test_reply_owing_all_declined_auto_faults(kafka_bootstrap: str, topic_namespace: str) -> None:
     """R-1: a reply-owing delivery on a route no handler matches auto-faults
     ``calf.delivery.rejected`` with ``details.reason='all_declined'`` — the caller is
@@ -64,16 +75,16 @@ async def test_reply_owing_all_declined_auto_faults(kafka_bootstrap: str, topic_
 
     try:
         async with worker, fault_tap(kafka_bootstrap, node_pub) as tap:
-            # A reply is owed (start registers a future), but the route matches no handler.
-            await driver.start("go", node_in, route="unknown.route")
+            # A reply is owed (the call's callback is the client inbox), but the route matches no handler.
+            await _publish_routed(driver, node_in, "go", route="unknown.route")
 
             fault, headers = await tap.next_fault(timeout=60)
             assert fault.error.error_type == FaultTypes.DELIVERY_REJECTED
             assert headers[HDR_ERROR_TYPE] == FaultTypes.DELIVERY_REJECTED
             assert fault.error.details[FaultTypes.REASON] == FaultTypes.REASON_ALL_DECLINED
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_reply_owing_schema_rejection_auto_faults(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -89,12 +100,12 @@ async def test_reply_owing_schema_rejection_auto_faults(kafka_bootstrap: str, to
     try:
         async with worker, fault_tap(kafka_bootstrap, node_pub) as tap:
             # the route matches "create", but the body does not satisfy Order(amount: int)
-            await driver.start("go", node_in, route="create", body={"wrong": "shape"})
+            await _publish_routed(driver, node_in, "go", route="create", body={"wrong": "shape"})
 
             fault, headers = await tap.next_fault(timeout=60)
             assert fault.error.error_type == FaultTypes.DELIVERY_REJECTED
             assert headers[HDR_ERROR_TYPE] == FaultTypes.DELIVERY_REJECTED
             assert fault.error.details[FaultTypes.REASON] == FaultTypes.REASON_SCHEMA_REJECTED
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()

@@ -43,7 +43,7 @@ Keep these distinct:
   `result.resources["key"]`). The read side is typed as a read-only `Mapping`, so
   `ctx.resources[...] = ...` is a type error.
 - **`deps`** are per-request, JSON-serializable values the caller passes at invoke
-  time (`client.execute(..., deps={...})`). They ride along on the Kafka
+  time (`client.agent(name).execute(..., deps={...})`). They ride along on the Kafka
   envelope and are read by tools as `ctx.deps["key"]`.
 
 Use `resources` for connections you open once and reuse; use `deps` for

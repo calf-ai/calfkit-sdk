@@ -151,7 +151,7 @@ async def test_fanout_agent_opens_real_store_and_resumes_over_the_wire(kafka_boo
         assert f"calf.fanout.{agent_id}.state" in topics
         assert f"calf.fanout.{agent_id}.basestate" in topics
 
-        result = await client.execute("call both tools", agent_in, timeout=120)
+        result = await client.agent(topic=agent_in).execute("call both tools", timeout=120)
 
     # The agent resumed past the durable close to its final result.
     assert result.output is not None and "done" in result.output
@@ -171,7 +171,7 @@ async def test_fanout_agent_opens_real_store_and_resumes_over_the_wire(kafka_boo
     fanned = [p for p in model_turns[0].parts if isinstance(p, ToolCallPart)]
     assert {p.tool_name for p in fanned} == {"fanout_tool_a", "fanout_tool_b"}
 
-    await client.close()
+    await client.aclose()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -280,7 +280,7 @@ async def test_graceful_rebalance_continues_batch_on_new_owner(kafka_bootstrap: 
         async with owner1:
             # Kick off the invocation; owner-1 OPENs the durable batch and fans
             # out the two (now-blocked) siblings. Don't await the reply yet.
-            handle = await driver.start("call both tools", agent_in)
+            handle = await driver.agent(topic=agent_in).start("call both tools")
 
             # Both siblings reached the tools => owner-1's OPEN ran, the durable
             # batch is written, and the siblings are published and parked on the
@@ -309,7 +309,7 @@ async def test_graceful_rebalance_continues_batch_on_new_owner(kafka_bootstrap: 
     model_turns = [m for m in result.message_history if isinstance(m, ModelResponse)]
     assert len(model_turns) == 2
 
-    await driver.close()
-    await tools_worker._client.close()
-    await owner1._client.close()
-    await owner2._client.close()
+    await driver.aclose()
+    await tools_worker._client.aclose()
+    await owner1._client.aclose()
+    await owner2._client.aclose()

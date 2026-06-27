@@ -163,7 +163,7 @@ async def test_worker_wiring_round_trip(kafka_bootstrap: str, topic_namespace: s
     `@resource` (looked up under `control_plane_writer_key`) — so the worker-registers ↔
     publisher-looks-up key seam is exercised end-to-end, not via a hand-built publisher.
     """
-    from calfkit.client.client import Client
+    from calfkit.client import Client
     from calfkit.provisioning import ProvisioningConfig
     from calfkit.worker.worker import Worker
 

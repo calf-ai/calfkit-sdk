@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from calfkit.client.client import Client
+from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneStamp
 from calfkit.controlplane.publisher import control_plane_writer_key
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord, record_to_bindings

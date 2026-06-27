@@ -126,14 +126,14 @@ async def test_discovered_tool_node_roundtrips_over_the_wire(kafka_bootstrap: st
     async with tool_worker:
         await _await_capability(kafka_bootstrap, tool_name, timeout=60)
         async with agent_worker:
-            result = await driver.execute("add 2 and 3", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert tool_returns(result.message_history)[tool_name] == 5
 
-    await driver.close()
-    await tool_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await tool_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_model_pov_matches_the_advertised_tool(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -180,7 +180,7 @@ async def test_model_pov_matches_the_advertised_tool(kafka_bootstrap: str, topic
         # The source of truth the agent reads: what the tool node advertised on the view.
         await _await_view(kafka_bootstrap, _capture_advertised, timeout=60, what=f"advertised tools for {tool_name!r}")
         async with agent_worker:
-            result = await driver.execute("add 2 and 3", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3", timeout=120)
 
     # 1) the call drawn from the advertised tool round-tripped to a finalized turn
     assert result.output is not None and FINAL_OUTPUT in result.output
@@ -198,9 +198,9 @@ async def test_model_pov_matches_the_advertised_tool(kafka_bootstrap: str, topic
     # 4) the discovered tool reached the model with its real args
     assert {"a", "b"} <= set(pov[tool_name].parameters_json_schema.get("properties", {}))
 
-    await driver.close()
-    await tool_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await tool_worker._client.aclose()
+    await agent_worker._client.aclose()
 
 
 async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -233,7 +233,7 @@ async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str
     async with tool_worker:
         await _await_capability(kafka_bootstrap, tool_name, timeout=60)
         async with agent_worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("add with bad args", agent_in)  # reply owed; the discovered binding dispatches the bad args
+            await driver.agent(topic=agent_in).start("add with bad args")  # reply owed; the discovered binding dispatches the bad args
 
             fault, headers = await tap.next_fault(timeout=60)
             # The bad args reached the tool node (the discovered binding did NOT validate
@@ -243,6 +243,6 @@ async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str
             assert fault.error.error_type == FaultTypes.UNHANDLED
             assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) is not None  # the tool's exception class
 
-    await driver.close()
-    await tool_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await tool_worker._client.aclose()
+    await agent_worker._client.aclose()

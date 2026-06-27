@@ -49,12 +49,12 @@ async def test_oversized_fault_strips_to_minimal_and_still_arrives(kafka_bootstr
         tools=[oversized_fault],
         sequential_only_mode=True,
     )
-    driver = Client.connect(kafka_bootstrap, reply_topic=reply_topic)
+    driver = Client.connect(kafka_bootstrap, inbox_topic=reply_topic)
     worker = fault_worker(kafka_bootstrap, nodes=[agent, oversized_fault])
 
     try:
         async with worker, fault_tap(kafka_bootstrap, reply_topic) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
 
             fault, _ = await tap.next_fault(timeout=60)
             # identity survives; the heavy parts were stripped to fit
@@ -63,5 +63,5 @@ async def test_oversized_fault_strips_to_minimal_and_still_arrives(kafka_bootstr
             assert fault.error.causes == []
             assert fault.error.frame_chain == []
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()

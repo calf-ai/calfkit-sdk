@@ -90,7 +90,7 @@ class Worker(LifecycleHookMixin):
             extra_subscribe_kwargs: Forwarded to ``broker.subscriber(...)``.
             id: Stable wire identity for this worker (e.g. for fleet presence).
                 Validated non-empty; a uuid7 hex is generated when ``None``.
-                Read-only after construction — mirrors ``BaseClient.emitter_id``.
+                Read-only after construction — mirrors the client's emitter id.
             name: Display-only label; defaults to ``id``. Never put on the wire.
             control_plane: Optional tuning for the control-plane substrate
                 (heartbeat interval, staleness, catch-up timeout, bootstrap

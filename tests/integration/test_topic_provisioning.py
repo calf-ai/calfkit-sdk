@@ -237,7 +237,7 @@ async def test_flag_off_does_not_silently_create_topic() -> None:
     out = _unique("calf-it-off.out")
 
     client = Client.connect(BOOTSTRAP)  # provisioning defaults to disabled
-    assert client.provisioning.enabled is False
+    assert client._provisioning.enabled is False  # provisioning is private (experimental, hidden)
     worker = Worker(client, nodes=[_tool_node("off_echo", inbox, out)])
 
     async with _admin() as admin:
@@ -257,7 +257,7 @@ async def test_flag_off_does_not_silently_create_topic() -> None:
             "or calfkit silently created it"
         )
 
-    await client.close()
+    await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -296,9 +296,9 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
     # delivers. This raw-publish round-trip never invokes the client, so the
     # lazy reply-topic provisioning on the invoke path doesn't fire; create it
     # explicitly here (as a framework topic, so user ``topic_configs`` skip it).
-    await TopicProvisioner.from_connection(server_urls=BOOTSTRAP, config=client.provisioning).provision(
-        [client.reply_topic],
-        framework_topics={client.reply_topic},
+    await TopicProvisioner.from_connection(server_urls=BOOTSTRAP, config=client._provisioning).provision(
+        [client.inbox_topic],
+        framework_topics={client.inbox_topic},
     )
 
     async with _running_worker(worker), _admin() as admin:
@@ -317,7 +317,7 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
 
         assert received == ["ping"], f"round-trip over provisioned topic {inbox!r} did not deliver (received={received!r})"
 
-    await client.close()
+    await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +399,7 @@ async def test_issue_180_bare_broker_start_provisions_reply_topic() -> None:
     """ENABLED client + a DIRECT ``client.broker.start()`` returns (it HUNG
     before the fix) and the reply topic exists — the exact #180 repro."""
     reply = f"calf-test-180-{uuid.uuid4().hex[:8]}.reply"
-    client = Client.connect(BOOTSTRAP, reply_topic=reply, provisioning=ProvisioningConfig(enabled=True))
+    client = Client.connect(BOOTSTRAP, inbox_topic=reply, provisioning=ProvisioningConfig(enabled=True))
     try:
         # An infinite hang before the fix; the bounded wait turns a regression
         # into a clear failure rather than a stuck suite.
@@ -407,7 +407,7 @@ async def test_issue_180_bare_broker_start_provisions_reply_topic() -> None:
         async with _admin() as admin:
             await _await_topics_visible(admin, [reply])
     finally:
-        await client.close()
+        await client.aclose()
 
 
 async def test_issue_180_worker_run_does_not_hang_on_reply_topic() -> None:
@@ -417,7 +417,7 @@ async def test_issue_180_worker_run_does_not_hang_on_reply_topic() -> None:
     broker start, so the reply consumer never looped on missing metadata."""
     inbox = f"calf-test-180-{uuid.uuid4().hex[:8]}.in"
     client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
-    reply = client.reply_topic
+    reply = client.inbox_topic
 
     @consumer(subscribe_topics=inbox)
     async def _sink(result: Any) -> None:

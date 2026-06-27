@@ -1,148 +1,230 @@
 # How to call nodes from a client
 
-The `Client` supports multi-turn conversations, runtime dependency injection,
-temporary instruction overrides, and one-way dispatch with an optional return
-address — all without redeploying the agent.
+The `Client` connects to the broker once and mints a typed **gateway** per agent.
+Each gateway speaks one verb triad — `send` / `start` / `execute` — and supports
+multi-turn conversations, runtime dependency injection, temporary instruction
+overrides, and per-call structured output, all without redeploying the agent.
 
 See also: [CLI reference](cli.md) · [Worker lifecycle](worker-lifecycle.md) ·
-[Consumer nodes](consumer-nodes.md) · [Policy seams](policy-seams.md).
+[Consumer nodes](consumer-nodes.md) · [Policy seams](policy-seams.md) ·
+[Errors & faults](error-handling.md).
+
+## Connect once, then mint a gateway
+
+`Client.connect()` is **synchronous and lazy** — it does no I/O until the first
+dispatch, so a connection error surfaces from your first `send`/`start`/`execute`,
+not from `connect()`. Mint a gateway to one agent with `client.agent(name)`:
+
+```python
+from calfkit import Client
+
+client = Client.connect("localhost:9092")
+result = await client.agent("weather_agent").execute("What's the weather in Tokyo?")
+print(result.output)
+```
+
+`client.agent(name)` addresses a **deployed agent by name** — the name derives the
+agent's private input topic, so you never handle a raw topic. For the rare case of
+a topic that is *not* an agent's derived input (e.g. a shared work topic), use the
+escape hatch `client.agent(topic="some.topic")`.
+
+The client is an async context manager (one long-lived client per app); `aclose()`
+is graceful:
+
+```python
+async with Client.connect("localhost:9092") as client:
+    ...
+```
 
 ## Invocation patterns
 
-`Client` offers three ways to call a node:
+A gateway offers three verbs:
 
-| Method | Pattern | Returns |
+| Verb | Pattern | Returns |
 | --- | --- | --- |
-| `execute(...)` | Request/reply — publish and await the result in one call. | `InvocationResult` |
-| `start(...)` | Publish and get a handle; `await handle.result()` later. | `InvocationHandle` |
-| `send(...)` | One-way — dispatch and return immediately; no reply future. Optional `reply_to` return address. | `correlation_id` (str) |
+| `execute(...)` | Request/reply — dispatch and await the result in one call. | `InvocationResult` |
+| `start(...)` | Dispatch and get a handle; `await handle.result()` later. | `InvocationHandle` |
+| `send(...)` | Dispatch without awaiting; observe the reply on the firehose. | `Dispatch` |
 
-Use `send` for one-way sends (fire-and-forget, or with a `reply_to` topic some
-other consumer owns), `start` for async dispatch with a handle to await later,
-and `execute` for synchronous request/reply. Replies for `start`/`execute` are
-always delivered to the client's own reply inbox — the only address whose reply
-future can resolve.
+`send` returns a **`Dispatch`** (a fire token carrying `.correlation_id`) —
+deliberately *not* a handle, so the type itself tells you the result isn't
+retrievable by id. Use `start` when you want to await the result later, and
+`execute` for synchronous request/reply.
+
+```python
+gw = client.agent("weather_agent")
+
+result = await gw.execute("What's the weather in Tokyo?")     # InvocationResult
+handle = await gw.start("What's the weather in Osaka?")       # InvocationHandle
+dispatch = await gw.send("Re-index the catalog.")             # Dispatch (cid only)
+```
+
+## Typed output with `output_type`
+
+`output_type` binds **once when you mint the gateway** and defaults to `str`:
+
+```python
+# Default str: the reply is coerced to a string. Every reply part is rendered
+# (text verbatim, a structured DataPart as its JSON string) and newline-joined.
+text = (await client.agent("weather_agent").execute("...")).output   # str
+
+# Pass output_type to get the typed object back, validated against your type:
+from dataclasses import dataclass
+
+@dataclass
+class WeatherReport:
+    location: str
+    summary: str
+
+report = (await client.agent("weather_agent", output_type=WeatherReport).execute("...")).output
+print(report.location)   # "Tokyo"
+```
+
+With `output_type=str` (the default) you always get a string — a structured agent's
+reply comes back as its JSON string, never an error. Pass the matching
+`output_type=Model` to deserialize into your type; a reply that is present but fails
+that model raises [`DeserializationError`](#errors).
 
 ## Multi-turn conversations
 
-Pass the message history from a previous result to maintain context:
+Feed the previous result's `message_history` into the next call:
 
 ```python
-result = await client.execute("What's the weather in Tokyo?", "agent.input")
-
-# Continue the conversation with full context
-result = await client.execute(
-    "How about in Osaka?",
-    "agent.input",
-    message_history=result.message_history,
-)
+gw = client.agent("weather_agent")
+r1 = await gw.execute("What's the weather in Tokyo?")
+r2 = await gw.execute("How about in Osaka?", message_history=r1.message_history)
 ```
 
 The same `message_history` can carry turns from *multiple* agents — see
 [`examples/multi_agent_panel/`](../examples/multi_agent_panel/) for a multi-agent
 discussion over one shared transcript.
 
-## Runtime dependency injection
+## Per-call knobs
 
-Pass runtime data to tools via the `deps` parameter:
+`send` / `start` / `execute` take the same input-shaping arguments (the prompt is a
+plain `str`; `execute` additionally takes `timeout`):
+
+- **`deps`** — per-call, JSON-serializable data passed to the run's tools
+  (`ctx.deps["key"]`). Merged over the client's `deps_factory` seed, if set.
+- **`temp_instructions`** — system-level instructions injected into this turn only.
+- **`message_history`** — prior turns for multi-turn (above).
+- **`model_settings`** — per-call model settings (e.g. `{"temperature": 0}`).
+- **`tool_overrides`** — runtime agent-tool overrides for this invocation.
+- **`author`** — the human author of the prompt; surfaces as `<user:author>`
+  attribution when two or more named humans share a channel.
+- **`correlation_id`** — the demux key. Omit it (the safe default) to auto-mint a
+  collision-free uuid7; supply your own only for idempotency / external correlation,
+  and then *you* own its uniqueness within the inbox.
 
 ```python
-result = await client.execute(
+result = await client.agent("weather_agent").execute(
     "What's my phone number?",
-    "agent.input",
-    deps={"user_id": "usr_123"},  # Available to tools via ctx.deps["user_id"]
-)
-```
-
-## Temporary instructions
-
-Temporarily add system-level instructions scoped per request:
-
-```python
-result = await client.execute(
-    "What's the weather in Tokyo?",
-    "agent.input",
+    deps={"user_id": "usr_123"},
     temp_instructions="Always respond in Japanese.",
 )
 ```
 
-## One-way sends
+A non-JSON-serializable `deps` / `model_settings` surfaces as a serialization error
+when the call publishes — there is no call-site pre-flight.
 
-Dispatch work to a node without registering a reply future via `send`:
+## Observing results
 
-```python
-correlation_id = await client.send(
-    "Re-index the catalog.",
-    "indexer.input",
-)
-# Returns the correlation_id immediately; no reply is produced and no
-# client-side reply future is allocated.
-```
+There are two ways to observe a run, and which you use determines the delivery
+guarantee.
 
-`send` takes the same input-shaping arguments as `start` (`deps`,
-`temp_instructions`, `message_history`, `route`, `body`, `model_settings`,
-`tool_overrides`, `author`, `correlation_id`) — but no `output_type`, since
-deserialization belongs to whoever consumes the result.
+### Per-run — hold the handle (lossless)
 
-### Directing the result with `reply_to`
-
-Pass a `reply_to` topic to have the worker deliver the terminal result there,
-point-to-point — the [Return Address pattern](https://www.enterpriseintegrationpatterns.com/patterns/messaging/ReturnAddress.html).
-The consumer of that topic is **someone else**: a [consumer node](consumer-nodes.md),
-a sink service, another system — never the sending client, which has no reply
-future to resolve.
+`start` / `execute` register a per-run channel and return a handle (or its result).
+The handle is the **only** way to get this run's result by id, and it works for as
+long as you hold it — there is no reattach-by-`correlation_id`:
 
 ```python
-correlation_id = await client.send(
-    "Re-index the catalog.",
-    "indexer.input",
-    reply_to="indexer.done",  # terminal result lands here, point-to-point
-)
+handle = await client.agent("support").start("Where is my order?")
+result = await handle.result()              # await the terminal (lossless)
 ```
 
-A `@consumer` on `indexer.done` receives the terminal result exactly as one
-tapping a `publish_topic` does — but it sees only terminals addressed to it,
-not every hop of every invocation of the node. Two caveats:
-
-- `reply_to` is not a chaining mechanism: the call stack is unwound at the
-  terminal, so address consumers/sinks, not agent input topics.
-- The `reply_to` topic is owned by its consumer — on brokers with auto-create
-  disabled, it must exist before the worker's terminal publish. If that
-  publish fails (missing or unauthorized topic), the result is **not
-  retried**: the worker logs an ERROR naming the topic and correlation id,
-  and the terminal still reaches the `publish_topic` broadcast (when one is
-  configured).
-- Addressing another *client's* reply inbox is not rejected, but is almost
-  certainly a mistake: the receiving client logs a
-  `reply received but no pending future (emitter=...)` warning and drops the
-  reply — the sender is told nothing.
-
-`send` validates `reply_to` at call time, before anything publishes:
-a blank or Kafka-illegal topic name (allowed: letters, digits, `.`, `_`, `-`;
-max 249 chars) raises `ValueError`, and so does `reply_to=client.reply_topic`
-— with no future registered the client's own dispatcher would consume and
-drop the reply. Use `start`/`execute` to await a reply.
-
-### Traceability without a reply
-
-With or without `reply_to`, the terminal result also rides the target node's
-`publish_topic` broadcast stream. Set a `publish_topic` on the node you send to
-and tap it with a [consumer node](consumer-nodes.md) to observe terminals
-(`result.output` is populated exactly as it is for `execute`). With
-`reply_to=None`, a node with no `publish_topic` produces no observable record
-for the send — there is neither a reply nor a broadcast.
-
-## Bounding `start` memory
-
-Each pending `start` handle holds a reply future until it resolves. If a
-reply is lost or a handle is abandoned, that future leaks. Pass an opt-in TTL to
-bound it:
+`handle.stream()` yields this run's events in order, terminal-bearing — the last
+element is always the terminal. (Today the fabric emits no intermediate events, so
+`stream()` yields exactly one element: the terminal.)
 
 ```python
-client = Client.connect("localhost:9092", reply_ttl=30.0)
+async for event in handle.stream():
+    ...                                     # the run's events, ending in the terminal
 ```
 
-When set, an unanswered handle is evicted after `reply_ttl` seconds and
-`handle.result()` raises `ReplyExpiredError` (importable from
-`calfkit.exceptions`). The default (`None`) waits indefinitely. `send`
-allocates no future, so the TTL does not apply to it.
+### Cross-run — the `events()` firehose (best-effort)
+
+`client.events()` is a firehose over the client's one inbox — **every** reply on it
+while open, across all runs. You demux by `correlation_id` and do your own dedup.
+It is best-effort: a reader that falls behind drops its **oldest** buffered events
+(signaled by `EventStream.dropped` + a WARNING) so it can never block the hub.
+
+```python
+async with client.events(terminal_only=True) as stream:
+    dispatch = await client.agent("notifier").send("Ping everyone.")
+    async for event in stream:
+        if event.correlation_id == dispatch.correlation_id:
+            ...                             # observe the send()'s reply
+            break
+```
+
+> **Guaranteed delivery is hold-the-handle (`start`/`execute`) or a `@consumer`
+> node** — the firehose is observation, not a delivery guarantee. For a stateless
+> deployment (a web handler that can't hold a handle across a request boundary),
+> route replies to a named `inbox_topic` and consume them with a
+> [`@consumer` node](consumer-nodes.md).
+
+## A shared, durable inbox with `inbox_topic`
+
+By default each client gets an ephemeral per-client inbox. Set `inbox_topic` once at
+`connect()` for a **durable, named** inbox another process can consume:
+
+```python
+client = Client.connect("localhost:9092", inbox_topic="orders.inbox")
+```
+
+The hub and the firehose both read this one inbox, so `events()` can never drift off
+it. To *observe* an arbitrary topic, connect a separate client with that topic as its
+own `inbox_topic` and call `events()` there.
+
+## Bounding patience with `timeout`
+
+`result()` and `execute()` await the terminal indefinitely by design — a durable run
+may legitimately pause (a long task, a slow tool). To bound *the client's* patience,
+pass `timeout`:
+
+```python
+result = await client.agent("support").execute("...", timeout=30)
+# or, on a handle:
+result = await handle.result(timeout=30)
+```
+
+On a timeout the client raises **`ClientTimeoutError`** and **the run is
+unaffected** — a later terminal still resolves the channel. There is no `reply_ttl`:
+abandoned runs garbage-collect on their own (the hub holds the handle weakly), so
+memory is bounded by the handles you hold.
+
+## Errors
+
+The client surface has a small, typed error set over **run outcomes** (importable
+from `calfkit`):
+
+| Condition | Type |
+| --- | --- |
+| The run (or a node it called) faulted | **`NodeFaultError`** — branch on `e.report.find(FaultTypes.X)` |
+| A successful reply fails a **structured** `output_type` | **`DeserializationError`** |
+| This client stopped waiting (`result`/`execute` `timeout=`) | **`ClientTimeoutError`** (run unaffected) |
+| The client was closed (`aclose()`) with the run in flight | **`ClientClosedError`** (run unaffected) |
+
+```python
+from calfkit import NodeFaultError, FaultTypes
+
+try:
+    result = await client.agent("billing").execute("refund order 1234", timeout=30)
+except NodeFaultError as e:
+    if e.report.find(FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED):
+        ...
+```
+
+See [How to handle errors and faults](error-handling.md) for the in-node fault seams
+and `ErrorReport` details.

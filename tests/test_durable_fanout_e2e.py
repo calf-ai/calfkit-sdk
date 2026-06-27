@@ -19,7 +19,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
-from calfkit.exceptions import DeserializationError
+from calfkit.exceptions import NodeFaultError
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, agent_tool
@@ -95,7 +95,7 @@ async def test_durable_fanout_folds_in_store_and_closes_via_reentry(container) -
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute("call both tools", "durable_fanout_agent.input", timeout=10)
+        result = await client.agent(topic="durable_fanout_agent.input").execute("call both tools", timeout=10)
 
     # The batch was folded DURABLY in the store (not the in-process _pending_batches)...
     assert spy.opens == 1  # one OPEN for the 2-call batch
@@ -117,9 +117,8 @@ async def test_durable_fanout_with_failing_tool_escalates_a_fault_not_a_strand(c
     # The carriage switch (4.4), end-to-end: a 2-tool fan-out where ONE tool raises NO LONGER strands.
     # The tool's exception escalates via the rail (it is no longer captured into a FailedToolCall); the
     # agent folds it as a FAILED slot, and at close the batch escalates a fault group to the caller
-    # (production). Client RECEPTION as a typed NodeFaultError is the deferred reception PR (plan §0):
-    # in PR-6 the fault REACHES the client and surfaces when the reply is projected — a
-    # DeserializationError on the fault's empty parts — proving the caller is answered, not stranded.
+    # (production). The client's #250 reception arm (this caller-surface PR) materializes that fault as
+    # a typed NodeFaultError carrying the verbatim ErrorReport — the caller is answered, not stranded.
     worker = container.get(Worker)
     agent = Agent(
         "durable_fanout_fail_agent",
@@ -136,9 +135,9 @@ async def test_durable_fanout_with_failing_tool_escalates_a_fault_not_a_strand(c
     broker = container.get(KafkaBroker)
     client = container.get(Client)
 
-    with pytest.raises(DeserializationError):  # PR-6: the fault reaches the client; clean typed reception is deferred
+    with pytest.raises(NodeFaultError):  # #250 reception: the escalated fault surfaces as a typed NodeFaultError
         async with TestKafkaBroker(broker):
-            await client.execute("call both tools", "durable_fanout_fail_agent.input", timeout=10)
+            await client.agent(topic="durable_fanout_fail_agent.input").execute("call both tools", timeout=10)
 
     # The failure travelled the DURABLE path: both siblings folded through the store before close.
     assert spy.opens == 1

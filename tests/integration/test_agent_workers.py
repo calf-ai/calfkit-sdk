@@ -30,7 +30,7 @@ async def test_simple_agent_q_and_a(container, deploy_agent):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute("Hi, what's your name?", "test_agent.input")
+        result = await client.agent("test_simple_agent").execute("Hi, what's your name?")
 
         assert result.output is not None
         assert isinstance(result.output, str)
@@ -48,7 +48,7 @@ async def test_simple_agent_with_tool(container, deploy_agent, deploy_multiple_a
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute("Hi, what's my birthday?", "test_agent.input")
+        result = await client.agent("test_simple_agent").execute("Hi, what's my birthday?")
 
         assert result.output is not None
 
@@ -68,8 +68,8 @@ async def test_simple_agent_with_multiple_tools(container, deploy_agent, deploy_
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute(
-            "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?", "test_agent.input", output_type=str
+        result = await client.agent("test_simple_agent", output_type=str).execute(
+            "Hi, do you know my name, the weather in Singapore rn, and what my birthday is?"
         )
 
         print_message_history(result.message_history)
@@ -91,23 +91,21 @@ async def test_simple_agent_with_multiturn_convo(container, deploy_agent, deploy
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute("Do you know my name?", "test_agent.input")
+        result = await client.agent("test_simple_agent").execute("Do you know my name?")
 
         assert result.output is not None
         assert user_name.lower() in result.output.lower()
 
-        result = await client.execute(
+        result = await client.agent("test_simple_agent").execute(
             "And what's your name?",
-            "test_agent.input",
             message_history=result.message_history,
         )
 
         assert result.output is not None
         assert agent_name.lower() in result.output.lower()
 
-        result = await client.execute(
+        result = await client.agent("test_simple_agent").execute(
             "What's the weather in vegas rn and what's my birthday?",
-            "test_agent.input",
             message_history=result.message_history,
         )
 
@@ -127,27 +125,24 @@ async def test_simple_agent_with_injected_deps(container, deploy_agent, deploy_c
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute(
+        result = await client.agent("test_simple_agent").execute(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
-            "test_agent.input",
             deps={"ephemeral_id": "id1"},
         )
 
         assert result.output is not None
         assert caller_id_lookup["id1"] in result.output.lower()
 
-        result = await client.execute(
+        result = await client.agent("test_simple_agent").execute(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
-            "test_agent.input",
             deps={"ephemeral_id": "id2"},
         )
 
         assert result.output is not None
         assert caller_id_lookup["id2"] in result.output.lower()
 
-        result = await client.execute(
+        result = await client.agent("test_simple_agent").execute(
             "I am messaging you from my iphone, do you know my phone number? Give my phone # with no spaces or special characters in between.",
-            "test_agent.input",
             deps={"ephemeral_id": "id3"},
         )
 
@@ -165,10 +160,8 @@ async def test_structured_output_agent(container, deploy_structured_agent):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker) as _:
-        result = await client.execute(
+        result = await client.agent("test_structured_agent", output_type=Response).execute(
             f"What's your name? My name is {user_name}",
-            "test_agent.input",
-            output_type=Response,
             temp_instructions="When responding, always direct responses to the recipient's name you would like to target.",
         )
 
@@ -178,10 +171,8 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         assert agent_name.lower() in result.output.response.lower()
         print(f"structured_output: {result.output}")
 
-        result = await client.execute(
+        result = await client.agent("test_structured_agent", output_type=Response).execute(
             "Do you remember my name?",
-            "test_agent.input",
-            output_type=Response,
             temp_instructions="when responding, always direct responses to specific recipients you would like to target.",
             message_history=result.message_history,
         )
@@ -192,10 +183,8 @@ async def test_structured_output_agent(container, deploy_structured_agent):
         assert user_name.lower() in result.output.response.lower()
         print(f"structured_output: {result.output}")
 
-        result = await client.execute(
+        result = await client.agent("test_structured_agent", output_type=Response).execute(
             "Please tell my friend Amy that it's snowing in Calgary.",
-            "test_agent.input",
-            output_type=Response,
             temp_instructions="when responding, always direct responses to specific recipients you would like to target.",
             message_history=result.message_history,
         )

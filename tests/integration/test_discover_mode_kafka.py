@@ -140,7 +140,7 @@ async def test_discover_finds_all_separately_deployed_tool_nodes(kafka_bootstrap
         # capture what each node advertised (the source of truth the agent reads) in the same pass
         await _await_view(kafka_bootstrap, _both_advertised, timeout=60, what=f"advertised tools for {add_name!r} and {mul_name!r}")
         async with agent_worker:
-            result = await driver.execute("add 2 and 3", agent_in, timeout=120)
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3", timeout=120)
 
     # 1) the call drawn from a discovered tool round-tripped to a finalized turn
     assert result.output is not None and FINAL_OUTPUT in result.output
@@ -158,7 +158,7 @@ async def test_discover_finds_all_separately_deployed_tool_nodes(kafka_bootstrap
     #    pov[name] and advertised[name] key alike.
     assert {n: pov[n].parameters_json_schema for n in mine} == {n: advertised[n] for n in mine}
 
-    await driver.close()
-    await add_worker._client.close()
-    await mul_worker._client.close()
-    await agent_worker._client.close()
+    await driver.aclose()
+    await add_worker._client.aclose()
+    await mul_worker._client.aclose()
+    await agent_worker._client.aclose()

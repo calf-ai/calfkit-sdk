@@ -99,11 +99,12 @@ async def test_valid_body_passes_through_without_flooring(caplog: pytest.LogCapt
 
 
 def test_decode_floor_is_registered_outermost_on_the_connect_broker(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The shim is installed broker-wide by Client.connect, and OUTERMOST so its consume_scope wraps
+    # The floor is installed broker-wide by Client.connect — now via its configured BUILDER (carrying
+    # the {inbox: hub.fail_run} undecodable-sink registry), still OUTERMOST so its consume_scope wraps
     # the whole chain (ahead of ContextInjectionMiddleware) — every node + reply subscriber covered.
     from calfkit.client import Client
     from calfkit.client._broker import _PreStartHookBroker
-    from calfkit.client.middleware import ContextInjectionMiddleware
+    from calfkit.client.middleware import ContextInjectionMiddleware, _DecodeFloorBuilder
 
     captured: dict[str, object] = {}
     orig_init = _PreStartHookBroker.__init__
@@ -113,12 +114,13 @@ def test_decode_floor_is_registered_outermost_on_the_connect_broker(monkeypatch:
         orig_init(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(_PreStartHookBroker, "__init__", spy_init)
-    Client.connect(server_urls="localhost:9092")
+    client = Client.connect(server_urls="localhost:9092")
 
     mws = captured.get("middlewares")
     assert isinstance(mws, list)
-    assert DecodeFloorMiddleware in mws
-    assert mws.index(DecodeFloorMiddleware) < mws.index(ContextInjectionMiddleware)  # outermost
+    assert isinstance(mws[0], _DecodeFloorBuilder)  # the floor builder is OUTERMOST
+    assert mws[1] is ContextInjectionMiddleware
+    assert client.inbox_topic in mws[0]._registry  # the inbox→hub.fail_run undecodable seam is wired
 
 
 # ── Option-B undecodable-sink seam: a configured builder holding a {topic: sink} registry ──

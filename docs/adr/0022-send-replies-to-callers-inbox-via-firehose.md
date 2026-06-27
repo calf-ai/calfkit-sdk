@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # `send()` may reply to the caller's own inbox, observed via the firehose; supersedes ADR-0005's bar

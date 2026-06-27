@@ -90,7 +90,7 @@ async def test_one_unhandled_sibling_flattens_to_bare_fault(kafka_bootstrap: str
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, headers = await tap.next_fault(timeout=90)
 
             # singleton flatten: the bare child, not a group
@@ -100,8 +100,8 @@ async def test_one_unhandled_sibling_flattens_to_bare_fault(kafka_bootstrap: str
             assert topology["ok"] == 2
             assert topology["failed"] == 1
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_two_unhandled_siblings_compose_a_fault_group(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -126,7 +126,7 @@ async def test_two_unhandled_siblings_compose_a_fault_group(kafka_bootstrap: str
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, headers = await tap.next_fault(timeout=90)
 
             assert fault.error.error_type == FaultTypes.FAULT_GROUP
@@ -137,8 +137,8 @@ async def test_two_unhandled_siblings_compose_a_fault_group(kafka_bootstrap: str
             assert topology["failed"] == 2
             assert topology["ok"] == 1
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_on_callee_error_substitute_completes_the_batch(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -164,7 +164,7 @@ async def test_on_callee_error_substitute_completes_the_batch(kafka_bootstrap: s
 
     try:
         async with worker:
-            result = await driver.execute("go", agent_in, timeout=90)
+            result = await driver.agent(topic=agent_in).execute("go", timeout=90)
             assert result.output is not None and FINAL_OUTPUT in result.output
 
             returns = tool_returns(result.message_history)
@@ -172,8 +172,8 @@ async def test_on_callee_error_substitute_completes_the_batch(kafka_bootstrap: s
             assert returns["ok_a"] == "a_result"
             assert returns["ok_b"] == "b_result"
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_slot_scoped_seam_raise_fails_the_slot_and_escalates_at_closure(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -199,7 +199,7 @@ async def test_slot_scoped_seam_raise_fails_the_slot_and_escalates_at_closure(ka
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=90)
 
             assert fault.error.error_type == "seam.reject"  # the seam's slot-scoped mint
@@ -208,5 +208,5 @@ async def test_slot_scoped_seam_raise_fails_the_slot_and_escalates_at_closure(ka
             assert topology["failed"] == 1  # the boom slot
             assert topology["ok"] == 1  # ok_a still resolved
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()

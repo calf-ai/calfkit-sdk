@@ -8,18 +8,15 @@ async def main():
     # teardown). Delivery does not depend on it: ``send`` awaits the broker's
     # ack before returning, so the record is already on the topic.
     async with Client.connect("localhost:9092") as client:  # Connect to Kafka broker
-        # Fire-and-forget: dispatch the request and return immediately. No reply
-        # is produced and no client-side reply future is allocated — send
-        # hands back only the correlation_id, for tracing/logging.
-        correlation_id = await client.send(
-            "What's the weather in Tokyo?",
-            "weather_agent.input",  # The topic the agent subscribes to
-        )
-        print(f"Dispatched fire-and-forget — correlation_id={correlation_id}")
+        # Dispatch without awaiting: send() returns a Dispatch (a fire token) as soon as the broker
+        # acks the record — it registers no per-run handle, so you can't retrieve the result by id.
+        dispatch = await client.agent("weather_agent").send("What's the weather in Tokyo?")
+        print(f"Dispatched — correlation_id={dispatch.correlation_id}")
 
-    # There is no reply to await. To observe the result, tap the agent's
-    # publish_topic broadcast stream: run weather_sink.py (a @consumer on
-    # weather_agent.output) and watch the terminal output stream by.
+    # The reply still lands on this client's inbox. To observe a send()'s result, keep a firehose
+    # running (`async with client.events() as stream:` — subscribe BEFORE you send), or tap the agent's
+    # publish_topic broadcast (run weather_sink.py, a @consumer on weather_agent.output). For a result
+    # you must not miss, use start()/execute() (which hold a handle) instead of send().
 
 
 if __name__ == "__main__":

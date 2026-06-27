@@ -109,7 +109,7 @@ class TestPackageSurface:
 
 class TestDeployingARefFailsLoudAndEarly:
     def test_add_nodes_rejects_refs_with_teaching_message(self) -> None:
-        from calfkit.client.client import Client
+        from calfkit.client import Client
         from calfkit.mcp import MCPToolbox
         from calfkit.worker.worker import Worker
 
@@ -119,7 +119,7 @@ class TestDeployingARefFailsLoudAndEarly:
         assert "reference" in str(excinfo.value).lower()
 
     def test_add_nodes_rejects_arbitrary_non_nodes_too(self) -> None:
-        from calfkit.client.client import Client
+        from calfkit.client import Client
         from calfkit.worker.worker import Worker
 
         worker = Worker(Client.connect("kafka:9092"))

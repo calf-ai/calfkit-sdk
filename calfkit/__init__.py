@@ -1,8 +1,18 @@
 from importlib.metadata import version
 
-from calfkit.client import Client, InvocationHandle, InvocationResult
+from calfkit.client import (
+    AgentGateway,
+    Client,
+    Dispatch,
+    EventStream,
+    InvocationHandle,
+    InvocationResult,
+    RunCompleted,
+    RunEvent,
+    RunFailed,
+)
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView, advertises
-from calfkit.exceptions import DeserializationError, LifecycleConfigError, NodeFaultError
+from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, NodeFaultError
 from calfkit.models import ErrorReport, FaultTypes, ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, Tools, agent_tool, consumer
 from calfkit.peers import Handoff, Messaging
@@ -15,9 +25,15 @@ __version__ = version("calfkit")
 __all__ = [
     "__version__",
     # client
+    "AgentGateway",
     "Client",
+    "Dispatch",
+    "EventStream",
     "InvocationHandle",
     "InvocationResult",
+    "RunCompleted",
+    "RunEvent",
+    "RunFailed",
     # models
     "ErrorReport",
     "FaultTypes",
@@ -56,6 +72,8 @@ __all__ = [
     "FanoutConfig",
     "KTableReaderTuning",
     # exceptions
+    "ClientClosedError",
+    "ClientTimeoutError",
     "DeserializationError",
     "LifecycleConfigError",
     "NodeFaultError",

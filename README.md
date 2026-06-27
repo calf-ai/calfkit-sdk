@@ -164,9 +164,8 @@ async def main():
     client = Client.connect("localhost:9092")  # Connect to the broker
 
     # Send a request and await the response
-    result = await client.execute(
+    result = await client.agent("weather_agent").execute(  # address the agent by name
         "What's the weather in Tokyo?",
-        "weather_agent.input",  # The topic the agent is listening to
     )
     print(f"Assistant: {result.output}")
 
@@ -207,13 +206,11 @@ agent = Agent(
 )
 ```
 
-When invoking, pass the matching `output_type` to deserialize the response:
+When minting the gateway, pass the matching `output_type` to deserialize the response:
 
 ```python
-result = await client.execute(
+result = await client.agent("weather_agent", output_type=WeatherReport).execute(
     "What's the weather in Tokyo?",
-    "weather_agent.input",
-    output_type=WeatherReport,
 )
 print(result.output.location)  # "Tokyo"
 print(result.output.summary)   # "It's sunny in Tokyo"
@@ -253,7 +250,7 @@ In-repo documentation lives under [`docs/`](docs/).
 
 **How-to guides** — goal-oriented walkthroughs:
 
-- **[How to call nodes from a client](docs/client-features.md)** — the three invocation patterns (`execute` / `start` / `send`), multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, fire-and-forget, and bounding reply memory with `reply_ttl`.
+- **[How to call nodes from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, the `events()` firehose, and the typed client errors.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
 - **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.

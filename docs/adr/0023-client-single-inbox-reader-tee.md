@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # The client uses one inbox reader tee'd to a lossless per-run demux and a best-effort (bounded, drop-oldest) firehose

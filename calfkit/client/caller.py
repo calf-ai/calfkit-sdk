@@ -21,11 +21,12 @@ from typing import Any, overload
 import uuid_utils
 from faststream.kafka import KafkaBroker
 
-from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, is_topic_safe
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, is_topic_safe
+from calfkit._routing import is_concrete_route_key
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
-from calfkit.client.base import _new_client_emitter_id
+from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client.events import DEFAULT_FIREHOSE_BUFFER_SIZE, EventStream
 from calfkit.client.gateway import AgentGateway
 from calfkit.client.hub import _Hub
@@ -35,8 +36,15 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
 from calfkit.models.state import OverridesState, State
 from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, normalize_tool_bindings
+from calfkit.provisioning import ProvisioningConfig, StartupTopicEnsurer
 
 logger = logging.getLogger(__name__)
+
+
+def _new_client_emitter_id(client_id: str | None = None) -> str:
+    """Return a stable ``client.<uuid7-hex>`` emitter id stamped on the ``x-calf-emitter`` header of
+    every client publish. Pass *client_id* to reuse an existing hex id (e.g. the inbox's)."""
+    return f"client.{client_id if client_id is not None else uuid_utils.uuid7().hex}"
 
 
 class Client:
@@ -56,6 +64,9 @@ class Client:
         emitter_id: str,
         firehose_buffer_size: int,
         deps_factory: Callable[[], dict[str, Any]] | None,
+        provisioning: ProvisioningConfig,
+        startup_ensurer: StartupTopicEnsurer,
+        server_urls: str | None,
     ) -> None:
         self._broker = broker
         self._hub = hub
@@ -63,6 +74,12 @@ class Client:
         self._emitter_id = emitter_id
         self._firehose_buffer_size = firehose_buffer_size
         self._deps_factory = deps_factory
+        self._server_urls = server_urls
+        # EXPERIMENTAL opt-in topic provisioning (issue #180), kept as a removable unit (see connect()'s
+        # _make_provisioned_broker). The co-located Worker reuses these for its own node-topic
+        # provisioning (worker.py reads `_provisioning` / `_startup_ensurer`).
+        self._provisioning = provisioning
+        self._startup_ensurer = startup_ensurer
         # broker.start() is NOT self-idempotent; the base.py:334 check-then-await is non-atomic vs a
         # co-located Worker's app.start(), so guard the first start with a lock (re-check inside).
         self._start_lock = asyncio.Lock()
@@ -75,16 +92,21 @@ class Client:
         inbox_topic: str | None = None,
         deps_factory: Callable[[], dict[str, Any]] | None = None,
         firehose_buffer_size: int = DEFAULT_FIREHOSE_BUFFER_SIZE,
+        provisioning: ProvisioningConfig | None = None,
         **broker_kwargs: Any,
     ) -> Client:
         """Build the client — **sync, lazy, no I/O** (spec §2.1/§2.7). Registers the hub's groupless
         reply subscriber + the decode-floor undecodable seam on the inbox; the broker is started by the
         first ``events()`` / dispatch (or a co-located ``Worker``'s ``app.start()``).
 
-        ``inbox_topic`` defaults to an ephemeral per-client name (nothing to provision); set it for a
-        durable, shareable inbox (§6). Topic existence is an operational contract — documented, not
-        policed here (§2.7). Security is configured the broker's way (a FastStream ``security=`` object
-        in ``broker_kwargs``); raw security kwargs are rejected with an actionable error.
+        ``inbox_topic`` defaults to an ephemeral per-client name; set it for a durable, shareable inbox
+        (§6). Topic existence is an operational contract — the client never *boot-checks* it (§2.7).
+        Security is configured the broker's way (a FastStream ``security=`` object in ``broker_kwargs``);
+        raw security kwargs are rejected with an actionable error.
+
+        ``provisioning`` is an **experimental** opt-in (issue #180; default disabled): when enabled,
+        topics are auto-created at broker start. It is a separate, removable concern from the §2.7
+        boot-check posture — see :meth:`_make_provisioned_broker`.
         """
         if server_urls is None:
             server_urls = os.getenv("CALF_HOST_URL") or "localhost"
@@ -116,10 +138,9 @@ class Client:
         # override via broker_kwargs. The decode floor is OUTERMOST, carrying the undecodable-sink
         # registry {inbox -> hub.fail_run} (spec §5.8); ContextInjection populates correlation_id.
         producer_posture = {"acks": "all", "enable_idempotence": True}
-        broker = KafkaBroker(
-            server_list,
-            middlewares=[DecodeFloorMiddleware.builder({inbox_topic: hub.fail_run}), ContextInjectionMiddleware],
-            **{**producer_posture, **broker_kwargs},
+        middlewares = [DecodeFloorMiddleware.builder({inbox_topic: hub.fail_run}), ContextInjectionMiddleware]
+        broker, ensurer, provisioning = cls._make_provisioned_broker(
+            server_list, middlewares, {**producer_posture, **broker_kwargs}, inbox_topic, provisioning
         )
         hub.register(broker, inbox_topic)
 
@@ -130,12 +151,55 @@ class Client:
             emitter_id=_new_client_emitter_id(client_id),
             firehose_buffer_size=firehose_buffer_size,
             deps_factory=deps_factory,
+            provisioning=provisioning,
+            startup_ensurer=ensurer,
+            server_urls=",".join(server_list),
         )
+
+    @staticmethod
+    def _make_provisioned_broker(
+        server_list: list[str],
+        middlewares: list[Any],
+        broker_kwargs: dict[str, Any],
+        inbox_topic: str,
+        provisioning: ProvisioningConfig | None,
+    ) -> tuple[KafkaBroker, StartupTopicEnsurer, ProvisioningConfig]:
+        """EXPERIMENTAL opt-in topic provisioning (issue #180), isolated here as a **removable unit**.
+
+        To drop provisioning later: delete this method, the ``provisioning=`` param, and the
+        ``_provisioning`` / ``_startup_ensurer`` fields, then have ``connect()`` build a plain
+        ``KafkaBroker(server_list, middlewares=middlewares, **broker_kwargs)``. The co-located ``Worker``
+        reuses ``_startup_ensurer`` + ``_provisioning`` for its own node-topic provisioning (``worker.py``),
+        so removing it here is a coordinated change with the Worker.
+        """
+        provisioning = provisioning or ProvisioningConfig()
+        ensurer = StartupTopicEnsurer(config=provisioning)
+        ensurer.declare([inbox_topic], framework=True)  # the inbox is a framework topic
+        # _PreStartHookBroker runs the ensurer at start (FastStream 0.7.x has no broker-level start hook).
+        broker = _PreStartHookBroker(server_list, middlewares=middlewares, pre_start=ensurer.run, **broker_kwargs)
+        return broker, ensurer, provisioning
 
     @property
     def inbox_topic(self) -> str:
         """The named topic this client receives its runs' events + terminal replies on (spec §6)."""
         return self._inbox_topic
+
+    @property
+    def broker(self) -> KafkaBroker:
+        """The underlying ``KafkaBroker`` (shared with a co-located ``Worker``)."""
+        return self._broker
+
+    @property
+    def _connection(self) -> KafkaBroker:
+        # Worker-compat alias for the broker: the Worker reads ``client._connection`` to register node
+        # subscribers/publishers on the shared broker. (Distinct from ``broker._connection``, the
+        # broker's own started-indicator.)
+        return self._broker
+
+    @property
+    def server_urls(self) -> str | None:
+        """The bootstrap server URL(s), comma-joined; ``None`` for a directly-constructed client."""
+        return self._server_urls
 
     # Four overloads (spec §2.2): a dedicated no-output_type form per address so the str default is
     # actually bound — a `= str` parameter default does NOT bind a TypeVar (OutT would fall back to Any).
@@ -247,16 +311,29 @@ class Client:
         state: State,
         overrides: OverridesState | None,
         deps: dict[str, Any] | None,
+        route: str | None = None,
+        body: Any | None = None,
     ) -> None:
         """Publish ONE call envelope to *topic* (spec §2.6): an ``Envelope`` carrying the session
         ``State`` + ``deps`` and a pushed ``CallFrame`` whose ``callback_topic`` is this client's inbox,
-        plus the emitter headers + ``x-calf-kind=call``. Keyed by ``correlation_id``. (No route/body —
-        those stay on the lower-level node-call surface, spec §9.2.)"""
+        plus the emitter headers + ``x-calf-kind=call``. Keyed by ``correlation_id``.
+
+        ``route`` / ``body`` are an **internal, non-public lower-level surface** (NOT the agent gateway,
+        spec §9.2): the gateway verbs never pass them. They let framework-internal callers target a
+        ``@handler`` route (``x-calf-route``) or carry a typed run ``payload`` — left unprioritized/hidden.
+        """
+        if route is not None and not is_concrete_route_key(route):
+            raise ValueError(
+                f"producer route {route!r} must be a concrete key — non-empty, '.'-delimited words, no "
+                "empty segments, no wildcard. ('*' is a route pattern for @handler, not a producer key.)"
+            )
         call_stack = CallFrameStack()
-        call_stack.push(CallFrame(target_topic=topic, callback_topic=self._inbox_topic, overrides=overrides))
+        call_stack.push(CallFrame(target_topic=topic, callback_topic=self._inbox_topic, overrides=overrides, payload=body))
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),
         )
         headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call"}
+        if route is not None:
+            headers[HDR_ROUTE] = route
         await self._broker.publish(envelope, topic=topic, correlation_id=correlation_id, headers=headers)

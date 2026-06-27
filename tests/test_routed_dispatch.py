@@ -374,10 +374,13 @@ class _StubConn:
 
 
 def _client(conn: Any) -> Any:
-    from calfkit.client.base import BaseClient
-    from calfkit.client.reply_dispatcher import _ReplyDispatcher
+    from calfkit.client import Client
 
-    return BaseClient(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
+    # connect() is sync/lazy (builds an unstarted broker); swap in the capturing stub so _publish_call's
+    # publish is recorded. route/body live on the internal _publish_call only (not the public gateway).
+    client = Client.connect("localhost:9092", inbox_topic="reply.topic")
+    client._broker = cast(Any, conn)
+    return client
 
 
 async def test_client_publish_call_stamps_route_and_body() -> None:
@@ -385,7 +388,6 @@ async def test_client_publish_call_stamps_route_and_body() -> None:
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
-        callback_topic="reply.topic",
         state=State(),
         overrides=None,
         deps=None,
@@ -405,7 +407,6 @@ async def test_client_allows_body_without_route() -> None:
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
-        callback_topic=None,
         state=State(),
         overrides=None,
         deps=None,
@@ -425,7 +426,6 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
         await _client(conn)._publish_call(
             topic="orders",
             correlation_id=_CORR,
-            callback_topic=None,
             state=State(),
             overrides=None,
             deps=None,
@@ -434,18 +434,9 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
         )
 
 
-async def test_send_threads_route_and_body_to_the_wire() -> None:
-    from calfkit.client.client import Client
-    from calfkit.client.reply_dispatcher import _ReplyDispatcher
-
-    conn = _StubConn()
-    client = Client(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
-    await client.send("hello", "orders", route="order.created", body={"amount": 3})
-
-    assert len(conn.published) == 1
-    _topic, headers, env = conn.published[0]
-    assert headers[HDR_ROUTE] == "order.created"
-    assert env.internal_workflow_state.current_frame.payload == {"amount": 3}
+# NOTE: the old `test_send_threads_route_and_body_to_the_wire` was removed at the caller-surface
+# cutover — `send()` no longer accepts route/body (they are internal to `_publish_call` only, spec
+# §9.2), and the wire-stamping is covered by `test_client_publish_call_stamps_route_and_body` above.
 
 
 # ---------------------------------------------------------------------------
@@ -601,18 +592,9 @@ async def test_tailcall_publish_carries_no_route_header() -> None:
     assert HDR_ROUTE not in headers
 
 
-async def test_start_threads_route_and_body_to_the_wire() -> None:
-    from calfkit.client.client import Client
-    from calfkit.client.reply_dispatcher import _ReplyDispatcher
-
-    conn = _StubConn()
-    client = Client(cast(Any, conn), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
-    await client.start("hello", "orders", route="order.created", body={"n": 1})
-
-    assert len(conn.published) == 1
-    _topic, headers, env = conn.published[0]
-    assert headers[HDR_ROUTE] == "order.created"
-    assert env.internal_workflow_state.current_frame.payload == {"n": 1}
+# NOTE: `test_start_threads_route_and_body_to_the_wire` was removed at the caller-surface cutover —
+# the public verbs no longer accept route/body (internal to `_publish_call` only, §9.2); the wire
+# stamping is covered by `test_client_publish_call_stamps_route_and_body`.
 
 
 @pytest.mark.parametrize("callback_topic,expected", [("reply.topic", logging.WARNING), (None, logging.DEBUG)])
@@ -690,22 +672,5 @@ async def test_malformed_route_log_level_keys_on_awaiting_reply(awaiting: bool, 
     assert recs and recs[0].levelno == expected
 
 
-async def test_execute_forwards_route_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    from calfkit.client.client import Client
-    from calfkit.client.reply_dispatcher import _ReplyDispatcher
-
-    client = Client(cast(Any, _StubConn()), "reply.topic", _ReplyDispatcher(reply_ttl=None), emitter_id="client.test")
-    captured: dict[str, Any] = {}
-
-    class _FakeHandle:
-        async def result(self, timeout: float | None = None) -> str:
-            return "ok"
-
-    async def _fake_start(*args: Any, **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return _FakeHandle()
-
-    monkeypatch.setattr(client, "start", _fake_start)
-    await client.execute("hello", "orders", route="order.created", body={"n": 1})
-    assert captured.get("route") == "order.created"
-    assert captured.get("body") == {"n": 1}
+# NOTE: `test_execute_forwards_route_and_body` was removed at the caller-surface cutover — the public
+# verbs no longer accept route/body (internal to `_publish_call`, §9.2).

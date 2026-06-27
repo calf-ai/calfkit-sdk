@@ -25,9 +25,9 @@ if TYPE_CHECKING:
 class Dispatch:
     """What ``send()`` returns: a fire token carrying only the ``correlation_id``.
 
-    Deliberately **not** an :class:`~calfkit.client.invocation_handle.InvocationHandle` — the
-    type itself says the result is not retrievable by id. Observe a ``send()`` result on the
-    firehose (``client.events()``), or use ``start()`` / ``execute()`` to get a per-run result.
+    Deliberately **not** an :class:`~calfkit.client.hub.InvocationHandle` — the type itself says
+    the result is not retrievable by id. Observe a ``send()`` result on the firehose
+    (``client.events()``), or use ``start()`` / ``execute()`` to get a per-run result.
     """
 
     correlation_id: str

@@ -100,7 +100,7 @@ async def test_agent_receives_client_emitter(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("hi", "test_emitter_client_hop.input", timeout=5)
+        await client.agent(topic="test_emitter_client_hop.input").execute("hi", timeout=5)
 
     assert len(seen) == 1
     assert seen[0] is not None
@@ -140,7 +140,7 @@ async def test_tool_receives_agent_id_as_emitter(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("call the tool", "test_emitter_agent_hop.input", timeout=5)
+        await client.agent(topic="test_emitter_agent_hop.input").execute("call the tool", timeout=5)
 
     assert _tool_capture["agent_name"] == "test_emitter_agent_hop"
 
@@ -180,7 +180,7 @@ async def test_agent_receives_tool_emitter_on_return(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("call the tool", "test_emitter_return_hop.input", timeout=5)
+        await client.agent(topic="test_emitter_return_hop.input").execute("call the tool", timeout=5)
 
     # Two agent invocations: client→agent, then tool→agent (return).
     assert len(seen) == 2
@@ -210,7 +210,7 @@ async def test_success_path_publish_topic_carries_emitter_header(container, depl
     prepare_worker(container)
 
     async with TestKafkaBroker(broker):
-        await client.execute("hi", agent.subscribe_topics[0], timeout=5)
+        await client.agent(topic=agent.subscribe_topics[0]).execute("hi", timeout=5)
 
     agent_published = [h for h in received_headers if _decode_header(h.get(HDR_EMITTER_KIND)) == "agent"]
     assert agent_published, f"no agent-emitted message reached {agent.publish_topic}; received={received_headers}"
@@ -274,7 +274,7 @@ async def test_parallel_fan_out_carries_emitter_per_call(container):
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        await client.execute("call all tools", "test_parallel_emitter.input", timeout=10)
+        await client.agent(topic="test_parallel_emitter.input").execute("call all tools", timeout=10)
 
     assert _parallel_capture == {"a": agent.node_id, "b": agent.node_id, "c": agent.node_id}
 
@@ -292,7 +292,7 @@ async def test_client_node_result_carries_reply_emitter(container, deploy_gated_
     client = container.get(Client)
 
     async with TestKafkaBroker(broker):
-        result = await client.execute("hi", agent.subscribe_topics[0], timeout=5)
+        result = await client.agent(topic=agent.subscribe_topics[0]).execute("hi", timeout=5)
 
     assert result.emitter_node_id == agent.node_id
     assert result.emitter_node_kind == "agent"

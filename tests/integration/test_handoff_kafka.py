@@ -109,16 +109,16 @@ async def test_handoff_transfers_to_peer_who_answers_original_caller(kafka_boots
     async with b_worker:
         await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's AgentCard {b_name!r}")
         async with a_worker:
-            result = await driver.execute("handle my refund", a_in, timeout=120)
+            result = await driver.agent(topic=a_in).execute("handle my refund", timeout=120)
 
     # B answered the ORIGINAL caller (the driver); A relinquished and dropped out.
     assert result.output is not None and "refund is approved" in result.output
     # A's handoff output rode the carried conversation, attributed to A (a ModelResponse stamped with A's name).
     assert any(isinstance(m, ModelResponse) and m.name == a_name for m in result.message_history)
 
-    await driver.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
 
 
 async def test_chained_handoff_reaches_original_caller(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -146,14 +146,14 @@ async def test_chained_handoff_reaches_original_caller(kafka_bootstrap: str, top
         async with b_worker:
             await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None and v.get(c_name) is not None, timeout=60, what="B+C cards")
             async with a_worker:
-                result = await driver.execute("start the chain", a_in, timeout=120)
+                result = await driver.agent(topic=a_in).execute("start the chain", timeout=120)
 
     assert result.output is not None and "C handled it" in result.output  # the last agent answered the original caller
 
-    await driver.close()
-    await c_worker._client.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await c_worker._client.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
 
 
 async def test_handoff_inside_peer_message_folds_to_messaging_caller(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -190,15 +190,15 @@ async def test_handoff_inside_peer_message_folds_to_messaging_caller(kafka_boots
         async with b_worker:
             await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None and v.get(c_name) is not None, timeout=60, what="B+C cards")
             async with a_worker:
-                result = await driver.execute("ask B, who may delegate", a_in, timeout=120)
+                result = await driver.agent(topic=a_in).execute("ask B, who may delegate", timeout=120)
 
     assert result.output is not None and FINAL_OUTPUT in result.output  # A kept control and finalized
     assert "C consulted answer" in str(returns_by_call_id(result.message_history)["m1"])  # C's answer folded into A's message slot
 
-    await driver.close()
-    await c_worker._client.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await c_worker._client.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
 
 
 async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -216,12 +216,12 @@ async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstra
     a_worker = _worker(kafka_bootstrap, nodes=[agent_a], control_plane=control_plane)
 
     async with a_worker:
-        result = await driver.execute("can you help", a_in, timeout=120)
+        result = await driver.agent(topic=a_in).execute("can you help", timeout=120)
 
     assert result.output is not None and "handle it myself" in result.output  # answered directly; no handoff member offered
 
-    await driver.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await a_worker._client.aclose()
 
 
 async def test_direct_handoff_clears_caller_overrides(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -259,13 +259,13 @@ async def test_direct_handoff_clears_caller_overrides(kafka_bootstrap: str, topi
     async with b_worker:
         await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's card {b_name!r}")
         async with a_worker:
-            result = await driver.execute("handle it (override set)", a_in, tool_overrides=[override_tool], timeout=120)
+            result = await driver.agent(topic=a_in).execute("handle it (override set)", tool_overrides=[override_tool], timeout=120)
 
     # B used its OWN tool (the override was cleared): b_tool dispatched + folded, NOT shadowed as 'unknown'.
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert "B_OWN_TOOL_OK" in str(returns_by_call_id(result.message_history)["bt1"])
     assert b_tool_name not in " ".join(retry_prompt_texts(result.message_history))  # not shadowed by A's override
 
-    await driver.close()
-    await b_worker._client.close()
-    await a_worker._client.close()
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()

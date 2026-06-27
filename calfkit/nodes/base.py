@@ -228,7 +228,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
     """Coarse classification of this node, stamped onto every outbound publish as the
     ``x-calf-emitter-kind`` Kafka header. Subclasses override to one of the values in
     :data:`~calfkit._protocol.NodeKind`. The ``"client"`` kind is reserved for the
-    :class:`~calfkit.client.base.BaseClient` and is not a valid subclass override.
+    :class:`~calfkit.client.Client` and is not a valid subclass override.
     """
     is_caller_capable: ClassVar[bool] = True
     """Whether this node type handles ``Call``s and their ``ReturnCall`` continuations over

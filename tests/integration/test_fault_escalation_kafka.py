@@ -79,7 +79,7 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            handle = await driver.start("go", agent_in)
+            handle = await driver.agent(topic=agent_in).start("go")
 
             fault, headers = await tap.next_fault(timeout=60)
             assert headers[HDR_KIND] == "fault"
@@ -94,8 +94,8 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
             with pytest.raises(DeserializationError):
                 await handle.result(timeout=60)
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_callee_error_seam_observes_fault_then_escalates(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -119,12 +119,12 @@ async def test_callee_error_seam_observes_fault_then_escalates(kafka_bootstrap: 
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=60)
             assert fault.error.error_type == FaultTypes.UNHANDLED
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
     # Capture-in-callback, assert-in-test-body (the seam fired once, in the worker
     # process, before it produced the mirror this test just observed).
@@ -153,15 +153,15 @@ async def test_tool_mint_escalates_verbatim_typed_fault(kafka_bootstrap: str, to
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.start("go", agent_in)
+            await driver.agent(topic=agent_in).start("go")
             fault, headers = await tap.next_fault(timeout=60)
             assert fault.error.error_type == "billing.quota_exceeded"
             assert headers[HDR_ERROR_TYPE] == "billing.quota_exceeded"
             assert fault.error.retryable is False
             assert fault.error.details.get("x") == 42
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_fire_and_forget_fault_mirrors_without_callback(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -183,15 +183,15 @@ async def test_fire_and_forget_fault_mirrors_without_callback(kafka_bootstrap: s
 
     try:
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            correlation_id = await driver.send("go", agent_in)  # one-way: returns the id, no future
+            correlation_id = (await driver.agent(topic=agent_in).send("go")).correlation_id  # one-way: returns the id, no future
             assert isinstance(correlation_id, str)
 
             fault, headers = await tap.next_fault(timeout=60)
             assert headers[HDR_KIND] == "fault"
             assert fault.error.error_type == FaultTypes.UNHANDLED
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
 
 
 async def test_stray_fault_does_not_disturb_the_live_worker(kafka_bootstrap: str, topic_namespace: str, caplog: pytest.LogCaptureFixture) -> None:
@@ -238,10 +238,10 @@ async def test_stray_fault_does_not_disturb_the_live_worker(kafka_bootstrap: str
                     await producer.stop()
 
                 # The worker survived the stray: a valid invocation still completes.
-                result = await driver.execute("go", agent_in, timeout=60)
+                result = await driver.agent(topic=agent_in).execute("go", timeout=60)
                 assert result.output is not None and FINAL_OUTPUT in result.output
 
         assert any("stray" in record.getMessage().lower() for record in caplog.records)
     finally:
-        await driver.close()
-        await worker._client.close()
+        await driver.aclose()
+        await worker._client.aclose()
