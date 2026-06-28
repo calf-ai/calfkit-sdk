@@ -11,6 +11,7 @@ from calfkit.models.actions import _Call
 from calfkit.models.payload import ContentPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.state import OverridesState, State
+from calfkit.models.step import StepEvent
 
 _EMPTY_RESOURCES: Mapping[str, Any] = MappingProxyType({})
 
@@ -36,6 +37,18 @@ class Stack(Generic[StackItemT]):
 
     def is_empty(self) -> bool:
         return not self._internal_list
+
+    def __len__(self) -> int:
+        return len(self._internal_list)
+
+    @property
+    def root(self) -> StackItemT:
+        """The bottom (first-pushed) frame — the run's originating caller (e.g. the client's root
+        frame, pushed by ``caller.py``). Mirrors :meth:`peek`'s guard for an empty stack."""
+        try:
+            return self._internal_list[0]
+        except Exception as e:
+            raise Exception("An exception occurred when reading the root of an empty execution stack") from e
 
 
 @dataclass(frozen=True)
@@ -183,6 +196,11 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     _ancestor_callers: frozenset[tuple[str, str]] = PrivateAttr(default_factory=frozenset)
     _resources: Mapping[str, Any] | None = PrivateAttr(default=None)
     _reply: ReturnMessage | FaultMessage | None = PrivateAttr(default=None)
+    # The agent's authored step events for THIS hop (spec §2.5): off-wire (PrivateAttr → never
+    # serialized), per-hop (rebuilt each Kafka re-entry), framework-written by the agent body in
+    # run() and read-and-cleared at the disposition chokepoint. Typed to the StepEvent union so the
+    # node says exactly what it is surfacing (not generic ContentParts).
+    _step_draft: list[StepEvent] | None = PrivateAttr(default=None)
 
     @property
     def correlation_id(self) -> str:
