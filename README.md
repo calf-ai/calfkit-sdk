@@ -36,7 +36,7 @@ general = Agent(
     system_prompt="You are a general assistant. Defer technical questions to other agents.",
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-mini"),
     peers=[
-        Messaging(discover=True),  # discover and consult any agent at runtime
+        Messaging(discover=True),  # discover and delegate to any agent at runtime
         Handoff(discover=True),  # discover and hand off to any agent at runtime
     ],
 )
