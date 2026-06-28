@@ -211,7 +211,7 @@ async def test_before_node_recorder_sees_ingress_seam_context(kafka_bootstrap: s
 async def test_before_node_contract_guard_faults(kafka_bootstrap: str, topic_namespace: str, bad_value: object) -> None:
     """S-8: a ``before_node`` returning a value that can never be a node output (a ``bool``
     or ``bytes`` — the §6.2 coercion guards) raises ``SeamContractError``, which escalates
-    as a ``calf.unhandled`` fault rather than silently passing garbage downstream."""
+    as a ``calf.exception`` fault rather than silently passing garbage downstream."""
 
     def before_bad(ctx: SeamContext[Any]) -> object:
         return bad_value
@@ -227,7 +227,7 @@ async def test_before_node_contract_guard_faults(kafka_bootstrap: str, topic_nam
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
             await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=60)
-            assert fault.error.error_type == FaultTypes.UNHANDLED
+            assert fault.error.error_type == FaultTypes.EXCEPTION
             assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) == "SeamContractError"
     finally:
         await driver.aclose()

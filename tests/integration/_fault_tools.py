@@ -6,7 +6,7 @@ addresses — keep them unique and descriptive. Each tool exercises one entry po
 the rail:
 
 - :func:`boom` — a generic uncaught exception → the chokepoint synthesizes
-  ``calf.unhandled`` (catalogue FR-2), carrying the exception class in
+  ``calf.exception`` (catalogue FR-2), carrying the exception class in
   ``details["calf.exception_type"]``.
 - :func:`quota` — a deliberate ``NodeFaultError`` minted in the tool body → carried
   **verbatim** (the mint rule bypasses ``on_node_error``; FR-3/FR-4).
@@ -33,7 +33,7 @@ from calfkit.nodes import agent_tool
 
 @agent_tool
 def boom(x: int) -> int:
-    """Raise a generic exception → synthesized as ``calf.unhandled`` at the chokepoint."""
+    """Raise a generic exception → synthesized as ``calf.exception`` at the chokepoint."""
     raise ValueError(f"kaboom({x})")
 
 

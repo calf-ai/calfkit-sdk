@@ -659,7 +659,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
     def _fault_from_exception(
         self, exc: Exception, ctx: SeamContext[State] | None, snapshot: WorkflowState, correlation_id: str, *, cause: ErrorReport | None = None
     ) -> ErrorReport:
-        """Synthesize a node-own ``calf.unhandled`` fault, capturing the call-stack topology from the
+        """Synthesize a node-own ``calf.exception`` fault, capturing the call-stack topology from the
         PRE-mutation ``snapshot`` (spec §4.3/§4.4 / ADR-0003): ``frame_chain`` is the traceback analog
         (one ``FrameRef`` per pending frame) and ``origin_frame_id`` is the node's own answering frame.
         The seam ``ctx`` carries no stack, so the snapshot is the sole source. ``cause`` chains the §6.8
@@ -821,7 +821,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
 
         - **call-kind ingress** (missing / ``call``): a caller awaits a reply on the inbound top
           frame, so fault it where the stack is readable (or floor, if frameless) — it never
-          hangs. The fault is ``calf.unhandled`` (a decoded-but-internally-broken envelope is an
+          hangs. The fault is ``calf.exception`` (a decoded-but-internally-broken envelope is an
           unexpected internal failure; ``calf.delivery.undecodable`` is the distinct PRE-handler
           decode floor).
         - **return / fault delivery**: junk or an internal error on the return inbox must NEVER
@@ -1044,7 +1044,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         (``handled=True``, coerced to parts — a wire-unsafe substitute becomes
         ``calf.slot.materialization_failed``); ``None`` (declined) fails the slot with the inbound report
         (escalates at closure); a raise is SLOT-SCOPED, never a node-own failure (§6.5) — a
-        ``NodeFaultError`` honored verbatim, anything else wrapped ``calf.unhandled``, both chaining the
+        ``NodeFaultError`` honored verbatim, anything else wrapped ``calf.exception``, both chaining the
         inbound fault via ``causes``. Carries the slot identity (frame_id/tag/target_topic) so the caller
         resolves or folds it with no in-process correlation map.
         """
@@ -1064,7 +1064,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             minted = nfe.report.model_copy(update={"causes": [*nfe.report.causes, report]})
             return _SlotFailed(frame_id=frame_id, tag=tag, target_topic=target_topic, report=minted)
         except Exception as exc:
-            # An accidental raise is SLOT-scoped (§6.5): wrapped calf.unhandled with the inbound chained
+            # An accidental raise is SLOT-scoped (§6.5): wrapped calf.exception with the inbound chained
             # — routing it to on_node_error would mint a whole-invocation outcome mid-batch (double
             # replies, leaked batches). It propagates outward (the batch/escalation axis), not sideways.
             chained = ErrorReport.from_exception(exc, node=self, ctx=seam_ctx, cause=report)
@@ -1322,7 +1322,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                     # so a fully-folded batch never leaks a complete-but-unclosed corpse. Catch is broad
                     # (matching the C1 OPEN-dispatch posture) so a NON-Kafka raise (e.g. a serialization
                     # error on the re-entry envelope) gets the precise FANOUT_ABORTED(reentry_failed)
-                    # attribution here rather than the generic calf.unhandled via the boundary backstop.
+                    # attribution here rather than the generic calf.exception via the boundary backstop.
                     logger.error("[%s] fan-out re-entry publish failed batch=%s node=%s; escalating", correlation_id[:8], fanout_id, self.node_id)
                     await abort_batch(store, fanout_id)
                     return _BatchFaulted(self._fanout_abort_report(FaultTypes.REASON_REENTRY_FAILED))
@@ -1510,7 +1510,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         # ── stage 3: before_node ── (+ its short-circuit after_node). A non-NodeFaultError raise from a
         # BOUNDARY seam is wrapped _SeamAccidentError so the stage-5 arm chains the handled inbound fault
         # (§6.5); a NodeFaultError propagates verbatim (the mint rule). The body (stage 4) is NOT
-        # wrapped — a body raise is §6.7 calf.unhandled with nothing chained.
+        # wrapped — a body raise is §6.7 calf.exception with nothing chained.
         try:
             pre = await run_chain(self._chains[BEFORE_NODE], seam_ctx, seam_name=BEFORE_NODE)
             if pre is not None:
@@ -1666,7 +1666,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         snapshot = self._stack_snapshot(envelope)
         # §6.5: a fault-kind delivery's inbound fault — chained in causes ONLY if a before_node/after_node
         # accident later routes to on_node_error (captured pre-mutation; it is the fault on_callee_error
-        # handled, since an UNHANDLED fault escalates before the seams ever run).
+        # handled, since a `calf.exception` fault escalates before the seams ever run).
         inbound_fault = envelope.reply.error if isinstance(envelope.reply, FaultMessage) else None
         try:
             output = await self._execute(

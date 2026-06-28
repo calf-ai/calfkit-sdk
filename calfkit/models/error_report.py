@@ -52,7 +52,7 @@ class FaultTypes:
     # error_type codes
     MODEL_CONTEXT_WINDOW_EXCEEDED = "calf.model.context_window_exceeded"
     FAULT_GROUP = "calf.fault_group"
-    UNHANDLED = "calf.unhandled"
+    EXCEPTION = "calf.exception"
     DELIVERY_REJECTED = "calf.delivery.rejected"
     DELIVERY_UNDECODABLE = "calf.delivery.undecodable"
     # A reply that DECODED into a valid Envelope but is structurally invalid as a terminal: its
@@ -69,7 +69,7 @@ class FaultTypes:
     # durable store died, its basestate was missing, a sibling/re-entry publish failed, or the node's
     # own work raised while slots were outstanding. The batch is tombstoned and the caller faulted ONCE
     # (in-node spec §4.4). ``details.reason`` ∈ {store_unavailable, basestate_missing, reentry_failed,
-    # dispatch_failed}; a node-own raise mid-batch escalates the exception itself (``calf.unhandled``).
+    # dispatch_failed}; a node-own raise mid-batch escalates the exception itself (``calf.exception``).
     FANOUT_ABORTED = "calf.fanout.aborted"
     REASON_STORE_UNAVAILABLE = "store_unavailable"
     REASON_BASESTATE_MISSING = "basestate_missing"
@@ -92,7 +92,7 @@ class FaultTypes:
     SEAM_ERRORS = "calf.seam_errors"
 
     # details key: the exception class name :meth:`ErrorReport.from_exception` records
-    # when synthesizing a ``calf.unhandled`` fault from an arbitrary exception (spec
+    # when synthesizing a ``calf.exception`` fault from an arbitrary exception (spec
     # §6.7) — exception identity does not cross the wire, but the class name is a useful
     # forensic breadcrumb in ``details``.
     EXCEPTION_TYPE = "calf.exception_type"
@@ -226,7 +226,7 @@ class ErrorReport(BaseModel):
 
         Mirrors :meth:`_clamp_message`: a non-str ``error_type`` would otherwise hit the
         ``error_type: str`` constraint and collapse ``build_safe`` into its last-resort
-        fallback, which rewrites ``error_type`` to ``calf.unhandled`` and drops causes and
+        fallback, which rewrites ``error_type`` to ``calf.exception`` and drops causes and
         frame_chain. Coercing the offending scalar keeps the primary build path total and
         preserves the original code's string form."""
         if not isinstance(v, str):
@@ -342,7 +342,7 @@ class ErrorReport(BaseModel):
             # ``__len__``/``__getitem__`` is what likely broke the primary path's
             # clamp, so re-passing it would re-break the fallback — coerce it out.
             return cls(
-                error_type=error_type if type(error_type) is str else FaultTypes.UNHANDLED,
+                error_type=error_type if type(error_type) is str else FaultTypes.EXCEPTION,
                 message=message if type(message) is str else "",
                 retryable=retryable if type(retryable) is bool else False,
                 origin_node_id=origin_node_id if type(origin_node_id) is str else None,
@@ -363,7 +363,7 @@ class ErrorReport(BaseModel):
     ) -> ErrorReport:
         """Synthesize a fault from an arbitrary exception (spec §6.7).
 
-        A non-``NodeFaultError`` maps to ``error_type="calf.unhandled"`` with the
+        A non-``NodeFaultError`` maps to ``error_type="calf.exception"`` with the
         exception's class name (``details[FaultTypes.EXCEPTION_TYPE]``) and a clamped
         message; ``build_safe`` keeps it total — the error path must never itself raise.
         ``node``/``ctx`` (optional, keyword) source the origin breadcrumb when present
@@ -378,7 +378,7 @@ class ErrorReport(BaseModel):
         bypassing ``on_node_error`` (the mint rule, §6.5).
         """
         report = cls.build_safe(
-            error_type=FaultTypes.UNHANDLED,
+            error_type=FaultTypes.EXCEPTION,
             message=_safe_exc_str(exc),
             origin_node_id=getattr(node, "node_id", None),
             origin_frame_id=origin_frame_id if origin_frame_id is not None else getattr(ctx, "frame_id", None),

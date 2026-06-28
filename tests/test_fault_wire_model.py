@@ -153,11 +153,11 @@ class TestErrorReport:
         assert back == r
 
     def test_nested_causes_round_trip(self) -> None:
-        inner = ErrorReport(error_type="calf.unhandled", message="inner")
+        inner = ErrorReport(error_type="calf.exception", message="inner")
         group = ErrorReport(error_type="calf.fault_group", causes=[inner, inner])
         back = ErrorReport.model_validate_json(group.model_dump_json())
         assert len(back.causes) == 2
-        assert back.causes[0].error_type == "calf.unhandled"
+        assert back.causes[0].error_type == "calf.exception"
         assert back.causes[0].message == "inner"
 
 
@@ -200,7 +200,7 @@ class TestBuildSafe:
 
     def test_non_str_error_type_coerced_keeps_causes_and_frame_chain(self) -> None:
         # round 1: a non-str ``error_type`` must likewise survive the primary path —
-        # coerced to str, NOT rewritten to calf.unhandled by the fallback arm, and not
+        # coerced to str, NOT rewritten to calf.exception by the fallback arm, and not
         # dropping causes/frame_chain.
         child = ErrorReport(error_type="calf.child")
         frame = FrameRef(frame_id="f1", target_topic="t")
@@ -211,7 +211,7 @@ class TestBuildSafe:
             frame_chain=[frame],
         )
         assert isinstance(r.error_type, str) and r.error_type == "12345"
-        assert r.error_type != FaultTypes.UNHANDLED  # not collapsed into the fallback
+        assert r.error_type != FaultTypes.EXCEPTION  # not collapsed into the fallback
         assert r.message == "keep"
         assert [c.error_type for c in r.causes] == ["calf.child"]  # cause kept
         assert r.frame_chain == [frame]  # topology kept
@@ -400,13 +400,13 @@ class TestWalkAndFind:
         assert [r.error_type for r in root.walk()] == ["root", "mid", "a", "b"]
 
     def test_find_returns_first_match_including_nested(self) -> None:
-        nested = ErrorReport(error_type="calf.unhandled")
+        nested = ErrorReport(error_type="calf.exception")
         group = ErrorReport(error_type="calf.fault_group", causes=[nested])
-        found = group.find("calf.unhandled")
+        found = group.find("calf.exception")
         assert found is nested
 
     def test_find_returns_none_when_absent(self) -> None:
-        assert ErrorReport(error_type="x").find("calf.unhandled") is None
+        assert ErrorReport(error_type="x").find("calf.exception") is None
 
     def test_find_matches_self(self) -> None:
         r = ErrorReport(error_type="calf.fault_group")
@@ -472,11 +472,11 @@ class TestFaultMessage:
         fm = FaultMessage(
             in_reply_to="f1",
             tag="call-7",
-            error=ErrorReport(error_type="calf.fault_group", causes=[ErrorReport(error_type="calf.unhandled")]),
+            error=ErrorReport(error_type="calf.fault_group", causes=[ErrorReport(error_type="calf.exception")]),
         )
         back = FaultMessage.model_validate_json(fm.model_dump_json())
         assert back == fm
-        assert back.error.causes[0].error_type == "calf.unhandled"
+        assert back.error.causes[0].error_type == "calf.exception"
 
 
 class TestNodeFaultError:
@@ -506,8 +506,8 @@ class TestNodeFaultError:
     def test_receive_allows_calf_namespace_report(self) -> None:
         # Wrapping a framework-minted calf.* report (the client re-raise path) must
         # NOT trip the mint guard — the guard is only for user string mints.
-        report = ErrorReport(error_type=FaultTypes.UNHANDLED)
-        assert NodeFaultError(report).report.error_type == FaultTypes.UNHANDLED
+        report = ErrorReport(error_type=FaultTypes.EXCEPTION)
+        assert NodeFaultError(report).report.error_type == FaultTypes.EXCEPTION
 
     def test_receive_rejects_mint_only_kwargs(self) -> None:
         # message/retryable/details are mint-only; passing them with a report is a
@@ -552,7 +552,7 @@ class TestFaultTypes:
     def test_known_error_type_codes(self) -> None:
         assert FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED == "calf.model.context_window_exceeded"
         assert FaultTypes.FAULT_GROUP == "calf.fault_group"
-        assert FaultTypes.UNHANDLED == "calf.unhandled"
+        assert FaultTypes.EXCEPTION == "calf.exception"
         assert FaultTypes.DELIVERY_REJECTED == "calf.delivery.rejected"
         assert FaultTypes.DELIVERY_UNDECODABLE == "calf.delivery.undecodable"
         assert FaultTypes.SLOT_MATERIALIZATION_FAILED == "calf.slot.materialization_failed"
@@ -593,7 +593,7 @@ class TestFromException:
 
     def test_generic_exception_maps_to_calf_unhandled(self) -> None:
         report = ErrorReport.from_exception(ValueError("boom"))
-        assert report.error_type == FaultTypes.UNHANDLED
+        assert report.error_type == FaultTypes.EXCEPTION
         # the exception class name is recorded as a framework details breadcrumb
         assert report.details[FaultTypes.EXCEPTION_TYPE] == "ValueError"
         # the clamped exception message rides the report's message field
@@ -607,7 +607,7 @@ class TestFromException:
                 raise RuntimeError("no str for you")
 
         report = ErrorReport.from_exception(HostileError())
-        assert report.error_type == FaultTypes.UNHANDLED
+        assert report.error_type == FaultTypes.EXCEPTION
         assert report.details[FaultTypes.EXCEPTION_TYPE] == "HostileError"
 
     def test_is_total_when_both_str_and_repr_raise(self) -> None:
@@ -623,7 +623,7 @@ class TestFromException:
 
         report = ErrorReport.from_exception(TotallyUnprintableError())
         assert report.message == "<unprintable TotallyUnprintableError>"
-        assert report.error_type == FaultTypes.UNHANDLED
+        assert report.error_type == FaultTypes.EXCEPTION
         assert report.details[FaultTypes.EXCEPTION_TYPE] == "TotallyUnprintableError"
 
     def test_chains_a_cause(self) -> None:

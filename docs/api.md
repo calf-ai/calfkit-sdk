@@ -304,7 +304,7 @@ Framework-minted `error_type` codes (all under the reserved `calf.` prefix), shi
 | Constant | Code | Meaning |
 | --- | --- | --- |
 | `FAULT_GROUP` | `calf.fault_group` | Multiple sibling faults composed under `causes` (e.g. a fan-out). |
-| `UNHANDLED` | `calf.unhandled` | An arbitrary exception synthesized into a fault. |
+| `EXCEPTION` | `calf.exception` | An arbitrary exception synthesized into a fault. |
 | `FANOUT_ABORTED` | `calf.fanout.aborted` | A fan-out batch could not complete (`details["reason"]` says why). |
 | `MODEL_CONTEXT_WINDOW_EXCEEDED` | `calf.model.context_window_exceeded` | The model's context window was exceeded. |
 | `DELIVERY_REJECTED` | `calf.delivery.rejected` | A reply-owing delivery declined its body. |

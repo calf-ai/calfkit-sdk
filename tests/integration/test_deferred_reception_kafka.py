@@ -59,7 +59,7 @@ async def test_self_retry_budget_exhausts() -> None:
 async def test_context_window_error_classifies() -> None:
     """When #193 lands: a provider context-window error classifies to
     ``calf.model.context_window_exceeded`` at the provider layer. Today such an error
-    surfaces as a generic ``calf.unhandled`` fault via the chokepoint."""
+    surfaces as a generic ``calf.exception`` fault via the chokepoint."""
 
 
 @pytest.mark.skip(reason="B2 follow-up: MCP isError is passed through transparently/unmarked")

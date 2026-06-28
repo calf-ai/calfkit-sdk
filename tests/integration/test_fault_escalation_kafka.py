@@ -60,7 +60,7 @@ def _agent(node_id: str, *, agent_in: str, agent_pub: str, tool, call: ToolCallP
 
 
 async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """F-1: a tool's generic exception → the agent escalates a ``calf.unhandled``
+    """F-1: a tool's generic exception → the agent escalates a ``calf.exception``
     ``FaultMessage`` on its ``publish_topic`` mirror (typed report + filterable
     headers), and the client's routed reply is received as a typed ``NodeFaultError``."""
     agent_in = f"{topic_namespace}.f1.input"
@@ -82,9 +82,9 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
 
             fault, headers = await tap.next_fault(timeout=60)
             assert headers[HDR_KIND] == "fault"
-            assert headers[HDR_ERROR_TYPE] == FaultTypes.UNHANDLED
-            assert fault.error.error_type == FaultTypes.UNHANDLED
-            assert fault.error.find(FaultTypes.UNHANDLED) is not None
+            assert headers[HDR_ERROR_TYPE] == FaultTypes.EXCEPTION
+            assert fault.error.error_type == FaultTypes.EXCEPTION
+            assert fault.error.find(FaultTypes.EXCEPTION) is not None
             assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) == "ValueError"
             assert len(fault.error.frame_chain) >= 1  # the faulting hop's topology is captured
 
@@ -92,14 +92,14 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
             # result() raises it carrying the verbatim escalated ErrorReport.
             with pytest.raises(NodeFaultError) as exc_info:
                 await handle.result(timeout=60)
-            assert exc_info.value.report.find(FaultTypes.UNHANDLED) is not None
+            assert exc_info.value.report.find(FaultTypes.EXCEPTION) is not None
     finally:
         await driver.aclose()
         await worker._client.aclose()
 
 
 async def test_callee_error_seam_observes_fault_then_escalates(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """F-1b (Channel B): an ``on_callee_error`` recorder sees the live ``calf.unhandled``
+    """F-1b (Channel B): an ``on_callee_error`` recorder sees the live ``calf.exception``
     fault (``delivery_kind=fault``, ``failing_call.tag``) and declines → the fault still
     escalates to the agent's ``publish_topic`` mirror."""
     recorder = CalleeErrorRecorder()
@@ -121,7 +121,7 @@ async def test_callee_error_seam_observes_fault_then_escalates(kafka_bootstrap: 
         async with worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
             await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=60)
-            assert fault.error.error_type == FaultTypes.UNHANDLED
+            assert fault.error.error_type == FaultTypes.EXCEPTION
     finally:
         await driver.aclose()
         await worker._client.aclose()
@@ -131,7 +131,7 @@ async def test_callee_error_seam_observes_fault_then_escalates(kafka_bootstrap: 
     assert len(recorder.calls) == 1
     (call,) = recorder.calls
     assert call["delivery_kind"] == "fault"
-    assert call["error_type"] == FaultTypes.UNHANDLED
+    assert call["error_type"] == FaultTypes.EXCEPTION
     assert call["tag"] == "c1"
 
 
@@ -188,7 +188,7 @@ async def test_fire_and_forget_fault_mirrors_without_callback(kafka_bootstrap: s
 
             fault, headers = await tap.next_fault(timeout=60)
             assert headers[HDR_KIND] == "fault"
-            assert fault.error.error_type == FaultTypes.UNHANDLED
+            assert fault.error.error_type == FaultTypes.EXCEPTION
     finally:
         await driver.aclose()
         await worker._client.aclose()

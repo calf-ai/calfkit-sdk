@@ -78,8 +78,8 @@ async with fault_tap(kafka_bootstrap, agent_pub) as tap:
     handle = await driver.start("go", agent_in)              # don't block on the (hanging) future
     fault, headers = await tap.next_fault(timeout=30)
     assert headers[HDR_KIND] == "fault"
-    assert headers[HDR_ERROR_TYPE] == "calf.unhandled"
-    assert fault.error.find("calf.unhandled") is not None
+    assert headers[HDR_ERROR_TYPE] == "calf.exception"
+    assert fault.error.find("calf.exception") is not None
 ```
 
 > Why a raw consumer and not a `@consumer` node: `ConsumerContext` has no `.fault` today (SE-27), so a sink node sees `output=None`. The raw tap reads `envelope.reply.error` directly — the only typed channel.
@@ -104,10 +104,10 @@ agent = Agent(..., on_callee_error=probe.on_callee_error)
 async with worker:
     handle = await driver.start("go", agent_in)
     await asyncio.wait_for(_settle(...), timeout=30)   # wait for the probe to fire / fault to mirror
-assert probe.calls == [{"kind": "fault", "type": "calf.unhandled", "tag": "c1", "depth": 1}]
+assert probe.calls == [{"kind": "fault", "type": "calf.exception", "tag": "c1", "depth": 1}]
 ```
 
-**Caveat (document in the helper):** a *raised* `AssertionError` inside a seam is a node-own accident — for `before_node`/`after_node` it routes to `on_node_error` → `calf.unhandled` (visible as a fault, not a test failure); for `on_callee_error` it is slot-scoped (resolves the slot failed). So **default to capture-then-assert.** Direct in-callback `assert`/`raise NodeFaultError(...)` is valid only for "must-fire / must-see-X" checks where you *want* the failure to surface as an observable fault (then assert that distinctive fault on Channel A). A handler that must *not* fire can assert by leaving its recorder empty.
+**Caveat (document in the helper):** a *raised* `AssertionError` inside a seam is a node-own accident — for `before_node`/`after_node` it routes to `on_node_error` → `calf.exception` (visible as a fault, not a test failure); for `on_callee_error` it is slot-scoped (resolves the slot failed). So **default to capture-then-assert.** Direct in-callback `assert`/`raise NodeFaultError(...)` is valid only for "must-fire / must-see-X" checks where you *want* the failure to surface as an observable fault (then assert that distinctive fault on Channel A). A handler that must *not* fire can assert by leaving its recorder empty.
 
 ### Channel C — client edge (current behavior) + caplog
 
@@ -127,7 +127,7 @@ from calfkit.exceptions import NodeFaultError
 from calfkit._vendor.pydantic_ai import ModelRetry   # exact import per tool.py
 
 @agent_tool
-def boom(x: int) -> int:                  # FR-2: generic raise → calf.unhandled
+def boom(x: int) -> int:                  # FR-2: generic raise → calf.exception
     raise ValueError("kaboom")
 
 @agent_tool
@@ -171,8 +171,8 @@ Each row: **ID** · behavior(s) covered · setup · action · assertion / channe
 
 | ID | Covers | Setup | Action → Assert |
 |---|---|---|---|
-| F-1 | FR-2, FR-11, FR-18 | agent(`tools=[boom]`, `model=scripted([boom c1])`, `publish_topic=pub`), no seams | `driver.start`; **A**: `next_fault` → `error_type=="calf.unhandled"`, `details["calf.exception_type"]=="ValueError"`, headers `kind=fault`+`error-type`. **C**: `handle.result()` raises `DeserializationError`. |
-| F-2 | FR-3, FR-4 | agent(`tools=[quota]`), no seams | **A**: fault `error_type=="billing.quota_exceeded"`, `retryable is False`, `details["x"]==1`. Verbatim, not `calf.unhandled`. `S32`. |
+| F-1 | FR-2, FR-11, FR-18 | agent(`tools=[boom]`, `model=scripted([boom c1])`, `publish_topic=pub`), no seams | `driver.start`; **A**: `next_fault` → `error_type=="calf.exception"`, `details["calf.exception_type"]=="ValueError"`, headers `kind=fault`+`error-type`. **C**: `handle.result()` raises `DeserializationError`. |
+| F-2 | FR-3, FR-4 | agent(`tools=[quota]`), no seams | **A**: fault `error_type=="billing.quota_exceeded"`, `retryable is False`, `details["x"]==1`. Verbatim, not `calf.exception`. `S32`. |
 | F-3 | FR-7, FR-8, FR-9 | deep chain A→B→C as 3 agents over 3 topics; C's tool `boom`; B has no `on_callee_error` (declines) | invoke A; **A** taps A's `publish_topic` → fault `error_type` identical to C's origin, `frame_chain` length ≥ 2, same `report_id` as the C-hop mirror. **B**: a recorder `on_callee_error` on A fires once with that fault. `S3`, `S24`. |
 | F-4 | FR-12, FR-13 | fire-and-forget: `driver.send("go", agent_in)` (no reply_to) to an agent whose tool `boom`s; agent `publish_topic=pub` | **A**: fault mirrored on `pub`. **C**: no future exists (send returns a correlation id only); assert nothing hangs. `S10`, `S14`. |
 | F-5 | FR-25, FR-16 (stray) | publish a hand-built `kind=fault`/`reply=None` envelope (kind/slot disagreement) onto a live agent's return topic | **B/caplog**: WARNING stray, the open invocation untouched; the agent's reply future still resolves normally for a concurrent valid call. `S29`. |
@@ -185,10 +185,10 @@ Each row: **ID** · behavior(s) covered · setup · action · assertion / channe
 | S-2 | SE-21 input transform | agent `before_node` mutates `ctx.state` (rewrite prompt) + returns `None` | **B**: body sees the transformed input (recorder tool captures it). `S18`. |
 | S-3 | B1 `after_node` replace | agent `after_node` returns `"redacted"` | **C**: output is `"redacted"`. |
 | S-4 | SE-8, SE-11 | agent `before_node` raises `ValueError`; `on_node_error` returns a recovery value | **A**: no fault; **C**: output is the recovery value (flowed through `after_node`). `S8`. |
-| S-5 | SE-10 decline-escalate | tool `boom`; agent `on_node_error` *handler* raises a non-NodeFaultError (declines) | **A**: original `calf.unhandled` escalates; `details["calf.seam_errors"]` notes the handler failure. `S9`. |
+| S-5 | SE-10 decline-escalate | tool `boom`; agent `on_node_error` *handler* raises a non-NodeFaultError (declines) | **A**: original `calf.exception` escalates; `details["calf.seam_errors"]` notes the handler failure. `S9`. |
 | S-6 | SE-7 mint bypass | tool `boom`; agent `on_node_error=[recover]` **and** the body raises `NodeFaultError("x.y")` | **A**: `x.y` escalates verbatim; the recovery seam never fired (recorder empty). `S32`. |
 | S-7 | SE-9 slot-scoped raise | fan-out of 2 (`boom`,`ok_a`); agent `on_callee_error` raises a `NodeFaultError("seam.reject")` on the `boom` slot | **A**: at closure the group/flattened fault carries `seam.reject` chained to the inbound fault; `ok_a` recorded ok; no double reply. `S31`. |
-| S-8 | SE-13/14/15/16 guards | agent `before_node` returns `True` / its `StateT` / `b"x"` / (separately) `after_node` returns a `Call` | each: **A**: `SeamContractError`-origin fault (`calf.unhandled`) escalates; body not silently skipped. `S41`, `S16`. |
+| S-8 | SE-13/14/15/16 guards | agent `before_node` returns `True` / its `StateT` / `b"x"` / (separately) `after_node` returns a `Call` | each: **A**: `SeamContractError`-origin fault (`calf.exception`) escalates; body not silently skipped. `S41`, `S16`. |
 | S-9 | SE-18, SE-19 | register a seam on a `@consumer`; register a wrong-arity seam | worker **startup raises** `RegistryConfigError` (assert at `async with worker:` entry). `S25`. |
 | S-10 | SE-24, SE-22, SE-23 | recorder seams on all four positions | drive ingress + a callee fault; **B**: assert `delivery_kind`/`route`/`awaiting_reply`/`failing_call`/`exception` are populated exactly per position and cleared elsewhere. |
 
@@ -219,8 +219,8 @@ Each row: **ID** · behavior(s) covered · setup · action · assertion / channe
 
 | ID | Covers | Setup | Action → Assert |
 |---|---|---|---|
-| X-1 | FO-12, FO-14 (flatten) | agent fan-out of 3 (`boom`,`ok_a`,`ok_b`), no `on_callee_error` | real `KtablesFanoutBatchStore`; **A**: at closure a **flattened** fault (the bare `boom` `calf.unhandled`) with `details["calf.fanout_topology"].ok==2`, the two successes as `status=="ok"` slots; body never ran (recorder). `S4`. |
-| X-2 | FO-12, FO-14 (group) | fan-out of 3, **two** tools `boom` | **A**: `calf.fault_group` with 2 `causes`; `report.find("calf.unhandled")` matches at depth; `failed==2`. `S5`, `S40`. |
+| X-1 | FO-12, FO-14 (flatten) | agent fan-out of 3 (`boom`,`ok_a`,`ok_b`), no `on_callee_error` | real `KtablesFanoutBatchStore`; **A**: at closure a **flattened** fault (the bare `boom` `calf.exception`) with `details["calf.fanout_topology"].ok==2`, the two successes as `status=="ok"` slots; body never ran (recorder). `S4`. |
+| X-2 | FO-12, FO-14 (group) | fan-out of 3, **two** tools `boom` | **A**: `calf.fault_group` with 2 `causes`; `report.find("calf.exception")` matches at depth; `failed==2`. `S5`, `S40`. |
 | X-3 | FO-6, B1 `on_callee_error` resolve | fan-out of 3 (`boom`,`ok_a`,`ok_b`); agent `on_callee_error` returns a substitute string for `boom` | **C**: batch **completes** (`handle.result().output` is the finalized text); **B**: the model's turn-2 saw 3 results (one substituted). `S6`. |
 | X-4 | FO-3, FO-15 dispatch-abort | fan-out where a sibling **publish fails** (point a sibling at an invalid topic / inject a broker error via a wrapper) **or** the store is made unavailable at OPEN | **A**: `calf.fanout.aborted`, `details["reason"]=="dispatch_failed"` (or `store_unavailable`), exactly one fault to the caller. |
 | X-5 | FO-16 mid-fold abort | fan-out open on real store; force a node-own raise mid-fold (a seam recorder that raises on the 2nd sibling) | **A**: `calf.fanout.aborted` once; both tables tombstoned (assert via a follow-up `KafkaTable` read that `state[X]` is gone); late siblings stray-floor. |
