@@ -18,7 +18,7 @@ from weakref import WeakValueDictionary
 from faststream import Context
 from faststream.kafka import KafkaBroker
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, decode_header_str, wire_filter
 from calfkit._types import OutputT
 from calfkit.client.events import EventStream, RunCompleted, RunEvent, RunFailed
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, NodeFaultError
@@ -181,7 +181,12 @@ class _Hub:
         and ``auto_offset_reset="latest"`` (tail). Pure bookkeeping; started by the first
         ``broker.start()`` (spec §2.7/§5.1). Called from ``connect()``."""
 
-        @broker.subscriber(inbox_topic, group_id=None, auto_offset_reset="latest")
+        # ONE groupless inbox subscriber; the envelope reply handler is its first filtered call-item.
+        # The filter (x-calf-wire == "envelope") runs BEFORE body decode, so a step body never triggers
+        # Envelope validation (spec §2.4). Increment E attaches the step call-item to this same `sub`.
+        sub = broker.subscriber(inbox_topic, group_id=None, auto_offset_reset="latest")
+
+        @sub(filter=wire_filter(Envelope))
         async def _handle_reply(
             envelope: Envelope,
             correlation_id: Annotated[str, Context()],

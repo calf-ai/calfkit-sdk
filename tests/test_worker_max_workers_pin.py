@@ -22,7 +22,9 @@ def _spy_registration(monkeypatch, client) -> list:  # noqa: ANN001
 
     def fake_subscriber(*topics, **kwargs):  # noqa: ANN002, ANN003
         calls.append((topics, kwargs))
-        return lambda fn: fn
+        # The returned call-item registrar now receives filter=wire_filter(Envelope) (increment C);
+        # accept and ignore per-call-item kwargs so the spy matches the real subscriber __call__.
+        return lambda fn, **_call_kwargs: fn
 
     def fake_publisher(*args, **kwargs):  # noqa: ANN002, ANN003
         return lambda fn: fn

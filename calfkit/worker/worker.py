@@ -8,12 +8,14 @@ import uuid_utils
 from faststream import FastStream
 from typing_extensions import Self
 
+from calfkit._protocol import wire_filter
 from calfkit.client import Client
 from calfkit.controlplane.config import ControlPlaneConfig
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.controlplane.view import ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard
 from calfkit.models.capability import CAPABILITY_TOPIC, CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
+from calfkit.models.envelope import Envelope
 from calfkit.models.tool_dispatch import ToolSelector
 from calfkit.nodes import BaseNodeDef
 from calfkit.provisioning import framework_topics_for_nodes, topics_for_nodes
@@ -397,7 +399,7 @@ class Worker(LifecycleHookMixin):
                 group_id=group_id,
                 **subscribe_kwargs,
             )
-            handler = subscriber(node.handler)
+            handler = subscriber(node.handler, filter=wire_filter(Envelope))
             if node.publish_topic:
                 self._client._connection.publisher(node.publish_topic, **self._extra_publish_kwargs)(handler)
 
