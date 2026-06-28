@@ -63,6 +63,8 @@ def lookup_account_balance(ctx: ToolContext) -> str:
 
 ## Running your agents
 
+> **An agent mesh is required** for agents to discover and connect with each other — set the `CALFKIT_MESH_URL` environment variable to point at it (defaults to `localhost`). Starting one is covered below.
+
 Start the general assistant independently. Assuming it's saved in `general_help.py`.
 
 ```bash
@@ -83,7 +85,7 @@ import asyncio
 from calfkit import Client
 
 async def main():
-    async with Client.connect("<calfkit_agent_mesh_url>") as client:
+    async with Client.connect() as client:
         result = await client.agent(name="general").execute(
             "Do I have enough money to afford a new car?"
         )
