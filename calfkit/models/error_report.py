@@ -127,6 +127,21 @@ class FrameRef(BaseModel):
     target_topic: str
 
 
+class ExceptionInfo(BaseModel):
+    """A structured projection of a raised exception (inspired by OTel's exception.* attrs).
+
+    Carried on a fault synthesized from an uncaught exception. Carries DATA, never
+    the exception object — ``attrs`` is JSON-native (harvested via the sanitize round-trip).
+    The receiver needs no producer class to read it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    type: str  # type(exc).__name__, e.g. "ModelHTTPError"
+    module: str | None = None  # type(exc).__module__
+    attrs: dict[str, Any] = Field(default_factory=dict)  # sanitized vars(exc)
+
+
 class ErrorReport(BaseModel):
     """A terminal failure as a typed wire value (spec §4.3).
 
@@ -180,6 +195,10 @@ class ErrorReport(BaseModel):
     causes: list[ErrorReport] = Field(default_factory=list)
     """Recursive — non-empty means this report is composed of other faults
     (a fault group, a deliberate conversion, or a recovery-then-failure)."""
+
+    exception: ExceptionInfo | None = None
+    """The structured projection of an uncaught exception (spec §5), populated only on
+    the :meth:`from_exception` synthesis path — ``None`` on minted and framework faults."""
 
     @field_validator("message", mode="before")
     @classmethod

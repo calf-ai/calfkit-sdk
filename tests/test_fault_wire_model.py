@@ -15,8 +15,10 @@ from pydantic import ValidationError
 
 from calfkit._protocol import HDR_ERROR_TYPE, MessageKind
 from calfkit.exceptions import NodeFaultError
-from calfkit.models.error_report import ErrorReport, FaultTypes, FrameRef
+from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, WorkflowState
+from calfkit.models.error_report import ErrorReport, ExceptionInfo, FaultTypes, FrameRef
 from calfkit.models.reply import FaultMessage, _ReplyBase
+from calfkit.models.state import State
 
 
 class TestFrameRef:
@@ -30,6 +32,83 @@ class TestFrameRef:
     def test_round_trips(self) -> None:
         ref = FrameRef(frame_id="f1", target_topic="orders")
         assert FrameRef.model_validate_json(ref.model_dump_json()) == ref
+
+
+def _envelope_with_reply(reply: FaultMessage) -> Envelope:
+    """A minimal Envelope carrying *reply*, for a full Envelope→FaultMessage→ErrorReport
+    wire round-trip (mirrors the canonical construction in test_reply_slot.py)."""
+    stack = CallFrameStack()
+    stack.push(CallFrame(target_topic="t", callback_topic="reply.topic"))
+    return Envelope(
+        internal_workflow_state=WorkflowState(call_stack=stack),
+        context=SessionRunContext(state=State(), deps={}),
+        reply=reply,
+    )
+
+
+class TestExceptionInfo:
+    """The typed projection of a raised exception carried on ErrorReport.exception (spec §5)."""
+
+    def test_carries_type_module_and_attrs(self) -> None:
+        info = ExceptionInfo(type="ModelHTTPError", module="httpx", attrs={"status_code": 400})
+        assert info.type == "ModelHTTPError"
+        assert info.module == "httpx"
+        assert info.attrs == {"status_code": 400}
+
+    def test_module_and_attrs_default(self) -> None:
+        info = ExceptionInfo(type="ValueError")
+        assert info.module is None
+        assert info.attrs == {}
+
+    def test_is_frozen(self) -> None:
+        # Frozen like the other wire values (spec §5): the projection travels and is read at
+        # many surfaces, so field reassignment is blocked.
+        info = ExceptionInfo(type="ValueError")
+        with pytest.raises(ValidationError):
+            info.type = "KeyError"  # type: ignore[misc]
+
+    def test_round_trips_through_json(self) -> None:
+        info = ExceptionInfo(type="ModelHTTPError", module="m", attrs={"status_code": 400, "body": {"code": "x"}})
+        assert ExceptionInfo.model_validate_json(info.model_dump_json()) == info
+
+
+class TestErrorReportExceptionField:
+    """ErrorReport.exception — the additive slot populated only on the from_exception path (spec §5)."""
+
+    def test_defaults_none(self) -> None:
+        assert ErrorReport(error_type="x").exception is None
+
+    def test_additive_decode_missing_key_is_none(self) -> None:
+        # Backward-compatible (spec §5): an old wire message without the field validates to
+        # None, so a pre-feature producer's fault still decodes.
+        report = ErrorReport.model_validate_json('{"error_type":"x"}')
+        assert report.exception is None
+
+    def test_unknown_sibling_key_ignored(self) -> None:
+        # extra="ignore" (spec §5): an unknown sibling key does not break decode.
+        report = ErrorReport.model_validate_json('{"error_type":"x","some_future_field":123}')
+        assert report.exception is None
+        assert not hasattr(report, "some_future_field")
+
+    def test_carries_exception_through_full_envelope_round_trip(self) -> None:
+        # A hand-built exception slot survives Envelope→FaultMessage→ErrorReport
+        # serialization and decodes as plain pydantic validation (spec §11).
+        report = ErrorReport(
+            error_type="x",
+            exception=ExceptionInfo(type="ModelHTTPError", module="m", attrs={"status_code": 400, "body": {"code": "ctx"}}),
+        )
+        env = _envelope_with_reply(FaultMessage(in_reply_to="f1", tag="t1", error=report))
+        back = Envelope.model_validate_json(env.model_dump_json())
+        assert isinstance(back.reply, FaultMessage)
+        assert back.reply.error.exception is not None
+        assert back.reply.error.exception.type == "ModelHTTPError"
+        assert back.reply.error.exception.attrs["status_code"] == 400
+        assert back.reply.error.exception.attrs["body"]["code"] == "ctx"
+
+    def test_to_minimal_omits_exception(self) -> None:
+        # The 256 KB strip floor is identity-only — the harvest is dropped wholesale (spec §7).
+        report = ErrorReport(error_type="x", exception=ExceptionInfo(type="ModelHTTPError", attrs={"status_code": 400}))
+        assert report.to_minimal().exception is None
 
 
 class TestErrorReport:
