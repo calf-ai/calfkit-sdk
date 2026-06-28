@@ -376,6 +376,17 @@ class TestStructuredLogging:
         synth = [r for r in caplog.records if r.levelno == logging.ERROR and r.exc_info is not None]
         assert synth, "expected a synthesis ERROR carrying the traceback (exc_info)"
         assert synth[0].exc_info is not None and synth[0].exc_info[0] is RuntimeError  # the originating body exception
+
+    async def test_synthesis_log_names_the_exception_type(self, caplog: pytest.LogCaptureFixture) -> None:
+        # §13: the synthesis log carries the exception class hint the removed calf.exception_type
+        # breadcrumb used to provide — sourced from the harvested slot (guarded for the build_safe
+        # fallback, which leaves exception=None).
+        node = _RaisingNode(node_id="n", subscribe_topics=["in"])  # body raises RuntimeError
+        broker = _CaptureBroker()
+        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+            await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+        synth = [r for r in caplog.records if r.levelno == logging.ERROR and r.exc_info is not None]
+        assert synth and "RuntimeError" in synth[0].getMessage()
         msg = synth[0].getMessage()
         assert "calf.exception" in msg and "n" in msg  # error_type + origin node
 

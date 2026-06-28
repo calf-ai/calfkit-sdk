@@ -188,7 +188,8 @@ class ErrorReport(BaseModel):
 
     causes: list[ErrorReport] = Field(default_factory=list)
     """Recursive — non-empty means this report is composed of other faults
-    (a fault group, a deliberate conversion, or a recovery-then-failure)."""
+    (a fault group, a deliberate conversion, a recovery-then-failure, or an
+    uncaught exception's ``__cause__`` chain)."""
 
     exception: ExceptionInfo | None = None
     """The structured projection of an uncaught exception (spec §5), populated only on
