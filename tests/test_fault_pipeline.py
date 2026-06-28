@@ -238,6 +238,13 @@ class _RaisingNode(BaseNodeDef):
         raise RuntimeError("body boom")
 
 
+class _ChainRaisingNode(BaseNodeDef):
+    """A node whose body raises a chained exception (``raise B from A``)."""
+
+    async def run(self, ctx: SessionRunContext) -> Any:
+        raise RuntimeError("outer boom") from ValueError("inner cause")
+
+
 class TestFaultBoundary:
     async def test_body_raise_becomes_a_fault_to_the_caller(self) -> None:
         # P1: a previously-dropped uncaught body exception now travels the success rail
@@ -258,6 +265,21 @@ class TestFaultBoundary:
         assert env.reply.error.origin_node_id == "n"
         assert headers[HDR_KIND] == "fault"
         assert resp.body.reply is env.reply  # the broadcast mirror carries the same fault
+
+    async def test_chained_body_raise_maps_cause_chain_onto_causes(self) -> None:
+        # §5.E(1): a node body `raise B from A` → the published fault carries the harvested exception
+        # slot AND the __cause__ chain mapped onto causes; the calf.exception_type breadcrumb is gone.
+        node = _ChainRaisingNode(node_id="n", subscribe_topics=["in"])
+        broker = _CaptureBroker()
+
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        report = broker.published[0][1].reply.error
+        assert report.error_type == "calf.exception"
+        assert report.exception is not None and report.exception.type == "RuntimeError"
+        assert len(report.causes) == 1
+        assert report.causes[0].exception is not None and report.causes[0].exception.type == "ValueError"
+        assert "calf.exception_type" not in report.details  # breadcrumb removed (commit 4)
 
     async def test_node_own_fault_captures_frame_chain_and_origin_frame_id(self) -> None:
         # §4.3/§4.4 + ADR-0003 + scenarios 3/24: a node-own fault captures the call-stack topology
@@ -418,6 +440,10 @@ class TestSeamPrecision:
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"  # the before_node accident
         assert inbound_report.report_id in [c.report_id for c in env.reply.error.causes]  # handled inbound chained
+        # unwrap guard (base.py:1690/1691): the ROOT exception is the unwrapped user exception, NOT
+        # the _SeamAccidentError boundary wrapper.
+        assert env.reply.error.exception is not None
+        assert env.reply.error.exception.type == "RuntimeError"
 
     async def test_body_raise_does_not_chain_the_inbound_fault(self) -> None:
         # §6.7 (the precise scope): a BODY raise on the same handled-fault delivery is calf.exception
@@ -459,6 +485,65 @@ class TestSeamPrecision:
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
         assert seen == [None]  # exception cleared once on_node_error recovered
+
+    async def test_recovery_path_after_node_accident_does_not_leak_seam_wrapper(self) -> None:
+        # C1 CASE-2 (plan §5.E / spec §6.1): a boundary-seam accident → on_node_error recovers → the
+        # recovery-path after_node then raises. That exc2 runs INSIDE the stage-5 `except`, so its
+        # __context__ is the _SeamAccidentError wrapper — the one path that would leak a framework
+        # internal onto the wire. __cause__-only must NOT walk it. A plain body-raise assertion here
+        # is vacuous (a body raise never routes _SeamAccidentError to `caught`).
+        node = _node()
+
+        @node.before_node
+        def boom_before(ctx: object) -> None:
+            raise RuntimeError("before_node boom")  # boundary-seam accident → wrapped _SeamAccidentError
+
+        @node.on_node_error
+        def recover(ctx: object, fault: ErrorReport) -> str:
+            return "recovered"
+
+        @node.after_node
+        def boom_after(ctx: SeamContext[State], output: object) -> None:
+            raise ValueError("after_node boom")  # the recovery-path after_node raises (exc2)
+
+        broker = _CaptureBroker()
+        await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        report = env.reply.error
+        # the published fault is from the recovery-path after_node raise (exc2)
+        assert report.exception is not None and report.exception.type == "ValueError"
+        # the before_node accident (RuntimeError) is chained — assert by CONTENT, not position (§6)
+        assert any(r.exception is not None and r.exception.type == "RuntimeError" for r in report.walk())
+        # NO framework internal leaks: __cause__-only excludes exc2.__context__ (= _SeamAccidentError)
+        harvested = [r.exception for r in report.walk() if r.exception]
+        assert all(info.type != "_SeamAccidentError" for info in harvested)
+        assert all(not (info.module or "").startswith("calfkit.nodes.base") for info in harvested)
+
+    async def test_on_callee_error_accidental_raise_harvests_and_chains_callee_fault(self) -> None:
+        # The :1070 chokepoint (the SECOND from_exception call site): an accidental raise inside
+        # on_callee_error is slot-scoped — wrapped calf.exception harvesting the raise into the
+        # exception slot, with the inbound callee fault chained via causes (§6.5).
+        node = _node()
+        inbound_report = ErrorReport(error_type="callee.boom", message="downstream failed")
+
+        @node.on_callee_error
+        def boom(ctx: object, fault: ErrorReport) -> str:
+            raise RuntimeError("on_callee_error boom")
+
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="callee-frame", tag="tc", error=inbound_report)
+        broker = _CaptureBroker()
+
+        await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        env = broker.published[0][1]
+        assert isinstance(env.reply, FaultMessage)
+        report = env.reply.error
+        assert report.error_type == "calf.exception"
+        assert report.exception is not None and report.exception.type == "RuntimeError"  # the seam raise
+        assert inbound_report.report_id in [c.report_id for c in report.causes]  # callee fault chained
 
     async def test_before_node_mint_bypasses_on_node_error(self) -> None:
         # §6.5 mint rule from a BOUNDARY seam: a NodeFaultError raised in before_node propagates

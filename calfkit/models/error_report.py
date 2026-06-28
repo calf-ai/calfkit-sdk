@@ -387,8 +387,9 @@ class ErrorReport(BaseModel):
         """Synthesize a fault from an arbitrary exception (spec §6.7).
 
         A non-``NodeFaultError`` maps to ``error_type="calf.exception"`` with a structured
-        ``exception`` slot harvested from its ``vars()`` (spec §6) and a clamped message;
-        ``build_safe`` keeps it total — the error path must never itself raise.
+        ``exception`` slot harvested from its ``vars()`` and its ``__cause__`` chain mapped onto
+        ``causes`` (``__cause__``-only, spec §6/§6.1), plus a clamped message; ``build_safe`` keeps
+        it total — the error path must never itself raise.
         ``node``/``ctx`` (optional, keyword) source the origin breadcrumb when present
         (``node.node_id`` / ``ctx.frame_id``); ``frame_chain`` and ``origin_frame_id`` capture the
         call-stack topology at synthesis (§4.3/§4.4, ADR-0003 — the traceback analog), passed
@@ -400,7 +401,46 @@ class ErrorReport(BaseModel):
         A ``NodeFaultError`` is NOT routed here — the chokepoint converts it verbatim,
         bypassing ``on_node_error`` (the mint rule, §6.5).
         """
+        # Public entry — seeds the walk; this exc is the ROOT (gets the origin breadcrumbs). The
+        # cycle-guard is pre-marked with the root and ``_trunc`` is a 1-element mutable flag, both
+        # threaded through the whole __cause__ recursion so a depth-cap drop is breadcrumbed.
+        return cls._from_exception(
+            exc,
+            node=node,
+            ctx=ctx,
+            cause=cause,
+            frame_chain=frame_chain,
+            origin_frame_id=origin_frame_id,
+            _seen={id(exc)},
+            _depth=1,
+            _trunc=[False],
+        )
+
+    @classmethod
+    def _from_exception(
+        cls,
+        exc: BaseException,
+        *,
+        node: Any,
+        ctx: Any,
+        cause: ErrorReport | None,
+        frame_chain: list[FrameRef] | None,
+        origin_frame_id: str | None,
+        _seen: set[int],
+        _depth: int,
+        _trunc: list[bool],
+    ) -> ErrorReport:
+        """The recursive core of :meth:`from_exception` (spec §6).
+
+        The root and every chain link are the SAME operation — one exception harvested into one
+        ``ErrorReport`` carrying its own ``exception`` slot. Mutual recursion with
+        :meth:`_walk_exception_chain` threads one cycle-guard (``_seen``), one depth counter
+        (``_depth``), and one truncation flag (``_trunc``) through the whole ``__cause__`` lineage.
+        Chain links pass ``node=None``/``ctx=None``/``frame_chain=None`` — a mid-chain exception
+        happened at no calfkit frame, so only the root carries origin/topology.
+        """
         exc_info, attrs_dropped = _harvest_exception(exc)
+        chain = cls._walk_exception_chain(exc, _seen=_seen, _depth=_depth, _trunc=_trunc)
         return cls.build_safe(
             error_type=FaultTypes.EXCEPTION,
             message=_safe_exc_str(exc),
@@ -409,8 +449,43 @@ class ErrorReport(BaseModel):
             frame_chain=frame_chain,
             exception=exc_info,
             exception_attrs_dropped=attrs_dropped,
-            causes=[cause] if cause is not None else None,
+            chain_truncated=_trunc[0],
+            causes=([cause] if cause is not None else []) + chain or None,
         )
+
+    @classmethod
+    def _walk_exception_chain(cls, exc: BaseException, *, _seen: set[int], _depth: int, _trunc: list[bool]) -> list[ErrorReport]:
+        """Map one ``__cause__`` step onto a chain link — ``__cause__``-ONLY (spec §6/§6.1).
+
+        ``__context__`` was evaluated and DROPPED (§6.1): ``from_exception`` runs inside the rail's
+        ``except`` blocks, where ``__context__`` captures the framework's handling context — walking
+        it would leak internals onto the wire and duplicate the recovery cause. GUARDED: a
+        hostile/raising ``__cause__`` descriptor must not break totality (drop the chain, stay total).
+        A cycle terminates via ``_seen`` (correct dedup, not a drop); a real depth-cap drop sets
+        ``_trunc`` so it is breadcrumbed, never silent.
+        """
+        try:
+            nxt = exc.__cause__
+        except Exception:
+            return []
+        if nxt is None or id(nxt) in _seen:
+            return []  # end-of-chain, or a cycle (correct dedup, not a drop)
+        if _depth >= _MAX_CAUSES_DEPTH:
+            _trunc[0] = True  # a real, non-cycle drop — breadcrumb it, never silent
+            return []
+        _seen.add(id(nxt))
+        link = cls._from_exception(
+            nxt,
+            node=None,
+            ctx=None,
+            cause=None,
+            frame_chain=None,
+            origin_frame_id=None,
+            _seen=_seen,
+            _depth=_depth + 1,
+            _trunc=_trunc,
+        )
+        return [link]
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,14 @@ from pydantic import ValidationError
 from calfkit._protocol import HDR_ERROR_TYPE, MessageKind
 from calfkit.exceptions import NodeFaultError
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, WorkflowState
-from calfkit.models.error_report import ErrorReport, ExceptionInfo, FaultTypes, FrameRef, _harvest_exception
+from calfkit.models.error_report import (
+    _MAX_CAUSES_DEPTH,
+    ErrorReport,
+    ExceptionInfo,
+    FaultTypes,
+    FrameRef,
+    _harvest_exception,
+)
 from calfkit.models.reply import FaultMessage, _ReplyBase
 from calfkit.models.state import State
 
@@ -977,3 +984,148 @@ class TestFromException:
         assert report.error_type == FaultTypes.EXCEPTION
         assert report.exception is not None
         assert report.exception.type == "<unharvestable>"
+
+
+class TestExceptionChain:
+    """The __cause__-only language chain mapped onto causes (spec §6) — each link a lean
+    ErrorReport carrying its own exception slot; linear, cycle-safe, depth-capped."""
+
+    def test_cause_mapped_to_chain_link(self) -> None:
+        # raise B() from A() → root exception.type=="B", causes[0].exception.type=="A".
+        a = ValueError("a")
+        b = RuntimeError("b")
+        b.__cause__ = a
+        report = ErrorReport.from_exception(b)
+        assert report.exception is not None and report.exception.type == "RuntimeError"
+        assert len(report.causes) == 1
+        link = report.causes[0]
+        assert link.error_type == FaultTypes.EXCEPTION
+        assert link.exception is not None and link.exception.type == "ValueError"
+        # a mid-chain link carries no calfkit origin — it happened at no calfkit frame (spec §6).
+        assert link.origin_node_id is None
+        assert link.frame_chain == []
+
+    def test_chain_link_carries_its_own_attrs(self) -> None:
+        a = ValueError("a")
+        a.status_code = 503  # type: ignore[attr-defined]
+        b = RuntimeError("b")
+        b.__cause__ = a
+        report = ErrorReport.from_exception(b)
+        assert report.causes[0].exception is not None
+        assert report.causes[0].exception.attrs["status_code"] == 503
+
+    def test_end_of_chain_no_cause(self) -> None:
+        report = ErrorReport.from_exception(ValueError("solo"))
+        assert report.causes == []
+
+    def test_multi_hop_cycle_to_root_terminates(self) -> None:
+        # A.__cause__=B, B.__cause__=A — terminates via the threaded _seen (correct dedup, not a drop).
+        a = ValueError("a")
+        b = RuntimeError("b")
+        a.__cause__ = b
+        b.__cause__ = a
+        report = ErrorReport.from_exception(a)  # must terminate
+        assert report.exception is not None and report.exception.type == "ValueError"
+        assert len(report.causes) == 1
+        assert report.causes[0].exception is not None and report.causes[0].exception.type == "RuntimeError"
+        assert report.causes[0].causes == []  # the cycle back to A is deduped, not re-walked
+
+    def test_cycle_onto_mid_chain_link_terminates(self) -> None:
+        # A → B → C → B (a cycle onto a NON-root link) terminates via threaded _seen.
+        a = ValueError("a")
+        b = RuntimeError("b")
+        c = KeyError("c")
+        a.__cause__ = b
+        b.__cause__ = c
+        c.__cause__ = b  # cycle back to B
+        report = ErrorReport.from_exception(a)  # must terminate
+        types = [r.exception.type for r in report.walk() if r.exception]
+        assert types == ["ValueError", "RuntimeError", "KeyError"]  # B is not re-walked
+
+    def test_chain_at_kept_depth_has_no_truncation_flag(self) -> None:
+        # A chain of exactly _MAX_CAUSES_DEPTH reports (deepest __cause__ is None) → end-of-chain,
+        # NOT truncated: `nxt is None` is checked BEFORE the depth cap (the off-by-one pin, spec §6).
+        excs: list[Exception] = [ValueError(f"e{i}") for i in range(_MAX_CAUSES_DEPTH)]
+        for i in range(len(excs) - 1):
+            excs[i].__cause__ = excs[i + 1]
+        report = ErrorReport.from_exception(excs[0])
+        assert len(list(report.walk())) == _MAX_CAUSES_DEPTH
+        assert "chain_truncated" not in report.details.get(FaultTypes.ELIDED, {})
+
+    def test_chain_one_deeper_sets_truncation_flag(self) -> None:
+        # One link deeper than the cap → the deepest is dropped and the drop is breadcrumbed
+        # (never silent); a cycle would NOT set the flag, only a real depth-cap drop does.
+        excs: list[Exception] = [ValueError(f"e{i}") for i in range(_MAX_CAUSES_DEPTH + 1)]
+        for i in range(len(excs) - 1):
+            excs[i].__cause__ = excs[i + 1]
+        report = ErrorReport.from_exception(excs[0])
+        assert report.details[FaultTypes.ELIDED]["chain_truncated"] is True
+
+    def test_walk_and_exception_type_locates_a_deep_link(self) -> None:
+        a = ValueError("a")
+        b = RuntimeError("b")
+        c = KeyError("c")
+        a.__cause__ = b
+        b.__cause__ = c
+        report = ErrorReport.from_exception(a)
+        key_link = next((r for r in report.walk() if r.exception and r.exception.type == "KeyError"), None)
+        assert key_link is not None
+
+    def test_find_does_not_discriminate_chain_links(self) -> None:
+        # Every link shares calf.exception, so find() returns the shallowest match (the root),
+        # NOT a deeper link — find() is not a chain discriminator here (spec §11.1).
+        a = ValueError("a")
+        b = RuntimeError("b")
+        a.__cause__ = b
+        report = ErrorReport.from_exception(a)
+        assert report.find(FaultTypes.EXCEPTION) is report
+
+    def test_recovery_cause_and_chain_comingle_in_causes(self) -> None:
+        # On a recovery-then-failure synthesis (cause= passed), causes holds BOTH the recovery-prior
+        # report AND the language-chain link, co-mingled — discriminate by CONTENT, not position (spec §6).
+        prior = ErrorReport(error_type="recovery.prior")
+        b = RuntimeError("b")
+        b.__cause__ = ValueError("a")
+        report = ErrorReport.from_exception(b, cause=prior)
+        assert any(c.error_type == "recovery.prior" for c in report.causes)
+        assert any(c.exception is not None and c.exception.type == "ValueError" for c in report.causes)
+
+    def test_context_only_chain_is_not_walked(self) -> None:
+        # __cause__-ONLY: an implicit __context__ chain (raised in an except with no `raise from`) is
+        # NOT walked — pin the dropped behavior (spec §6.1).
+        try:
+            try:
+                raise ValueError("inner")
+            except ValueError:
+                raise RuntimeError("outer")  # noqa: B904 — intentionally no `from`, sets __context__ only
+        except RuntimeError as e:
+            report = ErrorReport.from_exception(e)
+        assert report.exception is not None and report.exception.type == "RuntimeError"
+        assert report.causes == []  # the __context__ ValueError is NOT walked
+
+    def test_total_when_cause_descriptor_raises_at_root(self) -> None:
+        # A hostile/raising __cause__ descriptor must not break totality — the chain is dropped and
+        # from_exception stays total (spec §8).
+        class _RaisingCauseError(Exception):
+            @property
+            def __cause__(self):  # type: ignore[override]
+                raise RuntimeError("no cause")
+
+        report = ErrorReport.from_exception(_RaisingCauseError("x"))  # must not raise
+        assert report.exception is not None
+        assert report.causes == []
+
+    def test_total_when_cause_descriptor_raises_mid_chain(self) -> None:
+        class _RaisingCauseError(Exception):
+            @property
+            def __cause__(self):  # type: ignore[override]
+                raise RuntimeError("no cause")
+
+        root = ValueError("root")
+        root.__cause__ = _RaisingCauseError("mid")  # the mid link's own __cause__ raises
+        report = ErrorReport.from_exception(root)  # must not raise
+        assert report.exception is not None and report.exception.type == "ValueError"
+        assert len(report.causes) == 1
+        assert report.causes[0].exception is not None
+        assert report.causes[0].exception.type == "_RaisingCauseError"
+        assert report.causes[0].causes == []  # mid's raising __cause__ drops its onward chain
