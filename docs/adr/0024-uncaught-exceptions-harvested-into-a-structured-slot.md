@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Uncaught exceptions are harvested into a structured `ErrorReport.exception` slot, not flattened to a string
