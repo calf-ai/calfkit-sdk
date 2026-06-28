@@ -944,6 +944,41 @@ class TestFromException:
         assert report.exception is not None
         assert report.exception.type == "TotallyUnprintableError"
 
+    def test_is_total_when_str_repr_and_name_all_raise(self) -> None:
+        # The deepest message-rendering corner: str(exc), repr(exc), AND type(exc).__name__ all raise.
+        # safe_exc_message's innermost fallback dereferences __name__ (`<unprintable {__name__}>`), and
+        # from_exception calls it UNGUARDED at the chokepoint — so a hostile __name__ there breaks
+        # totality (from_exception raises). The message must degrade to a name-free sentinel instead.
+        #
+        # Record-then-fail-OUTSIDE-the-except: a raising __name__ ALSO breaks pytest's own traceback
+        # repr (saferepr does type(obj).__name__), so letting the raise reach pytest's reporter — even
+        # as a chained ``__context__`` of a ``pytest.fail`` called inside the ``except`` — yields an
+        # INTERNALERROR, not a clean failure. We capture a plain string and fail with no live exception
+        # context, keeping the hostile instance out of the report and pinning the totality break.
+        class _AllRaisingMeta(type):
+            @property
+            def __name__(cls):  # type: ignore[override]
+                raise RuntimeError("no name")
+
+        class _AllRaisingError(Exception, metaclass=_AllRaisingMeta):
+            def __str__(self) -> str:
+                raise RuntimeError("no str")
+
+            def __repr__(self) -> str:
+                raise RuntimeError("no repr")
+
+        report = None
+        failure_msg = None
+        try:
+            report = ErrorReport.from_exception(_AllRaisingError())
+        except Exception as exc:
+            failure_msg = f"from_exception must stay total, but raised {type(exc).__name__}: {exc}"
+        if failure_msg is not None:
+            pytest.fail(failure_msg)
+        assert report is not None
+        assert report.error_type == FaultTypes.EXCEPTION
+        assert report.message == "<unprintable>"
+
     def test_chains_a_cause(self) -> None:
         # The §6.8 recovery-then-failure case: the second error chains the original.
         prior = ErrorReport(error_type="upstream")
