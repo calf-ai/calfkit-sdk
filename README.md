@@ -63,7 +63,7 @@ def lookup_account_balance(ctx: ToolContext) -> str:
 
 ## Running your agents
 
-> Agents sit on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
+Agents sit on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
 
 Start the general assistant independently. Assuming it's saved in `general_help.py`.
 
