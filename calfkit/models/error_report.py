@@ -291,6 +291,9 @@ class ErrorReport(BaseModel):
         frame_chain: list[FrameRef] | None = None,
         details: dict[str, Any] | None = None,
         causes: list[ErrorReport] | None = None,
+        exception: ExceptionInfo | None = None,
+        exception_attrs_dropped: int = 0,
+        chain_truncated: bool = False,
     ) -> ErrorReport:
         """Synthesize a report that **never raises** (spec §4.3).
 
@@ -311,6 +314,23 @@ class ErrorReport(BaseModel):
             # and a reserved key's size can never evict legitimate user keys.
             user_details = {k: v for k, v in dict(details or {}).items() if not k.startswith(_CALF_PREFIX)}
             bounded_details, details_bytes_dropped = _bound_details(user_details)
+            # Bound exception.attrs the same way (the 16 KB serialized cap). attrs are already
+            # JSON-native (harvested via _jsonsafe), so _bound_details' unserializable branch is
+            # unreachable here — but handle it defensively, uniform with the user-details path, so
+            # the chokepoint stays total and never silent (spec §7). The model is frozen, so rebuild
+            # the bounded copy via model_copy (type/module are preserved).
+            bounded_exception = None
+            exc_attrs_bytes = 0
+            exc_attrs_unser = False
+            if exception is not None:
+                bounded_attrs, exc_attrs_dropped_or_none = _bound_details(exception.attrs)
+                if exc_attrs_dropped_or_none is None:
+                    bounded_attrs, exc_attrs_unser = {}, True
+                else:
+                    exc_attrs_bytes = exc_attrs_dropped_or_none
+                bounded_exception = exception.model_copy(update={"attrs": bounded_attrs})
+            # Assemble EVERY elision key BEFORE the single merge below: the merge snapshots
+            # ``elided``, so any key added after it is a silent drop — the exact hole this closes (§7).
             elided: dict[str, Any] = {}
             if budget.dropped:
                 elided["causes"] = budget.dropped
@@ -320,6 +340,14 @@ class ErrorReport(BaseModel):
                 elided["details_unserializable"] = True
             elif details_bytes_dropped:
                 elided["details_bytes"] = details_bytes_dropped
+            if exception_attrs_dropped:
+                elided["exception_attrs_dropped"] = exception_attrs_dropped
+            if exc_attrs_bytes:
+                elided["exception_attrs_bytes"] = exc_attrs_bytes
+            if exc_attrs_unser:
+                elided["exception_attrs_unserializable"] = True
+            if chain_truncated:
+                elided["chain_truncated"] = True
             if elided:
                 bounded_details = {**bounded_details, FaultTypes.ELIDED: elided}
             return cls(
@@ -331,6 +359,7 @@ class ErrorReport(BaseModel):
                 frame_chain=bounded_chain,
                 details=bounded_details,
                 causes=bounded_causes,
+                exception=bounded_exception,
             )
         except Exception as exc:
             # Last-resort total fallback: keep only the scalar identity that is safe
@@ -363,9 +392,10 @@ class ErrorReport(BaseModel):
     ) -> ErrorReport:
         """Synthesize a fault from an arbitrary exception (spec §6.7).
 
-        A non-``NodeFaultError`` maps to ``error_type="calf.exception"`` with the
-        exception's class name (``details[FaultTypes.EXCEPTION_TYPE]``) and a clamped
-        message; ``build_safe`` keeps it total — the error path must never itself raise.
+        A non-``NodeFaultError`` maps to ``error_type="calf.exception"`` with a structured
+        ``exception`` slot harvested from its ``vars()`` (spec §6), the exception's class name
+        (``details[FaultTypes.EXCEPTION_TYPE]``), and a clamped message; ``build_safe`` keeps it
+        total — the error path must never itself raise.
         ``node``/``ctx`` (optional, keyword) source the origin breadcrumb when present
         (``node.node_id`` / ``ctx.frame_id``); ``frame_chain`` and ``origin_frame_id`` capture the
         call-stack topology at synthesis (§4.3/§4.4, ADR-0003 — the traceback analog), passed
@@ -377,18 +407,23 @@ class ErrorReport(BaseModel):
         A ``NodeFaultError`` is NOT routed here — the chokepoint converts it verbatim,
         bypassing ``on_node_error`` (the mint rule, §6.5).
         """
+        exc_info, attrs_dropped = _harvest_exception(exc)
         report = cls.build_safe(
             error_type=FaultTypes.EXCEPTION,
             message=_safe_exc_str(exc),
             origin_node_id=getattr(node, "node_id", None),
             origin_frame_id=origin_frame_id if origin_frame_id is not None else getattr(ctx, "frame_id", None),
             frame_chain=frame_chain,
+            exception=exc_info,
+            exception_attrs_dropped=attrs_dropped,
             causes=[cause] if cause is not None else None,
         )
         # The exception-class breadcrumb is a framework-reserved calf.* details key, so it
         # is set AFTER build_safe (which strips caller-supplied calf.* keys); the report is
-        # freshly built and owned here, so the in-place add is safe.
-        report.details[FaultTypes.EXCEPTION_TYPE] = type(exc).__name__[:200]
+        # freshly built and owned here, so the in-place add is safe. Source the class name from
+        # the already-total harvest (``exc_info.type``), NOT a second unguarded ``type(exc).__name__``
+        # access — which would re-open the totality hole on a hostile metaclass.
+        report.details[FaultTypes.EXCEPTION_TYPE] = exc_info.type[:200]
         return report
 
 
@@ -479,6 +514,60 @@ def _bound_details(details: dict[str, Any]) -> tuple[dict[str, Any], int | None]
     if size <= _MAX_DETAILS_BYTES - _ELIDED_RESERVE_BYTES:
         return dict(details), 0
     return {}, size
+
+
+def _jsonsafe(v: Any) -> Any:
+    """Coerce a value to JSON-native data via a ``pydantic_core`` round-trip (spec §6).
+
+    Recursive and leaf-level: an unserializable value nested anywhere becomes its
+    ``str``/``"<Unserializable …>"`` placeholder, and a cyclic container becomes a ``"..."``
+    marker. HARDENED: ``bytes_mode='base64'`` (raw HTTP/socket error bodies are often non-utf8)
+    and ``inf_nan_mode='strings'`` (``nan``/``inf`` → ``"NaN"``/``"Infinity"``, lossless and
+    wire-consistent — the publish path emits ``null`` for inf/nan otherwise). The only residual
+    raise is pathologically-deep nesting (the serde recursion limit), handled by the per-attr
+    guard in :func:`_harvest_exception`.
+    """
+    return pydantic_core.from_json(pydantic_core.to_json(v, serialize_unknown=True, bytes_mode="base64", inf_nan_mode="strings"))
+
+
+def _harvest_exception(exc: BaseException) -> tuple[ExceptionInfo, int]:
+    """Project ``vars(exc)`` into a structured :class:`ExceptionInfo`, TOTALLY (spec §6/§8).
+
+    Runs as an argument to :meth:`ErrorReport.build_safe`, OUTSIDE its ``try``, on the unguarded
+    chokepoint path (``base.py`` ``from_exception`` call sites), so it must never raise on its
+    own. Returns the info plus a count of attrs dropped because they could not be serialized even
+    after hardening (the residual deep-nesting / lone-surrogate cases) — a dropped attr is tallied,
+    never silent. ``message`` is dropped (redundant with ``ErrorReport.message``); a non-``str``
+    key is coerced via ``str()``.
+    """
+    try:
+        raw = vars(exc)  # slots-only / hostile __dict__ -> ANY exception
+    except Exception:
+        raw = {}
+    attrs: dict[str, Any] = {}
+    dropped = 0
+    try:
+        items = list(raw.items())  # hostile .items() (dict-subclass) -> no attrs, stay total
+    except Exception:
+        items = []
+    for k, v in items:
+        # The WHOLE per-attr body is guarded — a hostile key's __eq__ or str(k), or a deep/odd
+        # value, must not escape. Anything that raises is dropped-and-tallied, never silent.
+        try:
+            if k == "message":  # redundant with ErrorReport.message
+                continue
+            key = k if isinstance(k, str) else str(k)  # attrs keys must be str (pydantic) — coerce
+            attrs[key] = _jsonsafe(v)
+        except Exception:
+            dropped += 1
+    try:
+        type_name, module = type(exc).__name__, type(exc).__module__  # hostile metaclass -> raise
+    except Exception:
+        type_name, module = "<unharvestable>", None
+    try:
+        return ExceptionInfo(type=type_name, module=module, attrs=attrs), dropped
+    except Exception:
+        return ExceptionInfo(type="<unharvestable>"), dropped
 
 
 def _safe_exc_str(exc: BaseException) -> str:

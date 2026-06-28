@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from calfkit._protocol import HDR_ERROR_TYPE, MessageKind
 from calfkit.exceptions import NodeFaultError
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, WorkflowState
-from calfkit.models.error_report import ErrorReport, ExceptionInfo, FaultTypes, FrameRef
+from calfkit.models.error_report import ErrorReport, ExceptionInfo, FaultTypes, FrameRef, _harvest_exception
 from calfkit.models.reply import FaultMessage, _ReplyBase
 from calfkit.models.state import State
 
@@ -587,14 +587,307 @@ class TestPublicExports:
         assert models.FaultTypes is FaultTypes
 
 
+class TestHarvestException:
+    """_harvest_exception — the TOTAL, leaf-safe projection of vars(exc) into ExceptionInfo
+    (spec §6/§8). It runs OUTSIDE build_safe's try, on the unguarded chokepoint path, so it must
+    never raise; a residually-unserializable attr is dropped-and-tallied, never silent."""
+
+    # ── fidelity (spec §5.B / §15) ───────────────────────────────────────────────────────
+
+    def test_harvests_real_shaped_model_http_error(self) -> None:
+        # The motivating case: a provider error's structured state survives as JSON data.
+        from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError
+
+        body = {"type": "invalid_request_error", "code": "context_length_exceeded"}
+        info, dropped = _harvest_exception(ModelHTTPError(status_code=400, model_name="m", body=body))
+        assert info.type == "ModelHTTPError"
+        assert info.module == "calfkit._vendor.pydantic_ai.exceptions"
+        assert info.attrs["status_code"] == 400
+        assert info.attrs["body"]["code"] == "context_length_exceeded"
+        assert "message" not in info.attrs  # redundant with ErrorReport.message
+        assert dropped == 0
+
+    def test_embedded_dict_round_trips_to_python_dict(self) -> None:
+        exc = ValueError()
+        exc.payload = {"nested": {"k": [1, 2, 3]}}  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)
+        assert info.attrs["payload"] == {"nested": {"k": [1, 2, 3]}}
+        assert isinstance(info.attrs["payload"], dict)
+        assert dropped == 0
+
+    def test_non_utf8_and_valid_utf8_bytes_become_base64(self) -> None:
+        # Raw HTTP/socket error bodies are often non-utf8; bytes_mode='base64' is lossless and is
+        # used even for valid-utf8 bytes (spec §6). pydantic_core emits URL-safe base64.
+        import base64
+
+        exc = ValueError()
+        exc.raw = b"\xff\xfe"  # type: ignore[attr-defined]  # non-utf8
+        exc.text = b"hello"  # type: ignore[attr-defined]  # valid utf8
+        info, dropped = _harvest_exception(exc)
+        assert info.attrs["raw"] == base64.urlsafe_b64encode(b"\xff\xfe").decode()
+        assert info.attrs["text"] == base64.urlsafe_b64encode(b"hello").decode()  # base64 even for valid utf8
+        # lossless: the URL-safe base64 decodes back to the original bytes
+        assert base64.urlsafe_b64decode(info.attrs["raw"]) == b"\xff\xfe"
+        assert dropped == 0
+
+    def test_nan_and_inf_become_strings_wire_consistent(self) -> None:
+        # inf_nan_mode='strings' so nan/inf survive losslessly and identically in-process and
+        # after the publish path's JSON (which emits null otherwise) (spec §6/§11).
+        exc = ValueError()
+        exc.vals = {"n": float("nan"), "p": float("inf"), "m": float("-inf")}  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)
+        assert info.attrs["vals"] == {"n": "NaN", "p": "Infinity", "m": "-Infinity"}
+        back = ExceptionInfo.model_validate_json(ExceptionInfo(type="X", attrs=info.attrs).model_dump_json())
+        assert back.attrs["vals"] == {"n": "NaN", "p": "Infinity", "m": "-Infinity"}  # wire-consistent
+        assert dropped == 0
+
+    def test_cyclic_container_attr_is_marked_not_dropped(self) -> None:
+        # A cyclic container serializes to a "..." marker (handled, NOT dropped) (spec §8).
+        exc = ValueError()
+        cyc: list = [1]
+        cyc.append(cyc)
+        exc.cyc = cyc  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)
+        assert "cyc" in info.attrs  # kept, not dropped
+        assert "..." in str(info.attrs["cyc"])
+        assert dropped == 0
+
+    def test_deeply_nested_attr_is_dropped_and_tallied(self) -> None:
+        # The deterministic residual drop lever: pydantic_core's serde recursion limit fires on a
+        # ~2000-deep attr (stack-independent), so it is dropped-and-tallied (spec §6/§8/§5.B).
+        deep: dict = {"leaf": 1}
+        for _ in range(2000):
+            deep = {"x": deep}
+        exc = ValueError()
+        exc.deep = deep  # type: ignore[attr-defined]
+        exc.good = "kept"  # type: ignore[attr-defined]  # good neighbor survives
+        info, dropped = _harvest_exception(exc)
+        assert dropped == 1
+        assert "deep" not in info.attrs
+        assert info.attrs["good"] == "kept"
+
+    def test_lone_surrogate_string_attr_is_dropped_not_coerced(self) -> None:
+        # A lone surrogate RAISES PydanticSerializationError (not coercible), so it is
+        # dropped-and-tallied — never silently coerced (spec §5.B).
+        exc = ValueError()
+        exc.bad = "\ud800"  # type: ignore[attr-defined]
+        exc.good = "ok"  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)
+        assert dropped == 1
+        assert "bad" not in info.attrs
+        assert info.attrs["good"] == "ok"
+
+    def test_generator_and_basemodel_attrs_coerced(self) -> None:
+        # serialize_unknown coerces unknown types (a generator, a BaseModel) rather than dropping.
+        exc = ValueError()
+        exc.gen = (i for i in range(3))  # type: ignore[attr-defined]
+        exc.model = FrameRef(frame_id="f", target_topic="t")  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)
+        assert "gen" in info.attrs and "model" in info.attrs  # coerced, not dropped
+        assert dropped == 0
+
+    def test_nested_unserializable_leaf_placeholdered_neighbors_kept(self) -> None:
+        # A nested unserializable leaf is coerced to a placeholder while good neighbor keys in the
+        # same dict survive (best-effort leaf-safety, spec §8).
+        class _Weird:
+            pass
+
+        exc = ValueError()
+        exc.mixed = {"good": 1, "leaf": _Weird()}  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)
+        assert info.attrs["mixed"]["good"] == 1
+        assert "leaf" in info.attrs["mixed"]  # coerced to a placeholder, not dropped
+        assert dropped == 0
+
+    def test_traceback_never_appears_in_attrs(self) -> None:
+        # vars(exc) excludes __traceback__, so a raised-and-caught exception never ships a
+        # TracebackType value (spec §8 "tracebacks never touched").
+        try:
+            raise ValueError("boom")
+        except ValueError as e:
+            info, dropped = _harvest_exception(e)
+        assert "__traceback__" not in info.attrs
+        assert dropped == 0
+
+    def test_slots_only_exception_has_empty_attrs_but_is_typed(self) -> None:
+        # No __dict__ (pure __slots__) → attrs={}, still typed (spec §6 edge case).
+        class _SlotsError(Exception):
+            __slots__ = ()
+
+        info, dropped = _harvest_exception(_SlotsError())
+        assert info.type == "_SlotsError"
+        assert info.attrs == {}
+        assert dropped == 0
+
+    def test_message_attr_is_dropped(self) -> None:
+        # The `message` attr is redundant with ErrorReport.message and dropped (spec §5).
+        exc = ValueError()
+        exc.message = "redundant"  # type: ignore[attr-defined]
+        exc.other = "kept"  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)
+        assert "message" not in info.attrs
+        assert info.attrs["other"] == "kept"
+
+    def test_non_str_dict_key_coerced(self) -> None:
+        # attrs keys must be str (pydantic); a non-str __dict__ key is coerced via str() (spec §6).
+        exc = ValueError()
+        exc.__dict__[42] = "v"
+        info, dropped = _harvest_exception(exc)
+        assert info.attrs["42"] == "v"
+        assert dropped == 0
+
+    # ── totality (spec §5.A harvest subset; walk-totality lands with the chain) ───────────
+
+    def test_total_when_metaclass_name_raises(self) -> None:
+        class _NoNameMeta(type):
+            @property
+            def __name__(cls):  # type: ignore[override]
+                raise RuntimeError("no name")
+
+        class _NoNameError(Exception, metaclass=_NoNameMeta):
+            pass
+
+        with pytest.raises(RuntimeError):  # precondition: the construction is non-vacuous
+            _ = type(_NoNameError()).__name__
+        info, dropped = _harvest_exception(_NoNameError())  # must not raise
+        assert info.type == "<unharvestable>"
+
+    def test_total_when_metaclass_module_raises(self) -> None:
+        class _NoModuleMeta(type):
+            @property
+            def __module__(cls):  # type: ignore[override]
+                raise RuntimeError("no module")
+
+        class _NoModuleError(Exception, metaclass=_NoModuleMeta):
+            pass
+
+        with pytest.raises(RuntimeError):
+            _ = type(_NoModuleError()).__module__
+        # __name__ is fine but the type-access tuple degrades wholesale to the sentinel.
+        info, dropped = _harvest_exception(_NoModuleError())  # must not raise
+        assert info.type == "<unharvestable>"
+
+    def test_total_when_dict_key_str_raises(self) -> None:
+        class _BadStrKey:
+            def __hash__(self) -> int:
+                return 1
+
+            def __str__(self) -> str:
+                raise RuntimeError("no str")
+
+        exc = ValueError()
+        exc.__dict__[_BadStrKey()] = "v"
+        exc.good = "kept"  # type: ignore[attr-defined]
+        info, dropped = _harvest_exception(exc)  # must not raise (str(k) coercion guarded)
+        assert dropped == 1
+        assert info.attrs.get("good") == "kept"
+
+    def test_total_when_dict_key_eq_raises(self) -> None:
+        class _BadEqKey:
+            def __hash__(self) -> int:
+                return 1
+
+            def __eq__(self, other: object) -> bool:
+                raise RuntimeError("no eq")
+
+        exc = ValueError()
+        exc.__dict__[_BadEqKey()] = "v"
+        info, dropped = _harvest_exception(exc)  # must not raise (the k == "message" compare guarded)
+        assert dropped == 1
+
+    def test_total_when_vars_raises(self) -> None:
+        class _NoDictError(Exception):
+            @property
+            def __dict__(self):  # type: ignore[override]
+                raise RuntimeError("no dict")
+
+        info, dropped = _harvest_exception(_NoDictError())  # must not raise
+        assert info.attrs == {}
+
+    def test_total_when_items_raises(self) -> None:
+        class _HostileItems(dict):
+            def items(self):  # type: ignore[override]
+                raise RuntimeError("no items")
+
+        class _BadItemsError(Exception):
+            @property
+            def __dict__(self):  # type: ignore[override]
+                return _HostileItems()
+
+        info, dropped = _harvest_exception(_BadItemsError())  # must not raise
+        assert info.attrs == {}
+
+    def test_total_when_exception_info_construction_fails(self) -> None:
+        # A hostile metaclass whose __name__ returns a non-str does NOT raise on access, but breaks
+        # ExceptionInfo(type: str) construction — the final guard returns the sentinel, staying total.
+        class _IntNameMeta(type):
+            @property
+            def __name__(cls):  # type: ignore[override]
+                return 999  # non-str, not a raise
+
+        class _IntNameError(Exception, metaclass=_IntNameMeta):
+            pass
+
+        info, dropped = _harvest_exception(_IntNameError())  # must not raise
+        assert info.type == "<unharvestable>"
+
+
+class TestBuildSafeExceptionBounds:
+    """build_safe(exception=, exception_attrs_dropped=, chain_truncated=) — the new field's
+    carriage bound lives at the single total-construction chokepoint (spec §7)."""
+
+    def test_carries_exception_slot(self) -> None:
+        report = ErrorReport.build_safe(error_type="x", exception=ExceptionInfo(type="ModelHTTPError", attrs={"status_code": 400}))
+        assert report.exception is not None
+        assert report.exception.type == "ModelHTTPError"
+        assert report.exception.attrs["status_code"] == 400
+
+    def test_oversized_attrs_bounded_type_module_survive(self) -> None:
+        # attrs over the 16 KB bound are dropped to {} with an exception_attrs_bytes breadcrumb,
+        # but the slot is KEPT and type/module survive the model_copy (spec §7 / §5.D).
+        big = ExceptionInfo(type="Big", module="m", attrs={"blob": "x" * 20_000})
+        report = ErrorReport.build_safe(error_type="x", exception=big)
+        assert report.exception is not None
+        assert report.exception.type == "Big"
+        assert report.exception.module == "m"
+        assert report.exception.attrs == {}
+        assert report.details[FaultTypes.ELIDED]["exception_attrs_bytes"] > 0
+
+    def test_exception_attrs_dropped_breadcrumb(self) -> None:
+        report = ErrorReport.build_safe(error_type="x", exception=ExceptionInfo(type="X"), exception_attrs_dropped=3)
+        assert report.details[FaultTypes.ELIDED]["exception_attrs_dropped"] == 3
+
+    def test_chain_truncated_breadcrumb(self) -> None:
+        # The depth-cap-drop breadcrumb (the param's elided branch is not exercised by
+        # from_exception until the chain lands, so unit-test it directly) (spec §7).
+        report = ErrorReport.build_safe(error_type="x", exception=ExceptionInfo(type="X"), chain_truncated=True)
+        assert report.details[FaultTypes.ELIDED]["chain_truncated"] is True
+
+    def test_no_breadcrumbs_when_nothing_elided(self) -> None:
+        report = ErrorReport.build_safe(error_type="x", exception=ExceptionInfo(type="X", attrs={"k": "v"}))
+        assert FaultTypes.ELIDED not in report.details
+
+    def test_unserializable_attrs_defensive_breadcrumb(self) -> None:
+        # Defensive uniformity (spec §7): if build_safe is handed an ExceptionInfo whose attrs are
+        # NOT jsonsafe'd (a direct caller, not the harvest), the unserializable case empties attrs and
+        # breadcrumbs exception_attrs_unserializable — total and never silent, never a raise.
+        report = ErrorReport.build_safe(error_type="x", exception=ExceptionInfo(type="X", attrs={"k": object()}))
+        assert report.exception is not None
+        assert report.exception.attrs == {}
+        assert report.details[FaultTypes.ELIDED]["exception_attrs_unserializable"] is True
+
+
 class TestFromException:
     """PR-6: ErrorReport.from_exception — the factory the rail's chokepoint uses to
     synthesize a fault from an arbitrary (non-NodeFaultError) exception (spec §6.7)."""
 
-    def test_generic_exception_maps_to_calf_unhandled(self) -> None:
+    def test_generic_exception_maps_to_calf_exception(self) -> None:
         report = ErrorReport.from_exception(ValueError("boom"))
         assert report.error_type == FaultTypes.EXCEPTION
-        # the exception class name is recorded as a framework details breadcrumb
+        # the structured projection is harvested into the typed exception slot
+        assert report.exception is not None
+        assert report.exception.type == "ValueError"
+        # the exception class name is ALSO recorded as a framework details breadcrumb (removed later)
         assert report.details[FaultTypes.EXCEPTION_TYPE] == "ValueError"
         # the clamped exception message rides the report's message field
         assert "boom" in report.message
@@ -639,3 +932,50 @@ class TestFromException:
 
         report = ErrorReport.from_exception(RuntimeError("x"), node=FakeNode())
         assert report.origin_node_id == "orchestrator"
+
+    def test_populates_exception_slot_with_attrs(self) -> None:
+        # The harvest is wired through from_exception: structured attrs reach report.exception.
+        exc = ValueError("boom")
+        exc.status_code = 429  # type: ignore[attr-defined]
+        report = ErrorReport.from_exception(exc)
+        assert report.exception is not None
+        assert report.exception.type == "ValueError"
+        assert report.exception.attrs["status_code"] == 429
+
+    def test_oversized_attrs_elided_with_breadcrumb_slot_kept(self) -> None:
+        # attrs over the 16 KB bound: the slot is kept with type, attrs emptied, breadcrumbed (§7/§5.D).
+        exc = ValueError("boom")
+        exc.blob = "x" * 20_000  # type: ignore[attr-defined]
+        report = ErrorReport.from_exception(exc)
+        assert report.exception is not None
+        assert report.exception.type == "ValueError"
+        assert report.exception.attrs == {}
+        assert report.details[FaultTypes.ELIDED]["exception_attrs_bytes"] > 0
+
+    def test_residual_attr_drop_breadcrumb(self) -> None:
+        # A deep attr is dropped-and-tallied; the count surfaces as a non-silent breadcrumb (§7/§5.D).
+        deep: dict = {"leaf": 1}
+        for _ in range(2000):
+            deep = {"x": deep}
+        exc = ValueError("boom")
+        exc.deep = deep  # type: ignore[attr-defined]
+        report = ErrorReport.from_exception(exc)
+        assert report.details[FaultTypes.ELIDED]["exception_attrs_dropped"] >= 1
+
+    def test_total_when_metaclass_name_raises_sources_breadcrumb_from_harvest(self) -> None:
+        # The commit-3 totality trap (plan §3): from_exception must stay total even when
+        # type(exc).__name__ raises — the retained EXCEPTION_TYPE breadcrumb is sourced from the
+        # already-total harvest (exc_info.type), NOT a second unguarded type(exc).__name__ access.
+        class _NoNameMeta(type):
+            @property
+            def __name__(cls):  # type: ignore[override]
+                raise RuntimeError("no name")
+
+        class _NoNameError(Exception, metaclass=_NoNameMeta):
+            pass
+
+        report = ErrorReport.from_exception(_NoNameError())  # must not raise
+        assert report.error_type == FaultTypes.EXCEPTION
+        assert report.exception is not None
+        assert report.exception.type == "<unharvestable>"
+        assert report.details[FaultTypes.EXCEPTION_TYPE] == "<unharvestable>"
