@@ -28,14 +28,17 @@ pip install calfkit
 ### An agent (that can discover other agents)
 
 ```python
-from calfkit import Agent, Messaging, Tools, OpenAIResponsesModelClient
+from calfkit import Agent, Handoff, Messaging, Tools, OpenAIResponsesModelClient
 
 general = Agent(
     name="general",
     description="Answers simple questions and routes requests to whoever can handle it.",
     system_prompt="You are a general assistant. Defer technical questions to other agents.",
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-mini"),
-    peers=[Messaging(discover=True)],   # discover and collaborate w/ any agent at runtime
+    peers=[
+        Messaging(discover=True),  # discover and delegate to any agent at runtime
+        Handoff(discover=True),  # discover and hand off to any agent at runtime
+    ],
 )
 ```
 
