@@ -355,7 +355,7 @@ client = Client.connect("kafka:9092")          # the only URL the user types
 worker = Worker(client, nodes=[agent, docs_toolbox])
 ```
 
-Today `Client.connect` resolves `server_urls` (arg → `CALF_HOST_URL` →
+Today `Client.connect` resolves `server_urls` (arg → `CALFKIT_MESH_URL` →
 `"localhost"`, `base.py:144`) but does not retain it. PR A adds retention: the
 resolved value is stored on the client and exposed as a read-only
 `client.server_urls`. Derivation chain, in order:
