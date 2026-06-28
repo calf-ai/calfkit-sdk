@@ -5,7 +5,7 @@ A fan-out-capable agent (no ``sequential_only_mode``) opens a real
 siblings through that durable fold over the wire (offline-only today):
 
 * **X-1** — one unhandled sibling fault → at closure the batch fails with a *flattened*
-  fault (the bare child ``calf.unhandled``), carrying the partial-success topology under
+  fault (the bare child ``calf.exception``), carrying the partial-success topology under
   ``details["calf.fanout_topology"]``; the body never resumes.
 * **X-2** — two unhandled sibling faults → a ``calf.fault_group`` with both in ``causes``.
 * **X-3** — an ``on_callee_error`` substitute resolves the faulting slot during the fold,
@@ -69,7 +69,7 @@ def _fanout_agent(node_id: str, *, agent_in: str, agent_pub: str, calls: list[To
 
 async def test_one_unhandled_sibling_flattens_to_bare_fault(kafka_bootstrap: str, topic_namespace: str) -> None:
     """X-1: a fan-out of 3 with one faulting sibling and no ``on_callee_error`` → the
-    batch closes failed with a *flattened* ``calf.unhandled`` fault carrying the
+    batch closes failed with a *flattened* ``calf.exception`` fault carrying the
     partial-success topology (``ok``/``failed`` counts); the body never resumes."""
     agent_in = f"{topic_namespace}.x1.input"
     agent_pub = f"{topic_namespace}.x1.mirror"
@@ -94,8 +94,8 @@ async def test_one_unhandled_sibling_flattens_to_bare_fault(kafka_bootstrap: str
             fault, headers = await tap.next_fault(timeout=90)
 
             # singleton flatten: the bare child, not a group
-            assert fault.error.error_type == FaultTypes.UNHANDLED
-            assert headers[HDR_ERROR_TYPE] == FaultTypes.UNHANDLED
+            assert fault.error.error_type == FaultTypes.EXCEPTION
+            assert headers[HDR_ERROR_TYPE] == FaultTypes.EXCEPTION
             topology = fault.error.details[FaultTypes.FANOUT_TOPOLOGY]
             assert topology["ok"] == 2
             assert topology["failed"] == 1
@@ -132,7 +132,7 @@ async def test_two_unhandled_siblings_compose_a_fault_group(kafka_bootstrap: str
             assert fault.error.error_type == FaultTypes.FAULT_GROUP
             assert headers[HDR_ERROR_TYPE] == FaultTypes.FAULT_GROUP
             assert len(fault.error.causes) == 2
-            assert fault.error.find(FaultTypes.UNHANDLED) is not None  # matches at depth
+            assert fault.error.find(FaultTypes.EXCEPTION) is not None  # matches at depth
             topology = fault.error.details[FaultTypes.FANOUT_TOPOLOGY]
             assert topology["failed"] == 2
             assert topology["ok"] == 1
@@ -203,7 +203,7 @@ async def test_slot_scoped_seam_raise_fails_the_slot_and_escalates_at_closure(ka
             fault, _ = await tap.next_fault(timeout=90)
 
             assert fault.error.error_type == "seam.reject"  # the seam's slot-scoped mint
-            assert fault.error.find(FaultTypes.UNHANDLED) is not None  # original boom fault, chained
+            assert fault.error.find(FaultTypes.EXCEPTION) is not None  # original boom fault, chained
             topology = fault.error.details[FaultTypes.FANOUT_TOPOLOGY]
             assert topology["failed"] == 1  # the boom slot
             assert topology["ok"] == 1  # ok_a still resolved

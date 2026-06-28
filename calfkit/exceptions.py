@@ -2,26 +2,14 @@ from typing import Any
 
 import pydantic_core
 
+# ``safe_exc_message`` moved to the dependency-free ``calfkit._safe`` leaf so ``error_report`` can use
+# it without the import cycle (``exceptions`` imports ``error_report``); explicitly re-exported here
+# (the ``as`` form) so existing ``from calfkit.exceptions import safe_exc_message`` callers are
+# unchanged, and used on the mint path below.
+from calfkit._safe import safe_exc_message as safe_exc_message
 from calfkit.models.error_report import ErrorReport
 
 _CALF_NAMESPACE = "calf."
-
-
-def safe_exc_message(e: BaseException) -> str:
-    """Best-effort string of an exception, robust against a broken ``__str__``.
-
-    A bare ``str(e)`` can itself raise (a broken ``__str__``, or args that don't
-    coerce). On the fault path that would propagate out and re-open the silent-drop
-    hole the rail closes (e.g. while synthesizing an ``ErrorReport`` from a tool's
-    exception). Mirrors stdlib ``traceback._some_str`` with a ``repr`` fallback.
-    """
-    try:
-        return str(e)
-    except Exception:
-        try:
-            return repr(e)
-        except Exception:
-            return f"<unprintable {type(e).__name__}>"
 
 
 class NodeFaultError(Exception):
@@ -32,17 +20,28 @@ class NodeFaultError(Exception):
         raise NodeFaultError("billing.quota_exceeded", message="...", retryable=False, details={...})
 
     **Receive** one at the client edge (the client hub maps a ``fault`` reply to
-    ``NodeFaultError(report)``, raised from ``result()``), then branch on the slotted report::
+    ``NodeFaultError(report)``, raised from ``result()``). Branch on the stable
+    ``error_type``; read ``report.exception`` for diagnostics (spec §11.1)::
 
         try:
             result = await handle.result()
         except NodeFaultError as e:
-            if e.report.find(FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED):  # find(), not == — groups compose
+            # BRANCH on the stable dotted code — find(), not ==, so it traverses fault groups:
+            if e.report.find(FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED):
                 ...
+            # DIAGNOSE with the harvested exception slot (first-class for logging / "what failed"):
+            if e.report.exception is not None:
+                log.error("upstream %s: %s", e.report.exception.type, e.report.exception.attrs)
+            # FORENSIC: inspect a specific deeper cause by class name (best-effort stopgap, §11.1):
+            inner = next((r for r in e.report.walk()
+                          if r.exception and r.exception.type == "BadRequestError"), None)
 
     The contract is the :class:`~calfkit.models.error_report.ErrorReport` on
     ``report``, never an exception class — no ``error_type → exception`` registry,
-    so every surface (seams, sinks, client) reads the same slotted report.
+    so every surface (seams, sinks, client) reads the same slotted report. The
+    ``exception`` slot is **diagnostic-first**: ``error_type`` + ``find()`` is the durable
+    branching contract; ``walk()`` + ``exception.type`` is forensic, not a blessed branching
+    API (it keys on a class name the LiteLLM migration, #230, will change).
     """
 
     report: ErrorReport

@@ -435,7 +435,7 @@ class TestMidBatchAbort:
         env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])
         resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "return"}, broker=_CaptureBroker())  # type: ignore[arg-type]
         assert isinstance(resp.body.reply, FaultMessage)  # escalated the node's own exception
-        assert resp.body.reply.error.error_type == FaultTypes.UNHANDLED
+        assert resp.body.reply.error.error_type == FaultTypes.EXCEPTION
         assert await store.read_state("A") is None  # the open batch was tombstoned (abort, not _publish_fault)
 
 

@@ -20,7 +20,7 @@
 **The six deferred behaviors (do not test as if live):**
 1. ⏳ `surface_to_model` prebuilt — does not exist in any module.
 2. ⏳ `self_retry_budget` / `State.seam_budgets` / `calf.agent.self_retry_exhausted` / `details.reason="self_retry_disabled"` — none exist; self-retry is an *unbounded* `TailCall` loop.
-3. ⏳ Provider classification of `calf.model.context_window_exceeded` — the `FaultTypes` constant exists but has **no producer**; a context-window error surfaces as generic `calf.unhandled`.
+3. ⏳ Provider classification of `calf.model.context_window_exceeded` — the `FaultTypes` constant exists but has **no producer**; a context-window error surfaces as generic `calf.exception`.
 4. ⏳ Client-side `NodeFaultError` on a `kind=fault` reply — the reply dispatcher has no `x-calf-kind` branch.
 5. ⏳ `ConsumerContext.fault` / `ConsumerContext.delivery_kind` — absent; a consumer tap sees `output=None`, not the fault.
 6. ⏳ MCP `isError=True` → `calf.retry` marking — merged code passes `isError` results through **transparently/unmarked**.
@@ -38,11 +38,11 @@
 | ID | Behavior | Status | Grounding / notes |
 |---|---|---|---|
 | FR-1 | A node body that returns normally publishes a `return` (no fault). | ✅ | `_publish_action` ReturnCall arm, `base.py:495-599`. |
-| FR-2 | An **uncaught non-`NodeFaultError` exception** in a body → synthesized `ErrorReport(error_type="calf.unhandled")` with the exception class in `details["calf.exception_type"]` and a clamped message; **no exception escapes to FastStream** (P1 — no silent drop). | ✅ | `_handle_delivery` `except Exception`, `base.py:1633-1669`; `_fault_from_exception` / `ErrorReport.from_exception`, `error_report.py:326-365`. `S1`. |
+| FR-2 | An **uncaught non-`NodeFaultError` exception** in a body → synthesized `ErrorReport(error_type="calf.exception")` with the exception harvested into its `exception` slot (`report.exception.type`/`.attrs`) and a clamped message; **no exception escapes to FastStream** (P1 — no silent drop). | ✅ | `_handle_delivery` `except Exception`, `base.py:1633-1669`; `_fault_from_exception` / `ErrorReport.from_exception`, `error_report.py:326-365`. `S1`. |
 | FR-3 | A **`raise NodeFaultError(...)`** anywhere (any seam, any body) converts **verbatim** — its `error_type`/`retryable`/`details` honored — and **bypasses `on_node_error`** (the mint rule). | ✅ | `except NodeFaultError as nfe` arm, `base.py:1630-1632`; `S32`. |
 | FR-4 | Minting a `NodeFaultError("calf.something", ...)` (user-supplied reserved `calf.*` type, or a `calf.*` key in `details`, or non-JSON-serializable `details`) raises `ValueError` **at construction** (fail-fast at the keyboard). Framework `calf.*` types pass via the internal factory. | ✅ | `NodeFaultError.__init__`, `exceptions.py:64-86`; `S26`. |
 | FR-5 | A `NodeFaultError` carrying an existing `ErrorReport` (receive/wrap arm) plus any of `message`/`retryable`/`details` raises `ValueError` ("mint-only"). | ✅ | `exceptions.py:58-63`. |
-| FR-6 | Context-window provider error classifies to `calf.model.context_window_exceeded`. | ⏳ | Constant declared (`error_report.py:53`); **no producer** in `calfkit/providers/`. Today such an error → `calf.unhandled`. `S13`. |
+| FR-6 | Context-window provider error classifies to `calf.model.context_window_exceeded`. | ⏳ | Constant declared (`error_report.py:53`); **no producer** in `calfkit/providers/`. Today such an error → `calf.exception`. `S13`. |
 
 ### A2. Escalation & propagation identity
 
@@ -130,7 +130,7 @@
 |---|---|---|---|
 | SE-7 | The **mint rule** is absolute: `raise NodeFaultError(...)` in any seam/body bypasses `on_node_error` and converts verbatim (incl. inside a recovery-path `after_node`). | ✅ | `base.py:1630-1632`; recovery-path local `except NodeFaultError`; `S19`, `S32`. |
 | SE-8 | A **non-`NodeFaultError`** raise inside `before_node`/`after_node` is a node-own accident → routed to `on_node_error`, with the original inbound fault (if any) chained in `causes` via `_SeamAccidentError`. | ✅ | `_SeamAccidentError`, `base.py:171-185,1637-1640`; `S8`. |
-| SE-9 | A raise inside **`on_callee_error` is slot-scoped, never node-own**: the slot resolves *failed* carrying the raised error (a `NodeFaultError` honored verbatim; else `calf.unhandled`) chained to the inbound fault; siblings continue; closure escalates. No double reply. | ✅ | `_resolve_callee` except arm, `base.py:1013-1032`; `S31`. |
+| SE-9 | A raise inside **`on_callee_error` is slot-scoped, never node-own**: the slot resolves *failed* carrying the raised error (a `NodeFaultError` honored verbatim; else `calf.exception`) chained to the inbound fault; siblings continue; closure escalates. No double reply. | ✅ | `_resolve_callee` except arm, `base.py:1013-1032`; `S31`. |
 | SE-10 | A **non-`NodeFaultError`** raise inside an `on_node_error` handler = *that handler declines* (logged, noted under `details["calf.seam_errors"]`); the chain continues; all-declined → the **original** fault escalates (no regress). A `NodeFaultError` there = mint → stop chain, convert verbatim, original chained via `causes` (`_Minted`). `CancelledError` propagates. | ✅ | `run_chain_guarded`, `_seams.py:69-117`; `S9`. |
 | SE-11 | `on_node_error` recovery value flows through `after_node` (ADK parity). A **non-`NodeFaultError`** raise during recovery processing is terminal (single-shot), chaining the original as `cause`. | ✅ | `base.py:1658-1669`; `S19`. |
 | SE-12 | A seam can never produce *nothing*: substitute / decline (`None`) / raise. (`Silent` is removed.) | ✅ | §10 of the spec. |
@@ -255,7 +255,7 @@
 | XC-2 | The shared producer defaults to **`acks=all` + `enable_idempotence=True`** — hardens every rail; makes "await the ack" durable and the re-entry retry-safe. | ✅ | §13 producer posture. |
 | XC-3 | Structured logging: synthesis = ERROR (with traceback, at origin); each escalation hop = WARNING (`error_type`, origin, remaining depth); seam handling = INFO. The escalation logs carry the "why didn't my handler fire" teaching load. | ✅ | `base.py:650-657,709-716`; `_seams.py` INFO. `S9`. |
 | XC-4 | `ModelRetry` raised by a tool → caught at origin, rendered to a **`calf.retry`-marked `TextPart`** (raw message, no suffix), shipped as an **ordinary return** (not a fault). The agent's `_resolve_slot` materializes a `RetryPromptPart` (Anthropic `is_error=True` fidelity). | ✅ | `tool.py:116-121`, `payload.py:47-53`, `agent.py:131-193`; `S20`, `S36`. |
-| XC-5 | MCP **transport/session failure** → fault rail (`calf.unhandled`); **`isError=True`** result → **transparent passthrough** as an ordinary `ReturnCall` (NOT marked `calf.retry`). | ⚠️ | `mcp_toolbox.py:243-266` (B2 decision). Spec's `calf.retry`-for-MCP is deferred. |
+| XC-5 | MCP **transport/session failure** → fault rail (`calf.exception`); **`isError=True`** result → **transparent passthrough** as an ordinary `ReturnCall` (NOT marked `calf.retry`). | ⚠️ | `mcp_toolbox.py:243-266` (B2 decision). Spec's `calf.retry`-for-MCP is deferred. |
 | XC-6 | `surface_to_model` per-tool budget tally in `State.seam_budgets` at every slot finalization (closure + the single continuation); reset on a tool's fault-free return; key = tool identity not topic. | ⏳ | **Unimplemented** (no `seam_budgets` field). `S35`. |
 | XC-7 | `reply_ttl` stays `None` by default; with the rail in place faults *arrive* instead of hanging — except where reception is deferred (FR-27/FR-30), where a finite `reply_ttl` is the liveness backstop. | ⚠️ | Until the reception PR, finite `reply_ttl` is **required** to observe routed-fault/undecodable cases without hanging. |
 

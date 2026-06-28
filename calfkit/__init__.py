@@ -13,7 +13,7 @@ from calfkit.client import (
 )
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView, advertises
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, NodeFaultError
-from calfkit.models import ErrorReport, FaultTypes, ToolContext
+from calfkit.models import ErrorReport, ExceptionInfo, FaultTypes, ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, Tools, agent_tool, consumer
 from calfkit.peers import Handoff, Messaging
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
@@ -36,6 +36,7 @@ __all__ = [
     "RunFailed",
     # models
     "ErrorReport",
+    "ExceptionInfo",
     "FaultTypes",
     "ToolContext",
     # nodes

@@ -61,10 +61,10 @@ class TestCalleeResultValue:
         # The transport view: raw parts kept alongside value; fault set on failure;
         # handled True when on_callee_error resolved it.
         parts = [TextPart(text="x")]
-        err = ErrorReport(error_type="calf.unhandled")
+        err = ErrorReport(error_type="calf.exception")
         r = CalleeResult(frame_id="f", tag="t", target_topic="tool", parts=parts, fault=err, handled=True)
         assert r.parts == parts
-        assert r.fault is not None and r.fault.error_type == "calf.unhandled"
+        assert r.fault is not None and r.fault.error_type == "calf.exception"
         assert r.handled is True
 
 

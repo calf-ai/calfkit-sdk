@@ -9,7 +9,7 @@ from calfkit.models.actions import (  # noqa: I001 — actions first (see commen
 )
 from calfkit.models.consumer_context import ConsumerContext
 from calfkit.models.envelope import Envelope
-from calfkit.models.error_report import ErrorReport, FaultTypes, FrameRef
+from calfkit.models.error_report import ErrorReport, ExceptionInfo, FaultTypes, FrameRef
 from calfkit.models.payload import ContentPart, DataPart, FilePart, TextPart, ToolCallPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import (
@@ -43,6 +43,7 @@ __all__ = [
     "Envelope",
     # error_report
     "ErrorReport",
+    "ExceptionInfo",
     "FaultTypes",
     "FrameRef",
     # reply

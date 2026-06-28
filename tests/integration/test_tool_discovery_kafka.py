@@ -17,7 +17,7 @@ its schema at runtime from the capability view, then dispatching the call over K
 The bad-args case is the discovered-binding contrast with the eager path
 (``test_invalid_tool_node_args_rejected_before_dispatch``): a discovered binding has NO
 validator, so the agent does NOT reject schema-invalid args locally — it dispatches them,
-the tool node raises on receipt, and the chokepoint escalates a typed ``calf.unhandled``
+the tool node raises on receipt, and the chokepoint escalates a typed ``calf.exception``
 ``FaultMessage`` on the agent's ``publish_topic`` mirror (observed via the fault tap; typed
 client reception is deferred to #250).
 
@@ -206,7 +206,7 @@ async def test_model_pov_matches_the_advertised_tool(kafka_bootstrap: str, topic
 async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str, topic_namespace: str) -> None:
     """A discovered binding carries NO validator (schema-only), so the agent dispatches
     schema-invalid args instead of rejecting them locally (the eager path's contrast): the
-    tool node raises on receipt and the chokepoint escalates a typed ``calf.unhandled``
+    tool node raises on receipt and the chokepoint escalates a typed ``calf.exception``
     ``FaultMessage`` on the agent's ``publish_topic`` mirror."""
     tool_name = f"{topic_namespace}-add"
     agent_id = f"{topic_namespace}-disc-fault"
@@ -239,9 +239,9 @@ async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str
             # The bad args reached the tool node (the discovered binding did NOT validate
             # locally), and its raise escalated as a typed unhandled fault.
             assert headers[HDR_KIND] == "fault"
-            assert headers[HDR_ERROR_TYPE] == FaultTypes.UNHANDLED
-            assert fault.error.error_type == FaultTypes.UNHANDLED
-            assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) is not None  # the tool's exception class
+            assert headers[HDR_ERROR_TYPE] == FaultTypes.EXCEPTION
+            assert fault.error.error_type == FaultTypes.EXCEPTION
+            assert fault.error.exception is not None  # the tool's exception class
 
     await driver.aclose()
     await tool_worker._client.aclose()

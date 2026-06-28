@@ -1,10 +1,9 @@
 """Channel A — the broadcast-mirror fault tap for the real-broker fault tests.
 
-No typed fault reaches the client today: the reply dispatcher has no ``x-calf-kind``
-branch yet, so a routed fault is ``set_result``-ed like a success and surfaces to the
-caller as a ``DeserializationError`` (the typed ``NodeFaultError`` reception is deferred
-to #250). The deterministic *typed* channel is a node's ``publish_topic`` broadcast
-mirror: every caller-capable node that escalates (or floors) a fault returns the
+The client edge now raises a typed ``NodeFaultError`` from ``result()`` (#250's client-side
+reception shipped). This tap is the complementary *typed* channel for observing a node's
+escalated (or floored) fault on its ``publish_topic`` broadcast mirror, independent of a
+waiting client: every caller-capable node that escalates (or floors) a fault returns the
 fault-bearing envelope as its handler ``Response``, and the worker's ``@publisher``
 broadcasts it on ``publish_topic`` with headers ``x-calf-kind=fault`` +
 ``x-calf-error-type``. This module taps that topic with a raw ``AIOKafkaConsumer`` and
@@ -12,8 +11,9 @@ decodes the calfkit ``Envelope`` so a test can read ``envelope.reply.error`` —
 :class:`~calfkit.models.error_report.ErrorReport`.
 
 Why a raw consumer and not a ``@consumer`` node: ``ConsumerContext`` has no ``.fault``
-field yet (also deferred to #250), so a sink node projects a ``FaultMessage`` to
-``output=None`` and never sees the report. The raw tap reads the reply slot directly.
+field yet (the consumer-side reception of #250 is still deferred), so a sink node projects
+a ``FaultMessage`` to ``output=None`` and never sees the report. The raw tap reads the
+reply slot directly.
 
 Read ``earliest`` with a fresh group so the tap sees the mirror even if it joins after
 the publish. Pre-create the tapped topic (see ``_ensure_topic`` in the test module) so

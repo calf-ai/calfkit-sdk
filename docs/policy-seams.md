@@ -86,7 +86,7 @@ def require_entitlement(ctx):
 
 The caller receives the fault on the result rail; the body and `after_node` are
 skipped. Any other exception also blocks the invocation but surfaces as a generic
-`calf.unhandled` fault — prefer `NodeFaultError` so callers get a code they can
+`calf.exception` fault — prefer `NodeFaultError` so callers get a code they can
 branch on. See [How to handle errors and faults](error-handling.md) for minting,
 the reserved `calf.*` namespace, and the caller-side `ErrorReport`.
 

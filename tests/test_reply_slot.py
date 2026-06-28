@@ -81,11 +81,11 @@ class TestEnvelopeReply:
     def test_carries_fault_reply_and_round_trips(self) -> None:
         # The slot widens to ReturnMessage | FaultMessage (discriminated on kind) so a
         # fault rides the same per-delivery reply carriage as a success (spec §4.2).
-        env = _envelope(reply=FaultMessage(in_reply_to="f1", tag="t1", error=ErrorReport(error_type="calf.unhandled", message="boom")))
+        env = _envelope(reply=FaultMessage(in_reply_to="f1", tag="t1", error=ErrorReport(error_type="calf.exception", message="boom")))
         back = Envelope.model_validate_json(env.model_dump_json())
         assert isinstance(back.reply, FaultMessage)
         assert back.reply.kind == "fault"
-        assert back.reply.error.error_type == "calf.unhandled"
+        assert back.reply.error.error_type == "calf.exception"
         assert back.reply.error.message == "boom"
 
 
@@ -264,7 +264,7 @@ class TestFaultReaderTolerance:
     deferred reception PR's job."""
 
     def test_output_parts_is_empty_on_a_fault(self) -> None:
-        env = _fault_env(ErrorReport(error_type="calf.unhandled"))
+        env = _fault_env(ErrorReport(error_type="calf.exception"))
         assert env.context.output_parts == []  # no AttributeError on FaultMessage.parts
 
     def test_project_output_is_none_on_a_fault_when_lenient(self) -> None:

@@ -6,7 +6,7 @@ ONE path resolves a callee slot for both a return and a fault, single-call and f
 - a **fault** → ``on_callee_error``: a substitute value → ``_SlotResolved(parts, handled=True)``;
   ``None`` (declined) → ``_SlotFailed(report)`` (escalate); a slot-scoped raise → ``_SlotFailed``
   carrying the chained error, NEVER a node-own failure (§6.5): a ``NodeFaultError`` honored verbatim,
-  anything else wrapped ``calf.unhandled``, both with the inbound fault chained via ``causes``.
+  anything else wrapped ``calf.exception``, both with the inbound fault chained via ``causes``.
 
 A wire-unsafe substitute coerces to ``_SlotFailed(calf.slot.materialization_failed)`` at stage-1.
 """
@@ -97,7 +97,7 @@ class TestFaultResolution:
 
         out = await _node(on_callee_error=_boom)._resolve_callee(_seam_ctx(), "fault", _fault(), target_topic=None)
         assert isinstance(out, _SlotFailed)
-        assert out.report.error_type == FaultTypes.UNHANDLED  # slot-scoped wrap, never a whole-invocation fault
+        assert out.report.error_type == FaultTypes.EXCEPTION  # slot-scoped wrap, never a whole-invocation fault
         assert out.report.causes and out.report.causes[0].error_type == "callee.boom"
 
     async def test_failing_call_is_set_during_seam_then_cleared(self) -> None:

@@ -6,8 +6,8 @@ addresses — keep them unique and descriptive. Each tool exercises one entry po
 the rail:
 
 - :func:`boom` — a generic uncaught exception → the chokepoint synthesizes
-  ``calf.unhandled`` (catalogue FR-2), carrying the exception class in
-  ``details["calf.exception_type"]``.
+  ``calf.exception`` (catalogue FR-2), carrying the exception class in its structured
+  ``exception`` slot (``report.exception.type``).
 - :func:`quota` — a deliberate ``NodeFaultError`` minted in the tool body → carried
   **verbatim** (the mint rule bypasses ``on_node_error``; FR-3/FR-4).
 - :func:`ok_a` / :func:`ok_b` — fault-free siblings, for mixed fan-out batches.
@@ -24,7 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
+import httpx
+from openai import BadRequestError
+
+from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError, ModelRetry
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.seam_context import SeamContext
@@ -33,8 +36,34 @@ from calfkit.nodes import agent_tool
 
 @agent_tool
 def boom(x: int) -> int:
-    """Raise a generic exception → synthesized as ``calf.unhandled`` at the chokepoint."""
+    """Raise a generic exception → synthesized as ``calf.exception`` at the chokepoint."""
     raise ValueError(f"kaboom({x})")
+
+
+#: The exact OpenAI context-window-overflow error body (a real ``ModelHTTPError`` carries this on
+#: ``.body``). Replayed deterministically so the kafka-lane harvest test needs no live LLM.
+_CTX_BODY = {
+    "message": "Input tokens exceed the configured limit of 272000 tokens. "
+    "Your messages resulted in 700007 tokens. Please reduce the length of the messages.",
+    "type": "invalid_request_error",
+    "param": "messages",
+    "code": "context_length_exceeded",
+}
+
+
+@agent_tool
+def ctx_overflow(x: int) -> int:
+    """Raise the real provider context-window error → harvested at the chokepoint into the
+    ``exception`` slot, with the ``__cause__`` (the ``openai.BadRequestError``) mapped onto causes.
+
+    ``openai.BadRequestError.__init__`` dereferences ``response.request``, so scaffold a live
+    ``httpx.Response`` (httpx is a transitive dep via openai; ``ModelHTTPError`` via the vendored
+    pydantic-ai). The structured state (``status_code`` / ``body.code``) is exactly what today's
+    flatten-to-string loses (spec §2)."""
+    resp = httpx.Response(status_code=400, request=httpx.Request("POST", "http://x"))
+    raise ModelHTTPError(status_code=400, model_name="gpt-5-nano", body=_CTX_BODY) from BadRequestError(
+        "context_length_exceeded", response=resp, body=_CTX_BODY
+    )
 
 
 @agent_tool

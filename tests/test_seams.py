@@ -75,7 +75,7 @@ class TestRunChainGuarded:
     async def test_returns_first_recovery_value(self) -> None:
         # The happy path mirrors run_chain: the first non-None handler return is
         # the recovery value (the skeleton coerces it to the node's output).
-        report = ErrorReport(error_type="calf.unhandled")
+        report = ErrorReport(error_type="calf.exception")
 
         async def recovers(ctx: object, fault: ErrorReport) -> str:
             return "recovered"
@@ -87,7 +87,7 @@ class TestRunChainGuarded:
     async def test_all_handlers_decline_returns_none(self) -> None:
         # No recovery (every handler returns None) → None, which the skeleton reads
         # as "escalate the original fault" (spec §6.5/§6.8). Empty chain too.
-        report = ErrorReport(error_type="calf.unhandled")
+        report = ErrorReport(error_type="calf.exception")
         assert await run_chain_guarded([lambda c, f: None], object(), report) is None
         assert await run_chain_guarded([], object(), report) is None
 
@@ -95,7 +95,7 @@ class TestRunChainGuarded:
         # §6.5: an accidental (non-NodeFaultError) raise in an on_node_error
         # handler is that handler DECLINING — logged, not propagated — and the
         # chain advances (deliberate deviation from pluggy's propagate-on-raise).
-        report = ErrorReport(error_type="calf.unhandled")
+        report = ErrorReport(error_type="calf.exception")
 
         def boom(ctx: object, fault: ErrorReport) -> str:
             raise RuntimeError("seam bug")
@@ -112,7 +112,7 @@ class TestRunChainGuarded:
         # ``CancelledError`` (cooperative cancellation) must propagate OUT of the guarded
         # chain — never be mistaken for an accidental decline and swallowed — and a later
         # handler that WOULD recover must not run (the cancellation wins).
-        report = ErrorReport(error_type="calf.unhandled")
+        report = ErrorReport(error_type="calf.exception")
 
         def cancels(ctx: object, fault: ErrorReport) -> str:
             raise asyncio.CancelledError()
@@ -129,7 +129,7 @@ class TestRunChainGuarded:
         # §6.5 mint rule (inside the error seam): a NodeFaultError raised in a
         # handler is a deliberate fault — the chain STOPS and the minted report is
         # returned as _Minted, with the original fault chained via causes.
-        original = ErrorReport(error_type="calf.unhandled", message="orig")
+        original = ErrorReport(error_type="calf.exception", message="orig")
 
         def mints(ctx: object, fault: ErrorReport) -> str:
             raise NodeFaultError("billing.quota_exceeded", message="minted")
@@ -149,7 +149,7 @@ class TestRunChainGuarded:
         # §6.5 / scenario 9: when every handler declines (a raise counts as a
         # decline), the ORIGINAL fault escalates (None) — and the seam failure is
         # noted on that report's details so the escalation carries the breadcrumb.
-        report = ErrorReport(error_type="calf.unhandled")
+        report = ErrorReport(error_type="calf.exception")
 
         def boom(ctx: object, fault: ErrorReport) -> str:
             raise RuntimeError("seam bug")
