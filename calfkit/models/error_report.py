@@ -91,12 +91,6 @@ class FaultTypes:
     # fault carries the trace of every recovery attempt that itself broke.
     SEAM_ERRORS = "calf.seam_errors"
 
-    # details key: the exception class name :meth:`ErrorReport.from_exception` records
-    # when synthesizing a ``calf.exception`` fault from an arbitrary exception (spec
-    # §6.7) — exception identity does not cross the wire, but the class name is a useful
-    # forensic breadcrumb in ``details``.
-    EXCEPTION_TYPE = "calf.exception_type"
-
     # details key + values: why a reply-owing delivery declined its body, written by the route
     # dispatcher (§10) and carried on the ``DELIVERY_REJECTED`` auto-fault so a consumer can branch
     # without typing a magic string. ``REASON`` is a plain (non-``calf.``) key by design — it is the
@@ -393,9 +387,8 @@ class ErrorReport(BaseModel):
         """Synthesize a fault from an arbitrary exception (spec §6.7).
 
         A non-``NodeFaultError`` maps to ``error_type="calf.exception"`` with a structured
-        ``exception`` slot harvested from its ``vars()`` (spec §6), the exception's class name
-        (``details[FaultTypes.EXCEPTION_TYPE]``), and a clamped message; ``build_safe`` keeps it
-        total — the error path must never itself raise.
+        ``exception`` slot harvested from its ``vars()`` (spec §6) and a clamped message;
+        ``build_safe`` keeps it total — the error path must never itself raise.
         ``node``/``ctx`` (optional, keyword) source the origin breadcrumb when present
         (``node.node_id`` / ``ctx.frame_id``); ``frame_chain`` and ``origin_frame_id`` capture the
         call-stack topology at synthesis (§4.3/§4.4, ADR-0003 — the traceback analog), passed
@@ -408,7 +401,7 @@ class ErrorReport(BaseModel):
         bypassing ``on_node_error`` (the mint rule, §6.5).
         """
         exc_info, attrs_dropped = _harvest_exception(exc)
-        report = cls.build_safe(
+        return cls.build_safe(
             error_type=FaultTypes.EXCEPTION,
             message=_safe_exc_str(exc),
             origin_node_id=getattr(node, "node_id", None),
@@ -418,13 +411,6 @@ class ErrorReport(BaseModel):
             exception_attrs_dropped=attrs_dropped,
             causes=[cause] if cause is not None else None,
         )
-        # The exception-class breadcrumb is a framework-reserved calf.* details key, so it
-        # is set AFTER build_safe (which strips caller-supplied calf.* keys); the report is
-        # freshly built and owned here, so the in-place add is safe. Source the class name from
-        # the already-total harvest (``exc_info.type``), NOT a second unguarded ``type(exc).__name__``
-        # access — which would re-open the totality hole on a hostile metaclass.
-        report.details[FaultTypes.EXCEPTION_TYPE] = exc_info.type[:200]
-        return report
 
 
 # ---------------------------------------------------------------------------

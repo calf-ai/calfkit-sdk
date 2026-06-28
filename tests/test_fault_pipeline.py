@@ -253,7 +253,8 @@ class TestFaultBoundary:
         assert topic == "caller.return"
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"
-        assert env.reply.error.details["calf.exception_type"] == "RuntimeError"
+        assert env.reply.error.exception is not None
+        assert env.reply.error.exception.type == "RuntimeError"
         assert env.reply.error.origin_node_id == "n"
         assert headers[HDR_KIND] == "fault"
         assert resp.body.reply is env.reply  # the broadcast mirror carries the same fault

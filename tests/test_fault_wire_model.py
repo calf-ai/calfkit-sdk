@@ -887,8 +887,6 @@ class TestFromException:
         # the structured projection is harvested into the typed exception slot
         assert report.exception is not None
         assert report.exception.type == "ValueError"
-        # the exception class name is ALSO recorded as a framework details breadcrumb (removed later)
-        assert report.details[FaultTypes.EXCEPTION_TYPE] == "ValueError"
         # the clamped exception message rides the report's message field
         assert "boom" in report.message
 
@@ -901,7 +899,8 @@ class TestFromException:
 
         report = ErrorReport.from_exception(HostileError())
         assert report.error_type == FaultTypes.EXCEPTION
-        assert report.details[FaultTypes.EXCEPTION_TYPE] == "HostileError"
+        assert report.exception is not None
+        assert report.exception.type == "HostileError"
 
     def test_is_total_when_both_str_and_repr_raise(self) -> None:
         # The innermost fallback of ``_safe_exc_str``: reached only when BOTH ``str(exc)``
@@ -917,7 +916,8 @@ class TestFromException:
         report = ErrorReport.from_exception(TotallyUnprintableError())
         assert report.message == "<unprintable TotallyUnprintableError>"
         assert report.error_type == FaultTypes.EXCEPTION
-        assert report.details[FaultTypes.EXCEPTION_TYPE] == "TotallyUnprintableError"
+        assert report.exception is not None
+        assert report.exception.type == "TotallyUnprintableError"
 
     def test_chains_a_cause(self) -> None:
         # The §6.8 recovery-then-failure case: the second error chains the original.
@@ -962,10 +962,9 @@ class TestFromException:
         report = ErrorReport.from_exception(exc)
         assert report.details[FaultTypes.ELIDED]["exception_attrs_dropped"] >= 1
 
-    def test_total_when_metaclass_name_raises_sources_breadcrumb_from_harvest(self) -> None:
-        # The commit-3 totality trap (plan §3): from_exception must stay total even when
-        # type(exc).__name__ raises — the retained EXCEPTION_TYPE breadcrumb is sourced from the
-        # already-total harvest (exc_info.type), NOT a second unguarded type(exc).__name__ access.
+    def test_total_when_metaclass_name_raises_degrades_slot_to_sentinel(self) -> None:
+        # from_exception must stay total even when type(exc).__name__ raises: the harvest's
+        # type-access guard degrades the slot's type to the sentinel rather than escaping (§8).
         class _NoNameMeta(type):
             @property
             def __name__(cls):  # type: ignore[override]
@@ -978,4 +977,3 @@ class TestFromException:
         assert report.error_type == FaultTypes.EXCEPTION
         assert report.exception is not None
         assert report.exception.type == "<unharvestable>"
-        assert report.details[FaultTypes.EXCEPTION_TYPE] == "<unharvestable>"

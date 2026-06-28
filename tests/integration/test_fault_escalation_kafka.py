@@ -85,7 +85,8 @@ async def test_tool_generic_raise_escalates_unhandled_fault(kafka_bootstrap: str
             assert headers[HDR_ERROR_TYPE] == FaultTypes.EXCEPTION
             assert fault.error.error_type == FaultTypes.EXCEPTION
             assert fault.error.find(FaultTypes.EXCEPTION) is not None
-            assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) == "ValueError"
+            assert fault.error.exception is not None
+            assert fault.error.exception.type == "ValueError"
             assert len(fault.error.frame_chain) >= 1  # the faulting hop's topology is captured
 
             # Channel C — the routed fault is RECEIVED as a typed NodeFaultError (#250 reception):

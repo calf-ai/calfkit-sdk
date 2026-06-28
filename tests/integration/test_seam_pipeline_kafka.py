@@ -228,7 +228,8 @@ async def test_before_node_contract_guard_faults(kafka_bootstrap: str, topic_nam
             await driver.agent(topic=agent_in).start("go")
             fault, _ = await tap.next_fault(timeout=60)
             assert fault.error.error_type == FaultTypes.EXCEPTION
-            assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) == "SeamContractError"
+            assert fault.error.exception is not None
+            assert fault.error.exception.type == "SeamContractError"
     finally:
         await driver.aclose()
         await worker._client.aclose()

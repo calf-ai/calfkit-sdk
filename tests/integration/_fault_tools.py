@@ -6,8 +6,8 @@ addresses — keep them unique and descriptive. Each tool exercises one entry po
 the rail:
 
 - :func:`boom` — a generic uncaught exception → the chokepoint synthesizes
-  ``calf.exception`` (catalogue FR-2), carrying the exception class in
-  ``details["calf.exception_type"]``.
+  ``calf.exception`` (catalogue FR-2), carrying the exception class in its structured
+  ``exception`` slot (``report.exception.type``).
 - :func:`quota` — a deliberate ``NodeFaultError`` minted in the tool body → carried
   **verbatim** (the mint rule bypasses ``on_node_error``; FR-3/FR-4).
 - :func:`ok_a` / :func:`ok_b` — fault-free siblings, for mixed fan-out batches.

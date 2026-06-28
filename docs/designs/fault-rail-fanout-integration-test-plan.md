@@ -171,7 +171,7 @@ Each row: **ID** · behavior(s) covered · setup · action · assertion / channe
 
 | ID | Covers | Setup | Action → Assert |
 |---|---|---|---|
-| F-1 | FR-2, FR-11, FR-18 | agent(`tools=[boom]`, `model=scripted([boom c1])`, `publish_topic=pub`), no seams | `driver.start`; **A**: `next_fault` → `error_type=="calf.exception"`, `details["calf.exception_type"]=="ValueError"`, headers `kind=fault`+`error-type`. **C**: `handle.result()` raises `DeserializationError`. |
+| F-1 | FR-2, FR-11, FR-18 | agent(`tools=[boom]`, `model=scripted([boom c1])`, `publish_topic=pub`), no seams | `driver.start`; **A**: `next_fault` → `error_type=="calf.exception"`, `exception.type=="ValueError"`, headers `kind=fault`+`error-type`. **C**: `handle.result()` raises `DeserializationError`. |
 | F-2 | FR-3, FR-4 | agent(`tools=[quota]`), no seams | **A**: fault `error_type=="billing.quota_exceeded"`, `retryable is False`, `details["x"]==1`. Verbatim, not `calf.exception`. `S32`. |
 | F-3 | FR-7, FR-8, FR-9 | deep chain A→B→C as 3 agents over 3 topics; C's tool `boom`; B has no `on_callee_error` (declines) | invoke A; **A** taps A's `publish_topic` → fault `error_type` identical to C's origin, `frame_chain` length ≥ 2, same `report_id` as the C-hop mirror. **B**: a recorder `on_callee_error` on A fires once with that fault. `S3`, `S24`. |
 | F-4 | FR-12, FR-13 | fire-and-forget: `driver.send("go", agent_in)` (no reply_to) to an agent whose tool `boom`s; agent `publish_topic=pub` | **A**: fault mirrored on `pub`. **C**: no future exists (send returns a correlation id only); assert nothing hangs. `S10`, `S14`. |

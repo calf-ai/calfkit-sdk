@@ -241,7 +241,7 @@ async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str
             assert headers[HDR_KIND] == "fault"
             assert headers[HDR_ERROR_TYPE] == FaultTypes.EXCEPTION
             assert fault.error.error_type == FaultTypes.EXCEPTION
-            assert fault.error.details.get(FaultTypes.EXCEPTION_TYPE) is not None  # the tool's exception class
+            assert fault.error.exception is not None  # the tool's exception class
 
     await driver.aclose()
     await tool_worker._client.aclose()
