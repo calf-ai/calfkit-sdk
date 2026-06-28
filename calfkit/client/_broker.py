@@ -21,6 +21,8 @@ from typing import Any
 
 from faststream.kafka import KafkaBroker
 
+from calfkit.client._mesh import DEFAULT_MESH_URL
+
 PreStartHook = Callable[[KafkaBroker], Awaitable[None]]
 
 
@@ -34,7 +36,7 @@ class _PreStartHookBroker(KafkaBroker):
 
     def __init__(
         self,
-        bootstrap_servers: str | Iterable[str] = "localhost",
+        bootstrap_servers: str | Iterable[str] = DEFAULT_MESH_URL,
         *,
         pre_start: PreStartHook | None = None,
         **kwargs: Any,

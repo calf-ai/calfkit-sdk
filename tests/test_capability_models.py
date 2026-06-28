@@ -134,7 +134,7 @@ class TestClientServerUrlsRetention:
         assert client.server_urls == "kafka-a:9092,kafka-b:9092"
 
     def test_connect_retains_env_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALF_HOST_URL", "env-kafka:9092")
+        monkeypatch.setenv("CALFKIT_MESH_URL", "env-kafka:9092")
         client = Client.connect()
         assert client.server_urls == "env-kafka:9092"
 

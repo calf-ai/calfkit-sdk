@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, overload
 
@@ -22,6 +21,7 @@ from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client._broker import _PreStartHookBroker
+from calfkit.client._mesh import resolve_mesh_url
 from calfkit.client.events import DEFAULT_FIREHOSE_BUFFER_SIZE, EventStream
 from calfkit.client.gateway import AgentGateway
 from calfkit.client.hub import _Hub
@@ -110,11 +110,9 @@ class Client:
         topics are auto-created at broker start. It is a separate, removable concern from the §2.7
         boot-check posture — see :meth:`_make_provisioned_broker`.
         """
-        if server_urls is None:
-            server_urls = os.getenv("CALF_HOST_URL") or "localhost"
-        # FastStream wraps a str into [str] and aiokafka never comma-splits inside a list element, so a
-        # one-shot iterable is materialized once into a list for the broker.
-        server_list = [server_urls] if isinstance(server_urls, str) else list(server_urls)
+        # Resolve the mesh URL once (arg > $CALFKIT_MESH_URL > localhost) and normalize to the list
+        # form the broker needs — see calfkit.client._mesh.resolve_mesh_url.
+        server_list = resolve_mesh_url(server_urls)
 
         rejected_security = [k for k in broker_kwargs if k in ("security_protocol", "ssl_context") or k.startswith(("sasl_plain_", "sasl_mechanism"))]
         if rejected_security:

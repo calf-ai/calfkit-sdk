@@ -51,7 +51,7 @@ def test_serve_resolves_nodes_and_runs_worker(captured: dict) -> None:
 
 def test_serve_no_host_delegates_to_client_default(captured: dict) -> None:
     """With no --host, serve passes server_urls=None so Client.connect applies
-    its CALF_HOST_URL -> localhost fallback."""
+    its CALFKIT_MESH_URL -> localhost fallback."""
     from calfkit.cli._run import serve
 
     serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
@@ -113,10 +113,10 @@ def test_serve_empty_resolution_exits_2(captured: dict) -> None:
 
 def test_serve_prints_banner_with_node_details(captured: dict, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     """The banner names the node, its kind, its topics, provisioning state, and
-    the effective broker (localhost when --host and CALF_HOST_URL are unset)."""
+    the effective broker (localhost when --host and CALFKIT_MESH_URL are unset)."""
     from calfkit.cli._run import serve
 
-    monkeypatch.delenv("CALF_HOST_URL", raising=False)
+    monkeypatch.delenv("CALFKIT_MESH_URL", raising=False)
     serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
     out = capsys.readouterr().out
     assert "echo" in out
@@ -128,10 +128,10 @@ def test_serve_prints_banner_with_node_details(captured: dict, capsys: pytest.Ca
 
 
 def test_serve_banner_shows_env_host_when_no_flag(captured: dict, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no --host, the banner reflects CALF_HOST_URL (the effective broker)."""
+    """With no --host, the banner reflects CALFKIT_MESH_URL (the effective broker)."""
     from calfkit.cli._run import serve
 
-    monkeypatch.setenv("CALF_HOST_URL", "envhost:9092")
+    monkeypatch.setenv("CALFKIT_MESH_URL", "envhost:9092")
     serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
     out = capsys.readouterr().out
     assert "envhost:9092" in out

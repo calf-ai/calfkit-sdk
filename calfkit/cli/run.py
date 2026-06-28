@@ -44,7 +44,7 @@ def run(
         None,
         "--host",
         "-H",
-        help="Kafka bootstrap server(s), comma-separated. Precedence: this flag > $CALF_HOST_URL > localhost.",
+        help="Kafka bootstrap server(s), comma-separated. Precedence: this flag > $CALFKIT_MESH_URL > localhost.",
     ),
     provision: bool = typer.Option(
         False,

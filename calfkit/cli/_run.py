@@ -44,7 +44,7 @@ def _parse_host(host: str | None) -> str | list[str] | None:
     """Map the ``--host`` flag to a ``server_urls`` value for ``Client.connect``.
 
     ``None`` (flag omitted) is passed through unchanged so ``Client.connect``
-    applies its ``CALF_HOST_URL`` → ``localhost`` fallback — preserving the
+    applies its ``CALFKIT_MESH_URL`` → ``localhost`` fallback — preserving the
     flag > env > localhost precedence. A comma-separated value becomes a list.
     """
     if not host:
@@ -57,10 +57,12 @@ def _parse_host(host: str | None) -> str | list[str] | None:
 
 def _print_banner(nodes: list[Any], server_urls: str | list[str] | None, provision: bool) -> None:
     """Print a concise startup banner describing what is being served."""
-    # Show the broker the worker will actually connect to. When --host is
-    # omitted, mirror Client.connect's own CALF_HOST_URL -> localhost fallback
-    # so the banner reflects the effective target, not a placeholder.
-    broker = server_urls if server_urls else (os.getenv("CALF_HOST_URL") or "localhost")
+    # Resolve through the same helper Client.connect uses (deferred import, matching
+    # serve()'s pattern) so the banner reports the exact broker the client connects
+    # to — its arg > $CALFKIT_MESH_URL > localhost fallback, never a placeholder.
+    from calfkit.client._mesh import resolve_mesh_url
+
+    broker = ", ".join(resolve_mesh_url(server_urls))
     typer.echo("🐮 Calfkit — starting dev worker")
     typer.echo(f"   broker: {broker}")
     typer.echo(f"   topic provisioning: {'on' if provision else 'off'}")

@@ -78,7 +78,7 @@ would block the import; keep it under the guard.)
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--host`, `-H` | `$CALF_HOST_URL` → `localhost` | Kafka bootstrap server(s), comma-separated. Precedence: this flag **>** `$CALF_HOST_URL` **>** `localhost`. |
+| `--host`, `-H` | `$CALFKIT_MESH_URL` → `localhost` | Kafka bootstrap server(s), comma-separated. Precedence: this flag **>** `$CALFKIT_MESH_URL` **>** `localhost`. |
 | `--provision` | off | Opt-in dev topic auto-creation (**experimental**; `replication_factor=1`, no ACLs). See [Topic provisioning](topic-provisioning.md). |
 | `--reload` | off | Watch source files and restart the worker on change (see [Reload](#reload)). |
 | `--reload-dir` | current dir | Directory to watch with `--reload`. Repeatable. |
