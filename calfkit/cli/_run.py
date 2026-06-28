@@ -16,6 +16,7 @@ from typing import Any
 import typer
 
 from calfkit.cli._loader import load_nodes
+from calfkit.client._mesh import resolve_mesh_url
 
 
 def _load_env(env_file: str | None) -> None:
@@ -57,11 +58,9 @@ def _parse_host(host: str | None) -> str | list[str] | None:
 
 def _print_banner(nodes: list[Any], server_urls: str | list[str] | None, provision: bool) -> None:
     """Print a concise startup banner describing what is being served."""
-    # Resolve through the same helper Client.connect uses (deferred import, matching
-    # serve()'s pattern) so the banner reports the exact broker the client connects
-    # to — its arg > $CALFKIT_MESH_URL > localhost fallback, never a placeholder.
-    from calfkit.client._mesh import resolve_mesh_url
-
+    # Resolve through the same helper Client.connect uses, so the banner reports
+    # the exact broker the client connects to (its arg > $CALFKIT_MESH_URL >
+    # localhost fallback), never a placeholder.
     broker = ", ".join(resolve_mesh_url(server_urls))
     typer.echo("🐮 Calfkit — starting dev worker")
     typer.echo(f"   broker: {broker}")
