@@ -21,7 +21,7 @@ import pytest
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from pydantic import TypeAdapter
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_WIRE
 from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -307,8 +307,8 @@ async def test_consumer_fans_in_across_multiple_topics(container):
 
     broker = container.get(KafkaBroker)
 
-    headers_a = {HDR_EMITTER: "src_a", HDR_EMITTER_KIND: "client"}
-    headers_b = {HDR_EMITTER: "src_b", HDR_EMITTER_KIND: "client"}
+    headers_a = {HDR_EMITTER: "src_a", HDR_EMITTER_KIND: "client", HDR_WIRE: "envelope"}
+    headers_b = {HDR_EMITTER: "src_b", HDR_EMITTER_KIND: "client", HDR_WIRE: "envelope"}
     async with TestKafkaBroker(broker):
         await broker.publish(_envelope(_text_reply("from_a")), topic="fanin.a", correlation_id="cid-a", headers=headers_a)
         await broker.publish(_envelope(_text_reply("from_b")), topic="fanin.b", correlation_id="cid-b", headers=headers_b)

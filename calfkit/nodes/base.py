@@ -13,7 +13,7 @@ from faststream.kafka.annotations import (
 )
 from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, HDR_WIRE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
 from calfkit.controlplane.advert import AdvertRegistryMixin
@@ -495,7 +495,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         """Outbound headers for one publish: emitter id/kind + the ``x-calf-kind``
         delivery classification (spec §4.1), plus ``x-calf-route`` when a ``Call``
         addresses a sub-route of a downstream routed node (ingress-only, ``Call`` only)."""
-        h = {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind, HDR_KIND: kind}
+        h = {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind, HDR_KIND: kind, HDR_WIRE: Envelope.WIRE}
         if route is not None:
             h[HDR_ROUTE] = route
         return h

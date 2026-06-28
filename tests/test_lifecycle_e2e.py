@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from faststream.kafka import TestKafkaBroker
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_WIRE
 from calfkit.client import Client, InvocationResult
 from calfkit.exceptions import LifecycleConfigError
 from calfkit.models import ReturnCall
@@ -87,7 +87,7 @@ async def _publish(broker: Any, envelope: Envelope, topic: str, correlation_id: 
         envelope,
         topic=topic,
         correlation_id=correlation_id,
-        headers={HDR_EMITTER: "client", HDR_EMITTER_KIND: "client"},
+        headers={HDR_EMITTER: "client", HDR_EMITTER_KIND: "client", HDR_WIRE: "envelope"},
     )
 
 

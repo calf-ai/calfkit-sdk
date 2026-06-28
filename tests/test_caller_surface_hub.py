@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_WIRE
 from calfkit.client.events import EventStream, RunCompleted, RunFailed
 from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, NodeFaultError
@@ -146,7 +146,7 @@ def _reply_env(parts: list | None = None, *, error: ErrorReport | None = None) -
 
 
 def _headers(kind: str, emitter: str = "agent.x") -> dict[str, str]:
-    return {HDR_KIND: kind, HDR_EMITTER: emitter, HDR_EMITTER_KIND: "agent"}
+    return {HDR_KIND: kind, HDR_EMITTER: emitter, HDR_EMITTER_KIND: "agent", HDR_WIRE: "envelope"}
 
 
 def _tracked(hub: _Hub, cid: str) -> InvocationHandle:
@@ -379,7 +379,7 @@ async def test_inbox_undecodable_floors_to_a_run_failed_in_the_tracked_channel()
     handle = _tracked(hub, "cid-u")
     async with TestKafkaBroker(broker):
         with pytest.raises(ValidationError):  # the floor re-raises after handing the report to the sink
-            await broker.publish(b'{"bad": "shape"}', inbox, correlation_id="cid-u")
+            await broker.publish(b'{"bad": "shape"}', inbox, correlation_id="cid-u", headers={HDR_WIRE: "envelope"})
     ev = await _terminal(handle)
     assert isinstance(ev, RunFailed)
     assert ev.report.error_type == FaultTypes.DELIVERY_UNDECODABLE  # result() will raise NodeFaultError, not hang

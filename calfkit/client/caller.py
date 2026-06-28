@@ -15,7 +15,7 @@ from typing import Any, overload
 import uuid_utils
 from faststream.kafka import KafkaBroker
 
-from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, is_topic_safe
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, HDR_WIRE, is_topic_safe
 from calfkit._routing import is_concrete_route_key
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
@@ -349,7 +349,7 @@ class Client:
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),
         )
-        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call"}
+        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call", HDR_WIRE: Envelope.WIRE}
         if route is not None:
             headers[HDR_ROUTE] = route
         await self._broker.publish(envelope, topic=topic, correlation_id=correlation_id, headers=headers)

@@ -15,7 +15,7 @@ import pytest
 from faststream import Context
 from faststream.kafka import TestKafkaBroker
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_WIRE
 from calfkit.client.caller import Client
 from calfkit.client.events import RunCompleted
 from calfkit.client.gateway import Dispatch
@@ -36,7 +36,7 @@ def _return_env(text: str) -> Envelope:
 
 
 def _headers(kind: str) -> dict[str, str]:
-    return {HDR_KIND: kind, HDR_EMITTER: "agent.x", HDR_EMITTER_KIND: "agent"}
+    return {HDR_KIND: kind, HDR_EMITTER: "agent.x", HDR_EMITTER_KIND: "agent", HDR_WIRE: "envelope"}
 
 
 def _register_echo_agent(client: Client, topic: str, reply_text: str = "reply") -> list[dict[str, Any]]:
