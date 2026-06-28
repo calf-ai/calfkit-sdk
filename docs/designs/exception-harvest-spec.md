@@ -84,48 +84,53 @@ class ErrorReport(BaseModel):
 
 ## 6. Harvest and chain — the algorithm
 
-`from_exception` becomes a thin public seed over a recursive core that threads one cycle-guard (`_seen`) and one depth counter (`_depth`) through the whole language chain:
+`from_exception` becomes a thin public seed over a recursive core that threads a shared `_ChainState` (the `id()`-keyed cycle-guard `seen` + the one-shot depth-cap truncation flag `truncated`) and a per-frame `_depth` counter through the whole language chain. `_depth` stays per-frame (by-value) so a future *branching* walk (`ExceptionGroup` members, §16) counts each branch independently rather than sharing one depth:
 
 ```python
+class _ChainState:                                   # sibling of the existing _CauseBudget
+    __slots__ = ("seen", "truncated")
+    def __init__(self, root_id):
+        self.seen = {root_id}                        # cycle guard, root pre-marked
+        self.truncated = False                       # set on a depth-cap drop (breadcrumbed, never silent)
+
 @classmethod
 def from_exception(cls, exc, *, node=None, ctx=None, cause=None, frame_chain=None, origin_frame_id=None):
     # public entry — seeds the walk; this exc is the ROOT (gets origin breadcrumbs).
-    # _trunc is a 1-element mutable flag threaded through the recursion so a depth-cap drop is breadcrumbed.
     return cls._from_exception(exc, node=node, ctx=ctx, cause=cause, frame_chain=frame_chain,
-                               origin_frame_id=origin_frame_id, _seen={id(exc)}, _depth=1, _trunc=[False])
+                               origin_frame_id=origin_frame_id, _state=_ChainState(id(exc)), _depth=1)
 
 @classmethod
-def _from_exception(cls, exc, *, node, ctx, cause, frame_chain, origin_frame_id, _seen, _depth, _trunc):
+def _from_exception(cls, exc, *, node, ctx, cause, frame_chain, origin_frame_id, _state, _depth):
     exc_info, attrs_dropped = _harvest_exception(exc)                          # TOTAL (see below)
-    chain = cls._walk_exception_chain(exc, _seen=_seen, _depth=_depth, _trunc=_trunc)  # list[ErrorReport], len ≤ 1
+    chain = cls._walk_exception_chain(exc, _state=_state, _depth=_depth)       # list[ErrorReport], len ≤ 1
     return cls.build_safe(
         error_type=FaultTypes.EXCEPTION,                              # renamed catch-all (§9)
-        message=_safe_exc_str(exc),                                   # unchanged: str(exc) at each level
+        message=safe_exc_message(exc),                                # str(exc) at each level (calfkit._safe leaf)
         origin_node_id=getattr(node, "node_id", None),
         origin_frame_id=origin_frame_id if origin_frame_id is not None else getattr(ctx, "frame_id", None),
         frame_chain=frame_chain,
         exception=exc_info,
         exception_attrs_dropped=attrs_dropped,                        # ELIDED breadcrumb (§7)
-        chain_truncated=_trunc[0],                                    # depth-cap-drop breadcrumb (§7)
+        chain_truncated=_state.truncated,                            # depth-cap-drop breadcrumb (§7)
         causes=([cause] if cause is not None else []) + chain or None,
     )
 
 @classmethod
-def _walk_exception_chain(cls, exc, *, _seen, _depth, _trunc):
+def _walk_exception_chain(cls, exc, *, _state, _depth):
     # __cause__-ONLY — `__context__` was evaluated and dropped (§6.1). GUARDED: a hostile/raising
     # __cause__ descriptor must not break totality (drop the chain, stay total).
     try:
         nxt = exc.__cause__
     except Exception:
         return []
-    if nxt is None or id(nxt) in _seen:
+    if nxt is None or id(nxt) in _state.seen:
         return []                                  # end-of-chain, or a cycle (correct dedup, not a drop)
     if _depth >= _MAX_CAUSES_DEPTH:
-        _trunc[0] = True                           # a real, non-cycle drop — breadcrumb it, never silent
+        _state.truncated = True                    # a real, non-cycle drop — breadcrumb it, never silent
         return []
-    _seen.add(id(nxt))
+    _state.seen.add(id(nxt))
     link = cls._from_exception(nxt, node=None, ctx=None, cause=None, frame_chain=None,
-                               origin_frame_id=None, _seen=_seen, _depth=_depth + 1, _trunc=_trunc)
+                               origin_frame_id=None, _state=_state, _depth=_depth + 1)
     return [link]
 ```
 
@@ -165,20 +170,28 @@ def _harvest_exception(exc) -> tuple[ExceptionInfo, int]:
             attrs[key] = _jsonsafe(v)
         except Exception:
             dropped += 1
+    # Harvest type and module INDEPENDENTLY: a hostile metaclass whose __module__ raises must not
+    # discard a readable __name__ (the forensic class hint §9 preserves on the synthesis log).
     try:
-        type_name, module = type(exc).__name__, type(exc).__module__   # hostile metaclass -> raise
+        type_name = type(exc).__name__
     except Exception:
-        type_name, module = "<unharvestable>", None
+        type_name = "<unharvestable>"
+    try:
+        module = type(exc).__module__
+    except Exception:
+        module = None
     try:
         return ExceptionInfo(type=type_name, module=module, attrs=attrs), dropped
     except Exception:
-        return ExceptionInfo(type="<unharvestable>"), dropped
+        # A non-str type/module RETURNED by a hostile metaclass (no raise) is rejected by
+        # ExceptionInfo: drop to the sentinel, but TALLY the harvested attrs so the loss is never silent.
+        return ExceptionInfo(type="<unharvestable>"), dropped + len(attrs)
 ```
 
 Key properties of the recursion:
 - **The root and every link are the same operation.** Both are `_from_exception` of one exception → one `ErrorReport` carrying its own `exception` slot. So `_walk_exception_chain` *recurses through `_from_exception`* — every chained exception is serialized into its own report with its own harvest. Mutual recursion: `_from_exception` → `_walk_exception_chain` → `_from_exception` → …
 - **Links carry no calfkit origin.** Chain links pass `node=None, ctx=None, frame_chain=None`, so a mid-chain `openai.BadRequestError` correctly has `origin_node_id=None` and an empty `frame_chain` — it happened at no calfkit frame. Only the **root** (the exception that faulted *at the node*) gets the origin/topology.
-- **Linear, not branching.** We follow exactly one next link per exception (`__cause__` only), so each node contributes ≤1 chain link; the whole chain is a linear list of depth ≤ `_MAX_CAUSES_DEPTH`. A chain deeper than the cap is truncated and the drop is breadcrumbed (`details["calf.elided"]["chain_truncated"] == True`) — never silent; a cycle terminates via `_seen` (correct dedup, not a drop).
+- **Linear, not branching.** We follow exactly one next link per exception (`__cause__` only), so each node contributes ≤1 chain link; the whole chain is a linear list of depth ≤ `_MAX_CAUSES_DEPTH`. A chain deeper than the cap is truncated and the drop is breadcrumbed (`details["calf.elided"]["chain_truncated"] == True`) — never silent; a cycle terminates via the threaded `_ChainState.seen` (correct dedup, not a drop).
 - **`causes` is a flat union; discriminate by content, not position.** On a recovery-then-failure synthesis (`cause=` passed), `causes` holds the recovery-prior report **and** the language-chain links co-mingled in one list (`[cause] + chain`). A consumer must **not** assume `causes[0]` is the recovery-prior — discriminate by `error_type` / `exception`, and traverse with `walk()`. (This is the acknowledged trade for reusing one chain mechanism; ADR-0024 rejected a separate `ExceptionInfo.cause` chain for the single traversal.)
 - **Shared budget; chain may be elided first (accepted).** Each link routes through its own `build_safe` (per-node `attrs` bound), and the top-level `_bound_cause_list` then bounds the overall structure against the shared `_MAX_CAUSES_DEPTH`/`_MAX_CAUSES_TOTAL`. Because the chain is appended **after** any recovery `cause`, a large recovery subtree can exhaust the 64-cause budget and the language-chain links are dropped first — **breadcrumbed** under `details["calf.elided"].causes`, never silent. Per the settled decision (option a) this shared-budget degradation is accepted; a dedicated chain sub-budget is deferred to Option A.
 
@@ -200,10 +213,10 @@ The initial scoping included implicit `__context__` chaining on a trivial-cost b
 
 | Property | How it's guaranteed |
 |---|---|
-| **Totality — `from_exception` never raises** | **The harvest itself is total** (it runs *before*/as input to `build_safe`, outside its `try`): `_harvest_exception` guards `vars()`, the `.items()` iteration, and the **entire per-attr body** (the `== "message"` compare, the `str(k)` key coercion, and the serialize) with bare `except`, plus the type-access + `ExceptionInfo(...)` construction; `_walk_exception_chain` guards the `__cause__` read (a raising descriptor drops the chain, stays total). `build_safe` is the secondary backstop. The chokepoint (`base.py:669/1070`) calls `from_exception` unguarded, so this is load-bearing. |
+| **Totality — `from_exception` never raises** | **The harvest itself is total** (it runs *before*/as input to `build_safe`, outside its `try`): `_harvest_exception` guards `vars()`, the `.items()` iteration, and the **entire per-attr body** (the `== "message"` compare, the `str(k)` key coercion, and the serialize) with bare `except`, plus the `__name__` and `__module__` accesses *independently* (a raising `__module__` keeps a readable `__name__`) and the `ExceptionInfo(...)` construction (a non-str type/module the construction rejects is tallied with `dropped`, never silently lost); `_walk_exception_chain` guards the `__cause__` read (a raising descriptor drops the chain, stays total). `build_safe` is the secondary backstop. The chokepoint (`base.py:669/1070`) calls `from_exception` unguarded, so this is load-bearing. |
 | **Leaf-safety (best-effort)** | `_jsonsafe` (`to_json(serialize_unknown=True, bytes_mode='base64', inf_nan_mode='strings')` round-trip) coerces unknown types, non-utf8 bytes, and nan/inf at any depth; a **cyclic-container** attr serializes to a `"..."` marker (handled, not dropped — verified). The only residual raise is pathologically-deep nesting (serialize recursion limit), dropped per-attr and **tallied** (`exception_attrs_dropped`). Good neighbors survive; nothing live is stored. |
 | **Bounded depth** | `_walk_exception_chain` caps the live walk at `_MAX_CAUSES_DEPTH` (8); `_bound_cause_list` re-bounds the serialized structure (≤8 deep, ≤64 total). |
-| **Cycle-safe** | One `_seen` (`id()`-keyed) set threaded through the whole recursion, root pre-marked — a `__cause__` chain can cycle via explicit construction. |
+| **Cycle-safe** | One `id()`-keyed `seen` set on the threaded `_ChainState`, root pre-marked — a `__cause__` chain can cycle via explicit construction. |
 | **Size-bounded** | `exception.attrs` rides the 16 KB `_bound_details` cap; `to_minimal` omits the field for the 256 KB publish floor. |
 | **No live objects on the wire** | `_jsonsafe` replaces every non-JSON-native leaf with a `str`/`<Unserializable …>` placeholder. Tracebacks are never touched — `vars(exc)` excludes `__traceback__`. |
 
@@ -288,7 +301,7 @@ Safe **by construction** — there is no custom deserializer, and that is the de
 
 1. **Model.** `ExceptionInfo` + `ErrorReport.exception`; rename `UNHANDLED`→`EXCEPTION` (+ the §9 code/doc/test edits); remove `EXCEPTION_TYPE` (+ migrate the §10 consumer assertions to `report.exception.type`). Update the `causes` field docstring (`:180-182`), fault-rail §52 glossary, and ADR-0003 (`:23`) to add the exception chain as a 4th `causes` source. *Tests:* additive decode (old message → `None`), frozen, rename references, JSON round-trip of `exception`.
 2. **Harvest.** `_jsonsafe` (hardened) + `_harvest_exception` (total) + `build_safe(exception=, exception_attrs_dropped=, chain_truncated=)` bounding (`model_copy`). *Tests:* serializable attrs kept and typed; nested-unserializable leaf coerced (good neighbors survive); **non-utf8 `bytes` → base64 (no raise)**; **`nan`/`inf` → strings**; **cyclic-container attr → `"..."` marker (handled, not dropped)**; **deeply-nested (~2000-deep) attr → `exception_attrs_dropped` (the deterministic residual lever — cyclic does NOT drop)**; **lone-surrogate string attr**; **generator- and `BaseModel`-valued attrs** coerced; empty / slots-only exception → `attrs={}`; **non-`str` `__dict__` key coerced**; `message` dropped; 16 KB `exception_attrs_bytes` elision breadcrumb (and `type`/`module` survive the `model_copy` bound).
-3. **Chain.** `_from_exception` / `_walk_exception_chain` recursion (`__cause__`-only). *Tests:* `__cause__` mapped to a link with its own `exception`; end-of-chain (`__cause__ is None`); **multi-hop cycle** (`A.__cause__=B`, `B.__cause__=A`) terminates via the threaded `_seen`; cycle onto a **mid-chain (non-root) link** terminates; **>`_MAX_CAUSES_DEPTH` chain → kept links + `details["calf.elided"]["chain_truncated"] == True`** (never silent); links carry `origin_node_id=None`/empty `frame_chain`; recovery-`cause=` + chain co-mingle in `causes` (discriminate by content, not position); **`walk()`+`exception.type` locates a deep link** (NOT `find`).
+3. **Chain.** `_from_exception` / `_walk_exception_chain` recursion (`__cause__`-only). *Tests:* `__cause__` mapped to a link with its own `exception`; end-of-chain (`__cause__ is None`); **multi-hop cycle** (`A.__cause__=B`, `B.__cause__=A`) terminates via the threaded `_ChainState.seen`; cycle onto a **mid-chain (non-root) link** terminates; **>`_MAX_CAUSES_DEPTH` chain → kept links + `details["calf.elided"]["chain_truncated"] == True`** (never silent); links carry `origin_node_id=None`/empty `frame_chain`; recovery-`cause=` + chain co-mingle in `causes` (discriminate by content, not position); **`walk()`+`exception.type` locates a deep link** (NOT `find`).
 4. **Totality.** *Tests (the load-bearing C1 set):* a hostile exception whose `__str__`/`__repr__` raises (existing bar `test_fault_wire_model.py:525-548`), **whose metaclass makes `type(exc).__name__` raise** (and a separate **`__module__`-raising** variant — good `__name__`), **with a non-`str` `__dict__` key** (incl. one whose `str()`/`__eq__` itself raises), **whose `__dict__` property or `.items()` raises** (non-`TypeError`), **with a raising `__cause__` descriptor** (at root and mid-chain), **with a hostile exception mid-`__cause__`-chain** — none make `from_exception` raise. (The currently-benign hostile variants pass even with the holes open, so the descriptor- and key-coercion-hostile variants are the ones that actually exercise the round-2 fixes.)
 5. **End-to-end.** Real `ModelHTTPError` (offline) → `from_exception` populates `exception.attrs` with `status_code`/`body` and the `__cause__` link; plus a **kafka-lane** real-broker test: a faulting model → client `NodeFaultError` whose `report.exception` and chain survive the wire.
 6. **Docs.** Update the `NodeFaultError` docstring example to read the `exception` slot via `walk()`/`exception.type`; write/keep ADR-0024; add `exception.type` to the §13 synthesis log.
@@ -296,7 +309,7 @@ Safe **by construction** — there is no custom deserializer, and that is the de
 ## 15. Test plan (coverage targets)
 
 - **Harvest unit:** JSON-native attrs preserved and typed after round-trip; poisoned leaf → placeholder; partially-poisoned dict keeps good keys; non-utf8 bytes / nan / inf / cyclic-container handled without raise or wire-divergence; over-budget attrs elided with breadcrumb (and `type`/`module` survive); deterministic deep-nesting drop tallied; `vars()`-less (slots) exception → empty attrs.
-- **Chain unit (`__cause__`-only):** `__cause__` mapped / end-of-chain; multi-hop cycle (to root and to a mid-chain link) terminates via threaded `_seen`; >`_MAX_CAUSES_DEPTH` truncation → `chain_truncated` breadcrumb (never silent); recovery `cause=` and chain co-mingle under one `causes` list (content-not-position); `walk()`+`exception.type` matches a deep link; `find(error_type)` does NOT discriminate links.
+- **Chain unit (`__cause__`-only):** `__cause__` mapped / end-of-chain; multi-hop cycle (to root and to a mid-chain link) terminates via the threaded `_ChainState.seen`; >`_MAX_CAUSES_DEPTH` truncation → `chain_truncated` breadcrumb (never silent); recovery `cause=` and chain co-mingle under one `causes` list (content-not-position); `walk()`+`exception.type` matches a deep link; `find(error_type)` does NOT discriminate links.
 - **Non-harvest paths:** a minted `NodeFaultError` and a framework `build_safe` fault (`calf.delivery.rejected`) both leave `exception is None`.
 - **Totality (load-bearing):** the §14.4 hostile set never makes `from_exception` raise — the chokepoint has no backstop.
 - **Wire:** full `Envelope → FaultMessage → ErrorReport` round-trip preserves `exception` and the chain; embedded dict decodes to a Python `dict`; receiver needs no producer class.

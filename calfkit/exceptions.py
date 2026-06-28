@@ -2,26 +2,14 @@ from typing import Any
 
 import pydantic_core
 
+# ``safe_exc_message`` moved to the dependency-free ``calfkit._safe`` leaf so ``error_report`` can use
+# it without the import cycle (``exceptions`` imports ``error_report``); explicitly re-exported here
+# (the ``as`` form) so existing ``from calfkit.exceptions import safe_exc_message`` callers are
+# unchanged, and used on the mint path below.
+from calfkit._safe import safe_exc_message as safe_exc_message
 from calfkit.models.error_report import ErrorReport
 
 _CALF_NAMESPACE = "calf."
-
-
-def safe_exc_message(e: BaseException) -> str:
-    """Best-effort string of an exception, robust against a broken ``__str__``.
-
-    A bare ``str(e)`` can itself raise (a broken ``__str__``, or args that don't
-    coerce). On the fault path that would propagate out and re-open the silent-drop
-    hole the rail closes (e.g. while synthesizing an ``ErrorReport`` from a tool's
-    exception). Mirrors stdlib ``traceback._some_str`` with a ``repr`` fallback.
-    """
-    try:
-        return str(e)
-    except Exception:
-        try:
-            return repr(e)
-        except Exception:
-            return f"<unprintable {type(e).__name__}>"
 
 
 class NodeFaultError(Exception):

@@ -19,6 +19,11 @@ import pydantic_core
 import uuid_utils
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# The ONLY calfkit import here, and deliberately so: ``calfkit._safe`` is a dependency-free stdlib
+# leaf (it imports nothing from calfkit), so using it does NOT create the cycle this module avoids
+# (``exceptions`` imports ``ErrorReport``). Everything else stays inlined to keep that cycle closed.
+from calfkit._safe import safe_exc_message
+
 # Carriage budgets (spec §4.3): construction-time bounds so a fault never grows
 # unboundedly. The total 256 KB serialized cap and the strip-and-retry-then-floor
 # loop are publish-time concerns and live with the fault-publish path (PR-6); what
@@ -359,9 +364,9 @@ class ErrorReport(BaseModel):
         except Exception as exc:
             # Last-resort total fallback: keep only the scalar identity that is safe
             # to coerce, and record the wholesale drop of causes/frame_chain/details
-            # under ELIDED — the fallback must not itself become a silent drop. Use
-            # the exception class name (never str(exc), which can raise) and avoid
-            # importing safe_exc_message to keep this module calfkit-import-free.
+            # under ELIDED — the fallback must not itself become a silent drop. The
+            # ``fallback`` breadcrumb uses the exception class name (the construction error itself,
+            # not a harvested foreign exception), so ``safe_exc_message`` is not what's wanted here.
             # ``type(x) is str`` (not isinstance): a str subclass with a hostile
             # ``__len__``/``__getitem__`` is what likely broke the primary path's
             # clamp, so re-passing it would re-break the fallback — coerce it out.
@@ -396,15 +401,15 @@ class ErrorReport(BaseModel):
         call-stack topology at synthesis (§4.3/§4.4, ADR-0003 — the traceback analog), passed
         explicitly by the rail from the pre-mutation stack snapshot since ``ctx`` carries no stack;
         ``cause`` chains a prior report (the §6.8 recovery-then-failure case). ``node``/``ctx`` are
-        typed ``Any`` to keep this module calfkit-import-free (the same reason ``build_safe`` inlines
-        its own coercions).
+        typed ``Any`` to avoid importing their (cycle-creating) calfkit types (the same reason
+        ``build_safe`` inlines its own coercions).
 
         A ``NodeFaultError`` is NOT routed here — the chokepoint converts it verbatim,
         bypassing ``on_node_error`` (the mint rule, §6.5).
         """
         # Public entry — seeds the walk; this exc is the ROOT (gets the origin breadcrumbs). The
-        # cycle-guard is pre-marked with the root and ``_trunc`` is a 1-element mutable flag, both
-        # threaded through the whole __cause__ recursion so a depth-cap drop is breadcrumbed.
+        # _ChainState (cycle guard pre-marked with the root + the depth-cap truncation flag) threads
+        # through the whole __cause__ recursion so a depth-cap drop is breadcrumbed, never silent.
         return cls._from_exception(
             exc,
             node=node,
@@ -412,9 +417,8 @@ class ErrorReport(BaseModel):
             cause=cause,
             frame_chain=frame_chain,
             origin_frame_id=origin_frame_id,
-            _seen={id(exc)},
+            _state=_ChainState(id(exc)),
             _depth=1,
-            _trunc=[False],
         )
 
     @classmethod
@@ -427,54 +431,53 @@ class ErrorReport(BaseModel):
         cause: ErrorReport | None,
         frame_chain: list[FrameRef] | None,
         origin_frame_id: str | None,
-        _seen: set[int],
+        _state: _ChainState,
         _depth: int,
-        _trunc: list[bool],
     ) -> ErrorReport:
         """The recursive core of :meth:`from_exception` (spec §6).
 
         The root and every chain link are the SAME operation — one exception harvested into one
         ``ErrorReport`` carrying its own ``exception`` slot. Mutual recursion with
-        :meth:`_walk_exception_chain` threads one cycle-guard (``_seen``), one depth counter
-        (``_depth``), and one truncation flag (``_trunc``) through the whole ``__cause__`` lineage.
-        Chain links pass ``node=None``/``ctx=None``/``frame_chain=None`` — a mid-chain exception
-        happened at no calfkit frame, so only the root carries origin/topology.
+        :meth:`_walk_exception_chain` threads a shared ``_ChainState`` (the cycle-guard + the
+        truncation flag) and a per-frame ``_depth`` through the whole ``__cause__`` lineage. Chain
+        links pass ``node=None``/``ctx=None``/``frame_chain=None`` — a mid-chain exception happened
+        at no calfkit frame, so only the root carries origin/topology.
         """
         exc_info, attrs_dropped = _harvest_exception(exc)
-        chain = cls._walk_exception_chain(exc, _seen=_seen, _depth=_depth, _trunc=_trunc)
+        chain = cls._walk_exception_chain(exc, _state=_state, _depth=_depth)
         return cls.build_safe(
             error_type=FaultTypes.EXCEPTION,
-            message=_safe_exc_str(exc),
+            message=safe_exc_message(exc),
             origin_node_id=getattr(node, "node_id", None),
             origin_frame_id=origin_frame_id if origin_frame_id is not None else getattr(ctx, "frame_id", None),
             frame_chain=frame_chain,
             exception=exc_info,
             exception_attrs_dropped=attrs_dropped,
-            chain_truncated=_trunc[0],
+            chain_truncated=_state.truncated,
             causes=([cause] if cause is not None else []) + chain or None,
         )
 
     @classmethod
-    def _walk_exception_chain(cls, exc: BaseException, *, _seen: set[int], _depth: int, _trunc: list[bool]) -> list[ErrorReport]:
+    def _walk_exception_chain(cls, exc: BaseException, *, _state: _ChainState, _depth: int) -> list[ErrorReport]:
         """Map one ``__cause__`` step onto a chain link — ``__cause__``-ONLY (spec §6/§6.1).
 
         ``__context__`` was evaluated and DROPPED (§6.1): ``from_exception`` runs inside the rail's
         ``except`` blocks, where ``__context__`` captures the framework's handling context — walking
         it would leak internals onto the wire and duplicate the recovery cause. GUARDED: a
         hostile/raising ``__cause__`` descriptor must not break totality (drop the chain, stay total).
-        A cycle terminates via ``_seen`` (correct dedup, not a drop); a real depth-cap drop sets
-        ``_trunc`` so it is breadcrumbed, never silent.
+        A cycle terminates via ``_state.seen`` (correct dedup, not a drop); a real depth-cap drop sets
+        ``_state.truncated`` so it is breadcrumbed, never silent.
         """
         try:
             nxt = exc.__cause__
         except Exception:
             return []
-        if nxt is None or id(nxt) in _seen:
+        if nxt is None or id(nxt) in _state.seen:
             return []  # end-of-chain, or a cycle (correct dedup, not a drop)
         if _depth >= _MAX_CAUSES_DEPTH:
-            _trunc[0] = True  # a real, non-cycle drop — breadcrumb it, never silent
+            _state.truncated = True  # a real, non-cycle drop — breadcrumb it, never silent
             return []
-        _seen.add(id(nxt))
+        _state.seen.add(id(nxt))
         link = cls._from_exception(
             nxt,
             node=None,
@@ -482,9 +485,8 @@ class ErrorReport(BaseModel):
             cause=None,
             frame_chain=None,
             origin_frame_id=None,
-            _seen=_seen,
+            _state=_state,
             _depth=_depth + 1,
-            _trunc=_trunc,
         )
         return [link]
 
@@ -492,6 +494,20 @@ class ErrorReport(BaseModel):
 # ---------------------------------------------------------------------------
 # Carriage-bound helpers (used by ErrorReport.build_safe)
 # ---------------------------------------------------------------------------
+class _ChainState:
+    """Shared accounting threaded through the ``__cause__`` walk (a sibling of :class:`_CauseBudget`):
+    the ``id()``-keyed cycle guard (``seen``, root pre-marked) and the one-shot depth-cap truncation
+    flag (``truncated`` — a real depth-cap drop must be breadcrumbed, never silent). ``_depth`` is
+    deliberately NOT here: it stays a per-frame by-value param, so a future *branching* walk
+    (``ExceptionGroup`` members, §16) counts each branch independently rather than sharing one depth."""
+
+    __slots__ = ("seen", "truncated")
+
+    def __init__(self, root_id: int) -> None:
+        self.seen: set[int] = {root_id}
+        self.truncated = False
+
+
 class _CauseBudget:
     """Shared accounting across the cause bounding: how many reports may still be kept
     (``remaining``), how many were dropped (``dropped``), and the report ids already
@@ -622,28 +638,20 @@ def _harvest_exception(exc: BaseException) -> tuple[ExceptionInfo, int]:
             attrs[key] = _jsonsafe(v)
         except Exception:
             dropped += 1
+    # Harvest type and module INDEPENDENTLY: a hostile metaclass whose __module__ raises must not
+    # discard a readable __name__ (the forensic class hint §9 preserves on the synthesis log).
     try:
-        type_name, module = type(exc).__name__, type(exc).__module__  # hostile metaclass -> raise
+        type_name = type(exc).__name__
     except Exception:
-        type_name, module = "<unharvestable>", None
+        type_name = "<unharvestable>"
+    try:
+        module = type(exc).__module__
+    except Exception:
+        module = None
     try:
         return ExceptionInfo(type=type_name, module=module, attrs=attrs), dropped
     except Exception:
-        return ExceptionInfo(type="<unharvestable>"), dropped
-
-
-def _safe_exc_str(exc: BaseException) -> str:
-    """Best-effort string of an exception, robust against a broken ``__str__``.
-
-    A local twin of ``calfkit.exceptions.safe_exc_message`` — duplicated deliberately
-    so this module stays calfkit-import-free (importing ``exceptions`` would be circular;
-    ``exceptions`` imports ``ErrorReport``). Used only by :meth:`ErrorReport.from_exception`,
-    whose contract is totality on the error path, so the ``str``/``repr`` calls are guarded.
-    """
-    try:
-        return str(exc)
-    except Exception:
-        try:
-            return repr(exc)
-        except Exception:
-            return f"<unprintable {type(exc).__name__}>"
+        # A non-str type/module RETURNED by a hostile metaclass (no raise) is rejected by
+        # ExceptionInfo: drop to the sentinel, but TALLY any harvested attrs with the construction
+        # drop so the loss is never silent (the feature's never-silent invariant).
+        return ExceptionInfo(type="<unharvestable>"), dropped + len(attrs)

@@ -781,9 +781,11 @@ class TestHarvestException:
 
         with pytest.raises(RuntimeError):
             _ = type(_NoModuleError()).__module__
-        # __name__ is fine but the type-access tuple degrades wholesale to the sentinel.
+        # type and module are harvested INDEPENDENTLY: a raising __module__ must NOT discard the
+        # readable __name__ (the forensic class hint §9 preserves); module alone degrades to None.
         info, dropped = _harvest_exception(_NoModuleError())  # must not raise
-        assert info.type == "<unharvestable>"
+        assert info.type == "_NoModuleError"
+        assert info.module is None
 
     def test_total_when_dict_key_str_raises(self) -> None:
         class _BadStrKey:
@@ -835,9 +837,10 @@ class TestHarvestException:
         info, dropped = _harvest_exception(_BadItemsError())  # must not raise
         assert info.attrs == {}
 
-    def test_total_when_exception_info_construction_fails(self) -> None:
-        # A hostile metaclass whose __name__ returns a non-str does NOT raise on access, but breaks
-        # ExceptionInfo(type: str) construction — the final guard returns the sentinel, staying total.
+    def test_construction_failure_tallies_dropped_attrs(self) -> None:
+        # A hostile metaclass whose __name__ RETURNS a non-str (no raise) makes ExceptionInfo(type:
+        # str) construction reject it; the harvested attrs are dropped — but TALLIED, never silently
+        # (the count surfaces as exception_attrs_dropped, the feature's never-silent invariant).
         class _IntNameMeta(type):
             @property
             def __name__(cls):  # type: ignore[override]
@@ -846,8 +849,12 @@ class TestHarvestException:
         class _IntNameError(Exception, metaclass=_IntNameMeta):
             pass
 
-        info, dropped = _harvest_exception(_IntNameError())  # must not raise
+        exc = _IntNameError()
+        exc.status_code = 400  # type: ignore[attr-defined]  # a cleanly-harvestable attr
+        info, dropped = _harvest_exception(exc)  # must not raise
         assert info.type == "<unharvestable>"
+        assert info.attrs == {}
+        assert dropped == 1  # the attr was tallied with the construction drop, not silently discarded
 
 
 class TestBuildSafeExceptionBounds:
