@@ -117,6 +117,17 @@ class TestErrorReportExceptionField:
         report = ErrorReport(error_type="x", exception=ExceptionInfo(type="ModelHTTPError", attrs={"status_code": 400}))
         assert report.to_minimal().exception is None
 
+    def test_minted_fault_has_no_exception_slot(self) -> None:
+        # Non-harvest path (spec §3): a deliberately-minted NodeFaultError converts verbatim and
+        # carries NO exception slot — there is no foreign exception to introspect.
+        assert NodeFaultError("billing.quota_exceeded", message="over quota").report.exception is None
+
+    def test_framework_build_safe_fault_has_no_exception_slot(self) -> None:
+        # A framework fault built directly via build_safe (e.g. calf.delivery.rejected) carries no
+        # exception slot — only the from_exception path harvests one (spec §5/§7).
+        report = ErrorReport.build_safe(error_type=FaultTypes.DELIVERY_REJECTED, message="declined")
+        assert report.exception is None
+
 
 class TestErrorReport:
     def test_minimal_construction_and_defaults(self) -> None:
@@ -1129,3 +1140,25 @@ class TestExceptionChain:
         assert report.causes[0].exception is not None
         assert report.causes[0].exception.type == "_RaisingCauseError"
         assert report.causes[0].causes == []  # mid's raising __cause__ drops its onward chain
+
+    def test_wire_json_decodes_with_no_producer_class(self) -> None:
+        # Decoupling by construction (spec §11): a fault wire JSON authored as a STRING LITERAL —
+        # referencing no producer class — decodes to a plain ErrorReport whose exception slot and
+        # __cause__-chain link read as JSON-native data. The receiver needs no openai / pydantic_ai
+        # class importable; the decode is pure pydantic validation.
+        wire = (
+            '{"error_type":"calf.exception","message":"status_code: 400 ...",'
+            '"exception":{"type":"ModelHTTPError",'
+            '"module":"calfkit._vendor.pydantic_ai.exceptions",'
+            '"attrs":{"status_code":400,"body":{"code":"context_length_exceeded"}}},'
+            '"causes":[{"error_type":"calf.exception","message":"bad request",'
+            '"exception":{"type":"BadRequestError","module":"openai","attrs":{"status_code":400}}}]}'
+        )
+        report = ErrorReport.model_validate_json(wire)
+        assert report.exception is not None
+        assert report.exception.type == "ModelHTTPError"
+        assert report.exception.attrs["status_code"] == 400
+        assert report.exception.attrs["body"]["code"] == "context_length_exceeded"
+        link = next((r for r in report.walk() if r.exception and r.exception.type == "BadRequestError"), None)
+        assert link is not None and link.exception is not None
+        assert link.exception.attrs["status_code"] == 400
