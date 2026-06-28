@@ -63,7 +63,7 @@ def lookup_account_balance(ctx: ToolContext) -> str:
 
 ## Running your agents
 
-> **An agent mesh is required** for agents to discover and connect with each other — set the `CALFKIT_MESH_URL` environment variable to point at it (defaults to `localhost`). Starting one is covered below.
+> Agents sit on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
 
 Start the general assistant independently. Assuming it's saved in `general_help.py`.
 
