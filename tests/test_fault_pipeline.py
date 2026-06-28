@@ -268,7 +268,7 @@ class TestFaultBoundary:
 
     async def test_chained_body_raise_maps_cause_chain_onto_causes(self) -> None:
         # §5.E(1): a node body `raise B from A` → the published fault carries the harvested exception
-        # slot AND the __cause__ chain mapped onto causes; the calf.exception_type breadcrumb is gone.
+        # slot AND the __cause__ chain mapped onto causes; the class-name details breadcrumb is gone.
         node = _ChainRaisingNode(node_id="n", subscribe_topics=["in"])
         broker = _CaptureBroker()
 
@@ -279,7 +279,7 @@ class TestFaultBoundary:
         assert report.exception is not None and report.exception.type == "RuntimeError"
         assert len(report.causes) == 1
         assert report.causes[0].exception is not None and report.causes[0].exception.type == "ValueError"
-        assert "calf.exception_type" not in report.details  # breadcrumb removed (commit 4)
+        assert report.details == {}  # no class-name breadcrumb/elision survives the commit-4 removal
 
     async def test_node_own_fault_captures_frame_chain_and_origin_frame_id(self) -> None:
         # §4.3/§4.4 + ADR-0003 + scenarios 3/24: a node-own fault captures the call-stack topology
@@ -378,7 +378,7 @@ class TestStructuredLogging:
         assert synth[0].exc_info is not None and synth[0].exc_info[0] is RuntimeError  # the originating body exception
 
     async def test_synthesis_log_names_the_exception_type(self, caplog: pytest.LogCaptureFixture) -> None:
-        # §13: the synthesis log carries the exception class hint the removed calf.exception_type
+        # §13: the synthesis log carries the exception class hint the removed class-name details
         # breadcrumb used to provide — sourced from the harvested slot (guarded for the build_safe
         # fallback, which leaves exception=None).
         node = _RaisingNode(node_id="n", subscribe_topics=["in"])  # body raises RuntimeError

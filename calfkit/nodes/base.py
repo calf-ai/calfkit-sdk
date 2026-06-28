@@ -675,7 +675,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             origin_frame_id=origin.frame_id if origin is not None else None,
         )
         # §13: synthesis is logged ERROR with the traceback, at origin (the 'why did my node fault'
-        # anchor). exception.type carries the forensic class hint the removed calf.exception_type
+        # anchor). exception.type carries the forensic class hint the removed class-name details
         # breadcrumb gave; the guard is necessary — build_safe's fallback arm leaves exception=None.
         logger.error(
             "[%s] fault synthesized at node=%s error_type=%s exception.type=%s: %s",
