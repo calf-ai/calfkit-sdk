@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 
 from aiokafka import AIOKafkaConsumer
 
-from calfkit._protocol import decode_header_str
+from calfkit._protocol import HDR_WIRE, decode_header_str
 from calfkit.models.envelope import Envelope
 from calfkit.models.reply import FaultMessage
 
@@ -41,11 +41,23 @@ class FaultTap:
         self._consumer = consumer
 
     async def next_envelope(self, *, timeout: float = 30.0) -> tuple[Envelope, dict[str, str | None]]:
-        """The next decoded envelope on the topic, with its headers as ``str | None``."""
-        record = await asyncio.wait_for(self._consumer.getone(), timeout=timeout)
-        envelope = Envelope.model_validate_json(record.value)
-        headers = {key: decode_header_str(value) for key, value in record.headers}
-        return envelope, headers
+        """The next decoded calfkit ``Envelope`` on the topic, with its headers as ``str | None``.
+
+        Skips non-envelope traffic: when this taps a run's inbox, that topic also carries intermediate
+        ``step`` messages (``x-calf-wire=step``), which are not ``Envelope``s — decoding one raw would
+        raise. We match the envelope wire-schema header and skip the rest (steps / foreign messages).
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            record = await asyncio.wait_for(self._consumer.getone(), timeout=remaining)
+            headers = {key: decode_header_str(value) for key, value in record.headers}
+            if headers.get(HDR_WIRE) != Envelope.WIRE:
+                continue  # a step message or foreign body — not an envelope
+            return Envelope.model_validate_json(record.value), headers
 
     async def next_fault(self, *, timeout: float = 30.0) -> tuple[FaultMessage, dict[str, str | None]]:
         """Drain until a ``FaultMessage`` envelope appears.

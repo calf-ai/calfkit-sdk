@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from aiokafka import AIOKafkaProducer
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
@@ -29,6 +30,7 @@ from calfkit.models.agents import AGENTS_TOPIC, AgentCard
 from calfkit.nodes import Agent, ToolNodeDef, agent_tool
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
+from tests.integration._fault_kafka import ensure_topic
 from tests.integration._kafka_helpers import fast_control_plane
 from tests.integration._roundtrip_helpers import final_model, scripted_model
 
@@ -84,11 +86,18 @@ async def test_node_survives_unmatched_message_and_subsequent_routes(kafka_boots
     # routes normally. TestKafkaBroker can't reproduce this (its publish bypasses the consume() swallow).
     a_in = f"{topic_namespace}.A.input"
     agent = Agent(f"{topic_namespace}-A", system_prompt="x", subscribe_topics=a_in, model_client=final_model("answer"))
+    await ensure_topic(kafka_bootstrap, a_in)  # the worker + the foreign producer share an already-existing topic
     driver = Client.connect(kafka_bootstrap)
     worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=fast_control_plane(kafka_bootstrap))
     async with worker:
-        # an UNSTAMPED foreign body into A's input topic → filtered → SubscriberNotFound → swallowed.
-        await driver.broker.publish(b'{"foreign": "junk"}', topic=a_in, correlation_id="foreign-1")
+        # an UNSTAMPED foreign body into A's input topic → filtered → SubscriberNotFound → swallowed. Inject
+        # via a raw producer (driver.broker's producer isn't connected until the first client run).
+        producer = AIOKafkaProducer(bootstrap_servers=kafka_bootstrap)
+        await producer.start()
+        try:
+            await producer.send_and_wait(a_in, b'{"foreign": "junk"}')  # no x-calf-wire → unstamped → dropped
+        finally:
+            await producer.stop()
         # the consumer survived: a normal (stamped) run still routes + completes.
         result = await driver.agent(topic=a_in).execute("hi", timeout=120)
     assert result.output is not None and "answer" in result.output
