@@ -119,10 +119,10 @@ Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm
 
 See [`examples/`](examples/) for more examples.
 
+- **[Streaming intermediate work](examples/streaming/)** — a trip-planner agent whose preamble, tool calls, and tool results stream to the caller via `handle.stream()`, for a live view of a run's progress.
 - **[Agent, tool & consumer](examples/quickstart/)** — a weather agent and its `get_weather` tool deployed as separate services and invoked over the broker, with a consumer node tapping the agent's output stream.
 - **[Multi-agent panel](examples/multi_agent_panel/)** — three persona agents (`optimist`, `skeptic`, `pragmatist`) debate over one shared transcript, each automatically seeing the thread from its own point of view.
 - **[MCP toolbox](examples/quickstart_mcp/)** — give an agent a live web-`fetch` tool from an MCP server, deployed as its own node and referenced by name — the agent's code never imports it.
-- **[Streaming intermediate work](examples/streaming/)** — a trip-planner agent whose preamble, tool calls, and tool results stream to the caller hop by hop via `handle.stream()`, for a live view of a run's progress.
 
 ## Documentation
 

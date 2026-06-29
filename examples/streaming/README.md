@@ -1,6 +1,6 @@
 # Streaming intermediate work
 
-Watch an agent's progress **live**, hop by hop, instead of waiting for the final
+Watch an agent's progress **live**, instead of waiting for the final
 answer. As the run unfolds, the caller receives **step events** — the agent's
 preamble, each tool call, and each tool result — and prints them as they arrive.
 This is the runnable version of the
