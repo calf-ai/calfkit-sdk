@@ -24,8 +24,7 @@ from calfkit.models.node_result import _extract_text, extract_lenient
 from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry, render_parts_as_text
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.step import AgentMessage, StepEvent, ToolCall, ToolResult
-from calfkit.models.step import Handoff as HandoffEvent
+from calfkit.models.step import AgentMessageEvent, HandoffEvent, StepEvent, ToolCallEvent, ToolResultEvent
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, step_preamble, structured_output_preamble
@@ -640,23 +639,23 @@ class BaseAgentNodeDef(
             latest_tool_calls = ctx.state.latest_tool_calls()
 
             # Author this hop's step draft (spec §2.5/§3.2): preamble (the final ModelResponse's text)
-            # + a ToolCall per requested call (raw model emission; covers message_agent + valid +
-            # invalid) + an is_error ToolResult for each call this hop rejects (the four arms below).
+            # + a ToolCallEvent per requested call (raw model emission; covers message_agent + valid +
+            # invalid) + an is_error ToolResultEvent for each call this hop rejects (the four arms below).
             # Read-and-cleared at the chokepoint via project_steps; committed to ctx._step_draft after
             # the loop. A pre-model re-dispatch hop never reaches here, so its draft stays None ⇒ no step.
             step_draft: list[StepEvent] = []
             _preamble = step_preamble(messages)
             if _preamble:
-                step_draft.append(AgentMessage(parts=[TextPart(text=_preamble)]))
+                step_draft.append(AgentMessageEvent(parts=[TextPart(text=_preamble)]))
 
             for tool_call in result.output.calls:
                 ctx.state.add_tool_call(tool_call)
                 # The raw emission can be an off-spec scalar (e.g. a bare int) — pydantic-ai's
                 # ToolCallPart is a non-validating dataclass — so coerce any non-(str/dict/None) value
-                # to its string form, keeping ToolCall.args within str|dict|None (spec §3.2).
+                # to its string form, keeping ToolCallEvent.args within str|dict|None (spec §3.2).
                 _raw_args = tool_call.args
                 _step_args = _raw_args if (_raw_args is None or isinstance(_raw_args, (str, dict))) else str(_raw_args)
-                step_draft.append(ToolCall(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, args=_step_args))
+                step_draft.append(ToolCallEvent(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, args=_step_args))
 
                 # message_agent forks BEFORE the tools_registry lookup (it is never a registry binding):
                 # validate the target (RetryPromptPart on self/cycle/offline/malformed), else leave it
@@ -681,7 +680,7 @@ class BaseAgentNodeDef(
                         ),
                     )
                     step_draft.append(
-                        ToolResult(
+                        ToolResultEvent(
                             tool_call_id=tool_call.tool_call_id,
                             name=tool_call.tool_name,
                             parts=[TextPart(text=no_tool_content)],
@@ -721,7 +720,7 @@ class BaseAgentNodeDef(
                         ),
                     )
                     step_draft.append(
-                        ToolResult(
+                        ToolResultEvent(
                             tool_call_id=tool_call.tool_call_id,
                             name=tool_call.tool_name,
                             parts=[TextPart(text=content)],
@@ -755,7 +754,7 @@ class BaseAgentNodeDef(
                         )
                         # validation_errors is a list[dict] (e.errors()) — render to a TextPart, not str.
                         step_draft.append(
-                            ToolResult(
+                            ToolResultEvent(
                                 tool_call_id=tool_call.tool_call_id,
                                 name=tool_call.tool_name,
                                 parts=[TextPart(text=pydantic_core.to_json(validation_errors).decode())],
@@ -787,7 +786,7 @@ class BaseAgentNodeDef(
                             ),
                         )
                         step_draft.append(
-                            ToolResult(
+                            ToolResultEvent(
                                 tool_call_id=tool_call.tool_call_id,
                                 name=tool_call.tool_name,
                                 parts=[TextPart(text=validator_content)],
@@ -867,7 +866,7 @@ class BaseAgentNodeDef(
                 handoff_draft: list[StepEvent] = []
                 _ho_preamble = step_preamble(new_messages)
                 if _ho_preamble:
-                    handoff_draft.append(AgentMessage(parts=[TextPart(text=_ho_preamble)]))
+                    handoff_draft.append(AgentMessageEvent(parts=[TextPart(text=_ho_preamble)]))
                 handoff_draft.append(HandoffEvent(target=result.output.name, reason=result.output.message))
                 ctx._step_draft = handoff_draft
                 return self._dispatch_handoff(result.output, ctx)
@@ -895,13 +894,13 @@ class BaseAgentNodeDef(
 
         An inner-frame ``ReturnCall`` — a consulted ``message_agent`` peer answering, depth > 1 (the
         chokepoint's terminal gate already excluded the depth-1 run terminal) — becomes a single
-        ``ToolResult`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
+        ``ToolResultEvent`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
         ``tool_call_id``, not name). ``is_error`` is derived once here, coerce-first. Otherwise
         (``Call`` / ``list[Call]`` / ``TailCall``) the agent's authored ``_step_draft`` is the
         projection — ``None`` on a pre-model re-dispatch hop ⇒ ``[]`` (the double-emit guard)."""
         if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
             parts = _coerce_to_parts(output.value)
-            return [ToolResult(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]
+            return [ToolResultEvent(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]
         return ctx._step_draft or []
 
     def _add_tools(self, raw_tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None) -> None:

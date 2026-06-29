@@ -38,14 +38,14 @@ class _StepEventBase(BaseModel):
     emitter: str | None = Field(default=None, exclude=True)
 
 
-class AgentMessage(_StepEventBase):
+class AgentMessageEvent(_StepEventBase):
     """The agent's preamble text for the hop (spec §3.2)."""
 
     kind: Literal["agent_message"] = "agent_message"
     parts: list[ContentPart]
 
 
-class ToolCall(_StepEventBase):
+class ToolCallEvent(_StepEventBase):
     """A tool call the model requested this hop, sourced from the model emission (spec §3.2).
 
     ``kind`` is ``"tool_call"`` — deliberately distinct from ``ContentPart``'s ``ToolCallPart``
@@ -59,7 +59,7 @@ class ToolCall(_StepEventBase):
     args: str | dict[str, Any] | None = None
 
 
-class ToolResult(_StepEventBase):
+class ToolResultEvent(_StepEventBase):
     """The result of a tool call — success **or** error (spec §3.2). One type for both: a tool-node
     return, a consulted ``message_agent`` peer's reply, and an agent's pre-dispatch rejection are
     all "a tool call produced a result"; ``is_error`` (derived once at the producer) distinguishes
@@ -73,7 +73,7 @@ class ToolResult(_StepEventBase):
     is_error: bool = False
 
 
-class Handoff(_StepEventBase):
+class HandoffEvent(_StepEventBase):
     """A handoff to a peer agent (spec §3.2) — emitted even for an offline target."""
 
     kind: Literal["handoff"] = "handoff"
@@ -81,7 +81,7 @@ class Handoff(_StepEventBase):
     reason: str
 
 
-class AgentThinking(_StepEventBase):
+class AgentThinkingEvent(_StepEventBase):
     """The agent's thinking text (spec §5). **Defined but never emitted in v1** — the
     ``calf.thinking`` marker mapping is documented, not wired."""
 
@@ -90,7 +90,7 @@ class AgentThinking(_StepEventBase):
 
 
 StepEvent = Annotated[
-    AgentMessage | ToolCall | ToolResult | Handoff | AgentThinking,
+    AgentMessageEvent | ToolCallEvent | ToolResultEvent | HandoffEvent | AgentThinkingEvent,
     Discriminator("kind"),
 ]
 """The closed, ``kind``-discriminated step-event union (spec §3.2)."""

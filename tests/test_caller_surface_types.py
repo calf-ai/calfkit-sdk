@@ -20,6 +20,7 @@ from calfkit.exceptions import ClientClosedError, ClientTimeoutError
 from calfkit.models import CallFrameStack, Envelope, SessionRunContext, WorkflowState
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.state import State
+from calfkit.models.step import AgentMessageEvent, HandoffEvent, ToolCallEvent, ToolResultEvent
 
 
 def _env() -> Envelope:
@@ -61,8 +62,17 @@ def test_run_failed_carries_the_error_report_verbatim_and_correlation_id() -> No
     assert ev.correlation_id == "cid-1"
 
 
-def test_run_event_is_the_closed_two_terminal_union() -> None:
-    assert set(get_args(RunEvent)) == {RunCompleted, RunFailed}
+def test_run_event_union_includes_terminals_and_intermediate_step_events() -> None:
+    # Widened with intermediate emission (spec §3.3): the two terminals plus the four emitted step
+    # events. AgentThinkingEvent is defined-not-emitted in v1 (§5), so it is not a member yet.
+    assert set(get_args(RunEvent)) == {
+        RunCompleted,
+        RunFailed,
+        AgentMessageEvent,
+        ToolCallEvent,
+        ToolResultEvent,
+        HandoffEvent,
+    }
 
 
 def test_default_firehose_buffer_size_is_a_positive_int() -> None:

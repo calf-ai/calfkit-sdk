@@ -62,3 +62,34 @@ async def test_step_emission_failure_does_not_break_the_run(container, monkeypat
         result = await client.agent(topic="guard_agent.input").execute("what year", timeout=10)
     # The run completed end to end DESPITE the projection raising on every hop.
     assert result.output is not None and "guarded-1967" in result.output
+
+
+async def test_stream_yields_intermediate_steps_then_terminal(container) -> None:  # noqa: ANN001
+    # The full D+E offline e2e: a real FunctionModel agent run (preamble + tool call hop, then final
+    # answer) — the held handle's stream() yields the intermediate step events (AgentMessageEvent +
+    # ToolCallEvent from the agent hop, ToolResultEvent from the tool) then the RunCompleted terminal.
+    worker = container.get(Worker)
+    agent = Agent(
+        "stream_agent",
+        system_prompt="x",
+        subscribe_topics="stream_agent.input",
+        model_client=FunctionModel(_call_then_final),
+        tools=[echo_for_guard],
+        sequential_only_mode=True,
+    )
+    worker.add_nodes(agent, echo_for_guard)
+    prepare_worker(container)
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+    async with TestKafkaBroker(broker):
+        handle = await client.agent(topic="stream_agent.input").start("go", correlation_id="cid-stream")
+        events = [e async for e in handle.stream()]
+    kinds = [type(e).__name__ for e in events]
+    assert kinds[-1] == "RunCompleted"  # terminal last (terminal-bearing stream)
+    assert "AgentMessageEvent" in kinds  # the hop's preamble
+    assert "ToolCallEvent" in kinds  # the requested tool call
+    assert "ToolResultEvent" in kinds  # the tool's result (inner-frame ReturnCall, depth>1)
+    # the tool result carries the tool's output + is not an error
+    tr = next(e for e in events if type(e).__name__ == "ToolResultEvent")
+    assert tr.is_error is False
+    assert "guarded-1967" in tr.parts[0].text

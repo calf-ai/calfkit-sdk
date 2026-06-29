@@ -1,25 +1,28 @@
-"""Increment C — the consume-side envelope wire-filter cutover (step-streaming spec §2.4).
+"""Increments C + E — the inbox subscriber's two filtered call-items (step-streaming spec §2.4 / §3.4).
 
-The hard cutover: every Worker-registered node handler (worker.py) and the client hub's inbox
-reply handler (hub.py) gain ``filter=wire_filter(Envelope)``. The filter runs in ``is_suitable``
-BEFORE the body is decoded, so a non-envelope body on a filtered subscriber is rejected without
-triggering ``Envelope`` validation (no decode-floor false-fault). Envelope routing + the floor on a
-stamped-but-malformed envelope are regression-covered by the now-stamped fixtures in
-``test_caller_surface_hub.py`` / ``test_consumer.py``; the worker-side ``SubscriberNotFound``
-*survival* is the kafka lane (``TestKafkaBroker`` re-raises instead of swallowing it).
+The single groupless inbox subscriber carries TWO filtered call-items: the envelope reply handler
+(``x-calf-wire == "envelope"``) and the step handler (``== "step"``, with the lenient decoder). The
+filter runs BEFORE body decode, so a foreign/unstamped body matches neither and is dropped
+(``SubscriberNotFound``) without triggering ``Envelope`` validation; a step body routes to the step
+handler and its events reach the owning run's channel. (Envelope reply routing + the decode floor are
+regression-covered by the now-stamped fixtures in ``test_caller_surface_hub.py``; the worker-side
+``SubscriberNotFound``-*survival* is the kafka lane — ``TestKafkaBroker`` re-raises it.)
 """
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 from faststream.exceptions import SubscriberNotFound
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._protocol import HDR_WIRE
-from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel
+from calfkit.client.events import EventStream
+from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel, lenient_step_decoder
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.models.payload import TextPart
-from calfkit.models.step import AgentMessage, StepMessage
+from calfkit.models.step import AgentMessageEvent, StepMessage
 
 
 def _tracked(hub: _Hub, cid: str) -> InvocationHandle:
@@ -28,22 +31,62 @@ def _tracked(hub: _Hub, cid: str) -> InvocationHandle:
     return handle
 
 
-async def test_step_body_is_filtered_before_envelope_decode() -> None:
-    # A step-stamped body on the inbox is rejected by the envelope filter BEFORE decode →
-    # SubscriberNotFound, NOT an Envelope ValidationError (the no-false-fault property, spec §2.4).
-    # (Before E registers the step call-item, a step body simply finds no matching handler here.)
-    hub = _Hub()
-    broker = KafkaBroker(middlewares=[ContextInjectionMiddleware])
-    hub.register(broker, "inbox.topic")
-    handle = _tracked(hub, "cid-step")
-    step = StepMessage(
-        correlation_id="cid-step",
+def _step(cid: str) -> StepMessage:
+    return StepMessage(
+        correlation_id=cid,
         emitter="agent.x",
         depth=2,
         frame_id="f1",
-        events=[AgentMessage(parts=[TextPart(text="thinking out loud")])],
+        events=[AgentMessageEvent(parts=[TextPart(text="thinking out loud")])],
     )
+
+
+async def test_unstamped_body_is_dropped_not_envelope_decoded() -> None:
+    # A foreign/unstamped body (no x-calf-wire) matches NEITHER call-item → SubscriberNotFound; and the
+    # filter runs before decode, so it never triggers Envelope validation (the no-false-fault property).
+    hub = _Hub()
+    broker = KafkaBroker(middlewares=[ContextInjectionMiddleware])
+    hub.register(broker, "inbox.topic")
+    handle = _tracked(hub, "cid-u")
     async with TestKafkaBroker(broker):
         with pytest.raises(SubscriberNotFound):
-            await broker.publish(step, "inbox.topic", correlation_id="cid-step", headers={HDR_WIRE: "step"})
-    assert not handle._channel.closed  # not routed, not floored — the run is untouched
+            await broker.publish(_step("cid-u"), "inbox.topic", correlation_id="cid-u")  # NO x-calf-wire
+    assert not handle._channel.closed  # untouched: not routed, not floored
+
+
+async def test_step_body_routes_to_the_step_handler_and_reaches_the_handle() -> None:
+    # A step-stamped body routes to the step call-item (lenient decode → _on_step → push_intermediate),
+    # so the owning run's channel receives the step event — NOT the envelope reply handler, and with no
+    # Envelope ValidationError (the filter sends it to the step handler before any envelope decode).
+    hub = _Hub()
+    broker = KafkaBroker(middlewares=[ContextInjectionMiddleware])
+    hub.register(broker, "inbox.topic")
+    handle = _tracked(hub, "cid-s")
+    async with TestKafkaBroker(broker):
+        await broker.publish(_step("cid-s"), "inbox.topic", correlation_id="cid-s", headers={HDR_WIRE: "step"})
+    intermediates = list(handle._channel._intermediates)
+    assert len(intermediates) == 1
+    assert isinstance(intermediates[0], AgentMessageEvent)
+    assert intermediates[0].parts[0].text == "thinking out loud"
+    assert intermediates[0].correlation_id == "cid-s"  # identity back-filled by StepMessage's validator
+    assert not handle._channel.closed  # a step does NOT close the run (only a terminal does)
+
+
+async def test_lenient_step_decoder_decodes_valid_and_swallows_malformed() -> None:
+    # The per-call-item decoder: a valid step body decodes; a malformed/undecodable body is swallowed to
+    # None (kept off the decode floor's sink, so a bad step never faults the run, §3.4).
+    decoded = await lenient_step_decoder(SimpleNamespace(body=_step("c").model_dump_json().encode()))
+    assert isinstance(decoded, StepMessage) and decoded.correlation_id == "c"
+    assert await lenient_step_decoder(SimpleNamespace(body=b'{"bad": "shape"}')) is None
+    assert await lenient_step_decoder(SimpleNamespace(body=b"not json at all")) is None
+
+
+def test_no_handle_step_drops_silently_but_tees_to_firehose() -> None:
+    # A step for a run with NO live handle (a send() run or a GC'd handle) drops silently from the per-run
+    # path (no raise, no WARN) but is STILL tee'd to the firehose, so send() runs stay observable (§3.4).
+    hub = _Hub()
+    outlet = EventStream(hub)
+    hub._add_outlet(outlet)
+    step = _step("no-such-run")  # no tracked handle for this correlation_id
+    hub._on_step(step)  # must not raise
+    assert list(outlet._buffer) == step.events  # tee'd despite no handle

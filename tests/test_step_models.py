@@ -16,13 +16,13 @@ from calfkit._protocol import HDR_WIRE, WireKind, wire_filter
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart, ToolCallPart
 from calfkit.models.step import (
-    AgentMessage,
-    AgentThinking,
-    Handoff,
+    AgentMessageEvent,
+    AgentThinkingEvent,
+    HandoffEvent,
     StepEvent,
     StepMessage,
-    ToolCall,
-    ToolResult,
+    ToolCallEvent,
+    ToolResultEvent,
 )
 
 
@@ -71,10 +71,10 @@ class TestWireFilter:
 
 def _sample_events() -> list[StepEvent]:
     return [
-        AgentMessage(parts=[TextPart(text="let me look that up")]),
-        ToolCall(tool_call_id="c1", name="search", args={"q": "x"}),
-        ToolResult(tool_call_id="c1", name="search_tool", parts=[TextPart(text="result")], is_error=False),
-        Handoff(target="billing", reason="needs billing"),
+        AgentMessageEvent(parts=[TextPart(text="let me look that up")]),
+        ToolCallEvent(tool_call_id="c1", name="search", args={"q": "x"}),
+        ToolResultEvent(tool_call_id="c1", name="search_tool", parts=[TextPart(text="result")], is_error=False),
+        HandoffEvent(target="billing", reason="needs billing"),
     ]
 
 
@@ -84,38 +84,38 @@ def _sample_message() -> StepMessage:
 
 class TestStepEventKinds:
     def test_kind_literals(self) -> None:
-        assert AgentMessage(parts=[]).kind == "agent_message"
-        assert ToolCall(tool_call_id="c", name="n").kind == "tool_call"
-        assert ToolResult(tool_call_id="c", name="n", parts=[]).kind == "tool_result"
-        assert Handoff(target="t", reason="r").kind == "handoff"
-        assert AgentThinking(parts=[]).kind == "agent_thinking"
+        assert AgentMessageEvent(parts=[]).kind == "agent_message"
+        assert ToolCallEvent(tool_call_id="c", name="n").kind == "tool_call"
+        assert ToolResultEvent(tool_call_id="c", name="n", parts=[]).kind == "tool_result"
+        assert HandoffEvent(target="t", reason="r").kind == "handoff"
+        assert AgentThinkingEvent(parts=[]).kind == "agent_thinking"
 
     def test_kinds_distinct_from_contentpart(self) -> None:
-        # The step ``kind`` space must not collide with ContentPart's — esp. ToolCall ("tool_call")
+        # The step ``kind`` space must not collide with ContentPart's — esp. ToolCallEvent ("tool_call")
         # vs ToolCallPart ("tool").
         step_kinds = {"agent_message", "tool_call", "tool_result", "handoff", "agent_thinking"}
         content_kinds = {"text", "file", "data", "tool"}
         assert step_kinds.isdisjoint(content_kinds)
-        assert ToolCall(tool_call_id="c", name="n").kind != ToolCallPart(tool_call_id="c", kwargs={}, tool_name="n").kind
+        assert ToolCallEvent(tool_call_id="c", name="n").kind != ToolCallPart(tool_call_id="c", kwargs={}, tool_name="n").kind
 
 
 class TestToolCallArgs:
     def test_args_accepts_str(self) -> None:
-        assert ToolCall(tool_call_id="c", name="n", args='{"q": "x"}').args == '{"q": "x"}'
+        assert ToolCallEvent(tool_call_id="c", name="n", args='{"q": "x"}').args == '{"q": "x"}'
 
     def test_args_accepts_dict(self) -> None:
-        assert ToolCall(tool_call_id="c", name="n", args={"q": "x"}).args == {"q": "x"}
+        assert ToolCallEvent(tool_call_id="c", name="n", args={"q": "x"}).args == {"q": "x"}
 
     def test_args_defaults_none(self) -> None:
-        assert ToolCall(tool_call_id="c", name="n").args is None
+        assert ToolCallEvent(tool_call_id="c", name="n").args is None
 
 
 class TestToolResult:
     def test_is_error_defaults_false(self) -> None:
-        assert ToolResult(tool_call_id="c", name="n", parts=[]).is_error is False
+        assert ToolResultEvent(tool_call_id="c", name="n", parts=[]).is_error is False
 
     def test_is_error_settable(self) -> None:
-        assert ToolResult(tool_call_id="c", name="n", parts=[], is_error=True).is_error is True
+        assert ToolResultEvent(tool_call_id="c", name="n", parts=[], is_error=True).is_error is True
 
 
 class TestStepEventMutability:
@@ -124,7 +124,7 @@ class TestStepEventMutability:
     swallows → every step silently dropped forever (spec §3.1)."""
 
     def test_identity_is_assignable(self) -> None:
-        e = AgentMessage(parts=[TextPart(text="hi")])
+        e = AgentMessageEvent(parts=[TextPart(text="hi")])
         e.correlation_id = "run-9"
         e.depth = 3
         e.frame_id = "f9"
@@ -132,7 +132,7 @@ class TestStepEventMutability:
         assert (e.correlation_id, e.depth, e.frame_id, e.emitter) == ("run-9", 3, "f9", "n9")
 
     def test_identity_defaults_none(self) -> None:
-        e = ToolCall(tool_call_id="c", name="n")
+        e = ToolCallEvent(tool_call_id="c", name="n")
         assert (e.correlation_id, e.depth, e.frame_id, e.emitter) == (None, None, None, None)
 
 
@@ -159,7 +159,7 @@ class TestStepMessageIdentityBackfill:
 
     def test_decode_backfills_identity_and_resolves_union(self) -> None:
         back = StepMessage.model_validate_json(_sample_message().model_dump_json())
-        assert [type(e) for e in back.events] == [AgentMessage, ToolCall, ToolResult, Handoff]
+        assert [type(e) for e in back.events] == [AgentMessageEvent, ToolCallEvent, ToolResultEvent, HandoffEvent]
         for e in back.events:
             assert e.correlation_id == "run-1"
             assert e.depth == 2
@@ -172,10 +172,25 @@ class TestStepMessageIdentityBackfill:
 
     def test_event_specific_fields_survive_round_trip(self) -> None:
         back = StepMessage.model_validate_json(_sample_message().model_dump_json())
-        tc = next(e for e in back.events if isinstance(e, ToolCall))
+        tc = next(e for e in back.events if isinstance(e, ToolCallEvent))
         assert (tc.tool_call_id, tc.name, tc.args) == ("c1", "search", {"q": "x"})
-        tr = next(e for e in back.events if isinstance(e, ToolResult))
+        tr = next(e for e in back.events if isinstance(e, ToolResultEvent))
         assert (tr.name, tr.is_error) == ("search_tool", False)
         assert isinstance(tr.parts[0], TextPart) and tr.parts[0].text == "result"
-        ho = next(e for e in back.events if isinstance(e, Handoff))
+        ho = next(e for e in back.events if isinstance(e, HandoffEvent))
         assert (ho.target, ho.reason) == ("billing", "needs billing")
+
+
+class TestPublicReExport:
+    def test_step_event_types_are_re_exported_from_calfkit(self) -> None:
+        import calfkit
+
+        # the four EMITTED step events re-export at the public top level (collision-free as *Event types)
+        assert calfkit.AgentMessageEvent is AgentMessageEvent
+        assert calfkit.ToolCallEvent is ToolCallEvent
+        assert calfkit.ToolResultEvent is ToolResultEvent
+        assert calfkit.HandoffEvent is HandoffEvent
+        for name in ("AgentMessageEvent", "ToolCallEvent", "ToolResultEvent", "HandoffEvent"):
+            assert name in calfkit.__all__
+        # calfkit.Handoff stays the peer capability handle — NOT the step event (the rename's whole point)
+        assert calfkit.Handoff is not HandoffEvent
