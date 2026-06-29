@@ -22,7 +22,7 @@ from calfkit.client.events import EventStream
 from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel, lenient_step_decoder
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.models.payload import TextPart
-from calfkit.models.step import AgentMessageEvent, StepMessage
+from calfkit.models.step import AgentMessageEvent, AgentThinkingEvent, StepMessage
 
 
 def _tracked(hub: _Hub, cid: str) -> InvocationHandle:
@@ -90,3 +90,15 @@ def test_no_handle_step_drops_silently_but_tees_to_firehose() -> None:
     step = _step("no-such-run")  # no tracked handle for this correlation_id
     hub._on_step(step)  # must not raise
     assert list(outlet._buffer) == step.events  # tee'd despite no handle
+
+
+def test_on_step_drops_a_foreign_agent_thinking_event() -> None:
+    # AgentThinkingEvent is decodable on the wire (defined) but NOT surfaced in v1 (§5): _on_step filters
+    # it, so even a foreign producer's thinking event never reaches the run's channel (enforced on receive).
+    hub = _Hub()
+    handle = _tracked(hub, "cid-t")
+    step = StepMessage(
+        correlation_id="cid-t", emitter="a", depth=2, frame_id="f", events=[AgentThinkingEvent(parts=[TextPart(text="secret thoughts")])]
+    )
+    hub._on_step(step)
+    assert list(handle._channel._intermediates) == []  # filtered, not surfaced

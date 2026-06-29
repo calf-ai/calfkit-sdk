@@ -194,3 +194,19 @@ class TestPublicReExport:
             assert name in calfkit.__all__
         # calfkit.Handoff stays the peer capability handle — NOT the step event (the rename's whole point)
         assert calfkit.Handoff is not HandoffEvent
+
+
+class TestAgentThinkingDefinedNotEmitted:
+    """Increment F — AgentThinkingEvent is DEFINED + wire-valid, but NOT emitted in v1 (spec §5)."""
+
+    def test_agent_thinking_event_round_trips(self) -> None:
+        sm = StepMessage(correlation_id="c", emitter="a", depth=1, frame_id="f", events=[AgentThinkingEvent(parts=[TextPart(text="hmm")])])
+        back = StepMessage.model_validate_json(sm.model_dump_json())
+        assert isinstance(back.events[0], AgentThinkingEvent)
+        assert back.events[0].parts[0].text == "hmm"
+
+    def test_agent_thinking_is_not_a_run_event_member_in_v1(self) -> None:
+        # Honest-naming (§5): not surfaced on the stream, so it is NOT a RunEvent member yet.
+        from calfkit.client.events import RunEvent
+
+        assert AgentThinkingEvent not in typing.get_args(RunEvent)
