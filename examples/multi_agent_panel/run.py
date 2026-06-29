@@ -5,7 +5,8 @@ the same transcript accumulates turns from all three agents. Once it holds more 
 one distinct agent identity, every subsequent invocation is automatically projected
 to that agent's point of view — its own turns stay assistant messages, the other
 panelists read as ``<optimist>`` / ``<skeptic>`` / ``<pragmatist>``, and the
-moderator prompts read as ``<user>``. There are no flags to set; it just works.
+moderator's prompts read as ``<user:Moderator>`` (attributed via ``author=``). There
+are no flags to set; it just works.
 
 Start ``service.py`` first, then run this.
 """
@@ -31,6 +32,7 @@ async def main() -> None:
             result = await client.agent(agent.name).execute(
                 prompt,
                 message_history=history,  # every panelist sees the same growing transcript
+                author="Moderator",  # attribute the human prompt so panelists address "Moderator", not an invented name
             )
             history = result.message_history  # accumulate this panelist's response
             print(f"\n[{agent.name}] {result.output}")

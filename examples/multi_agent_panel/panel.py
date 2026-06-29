@@ -22,8 +22,9 @@ def _panelist(name: str, persona: str) -> Agent:
         name,
         system_prompt=(
             f"You are {name}, one panelist in a group discussion. {persona} "
-            "Keep each contribution to 2-3 sentences, and address other panelists by "
-            "name when you build on or push back against their points."
+            "Keep each contribution to 2-3 sentences. Address another panelist by name "
+            "only when responding to a specific point they actually made; do not invent "
+            "participants."
         ),
         model_client=OpenAIResponsesModelClient(model_name=MODEL),
     )
