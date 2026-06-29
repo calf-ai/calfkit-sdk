@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Intermediate steps are happy-path-only and best-effort: projected once per hop at the disposition chokepoint, logged-and-dropped on any failure, never faulting the run

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Step events are two frozen families — a wire `*Step` (no identity) and a surface `*Event` (identity required) — mapped once on receive

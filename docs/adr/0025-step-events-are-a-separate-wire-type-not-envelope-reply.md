@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Intermediate steps ride a separate `StepMessage` wire type, routed by an always-stamped `x-calf-wire` header, not on `Envelope.reply`
