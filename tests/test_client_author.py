@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from faststream import Context
 from faststream.kafka import TestKafkaBroker
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_WIRE
 from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
 from calfkit.client import Client
 from calfkit.models import CallFrameStack, Envelope, SessionRunContext, WorkflowState
@@ -46,7 +46,7 @@ def _register_capture_agent(client: Client, *, reply: bool = False) -> list[Stat
                 internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
                 reply=ReturnMessage(in_reply_to=None, tag=None, parts=[TextPart(text="ok")]),
             )
-            headers: dict[str, Any] = {HDR_KIND: "return", HDR_EMITTER: "agent.x", HDR_EMITTER_KIND: "agent"}
+            headers: dict[str, Any] = {HDR_KIND: "return", HDR_EMITTER: "agent.x", HDR_EMITTER_KIND: "agent", HDR_WIRE: "envelope"}
             await client._broker.publish(r, client.inbox_topic, correlation_id=correlation_id, headers=headers)
 
     return captured

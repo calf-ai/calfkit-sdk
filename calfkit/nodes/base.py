@@ -13,13 +13,14 @@ from faststream.kafka.annotations import (
 )
 from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, MessageKind, NodeKind, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_ERROR_TYPE, HDR_KIND, HDR_ROUTE, HDR_WIRE, MessageKind, NodeKind, decode_header_str
 from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
 from calfkit.controlplane.advert import AdvertRegistryMixin
 from calfkit.exceptions import NodeFaultError, RegistryConfigError, SeamContractError, safe_exc_message
 from calfkit.models import (
     Call,
+    CallFrame,
     Next,
     NodeResult,
     ReturnCall,
@@ -36,6 +37,7 @@ from calfkit.models.payload import ContentPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import CalleeResult, SeamContext
 from calfkit.models.session_context import SessionRunContext, WorkflowState
+from calfkit.models.step import StepEvent, StepMessage
 from calfkit.nodes._fanout_store import (
     FANOUT_STORE_KEY,
     CloseAbandon,
@@ -495,10 +497,19 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         """Outbound headers for one publish: emitter id/kind + the ``x-calf-kind``
         delivery classification (spec §4.1), plus ``x-calf-route`` when a ``Call``
         addresses a sub-route of a downstream routed node (ingress-only, ``Call`` only)."""
-        h = {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind, HDR_KIND: kind}
+        h = {HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind, HDR_KIND: kind, HDR_WIRE: Envelope.WIRE}
         if route is not None:
             h[HDR_ROUTE] = route
         return h
+
+    def project_steps(self, output: NodeResult[State], ctx: SessionRunContext, frame: CallFrame | None) -> list[StepEvent]:
+        """Project this hop's disposition into observable step events (spec §2.5 / §3.2).
+
+        The default plain custom node emits nothing; :class:`~calfkit.nodes.agent.BaseAgentNodeDef`
+        and :class:`~calfkit.nodes.tool.BaseToolNodeDef` override it. Called once per hop at the
+        disposition chokepoint with the pre-action ``frame``; ``depth`` and the depth-1 terminal gate
+        are owned by the chokepoint, so this stays depth-agnostic."""
+        return []
 
     def _no_reply_mirror(self, envelope: Envelope) -> Response:
         """The broadcast mirror for a hop that produces NO reply this delivery: clear the inbound
@@ -1770,6 +1781,44 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             # raised, so it never tripped this node's own on_node_error. Re-address it to the caller
             # on the pre-mutation snapshot — the same report, unwrapped (§4.4).
             return await self._fault_response(output.report, snapshot, envelope, correlation_id, broker)
+
+        # ── Intermediate step emission — the disposition chokepoint (step-streaming spec §2.5). ──
+        # `output` is now a publishable happy-path action; project + publish this hop's steps BEFORE
+        # the action branches to fan-out OPEN or _publish_action below, so fan-out and non-fan-out
+        # hops emit uniformly. Best-effort (§2.9): on ANY failure this logs-and-drops AND falls
+        # through to the action. This point is OUTSIDE both publish guards below, so an UNGUARDED
+        # raise here would escape to FastStream and — under ACK_FIRST (the inbound already acked) —
+        # hang the run; the wrap is load-bearing, and it must never short-circuit the action.
+        try:
+            inbound_depth = len(snapshot.call_stack)
+            # Terminal gate (§3.3): the run's final answer (a depth-1 ReturnCall) emits no step — its
+            # preamble already rides the terminal's parts, and a post-terminal step would be dropped.
+            if not (isinstance(output, ReturnCall) and inbound_depth == 1):
+                step_events = self.project_steps(output, ctx, frame)
+                root_callback = snapshot.call_stack.root.callback_topic
+                if step_events and root_callback is not None:
+                    await broker.publish(
+                        StepMessage(
+                            correlation_id=correlation_id,
+                            emitter=self.node_id,
+                            depth=inbound_depth,
+                            frame_id=frame.frame_id if frame is not None else "",
+                            events=step_events,
+                        ),
+                        topic=root_callback,
+                        correlation_id=correlation_id,
+                        key=correlation_id.encode(),
+                        # A step's OWN header dict — NOT _headers() (which stamps wire="envelope" + a
+                        # business x-calf-kind): a step is a side-effect-free notification, no kind.
+                        headers={HDR_WIRE: StepMessage.WIRE, HDR_EMITTER: self.node_id, HDR_EMITTER_KIND: self._node_kind},
+                    )
+        except Exception:
+            logger.warning(
+                "[%s] step emission failed on node=%s; dropping (best-effort, run unaffected)",
+                correlation_id[:8],
+                self.node_id,
+                exc_info=True,
+            )
 
         # Fan-out OPEN: register a durable batch + publish the marked siblings when the caller's state
         # must survive the call independently of the round-trip (decision 1(b) / L13) — a true fan-out

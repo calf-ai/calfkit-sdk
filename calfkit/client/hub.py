@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Generic
@@ -17,17 +19,67 @@ from weakref import WeakValueDictionary
 
 from faststream import Context
 from faststream.kafka import KafkaBroker
+from faststream.message import StreamMessage
+from pydantic import ValidationError
 
-from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, decode_header_str
+from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, decode_header_str, wire_filter
 from calfkit._types import OutputT
-from calfkit.client.events import EventStream, RunCompleted, RunEvent, RunFailed
+from calfkit.client.events import EventStream, RunCompleted, RunEvent, RunFailed, RunTerminal
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, NodeFaultError
 from calfkit.models.envelope import Envelope  # runtime: FastDepends needs it for the handler arg
 from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.node_result import InvocationResult, extract_lenient
 from calfkit.models.reply import FaultMessage, ReturnMessage
+from calfkit.models.step import (
+    AgentMessageEvent,
+    HandoffEvent,
+    RunStepEvent,
+    StepEvent,
+    StepMessage,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 
 logger = logging.getLogger(__name__)
+
+
+async def lenient_step_decoder(msg: StreamMessage[Any]) -> StepMessage | None:
+    """The per-call-item decoder for the step subscriber (spec §3.4): decode the body to a
+    :class:`StepMessage`; on a malformed/schema-skewed body **swallow** the decode error and return
+    ``None`` (the lenient rail). A bad step must NEVER fault the run — swallowing keeps it off the
+    broker decode-floor's topic-keyed sink (the floor only re-routes a *raised* decode error). The
+    handler is typed ``StepMessage | None`` so FastDepends does not re-validate the sentinel."""
+    try:
+        return StepMessage.model_validate_json(msg.body)
+    except (ValidationError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+# The surfaced step-event kinds → their public RunEvent member (spec §3.2). An ALLOWLIST:
+# ``agent_thinking`` is deliberately absent (defined-not-emitted, §5), so ``_on_step`` filters it; a
+# wire kind missing here is never surfaced. (Kept in lockstep with the wire union by a parity test.)
+_SURFACE_BY_KIND: dict[str, type[RunStepEvent]] = {
+    "agent_message": AgentMessageEvent,
+    "tool_call": ToolCallEvent,
+    "tool_result": ToolResultEvent,
+    "handoff": HandoffEvent,
+}
+
+
+def _to_surface(step: StepEvent, message: StepMessage) -> RunStepEvent:
+    """Stamp a wire ``*Step`` with its message's hop identity → a frozen surface ``*Event`` (the
+    once-on-the-message → once-per-event mapping, spec §3.1/§3.4 — replaces the prior in-place validator
+    back-fill). Payload fields pass LIVE (not via ``model_dump()``), so nested ``ContentPart``s are not
+    re-serialized; the frozen surface model still validates on construction. ``kind`` rides in the splat
+    and matches the target's ``Literal`` default. Caller must filter unsurfaced kinds first (``_on_step``)."""
+    cls = _SURFACE_BY_KIND[step.kind]
+    return cls(
+        **{f: getattr(step, f) for f in type(step).model_fields},
+        correlation_id=message.correlation_id,
+        depth=message.depth,
+        frame_id=message.frame_id,
+        emitter=message.emitter,
+    )
 
 
 class _RunChannel:
@@ -43,7 +95,7 @@ class _RunChannel:
     """
 
     def __init__(self) -> None:
-        self._terminal: RunEvent | None = None
+        self._terminal: RunTerminal | None = None
         self._closed: bool = False
         self._closed_error: BaseException | None = None
         # The "terminal-arrived" signal — an Event, NOT a Future (§3 decision 1, corrected): a Future
@@ -54,12 +106,19 @@ class _RunChannel:
         # (§4.3). Like a Future it is not a Task, so it never roots the handle in the loop (the weak map
         # stays the sole owner, §5.2), and it needs no running loop at construction.
         self._arrived = asyncio.Event()
+        # Intermediate (step) events ride a SEPARATE consume-once queue with its OWN wake signal (both
+        # asyncio.Events, cancel-safe). Different access semantics (spec §2.8): the terminal is cached +
+        # replayable; intermediates drain once. terminal/close sets BOTH signals (a parked stream() wakes
+        # on completion AND on error-close); an intermediate push sets ONLY the queue signal (never
+        # spuriously wakes a parked result()).
+        self._intermediates: deque[RunEvent] = deque()
+        self._intermediate_ready = asyncio.Event()
 
     @property
     def closed(self) -> bool:
         return self._closed
 
-    def push(self, event: RunEvent) -> None:
+    def push(self, event: RunTerminal) -> None:
         """Cache the terminal + close (first wins), waking an awaiting reader. Synchronous and
         non-blocking — never awaits. A push into an already-closed channel is a benign no-op."""
         if self._closed:
@@ -79,9 +138,12 @@ class _RunChannel:
         self._wake()
 
     def _wake(self) -> None:
+        # terminal/close wakes a parked result() (terminal signal) AND a parked stream() (queue signal),
+        # so stream() drains the backlog then yields the cached terminal even when it parked on an empty queue.
         self._arrived.set()
+        self._intermediate_ready.set()
 
-    async def await_terminal(self) -> RunEvent:
+    async def await_terminal(self) -> RunTerminal:
         """Park until the channel closes, then return the cached terminal ``RunEvent`` — or raise
         the typed close error (``ClientClosedError``) if it was closed by ``aclose()``. O(1)
         replay once arrived (spec §4.4)."""
@@ -91,6 +153,32 @@ class _RunChannel:
         if self._terminal is None:  # defensive: a closed channel always has a terminal or an error
             raise RuntimeError("run channel closed without a terminal or a close error")
         return self._terminal
+
+    def push_intermediate(self, event: RunEvent) -> None:
+        """Append an intermediate (step) event, waking a parked ``stream()`` (spec §2.8). Synchronous,
+        non-blocking. A **no-op once closed** — a post-terminal reordered/duplicate step is dropped, not
+        appended (§3.3). Sets ONLY the queue signal (never the terminal signal — that would spuriously
+        wake a parked ``result()``)."""
+        if self._closed:
+            return
+        self._intermediates.append(event)
+        self._intermediate_ready.set()
+
+    async def drain_intermediates(self) -> AsyncIterator[RunEvent]:
+        """Yield buffered then live intermediates (consume-once) until the channel closes — used by
+        ``stream()`` before the cached terminal. Keeps **no ``await`` between the empty-check and the
+        signal-clear** (the lost-wakeup invariant, mirroring the firehose drain in ``events.py``)."""
+        while True:
+            while self._intermediates:
+                yield self._intermediates.popleft()
+            if self._closed:
+                return
+            self._intermediate_ready.clear()
+            # Re-check after the clear: a push between the drain and the clear set the signal; loop
+            # without waiting so it is not lost. Park only when genuinely empty AND still open.
+            if self._intermediates or self._closed:
+                continue
+            await self._intermediate_ready.wait()
 
 
 @dataclass
@@ -132,15 +220,18 @@ class InvocationHandle(Generic[OutputT]):
         return InvocationResult.from_envelope(terminal._envelope, self._output_type, correlation_id=terminal.correlation_id)
 
     async def stream(self) -> AsyncIterator[RunEvent]:
-        """Yield this run's events in order, **terminal-bearing** — the last element is always the
-        terminal (spec §3.1/§4.4). v1 emits no intermediates yet, so this yields **exactly one**
-        element: the terminal (raw — ``result()`` is the projected face). The terminal is cached, so
-        ``stream()`` is replayable after ``result()``; **at most one** live ``stream()`` per handle (a
-        second concurrent one raises ``RuntimeError``)."""
+        """Yield this run's events in order, **terminal-bearing** — intermediates (steps) first, the
+        cached terminal always last (spec §2.8/§3.1/§4.4). The intermediate queue is consume-once (a
+        late ``stream()`` drains the buffered backlog once); the raw events are surfaced un-projected
+        (``result()`` is the projected face). The terminal is cached, so ``stream()`` is replayable after
+        ``result()``; **at most one** live ``stream()`` per handle (a second concurrent one raises
+        ``RuntimeError``); an early ``break`` releases the guard via the ``finally``."""
         if self._stream_active:
             raise RuntimeError("at most one live stream() per handle (spec §4.4)")
         self._stream_active = True
         try:
+            async for event in self._channel.drain_intermediates():
+                yield event
             yield await self._channel.await_terminal()
         finally:
             self._stream_active = False
@@ -181,7 +272,12 @@ class _Hub:
         and ``auto_offset_reset="latest"`` (tail). Pure bookkeeping; started by the first
         ``broker.start()`` (spec §2.7/§5.1). Called from ``connect()``."""
 
-        @broker.subscriber(inbox_topic, group_id=None, auto_offset_reset="latest")
+        # ONE groupless inbox subscriber; the envelope reply handler is its first filtered call-item.
+        # The filter (x-calf-wire == "envelope") runs BEFORE body decode, so a step body never triggers
+        # Envelope validation (spec §2.4). Increment E attaches the step call-item to this same `sub`.
+        sub = broker.subscriber(inbox_topic, group_id=None, auto_offset_reset="latest")
+
+        @sub(filter=wire_filter(Envelope))
         async def _handle_reply(
             envelope: Envelope,
             correlation_id: Annotated[str, Context()],
@@ -190,6 +286,13 @@ class _Hub:
             # The subscriber binds only transport-sourced values and forwards to _on_reply, which holds
             # the classify/demux logic so it is unit-testable without driving the broker.
             self._on_reply(envelope, correlation_id, headers)
+
+        @sub(filter=wire_filter(StepMessage), decoder=lenient_step_decoder)
+        async def _handle_step(step: StepMessage | None) -> None:
+            # Typed StepMessage | None (NOT StepMessage): the lenient decoder returns None for a malformed
+            # step, and FastDepends must NOT re-validate that sentinel (a StepMessage-typed arg would raise
+            # a 2nd ValidationError → the decode floor → fail_run, faulting a healthy run, §3.4).
+            self._on_step(step)
 
     def _on_reply(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any]) -> None:
         """Classify an inbound reply by ``x-calf-kind`` and demux it into the owning run's channel.
@@ -218,7 +321,7 @@ class _Hub:
                 emitter,
             )
 
-    def _completed(self, envelope: Envelope, cid: str, emitter: str | None) -> RunEvent:
+    def _completed(self, envelope: Envelope, cid: str, emitter: str | None) -> RunTerminal:
         reply = envelope.context._reply
         if not isinstance(reply, ReturnMessage):
             return self._slot_anomaly(cid, "return", reply)  # §5.1(a) defense — never AttributeError
@@ -243,7 +346,7 @@ class _Hub:
         )
         return RunFailed(report=report, correlation_id=cid)
 
-    def _dispatch(self, cid: str, event: RunEvent) -> None:
+    def _dispatch(self, cid: str, event: RunTerminal) -> None:
         # Per-run demux FIRST (spec §5.4 decision: hub-demux, then firehose; both non-blocking).
         handle = self._runs.get(cid)
         if handle is not None:
@@ -265,6 +368,26 @@ class _Hub:
         # firehose reader can never stall the hub or another run.
         for outlet in list(self._firehose):
             outlet._offer(event)
+
+    def _on_step(self, step: StepMessage | None) -> None:
+        """Demux a decoded step (spec §3.4): map each wire ``*Step`` to its frozen surface ``*Event``
+        (stamping the hop identity from the message) and push it onto the owning run's consume-once
+        intermediate queue AND tee it to the firehose. A ``None`` (a malformed step the lenient decoder
+        swallowed) drops. A wire event whose kind is not a surfaced RunEvent (``AgentThinkingStep``,
+        defined-not-emitted §5) is filtered. A **no-handle** step (a ``send()`` run or a GC'd handle)
+        drops **silently** from the per-run path — unlike a no-handle *terminal*, which WARN/ERROR-logs —
+        but is still tee'd, so ``send()`` runs stay observable via ``events()``."""
+        if step is None:
+            logger.debug("dropped a malformed/undecodable step (best-effort; never faults the run)")
+            return
+        handle = self._runs.get(step.correlation_id)
+        for wire_event in step.events:
+            if wire_event.kind not in _SURFACE_BY_KIND:
+                continue  # AgentThinkingStep — defined-not-emitted in v1 (§5), never surfaced on a stream
+            event = _to_surface(wire_event, step)
+            if handle is not None:
+                handle._channel.push_intermediate(event)  # synchronous, non-blocking (consume-once queue)
+            self._tee(event)  # firehose: every step is surfaced raw, demux'd or not (§5.4)
 
     def fail_run(self, correlation_id: str, report: ErrorReport) -> None:
         """The Option-B undecodable-sink target (§5.8): the decode floor calls this for an undecodable

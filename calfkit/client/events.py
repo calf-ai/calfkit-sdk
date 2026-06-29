@@ -1,8 +1,8 @@
 """Caller-surface streaming events + the firehose tuning default (spec §3.3 / §2.1).
 
-The closed v1 ``RunEvent`` terminal union (``RunCompleted | RunFailed``). Intermediate event
-types (AgentMessage, ToolCalled, HandoffOccurred) are a future shape — emitted only once
-intermediate emission ships (spec §9.1) — so v1 yields exactly the terminal.
+The ``RunEvent`` union: intermediate step events (``AgentMessageEvent`` / ``ToolCallEvent`` / ``ToolResultEvent`` /
+``HandoffEvent``, spec §3.2) followed by exactly one terminal (``RunCompleted`` / ``RunFailed``). A run's
+stream yields zero or more intermediates then its terminal.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from calfkit.models.error_report import ErrorReport
+from calfkit.models.step import RunStepEvent  # the surface step-event union (no cycle: models.step → models.payload)
 
 if TYPE_CHECKING:
     from calfkit.client.hub import _Hub
@@ -55,9 +56,15 @@ class RunFailed:
     correlation_id: str
 
 
-RunEvent = RunCompleted | RunFailed
-"""The closed v1 terminal union — a run's stream ends in exactly one of these. Widened when
-intermediate emission ships (spec §3.3 / §9.1)."""
+RunTerminal = RunCompleted | RunFailed
+"""A run's terminal — exactly one ends every run (and is itself a :data:`RunEvent`). The per-run
+channel's cached, replayable terminal slot holds only this; the intermediate step events are the other
+``RunEvent`` members."""
+
+RunEvent = RunCompleted | RunFailed | RunStepEvent
+"""A run's stream: zero or more intermediate step events (``AgentMessageEvent`` / ``ToolCallEvent`` /
+``ToolResultEvent`` / ``HandoffEvent``, spec §3.2) then exactly one terminal (``RunCompleted`` / ``RunFailed``).
+``AgentThinkingEvent`` is defined but not emitted in v1 (§5), so it is not in the union yet."""
 
 
 class EventStream:
@@ -136,7 +143,7 @@ class EventStream:
         ``maxlen``); every drop increments ``dropped`` (the ongoing signal), and the **first** drop on
         this outlet logs a WARNING once (not re-logged — read ``dropped`` for the running total)."""
         if self._terminal_only and not isinstance(event, (RunCompleted, RunFailed)):
-            return  # v1: every RunEvent is terminal, so this never filters yet (forward-compat, §3.3)
+            return  # a terminal_only outlet drops intermediate step events, surfacing only terminals (§3.3)
         if len(self._buffer) == self._buffer.maxlen:  # full → this append evicts the oldest
             self.dropped += 1
             if not self._warned:

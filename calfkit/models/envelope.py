@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 from pydantic import BaseModel, Field
 
 from calfkit.models.reply import FaultMessage, ReturnMessage
@@ -13,6 +15,11 @@ class Envelope(BaseModel):
     Uses plain BaseModel so all fields are always serialized — no exclude_unset
     gotchas.
     """
+
+    WIRE: ClassVar[str] = "envelope"
+    """The ``x-calf-wire`` value for an Envelope body (spec §2.4) — the single source for both the
+    outbound stamp (``nodes/base.py`` ``_headers`` + the client ingress) and the inbound
+    ``wire_filter(Envelope)``. ``MessageKind`` (the business kind) and ``reply`` are unchanged."""
 
     context: SessionRunContext
     internal_workflow_state: WorkflowState = Field(description="The internal, framework-level state tracking workflow")

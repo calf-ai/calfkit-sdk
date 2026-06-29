@@ -120,6 +120,26 @@ def structured_output_preamble(new_messages: list[ModelMessage]) -> str:
     return "".join(p.content for p in final_resp.parts if isinstance(p, TextPart))
 
 
+def step_preamble(new_messages: list[ModelMessage]) -> str:
+    """The agent's preamble text for a NON-terminal (tool-dispatch / handoff) hop's step event
+    (intermediate-step-streaming spec §3.2): the concatenated ``TextPart`` text of the hop's
+    **final** ``ModelResponse``, excluding thinking/tool-call/file parts. Empty ⇒ the caller authors
+    no ``AgentMessage``.
+
+    Final-``ModelResponse``-only is load-bearing: concatenating ALL ``ModelResponse``s would surface
+    §2.2-out-of-scope internal-retry preamble. Unlike :func:`structured_output_preamble`, this needs
+    **no** ``has_final_result`` guard — the structured-output-as-text case (native/prompted mode,
+    where the ``TextPart`` *is* the JSON answer) cannot coincide with a step-emitting hop: a handoff
+    forces a multi-member output union that pydantic-ai bars from native/prompted, and an
+    un-handed-off structured answer is produced only on the depth-1 terminal hop (which emits no
+    step). Revisit if native/prompted output is ever enabled on a non-terminal step-emitting hop.
+    """
+    final_resp = next((m for m in reversed(new_messages) if isinstance(m, ModelResponse)), None)
+    if final_resp is None:
+        return ""
+    return "".join(p.content for p in final_resp.parts if isinstance(p, TextPart))
+
+
 # --------------------------------------------------------------------------- #
 # Transparent pass-through (§5.1)                                             #
 # --------------------------------------------------------------------------- #

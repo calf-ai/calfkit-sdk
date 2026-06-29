@@ -6,6 +6,7 @@ The full public surface is re-exported from the top-level `calfkit` package:
 from calfkit import (
     Client, AgentGateway, InvocationHandle, InvocationResult,   # client
     Dispatch, EventStream, RunEvent, RunCompleted, RunFailed,   # client — fire token + firehose events
+    AgentMessageEvent, ToolCallEvent, ToolResultEvent, HandoffEvent,  # intermediate step events (RunEvent members)
     Agent, agent_tool, consumer,                         # node authoring
     Tools,                                               # reference deployed tool nodes by name
     Messaging, Handoff,                                  # agent-to-agent peers
@@ -35,7 +36,20 @@ from calfkit import (
 | `InvocationHandle` | Handle returned by `gateway.start()`; its `result()` awaits the reply and `stream()` yields the run's events. |
 | `InvocationResult` | Client-facing projection of a node's session state after it returns (`output`, `state`, `correlation_id`, `message_history`, …). |
 | `EventStream` | The `client.events()` firehose — an async context manager + async iterator of every reply on the inbox; `.dropped` counts shed events. |
-| `RunEvent` | The closed terminal union `RunCompleted \| RunFailed` yielded by `stream()` / `events()`. |
+| `RunEvent` | The closed union yielded by `stream()` / `events()`: the terminals `RunCompleted` / `RunFailed` plus the intermediate step events `AgentMessageEvent` / `ToolCallEvent` / `ToolResultEvent` / `HandoffEvent`. |
+
+### Intermediate step events
+
+Members of the `RunEvent` union, surfaced by `stream()` / `events()` as a run progresses (best-effort, at-most-once, **raw** — not `output_type`-coerced). All re-exported from `calfkit`.
+
+| Symbol | Emitted by | Carries |
+| --- | --- | --- |
+| `AgentMessageEvent` | an agent hop | `parts` — the hop's preamble text |
+| `ToolCallEvent` | an agent hop | `tool_call_id`, `name`, `args: str \| dict \| None` (raw model emission) |
+| `ToolResultEvent` | a tool node / consulted peer / rejected call | `tool_call_id`, `name`, `parts`, `is_error: bool` |
+| `HandoffEvent` | an agent hop | `target`, `reason` |
+
+Each also carries hop identity (`correlation_id`, `depth`, `frame_id`, `emitter`). A fifth type, `AgentThinkingEvent`, is **defined but not emitted in v1** — it is not in the `RunEvent` union and not top-level re-exported; it lives at `calfkit.models.step` for forward compatibility.
 
 ### Node authoring
 
@@ -490,6 +504,7 @@ The top-level package re-exports the symbols above. A few public capabilities li
 | Import from | Provides |
 | --- | --- |
 | `calfkit.models` | `ConsumerContext` — the value passed to a `@consumer` function (`output`, `correlation_id`, `deps`, `resources`) — plus the wire/state models (`State`, `Envelope`, `ToolBinding`, …). |
+| `calfkit.models.step` | `AgentThinkingEvent` — the defined-but-not-emitted step event (the four emitted step events, plus `RunEvent`, re-export from the top level). |
 | `calfkit.mcp` | `MCPToolboxNode`, `MCPToolbox`, `StdioServerParameters`, `StreamableHttpParameters` — see [MCP toolboxes](#mcp-toolboxes). |
 | `calfkit.provisioning` | The full topic-provisioning surface: `TopicProvisioner`, `provision_topics`, `topics_for_nodes`, `ProvisionReport`, `StartupTopicEnsurer`, `MissingTopicsError`. |
 | `calfkit.exceptions` | The complete exception set, including the client run-outcome errors (`NodeFaultError`, `DeserializationError`, `ClientTimeoutError`, `ClientClosedError`), `RegistryConfigError`, and `MissingTopicsError`. |

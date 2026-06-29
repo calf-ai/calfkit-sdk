@@ -52,6 +52,7 @@ from typing import Any
 
 import pytest
 
+from calfkit._protocol import HDR_WIRE
 from calfkit.client import Client
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart
@@ -309,7 +310,7 @@ async def test_flag_on_provisions_topics_and_round_trips() -> None:
 
         # (b.2) produce -> consume round-trip over the provisioned inbox.
         envelope = _text_envelope("ping", correlation_id="calf-it-roundtrip")
-        await client.broker.publish(envelope, topic=inbox, correlation_id="calf-it-roundtrip")
+        await client.broker.publish(envelope, topic=inbox, correlation_id="calf-it-roundtrip", headers={HDR_WIRE: "envelope"})
 
         deadline = asyncio.get_event_loop().time() + _VISIBLE_TIMEOUT_S
         while not received and asyncio.get_event_loop().time() < deadline:

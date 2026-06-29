@@ -30,6 +30,7 @@ from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.models.actions import ReturnCall, TailCall
 from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY, derive_input_topic
 from calfkit.models.state import OverridesState, State
+from calfkit.models.step import AgentMessageStep, HandoffStep
 from calfkit.nodes import Agent
 from calfkit.peers import Handoff
 from calfkit.peers.handoff import HandoffRequest
@@ -184,3 +185,61 @@ async def test_structured_agent_produces_handoff_and_dispatches_identically() ->
     assert isinstance(result, TailCall)
     assert result.target_topic == derive_input_topic("billing")
     assert result.clear_overrides is True
+
+
+# ── step authoring: a handoff hop drafts a HandoffStep (online AND offline target) ──
+
+
+class TestHandoffAuthorsStepEvent:
+    """A handoff hop authors a HandoffStep into ``_step_draft`` (spec §3.2). The event is drafted
+    BEFORE _dispatch_handoff, so an OFFLINE target (stale self-retry) STILL emits it — the impl must
+    not special-case offline handoffs away."""
+
+    async def test_online_target_authors_handoffevent(self) -> None:
+        agent = _agent(FunctionModel(_emit_handoff("billing", "please take over")), peers=[Handoff("billing")])
+        ctx = _ctx_with_view(_view({"billing": "Billing."}))
+        await agent.run(ctx)
+        hos = [e for e in (ctx._step_draft or []) if isinstance(e, HandoffStep)]
+        assert len(hos) == 1 and hos[0].target == "billing" and hos[0].reason == "please take over"
+
+    async def test_handoff_hop_with_preamble_drafts_message_then_handoff(self) -> None:
+        # When the handoff hop's model also emits preamble text, the draft carries AgentMessageStep THEN
+        # HandoffStep (the handoff-branch preamble append).
+        def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
+            tool = next(t for t in info.output_tools if t.name == "final_result" or "HandoffRequest" in t.name)
+            return ModelResponse(
+                parts=[
+                    ModelTextPart("Let me transfer you to billing."),
+                    ToolCallPart(tool_name=tool.name, args={"name": "billing", "message": "take over"}, tool_call_id="h1"),
+                ]
+            )
+
+        agent = _agent(FunctionModel(_model), peers=[Handoff("billing")])
+        ctx = _ctx_with_view(_view({"billing": "Billing."}))
+        await agent.run(ctx)
+        draft = ctx._step_draft or []
+        assert [type(e).__name__ for e in draft] == ["AgentMessageStep", "HandoffStep"]
+        assert isinstance(draft[0], AgentMessageStep) and draft[0].parts[0].text == "Let me transfer you to billing."
+        assert isinstance(draft[1], HandoffStep) and draft[1].target == "billing"
+
+    async def test_offline_target_still_authors_handoffevent(self) -> None:
+        # The real "offline" scenario is the render->dispatch race: billing is live when the output member is
+        # offered (so the model CAN hand off), then offline by dispatch (-> stale self-retry). The HandoffStep
+        # is authored BEFORE _dispatch_handoff, so it is still drafted despite the self-retry.
+        gone = {"yet": False}
+
+        class _FlapView:
+            def snapshot(self) -> dict[str, Any]:
+                return {} if gone["yet"] else {"billing": SimpleNamespace(description="Billing.")}
+
+        def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
+            out = _emit_handoff("billing", "please take over")(messages, info)  # billing live at render
+            gone["yet"] = True  # ...then offline for the dispatch staleness check
+            return out
+
+        agent = _agent(FunctionModel(_model), peers=[Handoff("billing")])
+        ctx = _ctx_with_view(_FlapView())
+        result = await agent.run(ctx)
+        assert isinstance(result, TailCall) and result.target_topic == agent._return_topic  # stale -> self-retry
+        hos = [e for e in (ctx._step_draft or []) if isinstance(e, HandoffStep)]
+        assert len(hos) == 1 and hos[0].target == "billing" and hos[0].reason == "please take over"

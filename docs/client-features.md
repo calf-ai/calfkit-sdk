@@ -148,21 +148,88 @@ handle = await client.agent("support").start("Where is my order?")
 result = await handle.result()              # await the terminal (lossless)
 ```
 
-`handle.stream()` yields this run's events in order, terminal-bearing — the last
-element is always the terminal. (Today the fabric emits no intermediate events, so
-`stream()` yields exactly one element: the terminal.)
+`handle.stream()` yields this run's events in order, **terminal-bearing** — zero or
+more intermediate **step events** that report the run's progress hop by hop, then the
+terminal (`RunCompleted` / `RunFailed`) as the last element:
 
 ```python
+from calfkit import AgentMessageEvent, ToolCallEvent, ToolResultEvent, HandoffEvent, RunCompleted, RunFailed
+
+handle = await client.agent("support").start("Where is my order?")
 async for event in handle.stream():
-    ...                                     # the run's events, ending in the terminal
+    match event:
+        case AgentMessageEvent(parts=parts):
+            ...                             # the agent's preamble text for a hop
+        case ToolCallEvent(name=name, args=args):
+            ...                             # a tool the model is about to call
+        case ToolResultEvent(name=name, is_error=is_error):
+            ...                             # a tool's result (is_error=True for a retryable error)
+        case HandoffEvent(target=target, reason=reason):
+            ...                             # control transferred to another agent
+        case RunCompleted() | RunFailed():
+            break                           # the terminal — always last
+```
+
+`stream()` reads the **same** per-run channel as `result()`, so you can `await
+handle.result()` after (or instead of) streaming to get the typed terminal — it is cached
+and replayable.
+
+#### What a step event carries
+
+`stream()` (and the `events()` firehose below) surface the `RunEvent` union — the two
+terminals plus four intermediate step-event types, all importable from `calfkit`:
+
+| Event | Emitted by | Carries |
+| --- | --- | --- |
+| `AgentMessageEvent` | an agent hop | `parts` — the agent's preamble text for the hop |
+| `ToolCallEvent` | an agent hop | `tool_call_id`, `name`, `args` (the raw model emission: `str` / `dict` / `None`) |
+| `ToolResultEvent` | a tool node, a consulted peer, or an agent's rejected call | `tool_call_id`, `name`, `parts`, `is_error` |
+| `HandoffEvent` | an agent hop | `target` (the peer) and `reason` |
+
+Every step event also carries hop identity — `correlation_id`, `depth`, `frame_id`,
+`emitter` — so you can place an event within a multi-agent run: a consulted peer or
+sub-agent streams its own hops at `depth > 1`, all to the original caller. Pair a
+`ToolCallEvent` with its `ToolResultEvent` by **`tool_call_id`** (the names can differ — a
+peer consult's `ToolCallEvent.name` is `message_agent`, while the matching
+`ToolResultEvent.name` is the peer's name). Branch with `isinstance` / `match` on the
+closed union.
+
+> `AgentThinkingEvent` is **defined but not emitted** in v1 — it is not a `RunEvent`
+> member and never appears on a stream.
+
+**Step events are best-effort, not a delivery guarantee.** They are at-most-once, never
+de-duplicated, and **never** the cause of a run failure — a step that can't be emitted is
+logged and dropped, and a real failure arrives only as the terminal `RunFailed`. The
+intermediate queue is **consume-once**: a late `stream()` drains whatever steps are still
+buffered, once. For a guaranteed record of a run's outcome, use the terminal (`result()`),
+not the steps.
+
+**Step events surface RAW parts.** A `ToolResultEvent` or `AgentMessageEvent` carries the
+unprojected reply parts — they are **not** coerced to your `output_type`. Only `result()`
+projects the terminal to `output_type` (a typed object, or a string under the default `str`).
+
+To stop streaming early without holding the single-live-`stream()` guard open until garbage
+collection, wrap the iterator in `contextlib.aclosing` so its cleanup runs promptly on `break`:
+
+```python
+from contextlib import aclosing
+
+async with aclosing(handle.stream()) as stream:
+    async for event in stream:
+        if isinstance(event, ToolCallEvent):
+            print(event.name)
+            break          # aclosing() releases the stream, so a later handle.stream() is allowed
 ```
 
 ### Cross-run — the `events()` firehose (best-effort)
 
-`client.events()` is a firehose over the client's one inbox — **every** reply on it
-while open, across all runs. You demux by `correlation_id` and do your own dedup.
-It is best-effort: a reader that falls behind drops its **oldest** buffered events
-(signaled by `EventStream.dropped` + a WARNING) so it can never block the hub.
+`client.events()` is a firehose over the client's one inbox — **every** event on it
+while open, across all runs: terminal replies **and** the same intermediate step events
+`stream()` surfaces (pass `terminal_only=True` to keep only the terminals). You demux by
+`correlation_id` and do your own dedup. It is best-effort: a reader that falls behind drops
+its **oldest** buffered events (signaled by `EventStream.dropped` + a WARNING) so it can
+never block the hub. A `send()` run registers no per-run handle, so its progress is
+observable **only** here, never via `stream()`.
 
 ```python
 async with client.events(terminal_only=True) as stream:
@@ -195,6 +262,14 @@ client = Client.connect("localhost:9092", inbox_topic="orders.inbox")
 The hub and the firehose both read this one inbox, so `events()` can never drift off
 it. To *observe* an arbitrary topic, connect a separate client with that topic as its
 own `inbox_topic` and call `events()` there.
+
+> **Read-access to the inbox is as sensitive as the run's full content.** Step events
+> stream the **whole transitive trace** of a run — every tool call, tool result, and
+> handoff, at **all depths**, including the work of consulted peers and sub-agents — so
+> anything that can read this inbox can see everything done on the run's behalf. Treat
+> read-access to a shared `inbox_topic` accordingly. This is a deliberate design goal (an
+> end-to-end live progress view), documented rather than policed; cross-trust-boundary
+> confinement, if ever needed, is a future depth/redaction knob, not v1.
 
 ## Bounding patience with `timeout`
 

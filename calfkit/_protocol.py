@@ -7,6 +7,7 @@ Do not add imports from ``calfkit.*`` to this module.
 """
 
 import re
+from collections.abc import Callable
 from typing import Any, Literal
 
 NodeKind = Literal["node", "agent", "tool", "client", "consumer", "toolbox"]
@@ -48,6 +49,17 @@ the body. Framework-stamped, never user-set."""
 MessageKind = Literal["call", "return", "fault"]
 """Closed value space for :data:`HDR_KIND` (spec §4.1)."""
 
+HDR_WIRE = "x-calf-wire"
+"""Kafka header carrying the body's *wire schema* (intermediate-step-streaming spec §2.4):
+``envelope`` (an :class:`~calfkit.models.envelope.Envelope`) or ``step`` (a ``StepMessage``).
+Framework-stamped on every calfkit publish and matched by strict *positive* subscriber filters
+(no absent-fallback), so an unstamped message is dropped. Distinct from :data:`HDR_KIND` (the
+business kind), which is unchanged. The value is each wire model's ``WIRE`` ClassVar — the single
+source for both the outbound stamp and the inbound filter, so they cannot drift."""
+
+WireKind = Literal["envelope", "step"]
+"""Closed value space for :data:`HDR_WIRE` (spec §2.4)."""
+
 
 def decode_header_str(value: Any) -> str | None:
     """Coerce an inbound Kafka header value to ``str | None``.
@@ -61,6 +73,18 @@ def decode_header_str(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return None
+
+
+def wire_filter(model: Any) -> Callable[[Any], bool]:
+    """A FastStream subscriber ``filter`` matching a message's :data:`HDR_WIRE` header against
+    ``model.WIRE`` — strict positive equality, no absent-fallback (spec §2.4).
+
+    The filter runs in ``is_suitable`` *before* the body is decoded into the handler's type, so a
+    non-matching body never triggers ``model``'s validation (verified against FastStream 0.7.1).
+    Returns a *sync* predicate; FastStream wraps it via ``to_async`` at subscriber registration.
+    """
+    wire = model.WIRE
+    return lambda message: decode_header_str(message.headers.get(HDR_WIRE)) == wire
 
 
 # Kafka topic-name legality: charset [a-zA-Z0-9._-], 1-249 chars, with "." and ".."

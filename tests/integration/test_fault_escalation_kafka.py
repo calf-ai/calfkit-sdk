@@ -27,7 +27,7 @@ import logging
 import pytest
 from aiokafka import AIOKafkaProducer
 
-from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
+from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND, HDR_WIRE
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
@@ -233,7 +233,9 @@ async def test_stray_fault_does_not_disturb_the_live_worker(kafka_bootstrap: str
                     await producer.send_and_wait(
                         return_topic,
                         stray.model_dump_json().encode(),
-                        headers=[(HDR_KIND, b"fault")],
+                        # x-calf-wire=envelope so it passes the wire filter and reaches the stray-check
+                        # (the kind↔slot disagreement is caught at the handler, not before the filter).
+                        headers=[(HDR_WIRE, b"envelope"), (HDR_KIND, b"fault")],
                     )
                 finally:
                     await producer.stop()

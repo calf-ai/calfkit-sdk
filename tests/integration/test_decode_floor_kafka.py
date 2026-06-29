@@ -21,6 +21,7 @@ import logging
 import pytest
 from aiokafka import AIOKafkaProducer
 
+from calfkit._protocol import HDR_WIRE
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
@@ -59,7 +60,10 @@ async def test_undecodable_body_floored_and_worker_survives(kafka_bootstrap: str
                 producer = AIOKafkaProducer(bootstrap_servers=kafka_bootstrap)
                 await producer.start()
                 try:
-                    await producer.send_and_wait(agent_in, b'{"not": "a valid envelope"}')
+                    # Stamp x-calf-wire=envelope so the body passes the wire filter and reaches the
+                    # Envelope decoder (where it fails → floored). An UNSTAMPED body is filtered before
+                    # the floor (SubscriberNotFound) — the floor scopes to stamped-but-undecodable bodies.
+                    await producer.send_and_wait(agent_in, b'{"not": "a valid envelope"}', headers=[(HDR_WIRE, b"envelope")])
                 finally:
                     await producer.stop()
 
@@ -93,7 +97,8 @@ async def test_undecodable_reply_with_no_correlation_id_floors_and_does_not_reso
             producer = AIOKafkaProducer(bootstrap_servers=kafka_bootstrap)
             await producer.start()
             try:
-                await producer.send_and_wait(inbox_topic, b'{"garbage": true}')
+                # Stamp x-calf-wire=envelope (else the inbox's envelope/step filters drop it before the floor).
+                await producer.send_and_wait(inbox_topic, b'{"garbage": true}', headers=[(HDR_WIRE, b"envelope")])
             finally:
                 await producer.stop()
 

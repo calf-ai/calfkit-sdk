@@ -13,7 +13,8 @@ from calfkit._vendor.pydantic_ai import Tool
 from calfkit._vendor.pydantic_ai.exceptions import ModelRetry
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.controlplane import ControlPlaneStamp, advertises
-from calfkit.models import SessionRunContext, State, ToolContext
+from calfkit.models import CallFrame, SessionRunContext, State, ToolContext
+from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.actions import NodeResult, ReturnCall
 from calfkit.models.capability import (
     CAPABILITY_TOPIC,
@@ -23,7 +24,8 @@ from calfkit.models.capability import (
     resolve_all_capabilities,
     resolve_capability,
 )
-from calfkit.models.payload import retry_text_part
+from calfkit.models.payload import is_retry, retry_text_part
+from calfkit.models.step import StepEvent, ToolResultStep
 from calfkit.models.tool_dispatch import SelectorResult, ToolBinding, ToolCallRef
 from calfkit.nodes.base import BaseNodeDef
 
@@ -51,6 +53,16 @@ class BaseToolNodeDef(BaseNodeDef):
                 validator=self.validate_call_args,
             )
         ]
+
+    def project_steps(self, output: NodeResult[State], ctx: SessionRunContext, frame: CallFrame | None) -> list[StepEvent]:
+        """A tool hop always produces a ``ReturnCall`` (success or a ``ModelRetry``); the chokepoint
+        only calls this inner-frame (a tool is never a run root, §3.2), so it becomes a single
+        ``ToolResultStep`` keyed by the frame ``tag``. ``is_error`` is derived once here — **coerce
+        first**, then check the ``calf.retry`` marker (``is_retry`` AttributeErrors on a raw scalar)."""
+        if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
+            parts = _coerce_to_parts(output.value)
+            return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]
+        return []
 
     def validate_call_args(self, args_dict: dict[str, Any]) -> Any:
         """Validate ``args_dict`` against this tool's argument schema.
