@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.12.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.0...v0.12.1) (2026-06-29)
+
+
+### Features
+
+* intermediate step event streaming to the caller ([#302](https://github.com/calf-ai/calfkit-sdk/issues/302)) ([4d65743](https://github.com/calf-ai/calfkit-sdk/commit/4d6574317bf1626beb6a706bd693343ca2562775))
+* structured exception harvest into ErrorReport.exception ([#298](https://github.com/calf-ai/calfkit-sdk/issues/298)) ([9159f72](https://github.com/calf-ai/calfkit-sdk/commit/9159f727bc869f2fbe5fe40aee46273201619e9d))
+
+
+### Bug Fixes
+
+* correct misleading log labels in agent.py ([#295](https://github.com/calf-ai/calfkit-sdk/issues/295)) ([b145238](https://github.com/calf-ai/calfkit-sdk/commit/b145238f108772930b44cb2448aa7f727cbef66e))
+
+
+### Documentation
+
+* accept ADR-0024: exception harvest ([#299](https://github.com/calf-ai/calfkit-sdk/issues/299)) ([c6dee81](https://github.com/calf-ai/calfkit-sdk/commit/c6dee81374f924f6224c6847cd7e51dd0be6e409))
+* enable Handoff in README quickstart ([#296](https://github.com/calf-ai/calfkit-sdk/issues/296)) ([e85f909](https://github.com/calf-ai/calfkit-sdk/commit/e85f909d9ea2d84cc86e18bae46e201b506fa473))
+* update README quickstart ([#294](https://github.com/calf-ai/calfkit-sdk/issues/294)) ([9a89dcf](https://github.com/calf-ai/calfkit-sdk/commit/9a89dcfbf97a8e8b80f32bfba0f46861e58b97e6))
+* Update README.md ([#291](https://github.com/calf-ai/calfkit-sdk/issues/291)) ([4a80766](https://github.com/calf-ai/calfkit-sdk/commit/4a8076670a29dc323d92067422c4bc9c4a6710cb))
+* Update README.md ([#293](https://github.com/calf-ai/calfkit-sdk/issues/293)) ([0076d1a](https://github.com/calf-ai/calfkit-sdk/commit/0076d1a9511b87fbd973837f945322712850a877))
+* Update README.md wording ([#297](https://github.com/calf-ai/calfkit-sdk/issues/297)) ([d422c78](https://github.com/calf-ai/calfkit-sdk/commit/d422c783b1065882fbcfcc8318e67bfca8d3864b))
+
 ## [0.12.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.11.0...v0.12.0) (2026-06-27)
 
 
