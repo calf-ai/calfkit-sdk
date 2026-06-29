@@ -30,7 +30,15 @@ from calfkit.models.envelope import Envelope  # runtime: FastDepends needs it fo
 from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.node_result import InvocationResult, extract_lenient
 from calfkit.models.reply import FaultMessage, ReturnMessage
-from calfkit.models.step import AgentThinkingEvent, StepMessage
+from calfkit.models.step import (
+    AgentMessageEvent,
+    HandoffEvent,
+    RunStepEvent,
+    StepEvent,
+    StepMessage,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,33 @@ async def lenient_step_decoder(msg: StreamMessage[Any]) -> StepMessage | None:
         return StepMessage.model_validate_json(msg.body)
     except (ValidationError, json.JSONDecodeError, UnicodeDecodeError):
         return None
+
+
+# The surfaced step-event kinds → their public RunEvent member (spec §3.2). An ALLOWLIST:
+# ``agent_thinking`` is deliberately absent (defined-not-emitted, §5), so ``_on_step`` filters it; a
+# wire kind missing here is never surfaced. (Kept in lockstep with the wire union by a parity test.)
+_SURFACE_BY_KIND: dict[str, type[RunStepEvent]] = {
+    "agent_message": AgentMessageEvent,
+    "tool_call": ToolCallEvent,
+    "tool_result": ToolResultEvent,
+    "handoff": HandoffEvent,
+}
+
+
+def _to_surface(step: StepEvent, message: StepMessage) -> RunStepEvent:
+    """Stamp a wire ``*Step`` with its message's hop identity → a frozen surface ``*Event`` (the
+    once-on-the-message → once-per-event mapping, spec §3.1/§3.4 — replaces the prior in-place validator
+    back-fill). Payload fields pass LIVE (not via ``model_dump()``), so nested ``ContentPart``s are not
+    re-serialized; the frozen surface model still validates on construction. ``kind`` rides in the splat
+    and matches the target's ``Literal`` default. Caller must filter unsurfaced kinds first (``_on_step``)."""
+    cls = _SURFACE_BY_KIND[step.kind]
+    return cls(
+        **{f: getattr(step, f) for f in type(step).model_fields},
+        correlation_id=message.correlation_id,
+        depth=message.depth,
+        frame_id=message.frame_id,
+        emitter=message.emitter,
+    )
 
 
 class _RunChannel:
@@ -335,18 +370,21 @@ class _Hub:
             outlet._offer(event)
 
     def _on_step(self, step: StepMessage | None) -> None:
-        """Demux a decoded step (spec §3.4): push each event onto the owning run's consume-once
+        """Demux a decoded step (spec §3.4): map each wire ``*Step`` to its frozen surface ``*Event``
+        (stamping the hop identity from the message) and push it onto the owning run's consume-once
         intermediate queue AND tee it to the firehose. A ``None`` (a malformed step the lenient decoder
-        swallowed) drops. A **no-handle** step (a ``send()`` run or a GC'd handle) drops **silently**
-        from the per-run path — unlike a no-handle *terminal*, which WARN/ERROR-logs — but is still
-        tee'd, so ``send()`` runs stay observable via ``events()``."""
+        swallowed) drops. A wire event whose kind is not a surfaced RunEvent (``AgentThinkingStep``,
+        defined-not-emitted §5) is filtered. A **no-handle** step (a ``send()`` run or a GC'd handle)
+        drops **silently** from the per-run path — unlike a no-handle *terminal*, which WARN/ERROR-logs —
+        but is still tee'd, so ``send()`` runs stay observable via ``events()``."""
         if step is None:
             logger.debug("dropped a malformed/undecodable step (best-effort; never faults the run)")
             return
         handle = self._runs.get(step.correlation_id)
-        for event in step.events:
-            if isinstance(event, AgentThinkingEvent):
-                continue  # defined-not-emitted in v1 (§5): not a RunEvent member, never surfaced on a stream
+        for wire_event in step.events:
+            if wire_event.kind not in _SURFACE_BY_KIND:
+                continue  # AgentThinkingStep — defined-not-emitted in v1 (§5), never surfaced on a stream
+            event = _to_surface(wire_event, step)
             if handle is not None:
                 handle._channel.push_intermediate(event)  # synchronous, non-blocking (consume-once queue)
             self._tee(event)  # firehose: every step is surfaced raw, demux'd or not (§5.4)

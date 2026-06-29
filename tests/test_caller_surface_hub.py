@@ -22,6 +22,7 @@ from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.payload import TextPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.state import State
+from calfkit.models.step import AgentMessageStep, StepMessage
 
 _HUB_LOGGER = "calfkit.client.hub"
 _EVENTS_LOGGER = "calfkit.client.events"
@@ -458,7 +459,20 @@ async def test_terminal_only_yields_terminal_events() -> None:
     async with EventStream(hub, terminal_only=True, buffer_size=8) as stream:
         hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"))
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
-    assert isinstance(ev, RunCompleted)  # a terminal passes the filter (v1: every event is terminal)
+    assert isinstance(ev, RunCompleted)  # a terminal passes the terminal_only filter
+
+
+async def test_terminal_only_drops_intermediate_step_events() -> None:
+    # A terminal_only firehose outlet surfaces ONLY terminals (events.py:150): an intermediate step event
+    # tee'd before the terminal is filtered, so the first event the stream yields is the terminal, not the
+    # step. (Now that this PR widened RunEvent with step events, the filter is load-bearing, not a no-op.)
+    hub = _Hub()
+    async with EventStream(hub, terminal_only=True, buffer_size=8) as stream:
+        step = StepMessage(correlation_id="c-1", emitter="a", depth=2, frame_id="f", events=[AgentMessageStep(parts=[TextPart(text="x")])])
+        hub._on_step(step)
+        hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"))
+        ev = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert isinstance(ev, RunCompleted)  # the step was filtered out; only the terminal surfaced
 
 
 async def test_two_open_streams_each_receive_every_event() -> None:

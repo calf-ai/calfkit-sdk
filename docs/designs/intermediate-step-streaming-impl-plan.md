@@ -281,3 +281,145 @@ wired (§4/§5). Test: the type decodes; v1 never emits it.
 `make fix && make check` (lint/format/type) + `make test` + `make test-kafka` green · 100% coverage on new
 code · every constraints box ticked with a test · parent-spec edits + ADR(s) + user docs landed · final
 adversarial PR review converged to zero critical/major · worktree/branch ready to merge.
+
+---
+
+## 6. Wire/surface split — increment H (round-1 PR-review fold, in #302)
+
+> **Status: data model FINALIZED** (decisions locked with Ryan: `*Step` wire names · **parallel**
+> hierarchies, not subclasses · folded into **PR #302**). Supersedes the unified-type design of
+> **ADR-0026** (type-design MAJOR: the unified `… | None`-identity, non-frozen, in-place-stamped type
+> made the public surface dishonest and aliased a shared-mutable object across observers). This increment
+> replaces it with two **frozen** families mapped once.
+
+### 6.1 The two families (finalized `models/step.py`)
+
+Two **parallel** (non-subclass) hierarchies, both `frozen=True`. A surface `*Event` is therefore **not**
+assignable where a wire `*Step` is expected — empirically verified **both** at compile time (mypy rejects a
+`*Event` in `list[StepEvent]`) **and** at runtime (a live `*Event` instance is rejected by the discriminated
+union). So a surfaced event can never ride the wire and identity stays strictly once-on-the-message. (Precise
+claim: *mypy-rejected + live-instance-rejected* — a surface event *dumped to a dict* would coerce to a `*Step`
+with identity keys ignored, but the producer only ever authors `*Step` directly, so that path is unreachable.)
+
+**WIRE / DRAFT — `*Step` (frozen, NO identity).** Authored by the node side; serialized verbatim inside
+`StepMessage`; identity rides once on the message, never per event.
+
+```python
+class _StepBase(BaseModel):
+    model_config = ConfigDict(frozen=True)            # no identity fields at all
+
+class AgentMessageStep(_StepBase):
+    kind: Literal["agent_message"] = "agent_message"; parts: list[ContentPart]
+class ToolCallStep(_StepBase):
+    kind: Literal["tool_call"] = "tool_call"; tool_call_id: str; name: str; args: str | dict[str, Any] | None = None
+class ToolResultStep(_StepBase):
+    kind: Literal["tool_result"] = "tool_result"; tool_call_id: str; name: str; parts: list[ContentPart]; is_error: bool = False
+class HandoffStep(_StepBase):
+    kind: Literal["handoff"] = "handoff"; target: str; reason: str
+class AgentThinkingStep(_StepBase):
+    kind: Literal["agent_thinking"] = "agent_thinking"; parts: list[ContentPart]   # decode-complete; never emitted in v1
+
+StepEvent = Annotated[AgentMessageStep | ToolCallStep | ToolResultStep | HandoffStep | AgentThinkingStep, Discriminator("kind")]
+
+class StepMessage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    WIRE: ClassVar[str] = "step"
+    correlation_id: str; emitter: str; depth: int; frame_id: str
+    events: list[StepEvent]
+    # NO model_validator — wire events carry no identity, so there is nothing to back-fill.
+```
+
+**SURFACE — `*Event` (frozen, identity REQUIRED).** The public `RunEvent` members the caller observes;
+identity is **always** present (stamped once in `_on_step`). Names unchanged → zero consumer churn.
+
+```python
+class _RunStepEventBase(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    correlation_id: str; depth: int; frame_id: str; emitter: str   # all non-null
+
+class AgentMessageEvent(_RunStepEventBase):
+    kind: Literal["agent_message"] = "agent_message"; parts: list[ContentPart]
+class ToolCallEvent(_RunStepEventBase):
+    kind: Literal["tool_call"] = "tool_call"; tool_call_id: str; name: str; args: str | dict[str, Any] | None = None
+class ToolResultEvent(_RunStepEventBase):
+    kind: Literal["tool_result"] = "tool_result"; tool_call_id: str; name: str; parts: list[ContentPart]; is_error: bool = False
+class HandoffEvent(_RunStepEventBase):
+    kind: Literal["handoff"] = "handoff"; target: str; reason: str
+class AgentThinkingEvent(_RunStepEventBase):
+    kind: Literal["agent_thinking"] = "agent_thinking"; parts: list[ContentPart]   # defined-not-emitted (§5); not in RunEvent
+```
+
+The payload fields (`tool_call_id`/`name`/`args`/`parts`/`is_error`/`target`/`reason`) are **declared in
+both families** — deliberate, ~5 short lines duplicated. A shared mixin was rejected: it adds a base per
+event for less clarity, and subclassing was rejected because it makes a surface event *is-a* wire event
+(re-opening the leak the split closes).
+
+### 6.2 The mapping seam (`client/hub.py`)
+
+The in-place validator back-fill is replaced by one explicit, kind-dispatched constructor. `_on_step`
+filters the wire `AgentThinkingStep` (defined-not-emitted) **before** mapping, so the surface
+`AgentThinkingEvent` is never produced in v1 (matching today):
+
+```python
+_SURFACE_BY_KIND: dict[str, type[_RunStepEventBase]] = {
+    "agent_message": AgentMessageEvent, "tool_call": ToolCallEvent,
+    "tool_result": ToolResultEvent, "handoff": HandoffEvent,
+    # "agent_thinking" deliberately absent — filtered before mapping (defined-not-emitted, §5)
+}
+
+def _to_surface(step: StepEvent, msg: StepMessage) -> _RunStepEventBase:
+    cls = _SURFACE_BY_KIND[step.kind]
+    return cls(**{f: getattr(step, f) for f in type(step).model_fields}, correlation_id=msg.correlation_id,
+               depth=msg.depth, frame_id=msg.frame_id, emitter=msg.emitter)   # type(step).model_fields, NOT instance (pydantic ≥2.11 deprecation)
+
+# _on_step (preserve the EXISTING no-handle guard — a send() run has no handle: drop from the per-run
+# path silently but STILL tee to the firehose, spec §3.4):
+#   handle = self._runs.get(step.correlation_id)
+#   for s in step.events:
+#       if s.kind not in _SURFACE_BY_KIND: continue          # AgentThinkingStep — defined-not-emitted
+#       event = _to_surface(s, step)
+#       if handle is not None: handle._channel.push_intermediate(event)
+#       self._tee(event)
+```
+
+(Field values are passed **live**, not via `model_dump()`, so nested `ContentPart`s are not needlessly
+re-serialized; the surface model still validates on construction. `kind` rides in the splat and matches the
+target's `Literal` default.)
+
+### 6.3 Object-creation paths — before → after
+| Site | Now (unified, ADR-0026) | After (split) |
+| --- | --- | --- |
+| Author (`agent.py` ×6, `tool.py` ×1; `_step_draft`/`project_steps` return) | construct `*Event` (identity unset) into `list[StepEvent]` | construct `*Step` into `list[StepEvent]` (wire union) |
+| Batch (`base.py` chokepoint) | `StepMessage(events=[*Event])`; validator stamps on decode | `StepMessage(events=[*Step])`; no validator |
+| Decode (client ingress) | `model_validate_json` → in-place stamp | `model_validate_json` → plain (no identity on wire) |
+| Surface (`hub._on_step`) | push the *same* non-frozen `*Event` to queue + every firehose outlet | build one frozen `*Event` via `_to_surface`, push/tee it |
+| `RunEvent` / re-exports (`events.py`, `__init__.py`, `client/__init__.py`) | the 4 `*Event` | unchanged (same names, frozen now) |
+
+### 6.4 Churn surface (all in #302)
+*(Production construction counts verified exact in review: `agent.py` ×6, `tool.py` ×1; `base.py`/`session_context.py`/`_protocol.py` need no construction change — `base.py:1801` builds `StepMessage(events=step_events)` from the `project_steps` return and names no event type; `StepEvent`/`_step_draft`/`project_steps -> list[StepEvent]` stay correct since `StepEvent` remains the wire-union name. `StepEvent` is **not** publicly re-exported and stays wire-internal; the surface `*Event` names stay public+unchanged, so `__init__.py`/`client/__init__.py`/`events.py` have **nothing to re-point** beyond the `models.step` import line.)*
+
+- `models/step.py` — the §6.1 rewrite (drops the validator, `exclude=True`, `default=None`, `frozen=False`).
+- `nodes/agent.py` (×6) + `nodes/tool.py` (×1) — authoring constructs `*Step`; `_step_draft` typed `list[StepEvent]` (wire).
+- `client/hub.py` — `_to_surface` + `_SURFACE_BY_KIND`; `_on_step` maps wire→surface (filter on `AgentThinkingStep`), **keeping the no-handle guard** (§6.2).
+- **Tests** (the full set — review found the original list under-scoped):
+  - *Producer-side draft* `*Event` → `*Step`: `test_project_steps.py` (the arm/chokepoint/scalar/`message_agent` draft checks), `test_handoff_dispatch.py` (`TestHandoffAuthorsStepEvent`, the `isinstance(e, HandoffEvent)` over `_step_draft` → `HandoffStep`), `test_co_tenant_tool_isolation.py` (the unknown-tool-arm draft check).
+  - *Wire-side `StepMessage(events=[…])` builders* `*Event` → `*Step`: `test_wire_filter_cutover.py` (`_step()` + the thinking-event helper) and `test_caller_surface_hub.py:471`. **Semantic break (not a rename):** `test_wire_filter_cutover.py:107` `assert list(outlet._buffer) == step.events` fails post-split (the firehose now holds mapped **surface** `*Event`, `step.events` holds **wire** `*Step`) — rewrite to compare mapped fields, not `== step.events`.
+  - *Reception-side surface builders* now need identity: `test_run_channel.py` `_step()` (`:28-29`) + `:127` build `AgentMessageEvent(parts=…)` with **no** identity → add `correlation_id/depth/frame_id/emitter` (surface `*Event` is now identity-required).
+  - `test_step_models.py` rewrites: drop mutability/back-fill; **add** a `_to_surface` mapping test, "surface event cannot construct without identity", "both families frozen", and a **mechanical parity test** (§6.5 H1) guarding the parallel-hierarchy drift hazard.
+- **Docs** (widen from the original "§3.1/§3.2"): **ADR-0026** rewritten to record the split; **spec §2.5 / §3.1 / §3.2 / §3.4 / §7 + the status header (`:6-7`)** updated — scrub every "non-frozen / `exclude=True` / blessed-factory / `model_validator` back-fill / in-place" claim, describe the two frozen families + the `_on_step` mapping. Also scrub the stale "validator/back-fill" wording in `session_context.py:201` (the `_step_draft` comment) and `client/events.py:3-5` (module docstring). ADR-0025/0027 + `docs/api.md`/`docs/client-features.md` carry no stale design prose (surface names + "carries hop identity" both still true) — **no edit**.
+
+### 6.5 Build order (TDD, within #302)
+H1 `models/step.py` two families + `StepEvent` wire union (+ `test_step_models.py` rewrite: frozen both
+sides, surface-needs-identity, wire-has-no-identity, union resolves, wire round-trip byte-identical to today,
+**+ the mechanical parity test**: for each kind `set(WireCls.model_fields) | {"correlation_id","depth","frame_id","emitter"} == set(SurfaceCls.model_fields)`, and `set(_SURFACE_BY_KIND) == {every wire kind except agent_thinking}` — converts the parallel-hierarchy payload-drift + forgotten-allowlist-entry silent-drop hazards into a test-time failure) → H2 `_to_surface`/`_SURFACE_BY_KIND` + `_on_step` rewrite (channel/firehose
+tests still green; thinking filtered; no-handle guard kept) → H3 flip authoring in `agent.py`/`tool.py` to
+`*Step` + retype `_step_draft` (the §4 draft tests + the §6.4 wire-side builders flip) → H4 re-point the
+`models.step` import in `events.py`/re-exports (names unchanged) → H5 ADR-0026 rewrite + spec §2.5/§3.1/§3.2/§3.4/§7
++ header + the stale `session_context.py`/`events.py` docstrings. `make fix && make check` + offline suite
+green at each step.
+
+> **Plan-internal supersession (review M4):** §1.A and the §2 checklist still describe the *old* unified
+> design — `Field(default=None, exclude=True)`, **NON-frozen** `model_config`, the "mutability regression"
+> box, and the bare `AgentMessage`/`ToolCall` names. Those are **superseded by §6** for #302: the events are
+> now **frozen** (both families), identity is required on the surface / absent on the wire, and the validator
+> back-fill is replaced by `_to_surface`. Read §1.A/§2 as the *as-originally-shipped* record; build to §6.

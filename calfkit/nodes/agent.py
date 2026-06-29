@@ -24,7 +24,7 @@ from calfkit.models.node_result import _extract_text, extract_lenient
 from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry, render_parts_as_text
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.step import AgentMessageEvent, HandoffEvent, StepEvent, ToolCallEvent, ToolResultEvent
+from calfkit.models.step import AgentMessageStep, HandoffStep, StepEvent, ToolCallStep, ToolResultStep
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, step_preamble, structured_output_preamble
@@ -414,28 +414,35 @@ class BaseAgentNodeDef(
             return f"Agent {name!r} is not currently reachable — it is offline or not in your messaging scope. Choose from the agents listed in the tool description."  # noqa: E501
         return None
 
-    def _message_agent_retry(self, tool_call: ToolCallPart, ctx: SessionRunContext, content: str) -> None:
-        """Land a model-visible ``RetryPromptPart`` for a bad ``message_agent`` call (so the slot completes
-        and never dispatches), keyed by ``tool_call_id`` like any tool result."""
+    def _reject_invalid_call(
+        self, tool_call: ToolCallPart, ctx: SessionRunContext, step_draft: list[StepEvent], content: str | list[pydantic_core.ErrorDetails]
+    ) -> None:
+        """A calfkit-caught invalid call — an unknown tool, malformed/invalid args, a failed validator, or
+        a bad ``message_agent`` target — lands a model-visible ``RetryPromptPart`` AND authors the paired
+        ``is_error`` ``ToolResultStep`` step. This is the SINGLE seam for both, so a pre-dispatch rejection
+        can never surface a model retry without its observation step (spec §3.2 lists pre-dispatch rejection
+        as a ``ToolResultStep`` producer; the missing message_agent pairing was round-1 review MAJOR-1).
+        ``content`` is the ``RetryPromptPart`` content — a ``str`` for most arms, or the schema arm's
+        ``e.errors()`` ``list[dict]``; the step renders non-``str`` content to JSON text."""
         ctx.state.add_tool_result(
             tool_call.tool_call_id, RetryPromptPart(content=content, tool_name=tool_call.tool_name, tool_call_id=tool_call.tool_call_id)
         )
+        text = content if isinstance(content, str) else pydantic_core.to_json(content).decode()
+        step_draft.append(ToolResultStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, parts=[TextPart(text=text)], is_error=True))
 
-    def _validate_message_agent(self, tool_call: ToolCallPart, ctx: SessionRunContext) -> None:
-        """Validate a message_agent call's target; RetryPromptPart on failure, else leave it pending
-        (no tools_registry binding) so the dispatch builds the peer Call. View re-read at dispatch."""
+    def _validate_message_agent(self, tool_call: ToolCallPart, ctx: SessionRunContext) -> str | None:
+        """Validate a message_agent call's target, returning the rejection reason (malformed args / self /
+        cycle / offline) or ``None`` if valid — a pure predicate. The caller lands the ``RetryPromptPart`` +
+        paired step via :meth:`_reject_invalid_call`; a valid call is left pending (no tools_registry
+        binding) so the dispatch builds the peer Call. View re-read at dispatch."""
         try:
             args = tool_call.args_as_dict()
         except Exception as e:  # noqa: BLE001
-            self._message_agent_retry(tool_call, ctx, f"Malformed message_agent arguments: {type(e).__name__}: {safe_exc_message(e)}")
-            return
+            return f"Malformed message_agent arguments: {type(e).__name__}: {safe_exc_message(e)}"
         name, message = args.get("name"), args.get("message")
         if not isinstance(name, str) or not name.strip() or not isinstance(message, str) or not message.strip():
-            self._message_agent_retry(tool_call, ctx, "message_agent requires non-empty string 'name' and 'message' arguments.")
-            return
-        error = self._message_agent_target_error(name, ctx)
-        if error is not None:
-            self._message_agent_retry(tool_call, ctx, error)
+            return "message_agent requires non-empty string 'name' and 'message' arguments."
+        return self._message_agent_target_error(name, ctx)
 
     def _message_agent_call(self, tool_call: ToolCallPart) -> Call[State]:
         """Build the peer Call: a fresh seeded sub-state (message staged as a user turn) to the peer's
@@ -639,30 +646,38 @@ class BaseAgentNodeDef(
             latest_tool_calls = ctx.state.latest_tool_calls()
 
             # Author this hop's step draft (spec §2.5/§3.2): preamble (the final ModelResponse's text)
-            # + a ToolCallEvent per requested call (raw model emission; covers message_agent + valid +
-            # invalid) + an is_error ToolResultEvent for each call this hop rejects (the four arms below).
-            # Read-and-cleared at the chokepoint via project_steps; committed to ctx._step_draft after
-            # the loop. A pre-model re-dispatch hop never reaches here, so its draft stays None ⇒ no step.
+            # + a ToolCallStep per requested call (raw model emission; covers message_agent + valid +
+            # invalid) + an is_error ToolResultStep for each call this hop rejects (the arms below, via
+            # _reject_invalid_call). Read at the chokepoint via project_steps; committed to ctx._step_draft
+            # after the loop. A pre-model re-dispatch hop never reaches here, so its draft stays None ⇒ no step.
+            #
+            # Authoring runs OUTSIDE the chokepoint's best-effort wrap (spec §2.9), so a raise here would
+            # FAULT the run — the one thing a step must never do. It is total by construction: step_preamble
+            # returns a str; a ToolCallPart's tool_call_id/name are str and args is coerced to str|dict|None;
+            # the schema arm renders e.errors() (over JSON-native validated args) via pydantic_core. Keep it
+            # so — a future event field sourced from un-coerced data must coerce here or move under a guard.
             step_draft: list[StepEvent] = []
             _preamble = step_preamble(messages)
             if _preamble:
-                step_draft.append(AgentMessageEvent(parts=[TextPart(text=_preamble)]))
+                step_draft.append(AgentMessageStep(parts=[TextPart(text=_preamble)]))
 
             for tool_call in result.output.calls:
                 ctx.state.add_tool_call(tool_call)
                 # The raw emission can be an off-spec scalar (e.g. a bare int) — pydantic-ai's
                 # ToolCallPart is a non-validating dataclass — so coerce any non-(str/dict/None) value
-                # to its string form, keeping ToolCallEvent.args within str|dict|None (spec §3.2).
+                # to its string form, keeping ToolCallStep.args within str|dict|None (spec §3.2).
                 _raw_args = tool_call.args
                 _step_args = _raw_args if (_raw_args is None or isinstance(_raw_args, (str, dict))) else str(_raw_args)
-                step_draft.append(ToolCallEvent(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, args=_step_args))
+                step_draft.append(ToolCallStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, args=_step_args))
 
                 # message_agent forks BEFORE the tools_registry lookup (it is never a registry binding):
                 # validate the target (RetryPromptPart on self/cycle/offline/malformed), else leave it
                 # pending so the dispatch path below builds the peer Call. add_tool_call above is still
                 # load-bearing for the completion check (KeyError on an unregistered id).
                 if tool_call.tool_name == _MESSAGE_AGENT_TOOL:
-                    self._validate_message_agent(tool_call, ctx)
+                    rejection = self._validate_message_agent(tool_call, ctx)
+                    if rejection is not None:
+                        self._reject_invalid_call(tool_call, ctx, step_draft, rejection)
                     continue
 
                 binding = tools_registry.get(tool_call.tool_name)
@@ -671,22 +686,7 @@ class BaseAgentNodeDef(
                     no_tool_content = (
                         f"There is no tool named {tool_call.tool_name}, it does not exist. Please ensure you are only calling tools you are provided."  # noqa: E501
                     )
-                    ctx.state.add_tool_result(
-                        tool_call.tool_call_id,
-                        RetryPromptPart(
-                            content=no_tool_content,
-                            tool_name=tool_call.tool_name,
-                            tool_call_id=tool_call.tool_call_id,
-                        ),
-                    )
-                    step_draft.append(
-                        ToolResultEvent(
-                            tool_call_id=tool_call.tool_call_id,
-                            name=tool_call.tool_name,
-                            parts=[TextPart(text=no_tool_content)],
-                            is_error=True,
-                        )
-                    )
+                    self._reject_invalid_call(tool_call, ctx, step_draft, no_tool_content)
                     continue
 
                 # Parse args from the LLM's emission. Applies to ALL dispatch
@@ -711,22 +711,7 @@ class BaseAgentNodeDef(
                         content,
                         exc_info=True,
                     )
-                    ctx.state.add_tool_result(
-                        tool_call.tool_call_id,
-                        RetryPromptPart(
-                            content=content,
-                            tool_name=tool_call.tool_name,
-                            tool_call_id=tool_call.tool_call_id,
-                        ),
-                    )
-                    step_draft.append(
-                        ToolResultEvent(
-                            tool_call_id=tool_call.tool_call_id,
-                            name=tool_call.tool_name,
-                            parts=[TextPart(text=content)],
-                            is_error=True,
-                        )
-                    )
+                    self._reject_invalid_call(tool_call, ctx, step_draft, content)
                     continue
 
                 # Validate against the schema if we have a runtime validator.
@@ -744,23 +729,9 @@ class BaseAgentNodeDef(
                             tool_call.tool_name,
                             validation_errors,
                         )
-                        ctx.state.add_tool_result(
-                            tool_call.tool_call_id,
-                            RetryPromptPart(
-                                content=validation_errors,
-                                tool_name=tool_call.tool_name,
-                                tool_call_id=tool_call.tool_call_id,
-                            ),
-                        )
-                        # validation_errors is a list[dict] (e.errors()) — render to a TextPart, not str.
-                        step_draft.append(
-                            ToolResultEvent(
-                                tool_call_id=tool_call.tool_call_id,
-                                name=tool_call.tool_name,
-                                parts=[TextPart(text=pydantic_core.to_json(validation_errors).decode())],
-                                is_error=True,
-                            )
-                        )
+                        # validation_errors is a list[dict] (e.errors()): the RetryPromptPart carries it
+                        # verbatim; _reject_invalid_call renders it to JSON text for the step.
+                        self._reject_invalid_call(tool_call, ctx, step_draft, validation_errors)
                         continue
                     except Exception as e:
                         # A user-authored Pydantic ``field_validator`` raised
@@ -777,22 +748,7 @@ class BaseAgentNodeDef(
                             type(e).__name__,
                             exc_info=True,
                         )
-                        ctx.state.add_tool_result(
-                            tool_call.tool_call_id,
-                            RetryPromptPart(
-                                content=validator_content,
-                                tool_name=tool_call.tool_name,
-                                tool_call_id=tool_call.tool_call_id,
-                            ),
-                        )
-                        step_draft.append(
-                            ToolResultEvent(
-                                tool_call_id=tool_call.tool_call_id,
-                                name=tool_call.tool_name,
-                                parts=[TextPart(text=validator_content)],
-                                is_error=True,
-                            )
-                        )
+                        self._reject_invalid_call(tool_call, ctx, step_draft, validator_content)
                         continue
 
             # Commit the authored draft so the chokepoint's project_steps surfaces it (covers both the
@@ -866,8 +822,8 @@ class BaseAgentNodeDef(
                 handoff_draft: list[StepEvent] = []
                 _ho_preamble = step_preamble(new_messages)
                 if _ho_preamble:
-                    handoff_draft.append(AgentMessageEvent(parts=[TextPart(text=_ho_preamble)]))
-                handoff_draft.append(HandoffEvent(target=result.output.name, reason=result.output.message))
+                    handoff_draft.append(AgentMessageStep(parts=[TextPart(text=_ho_preamble)]))
+                handoff_draft.append(HandoffStep(target=result.output.name, reason=result.output.message))
                 ctx._step_draft = handoff_draft
                 return self._dispatch_handoff(result.output, ctx)
             logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
@@ -894,13 +850,13 @@ class BaseAgentNodeDef(
 
         An inner-frame ``ReturnCall`` — a consulted ``message_agent`` peer answering, depth > 1 (the
         chokepoint's terminal gate already excluded the depth-1 run terminal) — becomes a single
-        ``ToolResultEvent`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
+        ``ToolResultStep`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
         ``tool_call_id``, not name). ``is_error`` is derived once here, coerce-first. Otherwise
         (``Call`` / ``list[Call]`` / ``TailCall``) the agent's authored ``_step_draft`` is the
         projection — ``None`` on a pre-model re-dispatch hop ⇒ ``[]`` (the double-emit guard)."""
         if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
             parts = _coerce_to_parts(output.value)
-            return [ToolResultEvent(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]
+            return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]
         return ctx._step_draft or []
 
     def _add_tools(self, raw_tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None) -> None:

@@ -26,7 +26,8 @@ def _terminal(cid: str = "c") -> RunFailed:
 
 
 def _step(text: str = "hi") -> AgentMessageEvent:
-    return AgentMessageEvent(parts=[TextPart(text=text)])
+    # a surface RunEvent — identity is required (stamped from the StepMessage by _to_surface on the live path).
+    return AgentMessageEvent(parts=[TextPart(text=text)], correlation_id="c", depth=1, frame_id="f", emitter="e")
 
 
 def _handle(ch: _RunChannel, *, output_type: type = str) -> InvocationHandle:
@@ -124,7 +125,7 @@ class TestRunChannelTwoStorage:
         # stream() yields the channel's raw events; the handle's output_type only projects result()'s
         # terminal, never the steps (spec §3.2/§3.4) — an AgentMessageEvent stays an AgentMessageEvent under output_type=str.
         ch = _RunChannel()
-        ch.push_intermediate(AgentMessageEvent(parts=[TextPart(text="raw")]))
+        ch.push_intermediate(AgentMessageEvent(parts=[TextPart(text="raw")], correlation_id="c", depth=1, frame_id="f", emitter="e"))
         ch.push(_terminal())
         got = [e async for e in _handle(ch, output_type=str).stream()]
         assert isinstance(got[0], AgentMessageEvent)

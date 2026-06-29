@@ -1,9 +1,10 @@
-"""Increment A — the step wire vocabulary (intermediate-step-streaming spec §2.4 / §3.1 / §3.2).
+"""The step wire vocabulary — two parallel frozen families (intermediate-step-streaming spec §3.1/§3.2,
+impl-plan §6).
 
-Inert, offline, no broker: the ``StepMessage`` wire body + the ``StepEvent`` discriminated
-union (non-frozen, identity excluded-from-wire and back-filled by ``StepMessage``'s validator),
-the ``x-calf-wire`` header + ``WireKind`` + ``wire_filter``, and ``Envelope.WIRE``. Nothing here
-emits, routes, or receives a step.
+WIRE/DRAFT ``*Step`` (frozen, NO identity) carried by ``StepMessage`` (frozen, no validator); identity
+rides once on the message. SURFACE ``*Event`` (frozen, identity REQUIRED) are the public ``RunEvent``
+members, built once caller-side by ``_to_surface``. The two families are separate (not subclasses) so a
+surface event cannot ride the wire. Nothing here emits, routes, or receives a step.
 """
 
 from __future__ import annotations
@@ -12,18 +13,36 @@ import json
 import typing
 from types import SimpleNamespace
 
+import pytest
+from pydantic import ValidationError
+
 from calfkit._protocol import HDR_WIRE, WireKind, wire_filter
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart, ToolCallPart
 from calfkit.models.step import (
     AgentMessageEvent,
+    AgentMessageStep,
     AgentThinkingEvent,
+    AgentThinkingStep,
     HandoffEvent,
+    HandoffStep,
     StepEvent,
     StepMessage,
     ToolCallEvent,
+    ToolCallStep,
     ToolResultEvent,
+    ToolResultStep,
 )
+
+# (wire `*Step`, surface `*Event`, kind) for every step-event kind.
+_PAIRS = [
+    (AgentMessageStep, AgentMessageEvent, "agent_message"),
+    (ToolCallStep, ToolCallEvent, "tool_call"),
+    (ToolResultStep, ToolResultEvent, "tool_result"),
+    (HandoffStep, HandoffEvent, "handoff"),
+    (AgentThinkingStep, AgentThinkingEvent, "agent_thinking"),
+]
+_IDENTITY = {"correlation_id", "depth", "frame_id", "emitter"}
 
 
 def _msg(**headers: object) -> SimpleNamespace:
@@ -69,144 +88,215 @@ class TestWireFilter:
         assert wire_filter(StepMessage)(_msg()) is False
 
 
-def _sample_events() -> list[StepEvent]:
+# --------------------------------------------------------------------------- #
+# WIRE / DRAFT family — `*Step` (frozen, no identity)                          #
+# --------------------------------------------------------------------------- #
+
+
+def _wire_events() -> list[StepEvent]:
     return [
-        AgentMessageEvent(parts=[TextPart(text="let me look that up")]),
-        ToolCallEvent(tool_call_id="c1", name="search", args={"q": "x"}),
-        ToolResultEvent(tool_call_id="c1", name="search_tool", parts=[TextPart(text="result")], is_error=False),
-        HandoffEvent(target="billing", reason="needs billing"),
+        AgentMessageStep(parts=[TextPart(text="let me look that up")]),
+        ToolCallStep(tool_call_id="c1", name="search", args={"q": "x"}),
+        ToolResultStep(tool_call_id="c1", name="search_tool", parts=[TextPart(text="result")], is_error=False),
+        HandoffStep(target="billing", reason="needs billing"),
     ]
 
 
-def _sample_message() -> StepMessage:
-    return StepMessage(correlation_id="run-1", emitter="agent-a", depth=2, frame_id="f1", events=_sample_events())
+def _message() -> StepMessage:
+    return StepMessage(correlation_id="run-1", emitter="agent-a", depth=2, frame_id="f1", events=_wire_events())
 
 
-class TestStepEventKinds:
+class TestWireStep:
     def test_kind_literals(self) -> None:
-        assert AgentMessageEvent(parts=[]).kind == "agent_message"
-        assert ToolCallEvent(tool_call_id="c", name="n").kind == "tool_call"
-        assert ToolResultEvent(tool_call_id="c", name="n", parts=[]).kind == "tool_result"
-        assert HandoffEvent(target="t", reason="r").kind == "handoff"
-        assert AgentThinkingEvent(parts=[]).kind == "agent_thinking"
+        assert AgentMessageStep(parts=[]).kind == "agent_message"
+        assert ToolCallStep(tool_call_id="c", name="n").kind == "tool_call"
+        assert ToolResultStep(tool_call_id="c", name="n", parts=[]).kind == "tool_result"
+        assert HandoffStep(target="t", reason="r").kind == "handoff"
+        assert AgentThinkingStep(parts=[]).kind == "agent_thinking"
 
     def test_kinds_distinct_from_contentpart(self) -> None:
-        # The step ``kind`` space must not collide with ContentPart's — esp. ToolCallEvent ("tool_call")
-        # vs ToolCallPart ("tool").
-        step_kinds = {"agent_message", "tool_call", "tool_result", "handoff", "agent_thinking"}
-        content_kinds = {"text", "file", "data", "tool"}
-        assert step_kinds.isdisjoint(content_kinds)
-        assert ToolCallEvent(tool_call_id="c", name="n").kind != ToolCallPart(tool_call_id="c", kwargs={}, tool_name="n").kind
+        # ToolCallStep.kind ("tool_call") must not collide with ContentPart's ToolCallPart.kind ("tool").
+        step_kinds = {k for _, _, k in _PAIRS}
+        assert step_kinds.isdisjoint({"text", "file", "data", "tool"})
+        assert ToolCallStep(tool_call_id="c", name="n").kind != ToolCallPart(tool_call_id="c", kwargs={}, tool_name="n").kind
+
+    def test_wire_step_carries_no_identity_fields(self) -> None:
+        # Identity rides ONCE on StepMessage; the wire events structurally cannot carry it.
+        for wire, _, _ in _PAIRS:
+            assert _IDENTITY.isdisjoint(set(wire.model_fields)), wire.__name__
+
+    def test_wire_step_is_frozen(self) -> None:
+        s = ToolCallStep(tool_call_id="c", name="n")
+        with pytest.raises(ValidationError):
+            s.name = "other"  # type: ignore[misc]
+
+    def test_args_accepts_str_dict_none(self) -> None:
+        assert ToolCallStep(tool_call_id="c", name="n", args='{"q": "x"}').args == '{"q": "x"}'
+        assert ToolCallStep(tool_call_id="c", name="n", args={"q": "x"}).args == {"q": "x"}
+        assert ToolCallStep(tool_call_id="c", name="n").args is None
+
+    def test_is_error_default_and_settable(self) -> None:
+        assert ToolResultStep(tool_call_id="c", name="n", parts=[]).is_error is False
+        assert ToolResultStep(tool_call_id="c", name="n", parts=[], is_error=True).is_error is True
 
 
-class TestToolCallArgs:
-    def test_args_accepts_str(self) -> None:
-        assert ToolCallEvent(tool_call_id="c", name="n", args='{"q": "x"}').args == '{"q": "x"}'
+class TestStepMessageWire:
+    def test_step_message_is_frozen(self) -> None:
+        sm = _message()
+        with pytest.raises(ValidationError):
+            sm.correlation_id = "other"  # type: ignore[misc]
 
-    def test_args_accepts_dict(self) -> None:
-        assert ToolCallEvent(tool_call_id="c", name="n", args={"q": "x"}).args == {"q": "x"}
-
-    def test_args_defaults_none(self) -> None:
-        assert ToolCallEvent(tool_call_id="c", name="n").args is None
-
-
-class TestToolResult:
-    def test_is_error_defaults_false(self) -> None:
-        assert ToolResultEvent(tool_call_id="c", name="n", parts=[]).is_error is False
-
-    def test_is_error_settable(self) -> None:
-        assert ToolResultEvent(tool_call_id="c", name="n", parts=[], is_error=True).is_error is True
-
-
-class TestStepEventMutability:
-    """Load-bearing: ``StepMessage``'s validator back-fills identity by in-place assignment, so a
-    StepEvent MUST be non-frozen. A frozen model would raise during decode → the lenient decoder
-    swallows → every step silently dropped forever (spec §3.1)."""
-
-    def test_identity_is_assignable(self) -> None:
-        e = AgentMessageEvent(parts=[TextPart(text="hi")])
-        e.correlation_id = "run-9"
-        e.depth = 3
-        e.frame_id = "f9"
-        e.emitter = "n9"
-        assert (e.correlation_id, e.depth, e.frame_id, e.emitter) == ("run-9", 3, "f9", "n9")
-
-    def test_identity_defaults_none(self) -> None:
-        e = ToolCallEvent(tool_call_id="c", name="n")
-        assert (e.correlation_id, e.depth, e.frame_id, e.emitter) == (None, None, None, None)
-
-
-class TestStepMessageIdentityBackfill:
-    def test_validator_stamps_each_event_identity_on_construction(self) -> None:
-        sm = _sample_message()
-        for e in sm.events:
-            assert e.correlation_id == "run-1"
-            assert e.depth == 2
-            assert e.frame_id == "f1"
-            assert e.emitter == "agent-a"
-
-    def test_dump_excludes_nested_identity_keeps_message_level(self) -> None:
-        raw = json.loads(_sample_message().model_dump_json())
-        assert raw["correlation_id"] == "run-1"
-        assert raw["emitter"] == "agent-a"
-        assert raw["depth"] == 2
-        assert raw["frame_id"] == "f1"
+    def test_wire_dump_has_message_identity_only(self) -> None:
+        # The wire byte shape: identity ONCE at the message level, NONE per event (wire-compatible with the
+        # superseded unified design, which already excluded per-event identity).
+        raw = json.loads(_message().model_dump_json())
+        assert (raw["correlation_id"], raw["emitter"], raw["depth"], raw["frame_id"]) == ("run-1", "agent-a", 2, "f1")
         for ev in raw["events"]:
-            assert "correlation_id" not in ev
-            assert "depth" not in ev
-            assert "frame_id" not in ev
-            assert "emitter" not in ev
+            assert _IDENTITY.isdisjoint(ev.keys())
 
-    def test_decode_backfills_identity_and_resolves_union(self) -> None:
-        back = StepMessage.model_validate_json(_sample_message().model_dump_json())
-        assert [type(e) for e in back.events] == [AgentMessageEvent, ToolCallEvent, ToolResultEvent, HandoffEvent]
-        for e in back.events:
-            assert e.correlation_id == "run-1"
-            assert e.depth == 2
-            assert e.frame_id == "f1"
-            assert e.emitter == "agent-a"
+    def test_decode_resolves_the_wire_union(self) -> None:
+        back = StepMessage.model_validate_json(_message().model_dump_json())
+        assert [type(e) for e in back.events] == [AgentMessageStep, ToolCallStep, ToolResultStep, HandoffStep]
 
     def test_round_trips_equal(self) -> None:
-        sm = _sample_message()
+        sm = _message()
         assert StepMessage.model_validate_json(sm.model_dump_json()) == sm
 
     def test_event_specific_fields_survive_round_trip(self) -> None:
-        back = StepMessage.model_validate_json(_sample_message().model_dump_json())
-        tc = next(e for e in back.events if isinstance(e, ToolCallEvent))
+        back = StepMessage.model_validate_json(_message().model_dump_json())
+        tc = next(e for e in back.events if isinstance(e, ToolCallStep))
         assert (tc.tool_call_id, tc.name, tc.args) == ("c1", "search", {"q": "x"})
-        tr = next(e for e in back.events if isinstance(e, ToolResultEvent))
+        tr = next(e for e in back.events if isinstance(e, ToolResultStep))
         assert (tr.name, tr.is_error) == ("search_tool", False)
         assert isinstance(tr.parts[0], TextPart) and tr.parts[0].text == "result"
-        ho = next(e for e in back.events if isinstance(e, HandoffEvent))
+        ho = next(e for e in back.events if isinstance(e, HandoffStep))
         assert (ho.target, ho.reason) == ("billing", "needs billing")
 
 
+# --------------------------------------------------------------------------- #
+# SURFACE family — `*Event` (frozen, identity required)                       #
+# --------------------------------------------------------------------------- #
+
+
+def _surface_kwargs() -> dict[str, object]:
+    return {"correlation_id": "run-1", "depth": 2, "frame_id": "f1", "emitter": "agent-a"}
+
+
+class TestSurfaceEvent:
+    def test_kind_literals(self) -> None:
+        kw = _surface_kwargs()
+        assert AgentMessageEvent(parts=[], **kw).kind == "agent_message"
+        assert ToolCallEvent(tool_call_id="c", name="n", **kw).kind == "tool_call"
+        assert ToolResultEvent(tool_call_id="c", name="n", parts=[], **kw).kind == "tool_result"
+        assert HandoffEvent(target="t", reason="r", **kw).kind == "handoff"
+        assert AgentThinkingEvent(parts=[], **kw).kind == "agent_thinking"
+
+    def test_surface_requires_identity(self) -> None:
+        # Honest public type: identity is non-null on the surface, so construction without it fails.
+        with pytest.raises(ValidationError):
+            AgentMessageEvent(parts=[])
+        with pytest.raises(ValidationError):
+            ToolCallEvent(tool_call_id="c", name="n")
+
+    def test_surface_event_is_frozen(self) -> None:
+        e = ToolCallEvent(tool_call_id="c", name="n", **_surface_kwargs())
+        with pytest.raises(ValidationError):
+            e.name = "other"  # type: ignore[misc]
+
+    def test_surface_event_rejected_on_the_wire(self) -> None:
+        # Parallel hierarchies: a surface `*Event` is NOT a member of the wire `StepEvent` union, so a live
+        # surface instance is rejected by StepMessage.events (identity can never leak per-event onto the wire).
+        surf = ToolCallEvent(tool_call_id="c", name="n", **_surface_kwargs())
+        with pytest.raises(ValidationError):
+            StepMessage(correlation_id="run-1", emitter="agent-a", depth=2, frame_id="f1", events=[surf])  # type: ignore[list-item]
+
+
+# --------------------------------------------------------------------------- #
+# Mapping seam — `_to_surface` (wire `*Step` + message identity → surface `*Event`)
+# --------------------------------------------------------------------------- #
+
+
+class TestToSurface:
+    def test_maps_each_kind_stamping_identity(self) -> None:
+        from calfkit.client.hub import _SURFACE_BY_KIND, _to_surface
+
+        msg = _message()
+        for step in msg.events:
+            surf = _to_surface(step, msg)
+            assert isinstance(surf, _SURFACE_BY_KIND[step.kind])
+            assert surf.kind == step.kind
+            assert (surf.correlation_id, surf.depth, surf.frame_id, surf.emitter) == ("run-1", 2, "f1", "agent-a")
+
+    def test_payload_fields_carry_over(self) -> None:
+        from calfkit.client.hub import _to_surface
+
+        msg = _message()
+        tc_step = next(e for e in msg.events if isinstance(e, ToolCallStep))
+        surf = _to_surface(tc_step, msg)
+        assert isinstance(surf, ToolCallEvent)
+        assert (surf.tool_call_id, surf.name, surf.args) == ("c1", "search", {"q": "x"})
+
+    def test_nested_parts_pass_by_reference_no_reserialize(self) -> None:
+        from calfkit.client.hub import _to_surface
+
+        msg = _message()
+        am_step = next(e for e in msg.events if isinstance(e, AgentMessageStep))
+        surf = _to_surface(am_step, msg)
+        assert surf.parts[0] is am_step.parts[0]
+
+
+# --------------------------------------------------------------------------- #
+# Mechanical parity — the parallel hierarchies' only unenforced invariant     #
+# --------------------------------------------------------------------------- #
+
+
+class TestFamilyParity:
+    def test_field_lockstep_wire_plus_identity_equals_surface(self) -> None:
+        # A wire-only or surface-only payload field would silently drift (dropped by _to_surface, or a
+        # required surface field would fault every step). Pin lockstep so drift is a test failure.
+        for wire, surface, _ in _PAIRS:
+            assert set(wire.model_fields) | _IDENTITY == set(surface.model_fields), wire.__name__
+
+    def test_surface_by_kind_covers_every_emitted_kind(self) -> None:
+        # _SURFACE_BY_KIND is an allowlist: a wire kind missing an entry is silently dropped by _on_step. It
+        # must cover exactly the EMITTED kinds (all but agent_thinking, which is defined-not-emitted, §5).
+        from calfkit.client.hub import _SURFACE_BY_KIND
+
+        emitted = {k for _, _, k in _PAIRS if k != "agent_thinking"}
+        assert set(_SURFACE_BY_KIND) == emitted
+
+
+# --------------------------------------------------------------------------- #
+# Public surface + AgentThinking (defined-not-emitted)                        #
+# --------------------------------------------------------------------------- #
+
+
 class TestPublicReExport:
-    def test_step_event_types_are_re_exported_from_calfkit(self) -> None:
+    def test_surface_step_events_re_export_from_calfkit(self) -> None:
         import calfkit
 
-        # the four EMITTED step events re-export at the public top level (collision-free as *Event types)
+        # the four EMITTED surface events re-export at the public top level (collision-free as *Event types)
         assert calfkit.AgentMessageEvent is AgentMessageEvent
         assert calfkit.ToolCallEvent is ToolCallEvent
         assert calfkit.ToolResultEvent is ToolResultEvent
         assert calfkit.HandoffEvent is HandoffEvent
         for name in ("AgentMessageEvent", "ToolCallEvent", "ToolResultEvent", "HandoffEvent"):
             assert name in calfkit.__all__
-        # calfkit.Handoff stays the peer capability handle — NOT the step event (the rename's whole point)
+        # calfkit.Handoff stays the peer capability handle — NOT the step event.
         assert calfkit.Handoff is not HandoffEvent
 
 
 class TestAgentThinkingDefinedNotEmitted:
-    """Increment F — AgentThinkingEvent is DEFINED + wire-valid, but NOT emitted in v1 (spec §5)."""
+    """``AgentThinkingStep`` is wire-valid (the decoder must resolve every kind) and ``AgentThinkingEvent``
+    is a defined surface type, but neither is emitted/surfaced in v1 (spec §5)."""
 
-    def test_agent_thinking_event_round_trips(self) -> None:
-        sm = StepMessage(correlation_id="c", emitter="a", depth=1, frame_id="f", events=[AgentThinkingEvent(parts=[TextPart(text="hmm")])])
+    def test_agent_thinking_step_round_trips_on_the_wire(self) -> None:
+        sm = StepMessage(correlation_id="c", emitter="a", depth=1, frame_id="f", events=[AgentThinkingStep(parts=[TextPart(text="hmm")])])
         back = StepMessage.model_validate_json(sm.model_dump_json())
-        assert isinstance(back.events[0], AgentThinkingEvent)
+        assert isinstance(back.events[0], AgentThinkingStep)
         assert back.events[0].parts[0].text == "hmm"
 
-    def test_agent_thinking_is_not_a_run_event_member_in_v1(self) -> None:
-        # Honest-naming (§5): not surfaced on the stream, so it is NOT a RunEvent member yet.
+    def test_agent_thinking_event_is_not_a_run_event_member(self) -> None:
         from calfkit.client.events import RunEvent
 
         assert AgentThinkingEvent not in typing.get_args(RunEvent)

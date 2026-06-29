@@ -15,12 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from calfkit.models.error_report import ErrorReport
-from calfkit.models.step import (  # widen RunEvent (no cycle: models.step → models.payload)
-    AgentMessageEvent,
-    HandoffEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-)
+from calfkit.models.step import RunStepEvent  # the surface step-event union (no cycle: models.step → models.payload)
 
 if TYPE_CHECKING:
     from calfkit.client.hub import _Hub
@@ -66,7 +61,7 @@ RunTerminal = RunCompleted | RunFailed
 channel's cached, replayable terminal slot holds only this; the intermediate step events are the other
 ``RunEvent`` members."""
 
-RunEvent = RunCompleted | RunFailed | AgentMessageEvent | ToolCallEvent | ToolResultEvent | HandoffEvent
+RunEvent = RunCompleted | RunFailed | RunStepEvent
 """A run's stream: zero or more intermediate step events (``AgentMessageEvent`` / ``ToolCallEvent`` /
 ``ToolResultEvent`` / ``HandoffEvent``, spec §3.2) then exactly one terminal (``RunCompleted`` / ``RunFailed``).
 ``AgentThinkingEvent`` is defined but not emitted in v1 (§5), so it is not in the union yet."""

@@ -22,7 +22,7 @@ from calfkit.client.events import EventStream
 from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel, lenient_step_decoder
 from calfkit.client.middleware import ContextInjectionMiddleware
 from calfkit.models.payload import TextPart
-from calfkit.models.step import AgentMessageEvent, AgentThinkingEvent, StepMessage
+from calfkit.models.step import AgentMessageEvent, AgentMessageStep, AgentThinkingStep, StepMessage
 
 
 def _tracked(hub: _Hub, cid: str) -> InvocationHandle:
@@ -37,7 +37,7 @@ def _step(cid: str) -> StepMessage:
         emitter="agent.x",
         depth=2,
         frame_id="f1",
-        events=[AgentMessageEvent(parts=[TextPart(text="thinking out loud")])],
+        events=[AgentMessageStep(parts=[TextPart(text="thinking out loud")])],
     )
 
 
@@ -68,8 +68,23 @@ async def test_step_body_routes_to_the_step_handler_and_reaches_the_handle() -> 
     assert len(intermediates) == 1
     assert isinstance(intermediates[0], AgentMessageEvent)
     assert intermediates[0].parts[0].text == "thinking out loud"
-    assert intermediates[0].correlation_id == "cid-s"  # identity back-filled by StepMessage's validator
+    assert intermediates[0].correlation_id == "cid-s"  # identity stamped onto the surface event by _to_surface
     assert not handle._channel.closed  # a step does NOT close the run (only a terminal does)
+
+
+async def test_malformed_step_over_the_broker_does_not_fault_a_tracked_run() -> None:
+    # C1 end-to-end (the headline reception guard): a malformed body STAMPED x-calf-wire=step routes to the
+    # step call-item (filter before decode), the lenient decoder swallows it to None, and _on_step(None)
+    # drops it — the tracked run is NOT faulted. A StepMessage-typed handler (instead of `| None`) would
+    # re-validate the sentinel → decode floor → fail_run; this pins that it does not.
+    hub = _Hub()
+    broker = KafkaBroker(middlewares=[ContextInjectionMiddleware])
+    hub.register(broker, "inbox.topic")
+    handle = _tracked(hub, "cid-bad")
+    async with TestKafkaBroker(broker):
+        await broker.publish(b'{"not": "a valid step"}', "inbox.topic", correlation_id="cid-bad", headers={HDR_WIRE: "step"})
+    assert handle._channel.closed is False  # the malformed step did NOT fault the run
+    assert list(handle._channel._intermediates) == []  # nothing surfaced
 
 
 async def test_lenient_step_decoder_decodes_valid_and_swallows_malformed() -> None:
@@ -89,16 +104,19 @@ def test_no_handle_step_drops_silently_but_tees_to_firehose() -> None:
     hub._add_outlet(outlet)
     step = _step("no-such-run")  # no tracked handle for this correlation_id
     hub._on_step(step)  # must not raise
-    assert list(outlet._buffer) == step.events  # tee'd despite no handle
+    teed = list(outlet._buffer)  # the firehose holds the MAPPED surface events (not the wire *Step)
+    assert len(teed) == 1 and isinstance(teed[0], AgentMessageEvent)
+    assert teed[0].parts[0].text == "thinking out loud" and teed[0].correlation_id == "no-such-run"
 
 
 def test_on_step_drops_a_foreign_agent_thinking_event() -> None:
-    # AgentThinkingEvent is decodable on the wire (defined) but NOT surfaced in v1 (§5): _on_step filters
-    # it, so even a foreign producer's thinking event never reaches the run's channel (enforced on receive).
+    # AgentThinkingStep is decodable on the wire (defined) but NOT surfaced in v1 (§5): _on_step filters it
+    # (its kind is absent from _SURFACE_BY_KIND), so even a foreign producer's thinking event never reaches
+    # the run's channel or the firehose (enforced on receive).
     hub = _Hub()
     handle = _tracked(hub, "cid-t")
     step = StepMessage(
-        correlation_id="cid-t", emitter="a", depth=2, frame_id="f", events=[AgentThinkingEvent(parts=[TextPart(text="secret thoughts")])]
+        correlation_id="cid-t", emitter="a", depth=2, frame_id="f", events=[AgentThinkingStep(parts=[TextPart(text="secret thoughts")])]
     )
     hub._on_step(step)
     assert list(handle._channel._intermediates) == []  # filtered, not surfaced
