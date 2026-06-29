@@ -25,7 +25,6 @@ def _panelist(name: str, persona: str) -> Agent:
             "Keep each contribution to 2-3 sentences, and address other panelists by "
             "name when you build on or push back against their points."
         ),
-        subscribe_topics=f"{name}.input",
         model_client=OpenAIResponsesModelClient(model_name=MODEL),
     )
 
