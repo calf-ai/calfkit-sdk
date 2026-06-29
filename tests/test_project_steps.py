@@ -128,6 +128,19 @@ class TestRejectionArmsAuthorPairedSteps:
         assert len(tcs) == 1 and tcs[0].name == "message_agent" and tcs[0].tool_call_id == "tc1"
         assert len(trs) == 1 and trs[0].name == "message_agent" and trs[0].tool_call_id == "tc1" and trs[0].is_error is True
 
+    def test_reject_invalid_call_render_is_total_on_non_serializable_content(self) -> None:
+        # _reject_invalid_call's list-content render (pydantic_core.to_json) runs OUTSIDE the §2.9 wrap, so it
+        # must be LOCALLY total: a future caller passing context-bearing ErrorDetails (e.g. a validator's raised
+        # exception in `ctx`, present when errors() keeps context) must NOT raise — which would fault the run.
+        agent = _agent_emitting([])
+        ctx = _make_ctx(State())
+        tool_call = ToolCallPart(tool_name="t", args={}, tool_call_id="x1")
+        step_draft: list = []
+        content = [{"type": "value_error", "loc": ("x",), "msg": "bad", "input": "5", "ctx": {"error": ValueError("boom")}}]
+        agent._reject_invalid_call(tool_call, ctx, step_draft, content)  # must not raise on the non-serializable ctx
+        trs = [e for e in step_draft if isinstance(e, ToolResultStep)]
+        assert len(trs) == 1 and trs[0].is_error is True and trs[0].parts[0].text
+
 
 class TestChokepointEmission:
     """The disposition chokepoint in _handle_delivery (spec §2.5/§3.3): the depth-1 terminal gate, the

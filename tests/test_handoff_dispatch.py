@@ -30,7 +30,7 @@ from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.models.actions import ReturnCall, TailCall
 from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY, derive_input_topic
 from calfkit.models.state import OverridesState, State
-from calfkit.models.step import HandoffStep
+from calfkit.models.step import AgentMessageStep, HandoffStep
 from calfkit.nodes import Agent
 from calfkit.peers import Handoff
 from calfkit.peers.handoff import HandoffRequest
@@ -201,6 +201,26 @@ class TestHandoffAuthorsStepEvent:
         await agent.run(ctx)
         hos = [e for e in (ctx._step_draft or []) if isinstance(e, HandoffStep)]
         assert len(hos) == 1 and hos[0].target == "billing" and hos[0].reason == "please take over"
+
+    async def test_handoff_hop_with_preamble_drafts_message_then_handoff(self) -> None:
+        # When the handoff hop's model also emits preamble text, the draft carries AgentMessageStep THEN
+        # HandoffStep (the handoff-branch preamble append).
+        def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
+            tool = next(t for t in info.output_tools if t.name == "final_result" or "HandoffRequest" in t.name)
+            return ModelResponse(
+                parts=[
+                    ModelTextPart("Let me transfer you to billing."),
+                    ToolCallPart(tool_name=tool.name, args={"name": "billing", "message": "take over"}, tool_call_id="h1"),
+                ]
+            )
+
+        agent = _agent(FunctionModel(_model), peers=[Handoff("billing")])
+        ctx = _ctx_with_view(_view({"billing": "Billing."}))
+        await agent.run(ctx)
+        draft = ctx._step_draft or []
+        assert [type(e).__name__ for e in draft] == ["AgentMessageStep", "HandoffStep"]
+        assert isinstance(draft[0], AgentMessageStep) and draft[0].parts[0].text == "Let me transfer you to billing."
+        assert isinstance(draft[1], HandoffStep) and draft[1].target == "billing"
 
     async def test_offline_target_still_authors_handoffevent(self) -> None:
         # The real "offline" scenario is the render->dispatch race: billing is live when the output member is

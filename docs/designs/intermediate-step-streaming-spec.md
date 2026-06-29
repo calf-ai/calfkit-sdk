@@ -274,6 +274,15 @@ the run outcome; the wrap is required because the chokepoint is **outside** the 
 guard (which wraps only `:1803`), so an unguarded raise would escape to FastStream and **hang** the run
 (§2.5). The wrap must fall through to the real action publish, never short-circuit it.
 
+**Draft authoring is OUTSIDE the wrap — so it must be total by construction.** The chokepoint wrap covers
+`project_steps` + the publish, but the agent *authors* its `*Step` events earlier, inline in `run()` (§2.5),
+where a raise escapes to the node fault rail (not the wrap) and would fault a run that should have proceeded
+— the one thing a step must never do. Authoring is therefore total by construction: the preamble is a
+derived `str`; a `ToolCallPart`'s `tool_call_id`/`name` are `str` and its `args` is coerced to
+`str|dict|None`; and the rejection-content render uses `pydantic_core.to_json(..., fallback=str)` so a
+non-JSON-native value renders rather than raises. A future event field sourced from un-coerced data must
+preserve this totality or move under a guard.
+
 ### 2.10 Performance — accepted, no mitigation
 
 The extra publish per hop, the single-partition-per-run hotspot, and the single groupless hub consumer
@@ -507,7 +516,8 @@ No open decisions remain (round-2 review folded). Next: implementation plan + ad
 - **New `models/step.py`** holds the **two frozen families** (ADR-0026): the wire `StepEvent` union
   (`AgentMessageStep`/`ToolCallStep`/`ToolResultStep`/`HandoffStep` + deferred `AgentThinkingStep`,
   discriminated on `kind`, **no identity**) carried by a frozen `StepMessage` (**no validator**), and the
-  surface `RunStepEvent` union (`AgentMessageEvent`/… + deferred `AgentThinkingEvent`, **identity required**).
+  surface `RunStepEvent` union (`AgentMessageEvent`/…, **identity required**) — plus a defined-not-emitted
+  `AgentThinkingEvent` that is **not** a `RunStepEvent`/`RunEvent` member (§5).
   It lives in `models/` (not `client/events.py`) because the **node side** publishes `StepMessage` and
   `nodes/`→`models/` is the only allowed direction; `client/events.py` composes `RunEvent` from `RunStepEvent`
   + terminals, and the public `calfkit` surface re-exports the surface `*Event` types — the same "public wire

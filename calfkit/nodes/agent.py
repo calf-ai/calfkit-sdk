@@ -427,7 +427,10 @@ class BaseAgentNodeDef(
         ctx.state.add_tool_result(
             tool_call.tool_call_id, RetryPromptPart(content=content, tool_name=tool_call.tool_name, tool_call_id=tool_call.tool_call_id)
         )
-        text = content if isinstance(content, str) else pydantic_core.to_json(content).decode()
+        # `fallback=str` keeps this render LOCALLY total: it runs outside the §2.9 best-effort wrap, so a
+        # non-JSON-native value in `content` (e.g. a raised exception in a context-bearing ErrorDetails) must
+        # render, never raise — a step must never fault the run.
+        text = content if isinstance(content, str) else pydantic_core.to_json(content, fallback=str).decode()
         step_draft.append(ToolResultStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, parts=[TextPart(text=text)], is_error=True))
 
     def _validate_message_agent(self, tool_call: ToolCallPart, ctx: SessionRunContext) -> str | None:

@@ -26,6 +26,7 @@ from calfkit.models.step import (
     AgentThinkingStep,
     HandoffEvent,
     HandoffStep,
+    RunStepEvent,
     StepEvent,
     StepMessage,
     ToolCallEvent,
@@ -43,6 +44,21 @@ _PAIRS = [
     (AgentThinkingStep, AgentThinkingEvent, "agent_thinking"),
 ]
 _IDENTITY = {"correlation_id", "depth", "frame_id", "emitter"}
+# AgentThinking is in the WIRE union (the decoder must resolve every kind) but defined-not-emitted (§5):
+# never surfaced, so absent from RunStepEvent and _SURFACE_BY_KIND.
+_DEFINED_NOT_EMITTED = {"agent_thinking"}
+
+
+def _kind_of(model_cls: type) -> str:
+    """The ``kind`` literal of a ``*Step`` / ``*Event`` model class."""
+    return model_cls.model_fields["kind"].default
+
+
+def _union_members(union: object) -> tuple[type, ...]:
+    """Concrete model classes of a (possibly Annotated) union — handles the wire ``StepEvent``
+    (``Annotated[Union, Discriminator]``) and the plain surface ``RunStepEvent`` union."""
+    args = typing.get_args(union)
+    return typing.get_args(args[0]) if (args and typing.get_args(args[0])) else args
 
 
 def _msg(**headers: object) -> SimpleNamespace:
@@ -251,19 +267,31 @@ class TestToSurface:
 
 
 class TestFamilyParity:
+    """The parallel hierarchies' field lockstep + the _SURFACE_BY_KIND allowlist are not type-enforced;
+    these are the guard. Anchored to the REAL unions (not just the hand-written _PAIRS), so a new wire kind
+    that someone forgets to pair / surface / denylist fails the suite — instead of being silently dropped by
+    _on_step's `kind not in _SURFACE_BY_KIND: continue` filter (the feature's one silent-drop seam)."""
+
+    def test_pairs_enumerate_the_whole_wire_union(self) -> None:
+        # _PAIRS must cover every StepEvent member, or the lockstep + no-identity guards below skip a kind.
+        assert {_kind_of(w) for w, _, _ in _PAIRS} == {_kind_of(m) for m in _union_members(StepEvent)}
+
+    def test_pairs_enumerate_the_whole_surface_family(self) -> None:
+        # the surface side of _PAIRS == RunStepEvent's members + the defined-not-emitted surface types.
+        assert {_kind_of(s) for _, s, _ in _PAIRS} == {_kind_of(m) for m in _union_members(RunStepEvent)} | _DEFINED_NOT_EMITTED
+
     def test_field_lockstep_wire_plus_identity_equals_surface(self) -> None:
         # A wire-only or surface-only payload field would silently drift (dropped by _to_surface, or a
         # required surface field would fault every step). Pin lockstep so drift is a test failure.
         for wire, surface, _ in _PAIRS:
             assert set(wire.model_fields) | _IDENTITY == set(surface.model_fields), wire.__name__
 
-    def test_surface_by_kind_covers_every_emitted_kind(self) -> None:
-        # _SURFACE_BY_KIND is an allowlist: a wire kind missing an entry is silently dropped by _on_step. It
-        # must cover exactly the EMITTED kinds (all but agent_thinking, which is defined-not-emitted, §5).
+    def test_surface_by_kind_covers_every_wire_kind(self) -> None:
+        # _SURFACE_BY_KIND is an allowlist: a wire kind missing an entry is SILENTLY dropped by _on_step.
+        # Anchored to the real wire union: every kind is either surfaced or explicitly defined-not-emitted.
         from calfkit.client.hub import _SURFACE_BY_KIND
 
-        emitted = {k for _, _, k in _PAIRS if k != "agent_thinking"}
-        assert set(_SURFACE_BY_KIND) == emitted
+        assert {_kind_of(m) for m in _union_members(StepEvent)} == set(_SURFACE_BY_KIND) | _DEFINED_NOT_EMITTED
 
 
 # --------------------------------------------------------------------------- #
