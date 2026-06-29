@@ -333,8 +333,11 @@ class InvocationHandle(Generic[OutT]):
 `stream()` yields this run's events in order, **terminal-bearing** (the last element is always the
 terminal; "quiet" e.g. a pending approval means alive, not finished).
 
-> **v1 reality:** the fabric emits no intermediate events yet (§9.1), so today `stream()` yields
-> **exactly one** element — the terminal. The intermediate vocabulary below is the future shape.
+> `stream()` yields **zero or more intermediate step events** (the per-hop progress events of §3.3 —
+> `AgentMessageEvent` / `ToolCallEvent` / `ToolResultEvent` / `HandoffEvent`, shipped by [intermediate
+> step streaming](./intermediate-step-streaming-spec.md)) **and then the terminal** as its last element.
+> The intermediate queue is consume-once (a late `stream()` drains whatever is still buffered, once); the
+> terminal is cached and replayable (§4.4).
 
 ### 3.2 `client.events()` — the firehose (cross-run)
 
@@ -370,15 +373,17 @@ shared inbox as a **load-balanced worker pool** is deliberately *not* a client m
 ### 3.3 The `RunEvent` taxonomy — settled *principles*
 
 ```python
-# Terminal set (settled, v1): a run's stream ends in exactly one of these.
+# Terminal set: a run's stream ends in exactly one of these.
 @dataclass(frozen=True)
 class RunCompleted: output: Any; correlation_id: str; agent: str | None; _envelope: Envelope   # success
 @dataclass(frozen=True)
 class RunFailed:    report: ErrorReport; correlation_id: str   # the fault value; → NodeFaultError(report) (§5.9)
-# Intermediate types (AgentMessage, ToolCalled, HandoffOccurred) AND RunRejected (an approval
-# rejection — it has no ErrorReport to bind, so its error mapping is settled with the feature)
-# are a FUTURE shape, emitted only once approval/gate seams + intermediate emission ship — §9.1.
-RunEvent = RunCompleted | RunFailed                 # (v1; widened when those land)
+# Intermediate step events (SHIPPED — intermediate step streaming): per-hop progress surfaced before the
+# terminal. AgentMessageEvent (preamble text), ToolCallEvent (name/args), ToolResultEvent (result parts +
+# is_error), HandoffEvent (target/reason). AgentThinkingEvent is defined-not-emitted in v1 (not in the
+# union). RunRejected (an approval rejection — it has no ErrorReport to bind, so its error mapping is
+# settled with the feature) remains a FUTURE shape, emitted only once approval/gate seams ship — §9.1.
+RunEvent = RunCompleted | RunFailed | AgentMessageEvent | ToolCallEvent | ToolResultEvent | HandoffEvent
 ```
 
 - **Closed, `match`-friendly union** — exhaustive and discoverable at the call site.
@@ -400,11 +405,12 @@ faults to the callback inbox) is keyed by `correlation_id` (`calfkit/nodes/base.
 `key=correlation_id.encode()`), so a run's replies are **co-partitioned and offset-ordered**; the
 "terminal is last" invariant holds on the **per-run channel** even though the hub reads all
 partitions (a single run lives on one partition; cross-partition interleaving only mixes *different*
-runs, which we demux anyway). **Note for the deferred intermediate-streaming feature (§9.1):**
-this is true *today only for the single terminal return/fault on the callback inbox*. Intermediate
-progress events do not route to the inbox yet and the broadcast rail is not `correlation_id`-keyed —
-so intermediate streaming requires NEW worker-side routing-to-inbox **and** `correlation_id`-keying
-on whatever rail carries it. It is not free.
+runs, which we demux anyway). **Intermediate step streaming (SHIPPED):** intermediate progress events
+now route to the run's inbox too — each happy-path hop publishes a separate `StepMessage` wire body to
+the run's **root** `callback_topic`, keyed by `correlation_id` (so steps co-partition with the
+terminal), at the worker's disposition chokepoint. This required exactly the new worker-side
+routing-to-inbox + `correlation_id`-keying called out here; see
+[intermediate-step-streaming-spec.md](./intermediate-step-streaming-spec.md) and ADR-0025 / ADR-0027.
 
 ---
 
@@ -434,21 +440,24 @@ raises a typed outcome (§2.5) — it does not poll or return early.
   `result(timeout=T)` / `execute(timeout=T)`** to bound the *client's* patience → `ClientTimeoutError`
   (the run is unaffected); without it, `result()`/`execute()` wait indefinitely **by design**.
 
-### 4.4 `result()` / `stream()` coexistence on one handle — "one drain, two faces"
-Both read the **same** handle-owned channel, fed by the hub push. The handle's internal driver,
-**pumped by the hub (not by reader pull)**, **caches the terminal** and **tees live events to a
-stream listener if one is attached** — so a stalled or absent stream reader can never deadlock
-`result()`:
-- `result()` = await the cached terminal (O(1) if already seen).
-- `stream()` = the live listener; yields each event to the terminal.
+### 4.4 `result()` / `stream()` coexistence on one handle — "two storages, two faces"
+Both read the **same** handle-owned channel, fed by the hub push. The channel keeps intermediate and
+terminal state in **two separate storages**: intermediate step events land in an unbounded
+**consume-once queue**, and the terminal is **cached** in its own replayable slot — both fed by
+synchronous, non-blocking hub pushes (not by reader pull), so a stalled or absent stream reader can never
+deadlock `result()`:
+- `result()` = await the cached terminal (O(1) if already seen); it does **not** touch the intermediate queue.
+- `stream()` = drain the intermediate queue (consume-once), then yield the cached terminal as the last element.
 
 Contract:
-- Supported: `stream()` then `result()` (O(1) cached terminal); `result()` alone (discards
-  intermediates); `result()` twice (idempotent, cached); **`result()` then `stream()`** — the cached
-  terminal is **replayable**, so `stream()` yields just it (preserving the terminal-bearing invariant);
-  intermediates, being consume-once, are not replayed.
+- Supported: `stream()` then `result()` (O(1) cached terminal); `result()` alone (reads only the
+  terminal — the buffered intermediates are **retained, undrained**, in the channel until the terminal
+  closes it / the handle is GC'd, never discarded out from under a later reader); `result()` twice
+  (idempotent, cached); **`result()` then `stream()`** — the cached terminal is **replayable**, and
+  `result()` did not consume the queue, so a late `stream()` **drains the still-buffered intermediates
+  (consume-once)** and then yields the cached terminal (preserving the terminal-bearing invariant).
 - **At most one** live `stream()` listener per channel — a second concurrent `stream()` raises `RuntimeError`.
-- Intermediate events are **consume-once** (no replay); the terminal is **replayable** (cached).
+- Intermediate events are **consume-once** (drained once, never replayed); the terminal is **replayable** (cached).
 
 ### 4.5 `client.events()` + `handle.stream()` coexistence — two outlets of one read
 The firehose and a per-run stream are **two in-process outlets of the hub's single upstream read**
@@ -456,7 +465,8 @@ The firehose and a per-run stream are **two in-process outlets of the hub's sing
 — so concurrent use never conflicts and a run's events are observable in **both** at once (intended
 overlap). The firehose is **not** the union of per-run channels (on a shared inbox it surfaces ids
 this client never dispatched), is **raw** (no projection), and (per §5.5) the **caller must do its own
-dedup / terminal handling** — only the per-run channel is dedup'd and terminal-bearing. Crucially, the
+dedup / terminal handling** — only the per-run channel's **terminal slot** is dedup'd (close-once) and
+terminal-bearing; its intermediate step queue is consume-once, not dedup'd (§5.5). Crucially, the
 two outlets are **decoupled in the direction that matters**: a stalled firehose reader **drops** its
 own buffered events (best-effort, §5.4), it does **not** stall the hub — so an undrained `events()` can
 never delay or deadlock a `result()`. The per-run path stays lossless and prompt regardless of the
@@ -585,19 +595,31 @@ inbox for the firehose). There is **no eviction timer and no `reply_ttl`** — p
 > spawn one. The hub pushes into the channel synchronously; the handle's driver is passive state the
 > reader pulls from.
 
-### 5.3 The per-run channel: lossless, sized by the run (handle-owned)
-The per-run channel is the **critical path** — it is **lossless and never drops** (distinct from the
-firehose outlet, which is bounded best-effort, §5.4). It yields many events, closed at the terminal —
-`result()` reads to the terminal, `stream()` yields every event; one channel serves both verbs (§4.4).
-It is a **custom lightweight queue with a `_closed` flag**: a `put` after close is a **benign no-op**
-(exactly what makes §5.2's terminal-dedup "a duplicate pushes into the closed channel and is dropped"
-true), and the terminal is **cached** on the channel so it stays replayable (§4.4) after close. It is
-deliberately **not** a stock `asyncio.Queue` — that has no `close()`, and 3.13's `Queue.shutdown()`
-*raises* on a post-close `put` rather than dropping. **Sizing:** a single run emits a small, finite
-number of (coarse, whole-turn) events, so the channel never grows large in practice — its size is the
-run's own event count, not a drop policy, and the synchronous hub `put` into it never blocks. (A
-high-volume per-run stream — token deltas — would need a real per-run overflow policy, but that is out
-of scope, §9.2.) The firehose outlet is the *only* place a drop policy applies (§5.4).
+### 5.3 The per-run channel: lossless, two storages (handle-owned)
+The per-run channel is the **critical path** — **lossless and never drops** (distinct from the firehose
+outlet, which is bounded best-effort, §5.4). It keeps intermediate and terminal state in **two separate
+storages** with different access semantics, each with its own wake signal:
+- **Terminal → a cached, replayable slot with a `_closed` flag.** `result()` reads it repeatably; a `put`
+  after close is a **benign no-op** (exactly what makes §5.2's terminal-dedup "a duplicate pushes into the
+  closed channel and is dropped" true), and the cached terminal stays replayable (§4.4) after close. It is
+  deliberately **not** a stock `asyncio.Queue` — that has no `close()`, and 3.13's `Queue.shutdown()`
+  *raises* on a post-close `put` rather than dropping.
+- **Intermediate step events → an unbounded, consume-once queue.** `stream()` drains it (buffered backlog
+  first, then live) **once**; memory drains as consumed. A push is a **no-op once closed** (a post-terminal
+  reordered/duplicate step is dropped, not appended).
+
+`result()` reads only the terminal slot; `stream()` drains the queue then yields the cached terminal; one
+channel serves both verbs (§4.4). The synchronous hub push into either never blocks.
+
+**Sizing / overflow.** A run's terminal is one element, but its intermediate queue holds the hop-by-hop
+trace of the *whole* task — including, by design, every sub-agent's and consulted peer's hops at **all
+depths** ([intermediate step streaming](./intermediate-step-streaming-spec.md) §2.7) — so a deep
+multi-agent run's queue can exceed the old "small, finite count" assumption. The deferred-feature
+prerequisite of a **per-run channel overflow policy (§9.1) is consciously NOT taken**: the queue is
+unbounded and consume-once, and the resulting memory cost (bounded by held handles, drained as consumed)
+is accepted (step-streaming spec §2.8/§2.10). A truly high-volume per-run stream — token deltas — would
+still need a real overflow policy, but that remains out of scope (§9.2). The firehose outlet is the *only*
+place a *drop* policy applies (§5.4).
 
 ### 5.4 One reader, two outlets (no separate firehose consumer)
 There is **one** physical consumer per client — the hub's handler subscriber (§5.1). The **handler**
@@ -630,12 +652,15 @@ is also memory-safe — a bounded *blocking* outlet would deadlock the hub; an *
 > only delays the drop and adds latency (bufferbloat). The design buys **simplicity** (one consumer, no
 > fetch amplification) and a **lossless critical path**; the honest cost is a best-effort firehose.
 
-### 5.5 Terminal-once / dedup (scoped to the per-run channel)
+### 5.5 Terminal-once / dedup (scoped to the per-run channel's terminal slot)
 At-least-once delivery (§5.7) can deliver a terminal more than once. Dedup lives on **the per-run
-channel**, via the close-once mechanism in §5.2: while the caller holds the handle, a duplicate
-terminal pushes into the already-closed channel and is dropped; after the handle is dropped, a late
-duplicate derefs to `None` → the no-handle path (§5.1: a late duplicate **return** WARNING-drops, a
-late duplicate **fault** ERROR-floors the full report — never a silent drop). Scoped to the per-run
+channel's terminal slot**, via the close-once mechanism in §5.2: while the caller holds the handle, a
+duplicate terminal pushes into the already-closed channel and is dropped; after the handle is dropped, a
+late duplicate derefs to `None` → the no-handle path (§5.1: a late duplicate **return** WARNING-drops, a
+late duplicate **fault** ERROR-floors the full report — never a silent drop). The **intermediate step
+queue is not dedup'd** — it is consume-once (§5.3); a redelivered or pathologically reordered
+post-terminal step is dropped by the closed-channel no-op (the channel closes at the terminal), not by a
+dedup key (steps are best-effort, hop-identity is for correlation not dedup). Scoped to the per-run
 channel only:
 - **The firehose is NOT dedup'd** — it is the raw outlet of the same single read (§5.4), so it may
   surface duplicate terminals (and, under redelivery, post-terminal events) for a `correlation_id`.
@@ -849,10 +874,14 @@ async with client.events(terminal_only=True) as stream:
 ## 9. Boundary: future features and out of scope
 
 ### 9.1 Future features to consider (noted, not designed)
-- **Worker-side intermediate event emission.** A run emitting progress events per `correlation_id`
-  (assistant turns, tool calls, handoffs, approvals), which `handle.stream()` / `events()` would
-  surface. Requires worker routing-to-inbox + `correlation_id`-keying on that rail (§3.3) and a
-  per-run channel overflow policy (§5.3). Not free.
+- **Worker-side intermediate event emission.** **SHIPPED ([intermediate step
+  streaming](./intermediate-step-streaming-spec.md)).** A run now emits per-hop progress events
+  (assistant preamble, tool calls, tool results, handoffs) per `correlation_id`, surfaced by
+  `handle.stream()` / `events()` — via a separate `StepMessage` wire type published to the run's root
+  inbox keyed by `correlation_id` at the disposition chokepoint (ADR-0025 / ADR-0027). The named **per-run
+  channel overflow policy** prerequisite (§5.3) was **consciously NOT taken**: the intermediate queue is
+  unbounded and consume-once, and that memory cost is accepted (step-streaming spec §2.8/§2.10). Approval
+  events remain future (the deferred approval/gate feature).
 - **Per-observer firehose buffer override (`events(buffer_size=…)`).** A per-call override of the
   client-level `firehose_buffer_size` (§2.1), for a client running one fast and one slow observer. Cut
   from v1 for simplicity (the client-level default covers the real case). **Cheap and non-breaking** —

@@ -1,9 +1,10 @@
 # Intermediate Step Streaming — Design Decisions
 
-> **Status: design CONVERGED after four adversarial review rounds** (the implementation plan has had two
-> plan-review rounds folded; a round-3 confirming review is the next gate). This document pins the
-> confirmed design for streaming mid-turn (per-hop) **steps** back to a caller. All owner decisions are
-> settled; what remains is the implementation plan + a plan review.
+> **Status: IMPLEMENTED** (design converged over four adversarial review rounds; the implementation plan
+> had two plan-review rounds folded, then shipped as increments A–F). This document pins the **as-built**
+> design for streaming mid-turn (per-hop) **steps** back to a caller. The load-bearing decisions are
+> recorded in ADR-0025 (separate `StepMessage` wire type + `x-calf-wire`), ADR-0026 (the unified, non-frozen
+> step-event type), and ADR-0027 (happy-path-only, best-effort emission).
 >
 > **Parent:** [`client-caller-surface-spec.md`](./client-caller-surface-spec.md) — this realises that
 > spec's deferred feature **§9.1 "Worker-side intermediate event emission."** Where this design changes
@@ -37,11 +38,11 @@ hop. **Every node that takes a happy-path action publishes the step(s) it author
 
 | Producer | Emits |
 | --- | --- |
-| Agent node | `AgentMessage` (preamble), `ToolCall` (per requested call), `Handoff`, and `ToolResult` — both for an **agent-rejected invalid call** (`is_error=True`, draft-authored) and when its own `ReturnCall` is inner-frame (a consulted peer answering) |
-| Tool node | `ToolResult` (always — success or `is_error=True` for a `ModelRetry`; never a run root, §3.2) |
+| Agent node | `AgentMessageEvent` (preamble), `ToolCallEvent` (per requested call), `HandoffEvent`, and `ToolResultEvent` — both for an **agent-rejected invalid call** (`is_error=True`, draft-authored) and when its own `ReturnCall` is inner-frame (a consulted peer answering) |
+| Tool node | `ToolResultEvent` (always — success or `is_error=True` for a `ModelRetry`; never a run root, §3.2) |
 
 **Steps are a quality-of-life, happy-path observation channel — not business logic.** They are emitted at
-the single **disposition chokepoint** — `_handle_delivery` at `nodes/base.py:1779`, where the hop's
+the single **disposition chokepoint** — `_handle_delivery` at `nodes/base.py`, where the hop's
 `output` is known before it branches to `_handle_fanout_open` (`:1790`) or `_publish_action` (`:1803`), so
 fan-out and non-fan-out hops project uniformly (§2.5). Infrastructure failures (a tool crash, an escalating
 fault, a declined/aborted delivery, re-entry) are **framework concerns** — they propagate to the caller as
@@ -52,7 +53,7 @@ is not called at `_publish_fault` / abort / decline / re-entry — only at the h
 
 A **calfkit-caught** invalid call is surfaced — the dispatch loop rejects an unknown tool
 (`nodes/agent.py:651`), malformed args (`:676`), or a failed validator (`:702`) **within the same hop**,
-so it batches into that hop's `step` message as a `ToolCall` + a `ToolResult(is_error=True)` carrying
+so it batches into that hop's `step` message as a `ToolCallEvent` + a `ToolResultEvent(is_error=True)` carrying
 the retry/error content (no bespoke `ToolFailed`/`InvalidToolCalls` type — a rejected call is just a tool
 call whose result is an error; §3.2). The all-invalid self-retry `TailCall` (`:748`) is therefore
 surfaced, not suppressed.
@@ -64,14 +65,14 @@ internal model-turn history is a possible future enhancement, explicitly deferre
 
 ### 2.3 Transport — emit to the root inbox at the base-node seam
 
-At the disposition chokepoint (§2.5, `base.py:1779`), `base.py` publishes the hop's step batch to the
+At the disposition chokepoint (§2.5, `base.py`), `base.py` publishes the hop's step batch to the
 **root** frame's `callback_topic` (the bottom of `envelope.internal_workflow_state.call_stack`, set by the
 client at `client/caller.py:349`), keyed by `correlation_id`. Every publish **on the reply rail** is
 already `key=correlation_id.encode()`, so steps co-partition with the terminal. Emission is
 **unconditional** — there is no client-vs-node "root" gate (see §2.4 for why node topics are safe).
 The step publishes **before** the action branch, so a step precedes its action on the wire. **[Decision —
 owner: the step may publish first.]** A rare action-publish failure or fan-out-OPEN abort can therefore
-leave a phantom step (e.g. a `ToolCall`) ahead of the resulting `RunFailed` — accepted as within the
+leave a phantom step (e.g. a `ToolCallEvent`) ahead of the resulting `RunFailed` — accepted as within the
 best-effort / close-on-terminal contract (§3.3), not designed around.
 
 ### 2.4 A `step` is a distinct message type, not an `Envelope` reply
@@ -142,7 +143,7 @@ constant, not `type(msg).WIRE`) and **`StepMessage.WIRE` at the step publish**. 
 ### 2.5 Emission mechanism — action-coupled projection + `StepDraft`
 
 A polymorphic `project_steps(output, ctx, frame) -> list[StepEvent]`, called **once per hop** at the
-**disposition chokepoint** — `_handle_delivery` at `nodes/base.py:1779`, where `output` (the
+**disposition chokepoint** — `_handle_delivery` at `nodes/base.py`, where `output` (the
 `NodeResult`) is fully determined, *before* it branches to `_handle_fanout_open` (`:1790`) **or**
 `_publish_action` (`:1803`). Both publish paths flow through this one point, so coupling projection here
 covers fan-out and non-fan-out hops uniformly (the round-2 hole was projecting only inside
@@ -150,7 +151,7 @@ covers fan-out and non-fan-out hops uniformly (the round-2 hole was projecting o
 free-form `ctx.emit()` (which would forfeit the once-per-hop guarantee and the single-publish-seam
 invariant; intra-hop progress is out of scope — whole-turn grain only). **The whole projection + step
 publish is wrapped in its own `try/except` that logs-and-drops and then *falls through* to the real
-action publish (§2.9).** This is load-bearing: `:1779` runs **outside** the outer publish guard (which
+action publish (§2.9).** This is load-bearing: the disposition chokepoint runs **outside** the outer publish guard (which
 wraps only the `_publish_action` call at `:1803`), so an *unguarded* projection raise would **escape to
 FastStream** and — since ACK_FIRST has already acked the inbound — the real action would never publish and
 **the run would hang** (worse than a fault). The own `try/except` must therefore both swallow the error
@@ -160,7 +161,7 @@ The agent's authored events for the hop — the residual not derivable from `out
 transient `PrivateAttr` slot mirroring the existing `_reply`/`_frame_id` family
 (`models/session_context.py:179-185`). **The draft is typed to the step-event kinds (a discriminated
 union on `kind`), not generic `ContentPart`s** — the node says explicitly *what* it is surfacing, the
-types match the wire `StepEvent`s the caller deserialises, and structured events (`Handoff`'s
+types match the wire `StepEvent`s the caller deserialises, and structured events (`HandoffEvent`'s
 `target`/`reason`) have a natural home:
 
 ```python
@@ -172,15 +173,15 @@ _step_draft: list[StepEvent] | None = PrivateAttr(default=None)   # off-wire; pe
   re-entry; written by the framework's agent body in `run()`, read-and-cleared at the chokepoint. The
   context object `run()` mutates **is** the one that reaches the chokepoint (the deep copy in
   `prepare_context` happens *before* `run()`), so the draft reaches it.
-- **The agent authors its own events directly.** `run()` stashes typed `AgentMessage` (preamble),
-  `ToolCall` (the model's requested calls — sourced from the model emission, **not** the dispatch
+- **The agent authors its own events directly.** `run()` stashes typed `AgentMessageEvent` (preamble),
+  `ToolCallEvent` (the model's requested calls — sourced from the model emission, **not** the dispatch
   action, since an invalid call is never dispatched and `sequential_only_mode` dispatches one-per-hop
-  while the model requested them together), a `ToolResult(is_error=True)` for **only** the calls it
+  while the model requested them together), a `ToolResultEvent(is_error=True)` for **only** the calls it
   rejected *this* hop (right there in the dispatch loop — so there is no `tool_results` accumulator scan
-  and no re-emit of prior hops' failures), and `Handoff` (from the model's `HandoffRequest`,
+  and no re-emit of prior hops' failures), and `HandoffEvent` (from the model's `HandoffRequest`,
   emitted for an online *or* offline target — §3.2). `project_steps(agent)` returns the draft; a
-  `ToolResult` from a tool node / consulted peer is **not** in the draft — it is action-derived at the
-  seam (an inner-frame `ReturnCall`, §3.2). So `ToolResult` has two producers (draft for a pre-dispatch
+  `ToolResultEvent` from a tool node / consulted peer is **not** in the draft — it is action-derived at the
+  seam (an inner-frame `ReturnCall`, §3.2). So `ToolResultEvent` has two producers (draft for a pre-dispatch
   rejection, action for a real return), one type.
 - **Pre-model re-dispatch hops emit nothing** (`:556-576`: no model run → no draft → no step), keeping
   *one model hop = one batch* and avoiding double-emit. Per-hop *metadata* (token usage, latency) is not
@@ -195,7 +196,7 @@ A hop's events ship as **one** `StepMessage` carrying `events: list[StepEvent]`,
 hop is the natural **atomic unit** (a model turn emits preamble + all tool calls simultaneously), so
 batching has **no latency cost** and is chosen for **atomicity** (the client never sees half a hop) and
 semantic cohesion — *not* throughput (the Kafka producer already coalesces sends). A hop batch is bounded
-by the model's output, and the large payloads (`ToolResult` full values) are their own single-event hops;
+by the model's output, and the large payloads (`ToolResultEvent` full values) are their own single-event hops;
 an oversized or otherwise-failed step publish is simply logged and dropped (§2.9), never faulting the run.
 
 ### 2.7 `depth` on every event; all depths stream
@@ -267,7 +268,7 @@ redelivery to dedup; a rare hub re-fetch dup is fine for a QoL firehose); hop-id
 chokepoint (§2.5); on **any** failure (a projection bug, an oversized step, a transient broker error) it
 **logs and moves on**. No retry (the strip-and-retry idea was dropped — best-effort observation does not
 warrant it, and a stripped event couldn't satisfy its own schema). A failed observation must never affect
-the run outcome; the wrap is required because the chokepoint (`:1779`) is **outside** the outer publish
+the run outcome; the wrap is required because the chokepoint is **outside** the outer publish
 guard (which wraps only `:1803`), so an unguarded raise would escape to FastStream and **hang** the run
 (§2.5). The wrap must fall through to the real action publish, never short-circuit it.
 
@@ -322,69 +323,69 @@ correctly.)*
 ### 3.2 `StepEvent` — a closed, discriminated union (`kind` literal)
 
 > The `kind` literal values are a separate union from `ContentPart`'s `kind` (no collision), but pick
-> **distinct** values for readability — e.g. `"tool_call"` for `ToolCall`, not `"tool"` (which is
+> **distinct** values for readability — e.g. `"tool_call"` for `ToolCallEvent`, not `"tool"` (which is
 > `ContentPart`'s `ToolCallPart.kind`). `BaseNodeDef.project_steps` returns `[]` by default (a plain custom
 > node emits no steps); `BaseAgentNodeDef`/`BaseToolNodeDef` override it.
 
 | Event | Producer | Carries | Source |
 | --- | --- | --- | --- |
-| `AgentMessage` | agent | preamble `parts` | `_step_draft` — the **`TextPart` content of the hop's model output** (`result.new_messages()` `ModelResponse`(s)), excluding thinking/tool-call/file parts; empty ⇒ no `AgentMessage` (see below) |
-| `ToolCall` | agent | `tool_call_id`, name, args | `_step_draft` — every call the model requested this hop (from the model emission, **not** the dispatch action) |
-| `ToolResult` | tool node, consulted peer (agent), **or** agent (pre-dispatch rejection) | `tool_call_id`, name, **result `parts`**, **`is_error: bool`** | **two producers, one type:** action-derived at the seam (an inner-frame `ReturnCall`, keyed by the frame `tag`; `_coerce_to_parts`), **or** draft-authored by the agent for a rejected invalid call (`is_error=True`, retry content). `is_error` is **derived once at its producer** (see below). |
-| `Handoff` | agent | `target` + `reason` | `_step_draft` — stashed from the model's `HandoffRequest.name`/`.message` (`peers/handoff.py:69-70`) |
-| `AgentThinking` | agent | thinking `parts` | **defined, not emitted in v1** (§5) |
+| `AgentMessageEvent` | agent | preamble `parts` | `_step_draft` — the **`TextPart` content of the hop's model output** (`result.new_messages()`, the final `ModelResponse` only), excluding thinking/tool-call/file parts; empty ⇒ no `AgentMessageEvent` (see below) |
+| `ToolCallEvent` | agent | `tool_call_id`, name, args | `_step_draft` — every call the model requested this hop (from the model emission, **not** the dispatch action) |
+| `ToolResultEvent` | tool node, consulted peer (agent), **or** agent (pre-dispatch rejection) | `tool_call_id`, name, **result `parts`**, **`is_error: bool`** | **two producers, one type:** action-derived at the seam (an inner-frame `ReturnCall`, keyed by the frame `tag`; `_coerce_to_parts`), **or** draft-authored by the agent for a rejected invalid call (`is_error=True`, retry content). `is_error` is **derived once at its producer** (see below). |
+| `HandoffEvent` | agent | `target` + `reason` | `_step_draft` — stashed from the model's `HandoffRequest.name`/`.message` (`peers/handoff.py:69-70`) |
+| `AgentThinkingEvent` | agent | thinking `parts` | **defined, not emitted in v1** (§5) |
 
-- **There is no `ToolFailed` type — a rejected/retried call is a `ToolResult(is_error=True)`.** A tool's
+- **There is no `ToolFailed` type — a rejected/retried call is a `ToolResultEvent(is_error=True)`.** A tool's
   `ModelRetry`, an agent's pre-dispatch rejection (invalid name/args/validator), and a normal success are
   all "a tool call produced a result" — the only difference (where it was caught) is an implementation
   detail that must not leak into the type. So one type, with `is_error` distinguishing them. (A *hard*
   tool failure that escalates the rail → terminal `RunFailed`, never a step.)
 - **`is_error` is a compute-once denormalisation, not a second source of truth.** For an action-derived
-  `ToolResult` (tool node / peer) the seam **coerces first, then checks** — `parts = _coerce_to_parts(value);
+  `ToolResultEvent` (tool node / peer) the seam **coerces first, then checks** — `parts = _coerce_to_parts(value);
   is_error = is_retry(parts)` (`payload.py:80-93`) — and reuses `parts` for the event. Order matters: at the
   chokepoint `output.value` is the **raw** return for a tool success (a `str`/`dict`/model, not parts), and
   `is_retry(raw_scalar)` **raises `AttributeError`** (verified); coercing first avoids it (and a missed coerce
-  would, via the §2.5 guard, silently suppress the `ToolResult` for every scalar-returning success). For the
+  would, via the §2.5 guard, silently suppress the `ToolResultEvent` for every scalar-returning success). For the
   agent's pre-dispatch rejection `run()` sets `is_error=True` directly (it *is* the producer). The
   `calf.retry` marker stays on the model-facing content (provider `is_error` fidelity); `is_error` is its
   caller-facing summary on the observation event.
-- **The agent's preamble (`AgentMessage`) needs a new extractor.** The existing `structured_output_preamble`
+- **The agent's preamble (`AgentMessageEvent`) needs a new extractor.** The existing `structured_output_preamble`
   (`nodes/_projection.py:100-120`) returns text **only** on the structured *terminal* hop (a `final_result*`
   output-tool call) — which emits no step (§3.3). For a tool-dispatching / handoff hop the model emits plain
   text + ordinary tool calls, so a new extractor is required: concat the `TextPart` text of the hop's
-  `result.new_messages()` `ModelResponse`(s), **excluding** thinking/tool-call/file parts; if empty, author
-  no `AgentMessage`. (This is the marquee event — the impl plan pins the multi-`ModelResponse` edge.) Unlike
+  `result.new_messages()`, the final `ModelResponse` only, **excluding** thinking/tool-call/file parts; if empty, author
+  no `AgentMessageEvent`. (This is the marquee event — the impl plan pins the multi-`ModelResponse` edge.) Unlike
   `structured_output_preamble`, this extractor needs **no `has_final_result` guard**: the structured-output-as-
   text case (native/prompted mode, where the `TextPart` *is* the JSON answer) cannot coincide with a
   step-emitting hop — a handoff forces a multi-member output union that pydantic-ai bars from native/prompted
   ("must be the only output type"), and an un-handed-off structured answer is produced only on the depth-1
   terminal hop, which emits no step. (Revisit if native/prompted is ever enabled on a non-terminal hop.)
-- **A draft `ToolResult.parts` must serialise non-`str` rejection content.** A `RetryPromptPart.content` is a
+- **A draft `ToolResultEvent.parts` must serialise non-`str` rejection content.** A `RetryPromptPart.content` is a
   `str` for the unknown-tool / malformed-args / validator-raise arms (`agent.py:656/688/726`) but a
   `list[dict]` for the schema-`ValidationError` arm (`agent.py:703/713`, `e.errors(...)`). `run()`'s draft
   builder must render both into a `TextPart` (optionally `calf.retry`-marked), not assume `str`.
 - **Inner-vs-root is stack depth — the *inbound (pre-action) snapshot* depth, the same measure as the
   §2.7 `depth` field.** A `message_agent` consult is a tool call from the model's POV, so the peer agent's
-  inner-frame `ReturnCall` is a `ToolResult` keyed by the frame `tag`. The discriminator is **inbound depth
-  `== 1` ⇒ the run's terminal (no step); `> 1` ⇒ `ToolResult`** (the client pushes exactly one root frame,
+  inner-frame `ReturnCall` is a `ToolResultEvent` keyed by the frame `tag`. The discriminator is **inbound depth
+  `== 1` ⇒ the run's terminal (no step); `> 1` ⇒ `ToolResultEvent`** (the client pushes exactly one root frame,
   `caller.py:349`, so the top-level agent runs at inbound depth 1; a tool/peer answering it runs at depth
   ≥ 2). Measure it on the **pre-action** stack, *not* post-pop (a `ReturnCall` pops first, so post-pop the
   terminal is depth 0 and an inner return is depth 1 — measuring post-pop inverts the classification).
   Do **not** use `callback_topic is None` (the client always sets the root's callback to its inbox) or
   `tag is None` (a custom node may `Call` without a tag) — both misclassify. **A tool node always emits
-  `ToolResult`** (never a run root — directly-called-tool out of scope); only the **agent's** `ReturnCall`
+  `ToolResultEvent`** (never a run root — directly-called-tool out of scope); only the **agent's** `ReturnCall`
   needs the depth test.
 - **The agent authors its draft events directly, so the two `TailCall`-to-self shapes need no inference:**
-  an all-invalid retry stashed `ToolCall`+`ToolResult(is_error=True)`, a stale-handoff retry (offline
-  target, `agent.py:399`) stashed `Handoff` — `run()` knows which it produced. A handoff to an
-  offline target **still emits** `Handoff` (a happy-path action that raised nothing); the impl
+  an all-invalid retry stashed `ToolCallEvent`+`ToolResultEvent(is_error=True)`, a stale-handoff retry (offline
+  target, `agent.py:399`) stashed `HandoffEvent` — `run()` knows which it produced. A handoff to an
+  offline target **still emits** `HandoffEvent` (a happy-path action that raised nothing); the impl
   must not special-case it away.
-- `tool_call_id` threads `ToolCall` ↔ `ToolResult` (it rides the `Call`'s `ToolCallRef` out and the
-  frame `tag` back). Note a consulted-peer `ToolResult.name` is the peer agent's name, while the
-  paired `ToolCall.name` is `message_agent` — they pair by `tool_call_id`, not name.
-- **`ToolCall.args` accepts the raw model emission** (`str | dict | None`), not a parsed dict — the
+- `tool_call_id` threads `ToolCallEvent` ↔ `ToolResultEvent` (it rides the `Call`'s `ToolCallRef` out and the
+  frame `tag` back). Note a consulted-peer `ToolResultEvent.name` is the peer agent's name, while the
+  paired `ToolCallEvent.name` is `message_agent` — they pair by `tool_call_id`, not name.
+- **`ToolCallEvent.args` accepts the raw model emission** (`str | dict | None`), not a parsed dict — the
   malformed-args rejection (`agent.py:676`, where `args_as_dict()` *raised*) must still surface a
-  `ToolCall` (+ its `is_error=True` `ToolResult`), and there is no parsed dict to carry in that case.
+  `ToolCallEvent` (+ its `is_error=True` `ToolResultEvent`), and there is no parsed dict to carry in that case.
 
 ### 3.3 Ordering
 
@@ -426,8 +427,8 @@ would be a guaranteed-dropped, content-duplicating event. So `project_steps` ret
   that owns it (lenient for the observation rail; strict on the envelope handler, where a malformed *reply*
   still floors → `fail_run`). *(Confirmed empirically: `None` sentinel + `StepMessage | None` → 0 floor-sink
   hits + clean drop; a `StepMessage`-typed handler → second `ValidationError` → floor → fault.)*
-- Surfaced types are the **individual** widened `RunEvent` members (`AgentMessage`, `ToolCall`,
-  `ToolResult` (with `is_error`), `Handoff` + terminals `RunCompleted`/`RunFailed`). The batch
+- Surfaced types are the **individual** widened `RunEvent` members (`AgentMessageEvent`, `ToolCallEvent`,
+  `ToolResultEvent` (with `is_error`), `HandoffEvent` + terminals `RunCompleted`/`RunFailed`). The batch
   never surfaces as a public object; hop grouping is reconstructable from each event's `frame_id`/`depth`.
   Steps surface their **raw** `parts` — they are **not** `output_type`-coerced (that scoping is the
   terminal `result()` only); a preamble or tool result is not the run's typed answer.
@@ -457,11 +458,11 @@ confinement, if ever needed, is a future depth/redaction knob — not v1.
 Thinking is distinct at the source (pydantic-ai `ThinkingPart`) but absent from the wire `ContentPart`
 (`payload.py:37`). The agreed approach (do **not** widen the wire union) mirrors the `calf.retry` marker
 idiom (`payload.py:80-89`): map a `ThinkingPart` → a `TextPart` with a `calf.thinking` marker; preamble
-stays unmarked; `project_steps` splits marked → `AgentThinking`, unmarked → `AgentMessage`.
+stays unmarked; `project_steps` splits marked → `AgentThinkingEvent`, unmarked → `AgentMessageEvent`.
 Observation-only and lossy (text for display, not the provider signature — the authoritative thinking
 stays in internal history for round-trips).
 
-**v1:** the `AgentThinking` type is **defined but not emitted**, ready to turn on later (matches the
+**v1:** the `AgentThinkingEvent` type is **defined but not emitted**, ready to turn on later (matches the
 codebase's forward-compat scaffolding). **No knob is defined now**; the default-on-vs-opt-in choice is
 made when thinking is activated.
 
@@ -474,19 +475,19 @@ made when thinking is activated.
 | Wire shape | Separate `StepMessage` model, **not** on `Envelope.reply`; routed by a new always-stamped `x-calf-wire ∈ {envelope, step}` header; **strict positive** filters (no absent-fallback); hard cutover |
 | Produce-side stamp | Universal — stamped at `_headers()` (`base.py:494`) + the client ingress (`caller.py:354`) + the step publish; unstamped ⇒ dropped (intended for foreign producers) |
 | Node-topic safety | Steps emit unconditionally; no emission gate. Nodes carry **only** their envelope handler; an unmatched `step` → `SubscriberNotFound` → swallowed + **FastStream ERROR-logs** (relied on; no step-drop handler) |
-| Projection seam | The **disposition chokepoint** `_handle_delivery:1779` (covers `_handle_fanout_open` AND `_publish_action`), wrapped in its own `try/except` |
+| Projection seam | The **disposition chokepoint** `_handle_delivery` (covers `_handle_fanout_open` AND `_publish_action`), wrapped in its own `try/except` |
 | `StepDraft` | **Typed** `list[StepEvent]` (discriminated on `kind`), not generic `ContentPart`s; agent authors its events directly |
 | Buffering | Consume-once queue (intermediates, own `Event` signal) + cached terminal; positive wake model (terminal/close sets both signals); `async with` stream scope |
 | `depth` | Pre-action call-stack snapshot |
 | Ordering | Causal-gap + close-on-terminal; rare reorder accepted; terminal hop emits no step |
-| `ToolResult` | One type for success *and* error (`is_error: bool`, derived once at its producer); **no `ToolFailed`**. Any inner-frame `ReturnCall` (covers `message_agent` peers) **or** agent pre-dispatch rejection; inner-vs-root = **inbound (pre-action) depth==1 ⇒ terminal, >1 ⇒ ToolResult**; tool hard-faults → terminal |
+| `ToolResultEvent` | One type for success *and* error (`is_error: bool`, derived once at its producer); **no `ToolFailed`**. Any inner-frame `ReturnCall` (covers `message_agent` peers) **or** agent pre-dispatch rejection; inner-vs-root = **inbound (pre-action) depth==1 ⇒ terminal, >1 ⇒ ToolResultEvent**; tool hard-faults → terminal |
 | Fault/abort/decline seams | Not steps — framework concerns → terminal `RunFailed` |
 | Model mistakes | calfkit-caught only; pydantic-ai internal retries out of scope |
 | Delivery | Best-effort, at-most-once, lossy; no dedup; ack-then-crash loss accepted |
 | Publish failure | Whole projection+publish wrapped; **log and drop, no retry**; never faults the run |
 | Depth/trust | All depths stream (a goal); documented, not policed |
 | Performance | Doubled publishes / hotspot / single consumer accepted; no mitigation |
-| Thinking | `AgentThinking` defined-not-emitted; `calf.thinking` marker pattern documented |
+| Thinking | `AgentThinkingEvent` defined-not-emitted; `calf.thinking` marker pattern documented |
 
 No open decisions remain (round-2 review folded). Next: implementation plan + adversarial plan review.
 
@@ -494,17 +495,17 @@ No open decisions remain (round-2 review folded). Next: implementation plan + ad
 
 ## 7. Implementation seams (reference)
 
-- Emission: the **disposition chokepoint** in `_handle_delivery` (`nodes/base.py:1779`, where `output` is
+- Emission: the **disposition chokepoint** in `_handle_delivery` (`nodes/base.py`, where `output` is
   known before the `_handle_fanout_open` / `_publish_action` branch) — project once from `(output, ctx,
   frame)`, wrapped in its own `try/except`; root inbox = `call_stack[0].callback_topic`; depth from the
   pre-action snapshot (`~:1666`).
 - `project_steps`: polymorphic on `BaseNodeDef` / `BaseAgentNodeDef` / `BaseToolNodeDef`. The agent stashes
   typed `StepEvent`s in `_step_draft` during `run()`; the chokepoint returns them + the action-derived
-  `ToolResult` (inner-frame `ReturnCall`, depth>1).
+  `ToolResultEvent` (inner-frame `ReturnCall`, depth>1).
 - `StepDraft`: `models/session_context.py` — `_step_draft: list[StepEvent] | None` PrivateAttr (`:179-185`).
 - **New `models/step.py`** holds `StepMessage` (its `model_validator(mode="after")` back-fills event
-  identity) + the closed `StepEvent` union (`AgentMessage`/`ToolCall`/`ToolResult`/`Handoff`, + deferred
-  `AgentThinking`), discriminated on `kind`, identity fields `Field(exclude=True)`. It lives in `models/`
+  identity) + the closed `StepEvent` union (`AgentMessageEvent`/`ToolCallEvent`/`ToolResultEvent`/`HandoffEvent`, + deferred
+  `AgentThinkingEvent`), discriminated on `kind`, identity fields `Field(exclude=True)`. It lives in `models/`
   (not `client/events.py`) because the **node side** publishes `StepMessage` and `nodes/`→`models/` is the
   only allowed direction; `client/events.py` **imports** the `StepEvent` types to widen `RunEvent`, and the
   public `calfkit` surface re-exports them — the same "public wire type defined in `models/`, re-exported"
