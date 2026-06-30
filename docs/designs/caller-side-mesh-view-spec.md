@@ -417,7 +417,8 @@ class Mesh:
             if self._closed: raise ClientClosedError(...) from None   # aclose cancelled us → closed contract
             raise                                                 # the waiter's OWN cancellation propagates
         except Exception as e:                                    # the open task raised (start() failed)
-            raise MeshUnavailableError(f"could not open the {kind.label} directory", reason="open_failed") from e
+            raise MeshUnavailableError(f"could not open the {kind.name} directory — the topic isn't present yet "  # actionable (§6.3)
+                                       "(it is created when an agent or tool comes online, or provision it via ops)", reason="open_failed") from e
         return cell
 
     async def get_agents(self) -> Mapping[str, AgentInfo]:
