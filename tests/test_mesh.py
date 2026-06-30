@@ -623,3 +623,60 @@ def test_importing_mesh_pulls_no_ktables() -> None:
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# === Client.mesh wiring (spec §5.1 / §6.2) ======================================
+
+
+def test_client_mesh_is_a_zero_io_identity_stable_singleton() -> None:
+    client = Client.connect("localhost:9092")
+    assert client._mesh is None  # __init__ initialized it to None (created lazily)
+    first = client.mesh
+    second = client.mesh
+    assert first is second and isinstance(first, Mesh)  # one cached singleton per client
+    assert not client._broker._connection  # zero I/O — accessing client.mesh brings up no broker
+
+
+def test_connect_threads_mesh_config_into_the_mesh() -> None:
+    config = MeshViewConfig(catchup_timeout=9.0)
+    client = Client.connect("localhost:9092", mesh_config=config)
+    assert client.mesh._config is config
+
+
+def test_client_mesh_defaults_config_when_unset() -> None:
+    client = Client.connect("localhost:9092")
+    assert client.mesh._config == MeshViewConfig()
+
+
+async def test_opening_a_mesh_view_does_not_start_the_client_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = Client.connect("localhost:9092")
+    _install_opener(monkeypatch, lambda **kw: _StubView())
+    await client.mesh.get_agents()
+    assert not client._broker._connection  # the mesh consumer is independent of the inbox/broker (§7.3)
+    await client.aclose()
+
+
+async def test_client_aclose_tears_down_the_mesh(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = Client.connect("localhost:9092")
+    view = _StubView()
+    _install_opener(monkeypatch, lambda **kw: view)
+    await client.mesh.get_agents()
+    await client.aclose()
+    assert view.stopped  # client.aclose() stopped the cached mesh view
+
+
+async def test_client_aclose_runs_the_broker_close_path_even_if_mesh_teardown_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = Client.connect("localhost:9092")
+    _install_opener(monkeypatch, lambda **kw: _StubView())
+    await client.mesh.get_agents()
+
+    async def _boom() -> None:
+        raise RuntimeError("mesh teardown boom")
+
+    monkeypatch.setattr(client.mesh, "aclose", _boom)
+    client._started = True  # so we can observe the finally resetting it
+    with pytest.raises(RuntimeError, match="mesh teardown boom"):
+        await client.aclose()
+    assert client._started is False  # the broker-close path (finally) ran despite the mesh raise
