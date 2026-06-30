@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import pydantic_core
 
@@ -175,6 +175,42 @@ class ClientClosedError(Exception):
 
     def __reduce__(self) -> tuple[Any, tuple[str]]:
         return (self.__class__, (self.correlation_id,))
+
+
+_MeshUnavailableReason = Literal["establishing", "reader_dead", "open_failed"]
+
+
+class MeshUnavailableError(Exception):
+    """A ``client.mesh`` read could not return a roster — the per-kind view is not usable.
+
+    Raised by ``client.mesh.get_agents()`` / ``get_tools()`` (spec §6.4) rather than ever
+    returning a silently-partial roster. Branch on ``reason`` to route without string-matching
+    the message (the discriminate-by-field precedent is ``NodeFaultError.report.retryable``):
+
+    - ``reason="establishing"`` — the view is still catching up (a cold-start latch; no cause
+      attached). It self-heals on the **same** client, so retry with a short backoff.
+    - ``reason="reader_dead"`` — the reader died on a non-retriable error (cause attached).
+      Terminal for the view's lifetime: alert; recovery needs a fresh ``Client``.
+    - ``reason="open_failed"`` — the open itself raised (a missing directory topic or an
+      unreachable broker; cause attached). The next read re-opens, so retry with backoff.
+
+    A misconfigured client (``server_urls is None``) raises a synchronous ``ValueError`` instead
+    — you never retry a programming bug.
+    """
+
+    def __init__(self, message: str, *, reason: _MeshUnavailableReason) -> None:
+        self.reason: _MeshUnavailableReason = reason
+        super().__init__(message)
+
+    def __reduce__(self) -> tuple[Any, tuple[str, _MeshUnavailableReason]]:
+        # The keyword-only `reason` breaks the default reduction (which would replay only the
+        # message string through __init__ and silently drop `reason`); rebuild from both fields
+        # via a module-level reconstructor (cf. ClientTimeoutError / ClientClosedError).
+        return (_rebuild_mesh_unavailable, (str(self), self.reason))
+
+
+def _rebuild_mesh_unavailable(message: str, reason: _MeshUnavailableReason) -> MeshUnavailableError:
+    return MeshUnavailableError(message, reason=reason)
 
 
 class MissingTopicsError(RuntimeError):

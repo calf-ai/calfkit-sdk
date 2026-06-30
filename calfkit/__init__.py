@@ -16,7 +16,7 @@ from calfkit.client import (
     ToolResultEvent,
 )
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView, advertises
-from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, NodeFaultError
+from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, MeshUnavailableError, NodeFaultError
 from calfkit.models import ErrorReport, ExceptionInfo, FaultTypes, ToolContext
 from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, Tools, agent_tool, consumer
 from calfkit.peers import Handoff, Messaging
@@ -86,5 +86,6 @@ __all__ = [
     "ClientTimeoutError",
     "DeserializationError",
     "LifecycleConfigError",
+    "MeshUnavailableError",
     "NodeFaultError",
 ]
