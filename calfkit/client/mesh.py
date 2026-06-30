@@ -10,13 +10,21 @@ The surface, DTOs, cache, and projections are built up across this feature's com
 
 from __future__ import annotations
 
+import copy
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from calfkit.controlplane.records import ControlPlaneRecord
+from calfkit.models.agents import AgentCard
+from calfkit.models.capability import CapabilityRecord
 from calfkit.tuning import KTableReaderTuning, PositiveFiniteFloat
+
+logger = logging.getLogger(__name__)
 
 # === Public DTOs (frozen dataclasses; the RunEvent precedent) ====================
 #
@@ -102,3 +110,95 @@ class MeshViewConfig(BaseModel):
     """Bound (seconds) on a view's open-time catch-up gate (spec §6.2)."""
     reader_tuning: KTableReaderTuning = Field(default_factory=KTableReaderTuning)
     """Cadence for the view reader (idle ``barrier()`` latency)."""
+
+
+# === Projections (wire record -> public DTO, spec §6.5) ==========================
+#
+# Pure over one record; a record that does not project is skipped (degrade, don't crash —
+# mirroring resolve_capability). The reachable skips are an unknown future node_kind and a
+# "tool" record whose tools list is not exactly one element. A malformed ToolSpec is not a
+# projection concern: parameters_json_schema is a required wire field, so such a record fails
+# wire-decode in ktables before projection.
+
+
+def _project_agent(node_id: str, record: AgentCard) -> AgentInfo:
+    """Project an ``AgentCard`` to a public :class:`AgentInfo`.
+
+    ``name`` is the wire key (``node_id``); ``last_seen`` is the wire ``last_heartbeat_at``.
+    """
+    return AgentInfo(name=node_id, description=record.description, last_seen=record.last_heartbeat_at)
+
+
+def _project_tool(node_id: str, record: CapabilityRecord) -> ToolInfo | None:
+    """Project a ``CapabilityRecord`` to a :class:`ToolNodeInfo` / :class:`ToolboxInfo`, or
+    ``None`` when it is not a projectable shape.
+
+    Dispatch on ``node_kind``: ``"tool"`` -> one inlined tool (the record must carry exactly one;
+    a foreign/malformed record with 0 or >1 is skipped, never blind-indexed); ``"toolbox"`` -> the
+    full tool list with **bare** names; any other kind -> ``None``. ``parameters_schema`` is
+    deep-copied so a caller mutating the DTO never reaches the live cached record.
+    """
+    if record.node_kind == "tool":
+        if len(record.tools) != 1:
+            return None
+        tool = record.tools[0]
+        return ToolNodeInfo(
+            name=node_id,
+            description=tool.description,
+            parameters_schema=copy.deepcopy(tool.parameters_json_schema),
+            last_seen=record.last_heartbeat_at,
+        )
+    if record.node_kind == "toolbox":
+        return ToolboxInfo(
+            name=node_id,
+            tools=tuple(
+                ToolSpec(
+                    name=tool.name,  # bare, not the LLM-facing <toolbox>__tool form
+                    description=tool.description,
+                    parameters_schema=copy.deepcopy(tool.parameters_json_schema),
+                )
+                for tool in record.tools
+            ),
+            last_seen=record.last_heartbeat_at,
+        )
+    return None
+
+
+_R = TypeVar("_R", bound=ControlPlaneRecord)
+_D = TypeVar("_D")
+
+
+class _Projector(Generic[_R, _D]):
+    """Projects a control-plane view ``snapshot()`` to a name-keyed DTO map, skipping records that
+    do not project and logging each skip **once** (deduped, mirroring the view's schema-skip log).
+
+    Holds the per-kind skip-log dedup state, so it is 1:1 with the long-lived cached view and is
+    *not* a per-call function (which would re-log every read).
+    """
+
+    def __init__(self, project_one: Callable[[str, _R], _D | None], *, label: str) -> None:
+        self._project_one = project_one
+        self._label = label
+        self._logged_skips: set[tuple[str, str]] = set()  # (node_id, node_kind) already warned
+
+    def __call__(self, snapshot: dict[str, _R]) -> dict[str, _D]:
+        out: dict[str, _D] = {}
+        for node_id, record in snapshot.items():
+            projected = self._project_one(node_id, record)
+            if projected is None:
+                self._log_skip_once(node_id, record)
+                continue
+            out[node_id] = projected
+        return out
+
+    def _log_skip_once(self, node_id: str, record: _R) -> None:
+        key = (node_id, record.node_kind)
+        if key in self._logged_skips:
+            return
+        self._logged_skips.add(key)
+        logger.warning(
+            "mesh %s view: skipping node=%s (node_kind=%s) — not a projectable control-plane record",
+            self._label,
+            node_id,
+            record.node_kind,
+        )

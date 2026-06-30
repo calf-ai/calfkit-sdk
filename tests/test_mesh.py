@@ -8,17 +8,51 @@ feature's commits; this module holds them (the URL-resolver tests moved to
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from calfkit import MeshUnavailableError
-from calfkit.client.mesh import AgentInfo, MeshViewConfig, ToolboxInfo, ToolInfo, ToolNodeInfo, ToolSpec
+from calfkit.client.mesh import (
+    AgentInfo,
+    MeshViewConfig,
+    ToolboxInfo,
+    ToolInfo,
+    ToolNodeInfo,
+    ToolSpec,
+    _project_agent,
+    _project_tool,
+    _Projector,
+)
+from calfkit.models.agents import AgentCard
+from calfkit.models.capability import CapabilityRecord, CapabilityToolDef
 from calfkit.tuning import KTableReaderTuning
 
 _NOW = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _agent_card(*, description: str | None = "A test agent") -> AgentCard:
+    return AgentCard(started_at=_NOW, last_heartbeat_at=_NOW, heartbeat_interval=30.0, node_kind="agent", description=description)
+
+
+def _tool_def(name: str, *, description: str | None = None, schema: dict[str, Any] | None = None) -> CapabilityToolDef:
+    return CapabilityToolDef(name=name, description=description, parameters_json_schema=schema if schema is not None else {"type": "object"})
+
+
+def _capability_record(*, node_kind: str, tools: list[CapabilityToolDef]) -> CapabilityRecord:
+    return CapabilityRecord(
+        started_at=_NOW,
+        last_heartbeat_at=_NOW,
+        heartbeat_interval=30.0,
+        node_kind=node_kind,
+        dispatch_topic="some.dispatch.topic",
+        tools=tools,
+        content_updated_at=_NOW,
+    )
 
 
 # -- DTOs: construction + immutability (frozen dataclasses, the RunEvent idiom) ----
@@ -182,3 +216,89 @@ def test_mesh_unavailable_error_reconstructs_from_its_fields() -> None:
     assert isinstance(restored, MeshUnavailableError)
     assert restored.reason == "open_failed"
     assert str(restored) == "could not open the agents directory"
+
+
+# -- Projections: wire record -> public DTO (spec §6.5) ---------------------------
+
+
+def test_project_agent_maps_card_to_agent_info() -> None:
+    info = _project_agent("billing", _agent_card(description="Handles invoices"))
+    assert info == AgentInfo(name="billing", description="Handles invoices", last_seen=_NOW)
+
+
+def test_project_agent_carries_absent_description() -> None:
+    assert _project_agent("billing", _agent_card(description=None)).description is None
+
+
+def test_project_tool_maps_a_function_tool_node_to_tool_node_info() -> None:
+    record = _capability_record(node_kind="tool", tools=[_tool_def("add", description="Add two numbers", schema={"type": "object", "x": 1})])
+    assert _project_tool("add", record) == ToolNodeInfo(
+        name="add", description="Add two numbers", parameters_schema={"type": "object", "x": 1}, last_seen=_NOW
+    )
+
+
+def test_project_tool_maps_a_toolbox_to_toolbox_info_with_bare_names() -> None:
+    record = _capability_record(node_kind="toolbox", tools=[_tool_def("search", description="Find"), _tool_def("fetch")])
+    info = _project_tool("docs", record)
+    assert isinstance(info, ToolboxInfo)
+    assert info.name == "docs"
+    assert info.last_seen == _NOW
+    assert [s.name for s in info.tools] == ["search", "fetch"]  # BARE names, not docs__search
+    assert info.tools[0] == ToolSpec(name="search", description="Find", parameters_schema={"type": "object"})
+
+
+def test_project_tool_toolbox_with_zero_tools_projects_to_empty_tuple() -> None:
+    assert _project_tool("empty", _capability_record(node_kind="toolbox", tools=[])) == ToolboxInfo(name="empty", tools=(), last_seen=_NOW)
+
+
+def test_project_tool_unknown_kind_is_skipped() -> None:
+    assert _project_tool("weird", _capability_record(node_kind="gadget", tools=[_tool_def("x")])) is None
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_project_tool_node_with_not_exactly_one_tool_is_skipped(count: int) -> None:
+    # A "tool" advertises exactly one tool by producer convention; a foreign/malformed record
+    # with 0 or >1 tools is skipped, not blind-indexed (spec §6.5).
+    tools = [_tool_def(f"t{i}") for i in range(count)]
+    assert _project_tool("add", _capability_record(node_kind="tool", tools=tools)) is None
+
+
+def test_project_tool_deep_copies_parameters_schema() -> None:
+    # A caller mutating info.parameters_schema must not reach the live cached record (spec §6.5).
+    record = _capability_record(node_kind="tool", tools=[_tool_def("add", schema={"type": "object", "nested": {"k": "v"}})])
+    info = _project_tool("add", record)
+    assert isinstance(info, ToolNodeInfo)
+    info.parameters_schema["nested"]["k"] = "MUTATED"
+    assert record.tools[0].parameters_json_schema["nested"]["k"] == "v"
+
+
+# -- _Projector: snapshot -> DTO dict, with deduped skip-logging -------------------
+
+
+def test_projector_projects_a_snapshot_skipping_non_projectable_records() -> None:
+    projector = _Projector(_project_tool, label="tools")
+    snapshot = {
+        "add": _capability_record(node_kind="tool", tools=[_tool_def("add")]),
+        "docs": _capability_record(node_kind="toolbox", tools=[_tool_def("search")]),
+        "weird": _capability_record(node_kind="gadget", tools=[]),
+    }
+    out = projector(snapshot)
+    assert set(out) == {"add", "docs"}  # "weird" skipped, uniformly absent
+    assert isinstance(out["add"], ToolNodeInfo)
+    assert isinstance(out["docs"], ToolboxInfo)
+
+
+def test_projector_handles_agents_which_never_skip() -> None:
+    projector = _Projector(_project_agent, label="agents")
+    out = projector({"billing": _agent_card(description="Invoices")})
+    assert out == {"billing": AgentInfo(name="billing", description="Invoices", last_seen=_NOW)}
+
+
+def test_projector_dedupes_the_skip_log_across_repeated_projections(caplog: pytest.LogCaptureFixture) -> None:
+    projector = _Projector(_project_tool, label="tools")
+    snapshot = {"weird": _capability_record(node_kind="gadget", tools=[])}
+    with caplog.at_level(logging.WARNING, logger="calfkit.client.mesh"):
+        projector(snapshot)
+        projector(snapshot)  # the same skip again — must not re-log
+    skip_warnings = [r for r in caplog.records if "weird" in r.getMessage()]
+    assert len(skip_warnings) == 1
