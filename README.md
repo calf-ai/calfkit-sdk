@@ -119,6 +119,7 @@ Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm
 
 See [`examples/`](examples/) for more examples.
 
+- **[Streaming intermediate work](examples/streaming/)** — a trip-planner agent whose preamble, tool calls, and tool results stream to the caller via `handle.stream()`, for a live view of a run's progress.
 - **[Agent, tool & consumer](examples/quickstart/)** — a weather agent and its `get_weather` tool deployed as separate services and invoked over the broker, with a consumer node tapping the agent's output stream.
 - **[Multi-agent panel](examples/multi_agent_panel/)** — three persona agents (`optimist`, `skeptic`, `pragmatist`) debate over one shared transcript, each automatically seeing the thread from its own point of view.
 - **[MCP toolbox](examples/quickstart_mcp/)** — give an agent a live web-`fetch` tool from an MCP server, deployed as its own node and referenced by name — the agent's code never imports it.
@@ -131,7 +132,7 @@ In-repo documentation lives under [`docs/`](docs/).
 
 **How-to guides** — goal-oriented walkthroughs:
 
-- **[How to call agents from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, the `events()` firehose, and the typed client errors.
+- **[How to call agents from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, streaming a run's intermediate steps live with `handle.stream()`, the `events()` firehose, and the typed client errors.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
 - **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.

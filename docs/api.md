@@ -42,14 +42,14 @@ from calfkit import (
 
 Members of the `RunEvent` union, surfaced by `stream()` / `events()` as a run progresses (best-effort, at-most-once, **raw** — not `output_type`-coerced). All re-exported from `calfkit`.
 
-| Symbol | Emitted by | Carries |
-| --- | --- | --- |
-| `AgentMessageEvent` | an agent hop | `parts` — the hop's preamble text |
-| `ToolCallEvent` | an agent hop | `tool_call_id`, `name`, `args: str \| dict \| None` (raw model emission) |
-| `ToolResultEvent` | a tool node / consulted peer / rejected call | `tool_call_id`, `name`, `parts`, `is_error: bool` |
-| `HandoffEvent` | an agent hop | `target`, `reason` |
+| Symbol | `kind` | Emitted by | Carries |
+| --- | --- | --- | --- |
+| `AgentMessageEvent` | `"agent_message"` | an agent hop | `parts` — the hop's preamble text |
+| `ToolCallEvent` | `"tool_call"` | an agent hop | `tool_call_id`, `name`, `args: str \| dict \| None` (raw model emission) |
+| `ToolResultEvent` | `"tool_result"` | a tool node / consulted peer / rejected call | `tool_call_id`, `name`, `parts`, `is_error: bool` |
+| `HandoffEvent` | `"handoff"` | an agent hop | `target`, `reason` |
 
-Each also carries hop identity (`correlation_id`, `depth`, `frame_id`, `emitter`). A fifth type, `AgentThinkingEvent`, is **defined but not emitted in v1** — it is not in the `RunEvent` union and not top-level re-exported; it lives at `calfkit.models.step` for forward compatibility.
+Each is a **frozen** model discriminated on its `kind` literal, and also carries hop identity (`correlation_id`, `depth`, `frame_id`, `emitter`). A fifth type, `AgentThinkingEvent` (`kind="agent_thinking"`), is **defined but not emitted in v1** — it is not in the `RunEvent` union and not top-level re-exported; it lives at `calfkit.models.step` for forward compatibility.
 
 ### Node authoring
 
