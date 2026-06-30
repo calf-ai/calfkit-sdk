@@ -46,7 +46,7 @@ answers you, because the handoff transferred the conversation:
 🔧 [editor] message_agent({"name": "fact_checker", "message": "Verify the dock counts and the 'first month free' claim."})
   🔧 [fact_checker] check_claim({'claim': '120 docks, 15 stations, first month free'})
 ↩  [fact_checker] replies: Verified with the transit authority; caveat: launch date is 'late spring'...
-🤝 [editor] hands off → [writer] (draft the final brief)
+🤝 [editor] hands off to [writer] (draft the final brief)
 --- the writer's brief ---
 The city council has approved a downtown bike-share program in a 7-2 vote ...
 ```

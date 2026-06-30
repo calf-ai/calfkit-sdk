@@ -36,7 +36,7 @@ def _show(event) -> None:
     elif isinstance(event, ToolResultEvent):
         print(f"{pad}↩  [{event.name}] replies: {_text(event.parts)}")
     elif isinstance(event, HandoffEvent):
-        print(f"{pad}🤝 [{event.emitter}] hands off → [{event.target}] ({event.reason})")
+        print(f"{pad}🤝 [{event.emitter}] hands off to [{event.target}] ({event.reason})")
 
 
 async def _ask(client: Client, prompt: str) -> None:
