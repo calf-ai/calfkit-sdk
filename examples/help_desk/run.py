@@ -1,9 +1,4 @@
-"""Ask the help desk two things, and watch it choreograph the right expert live.
-
-`start()` + `handle.stream()` surface every step of the run as it happens — the
-front desk's message_agent consults, each expert's reply, and any handoff — across
-all depths, to this caller. The help desk was never told who exists; it discovers
-the experts at runtime. (See ../streaming for streaming on its own.)
+"""Ask the help desk two things and watch it route to the right expert.
 
 Run it with:  python run.py   (start service.py first — see the README.)
 """
@@ -26,13 +21,12 @@ def _text(parts) -> str:
 
 
 def _show(event) -> None:
-    """Render one intermediate step event, indented by call depth (a consulted peer streams deeper)."""
+    """Render one intermediate step event, indented by call depth."""
     pad = "  " * (event.depth - 1)
     if isinstance(event, AgentMessageEvent):
         if text := _text(event.parts):
             print(f"{pad}💬 [{event.emitter}] {text}")
     elif isinstance(event, ToolCallEvent):
-        # message_agent renders like any tool call — name({json args}) — so the raw JSON is visible.
         print(f"{pad}🔧 [{event.emitter}] {event.name}({event.args})")
     elif isinstance(event, ToolResultEvent):
         print(f"{pad}↩  [{event.name}] replies: {_text(event.parts)}")

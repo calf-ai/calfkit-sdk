@@ -8,9 +8,6 @@ an expert should own with **`Handoff`** — both opened to *every* live agent wi
 [How to let agents find and reach each other at runtime](../../docs/agent-peers.md)
 guide.
 
-The driver streams the run with `handle.stream()`, so you watch the choreography
-unfold live — the consult, the expert's reply, the handoff — across all depths.
-
 ## What's here
 
 | File | Role |
@@ -18,7 +15,7 @@ unfold live — the consult, the expert's reply, the handoff — across all dept
 | `agents.py` | The `help_desk` (`peers=[Messaging(discover=True), Handoff(discover=True)]`) and three experts — `hr`, `it_support`, `finance`. |
 | `tools.py` | One canned lookup tool per expert. |
 | `service.py` | Deploys the help desk + experts + tools on one worker. |
-| `run.py` | Asks two questions and prints each step from `handle.stream()` live. |
+| `run.py` | Asks two questions and prints each step of the run. |
 | `extra_expert.py` | A `legal` expert you deploy *later* to see discovery pick it up with no code change. |
 
 ## Prerequisites
@@ -33,14 +30,13 @@ unfold live — the consult, the expert's reply, the handoff — across all dept
 # 1) the help desk + its experts, on one worker
 $ python service.py
 
-# 2) ask it two things and watch the choreography stream in
+# 2) ask it two things
 $ python run.py
 ```
 
 The first question is a quick lookup, so the desk **messages** `hr` and relays the
-answer (a consulted peer's hops stream indented, one level deeper). The second is a
-task to own, so the desk **hands off** to `finance`, which files it and answers you
-directly:
+answer. The second is a task to own, so the desk **hands off** to `finance`, which
+files it and answers you directly:
 
 ```text
 >>> How many vacation days do I have left? I'm Sam Rivera.

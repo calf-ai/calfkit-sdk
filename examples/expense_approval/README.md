@@ -7,16 +7,13 @@ approves it and answers the employee directly. This is the multi-hop side of the
 [How to let agents find and reach each other at runtime](../../docs/agent-peers.md)
 guide — a chain of handoffs, each decided at runtime by the agent holding the request.
 
-The driver streams the run with `handle.stream()`, so you watch the request climb the
-chain hop by hop.
-
 ## What's here
 
 | File | Role |
 | --- | --- |
 | `agents.py` | `team_lead` (≤ $1,000, `Handoff("director")`) → `director` (≤ $10,000, `Handoff("vp")`) → `vp` (any amount). |
 | `service.py` | Deploys all three approvers on one worker. |
-| `run.py` | Submits one large expense and prints each handoff from `handle.stream()` live. |
+| `run.py` | Submits one large expense and prints each handoff. |
 
 No tools here — the choreography *is* the example; each approver decides from the
 amount alone.

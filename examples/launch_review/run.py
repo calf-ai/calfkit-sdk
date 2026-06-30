@@ -1,9 +1,4 @@
-"""Ask the release manager for a go/no-go, and watch the review choreograph live.
-
-`start()` + `handle.stream()` surface every step as it happens — the release
-manager's three consults (messaging) and each expert's reply — across all depths, to
-this caller. The release manager keeps control the whole time and synthesizes the
-final call itself; there is no handoff. (See ../streaming for streaming on its own.)
+"""Ask the release manager for a go/no-go and watch it consult the three experts.
 
 Run it with:  python run.py   (start service.py first — see the README.)
 """
@@ -26,13 +21,12 @@ def _text(parts) -> str:
 
 
 def _show(event) -> None:
-    """Render one intermediate step event, indented by call depth (a consulted peer streams deeper)."""
+    """Render one intermediate step event, indented by call depth."""
     pad = "  " * (event.depth - 1)
     if isinstance(event, AgentMessageEvent):
         if text := _text(event.parts):
             print(f"{pad}💬 [{event.emitter}] {text}")
     elif isinstance(event, ToolCallEvent):
-        # message_agent renders like any tool call — name({json args}) — so the raw JSON is visible.
         print(f"{pad}🔧 [{event.emitter}] {event.name}({event.args})")
     elif isinstance(event, ToolResultEvent):
         print(f"{pad}↩  [{event.name}] replies: {_text(event.parts)}")

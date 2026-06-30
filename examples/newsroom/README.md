@@ -7,9 +7,6 @@ answers the reader directly. This is the composition side of the
 [How to let agents find and reach each other at runtime](../../docs/agent-peers.md)
 guide — messaging and handoff in one emergent workflow.
 
-The driver streams the run with `handle.stream()`, so you watch the editor's two
-consults stream back (indented, one depth deeper) and then the handoff to the writer.
-
 ## What's here
 
 | File | Role |
@@ -17,7 +14,7 @@ consults stream back (indented, one depth deeper) and then the handoff to the wr
 | `agents.py` | The `editor` (`peers=[Messaging("researcher", "fact_checker"), Handoff("writer")]`), plus `researcher`, `fact_checker`, `writer`. |
 | `tools.py` | Canned archive-search and fact-check tools. |
 | `service.py` | Deploys all four agents + the two tools on one worker. |
-| `run.py` | Gives the editor a brief and prints each step from `handle.stream()` live. |
+| `run.py` | Gives the editor a brief and prints each step of the run. |
 
 ## Prerequisites
 

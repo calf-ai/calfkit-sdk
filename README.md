@@ -119,7 +119,7 @@ Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm
 
 See [`examples/`](examples/) for more examples.
 
-**Agent teams** — dynamic multi-agent choreography with `Messaging`, `Handoff`, and runtime discovery (each streams the run live with `handle.stream()`):
+**Agent teams** — dynamic multi-agent choreography with `Messaging`, `Handoff`, and runtime discovery:
 
 - **[Internal help desk](examples/help_desk/)** — a front desk that discovers expert teams at runtime (`discover=True`) and either messages them or hands off a task; deploy a new expert and it's reachable next turn, no code change.
 - **[Newsroom](examples/newsroom/)** — an editor consults a researcher and a fact-checker (messaging), then hands off to a writer — both peer verbs in one run.

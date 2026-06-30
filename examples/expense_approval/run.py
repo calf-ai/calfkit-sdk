@@ -1,9 +1,4 @@
-"""Submit one big expense and watch it climb the approval chain live.
-
-`start()` + `handle.stream()` surface every step as it happens — each approver's
-handoff up the chain — to this caller. Whoever is authorized approves it and answers
-you directly, because each handoff transfers the conversation. (See ../streaming for
-streaming on its own.)
+"""Submit one big expense and watch it climb the approval chain.
 
 Run it with:  python run.py   (start service.py first — see the README.)
 """

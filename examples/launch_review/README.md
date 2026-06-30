@@ -7,9 +7,6 @@ keeps control**. A `release_manager` **messages** `engineering`, `security`, and
 [How to let agents find and reach each other at runtime](../../docs/agent-peers.md)
 guide: gather many expert opinions via messaging, then decide.
 
-The driver streams the run with `handle.stream()`, so you watch all three consults
-stream back (indented, one depth deeper) before the recommendation lands.
-
 ## What's here
 
 | File | Role |
@@ -17,7 +14,7 @@ stream back (indented, one depth deeper) before the recommendation lands.
 | `agents.py` | The `release_manager` (`peers=[Messaging("engineering", "security", "legal")]`), plus the three experts. |
 | `tools.py` | One canned status tool per expert. |
 | `service.py` | Deploys the release manager + three experts + their tools on one worker. |
-| `run.py` | Asks for a go/no-go and prints each step from `handle.stream()` live. |
+| `run.py` | Asks for a go/no-go and prints each step of the run. |
 
 ## Prerequisites
 
@@ -31,7 +28,7 @@ stream back (indented, one depth deeper) before the recommendation lands.
 # 1) the review board, on one worker
 $ python service.py
 
-# 2) ask for a go/no-go and watch the consults stream in
+# 2) ask for a go/no-go
 $ python run.py
 ```
 

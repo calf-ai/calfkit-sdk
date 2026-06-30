@@ -1,9 +1,4 @@
-"""Give the editor a story brief, and watch the desk choreograph it live.
-
-`start()` + `handle.stream()` surface every step as it happens — the editor's
-consults of the researcher and fact-checker (messaging) and the handoff to the
-writer — across all depths, to this caller. The writer answers you directly because
-the editor handed the conversation off. (See ../streaming for streaming on its own.)
+"""Give the editor a story brief and watch it consult, then hand off to the writer.
 
 Run it with:  python run.py   (start service.py first — see the README.)
 """
@@ -26,13 +21,12 @@ def _text(parts) -> str:
 
 
 def _show(event) -> None:
-    """Render one intermediate step event, indented by call depth (a consulted peer streams deeper)."""
+    """Render one intermediate step event, indented by call depth."""
     pad = "  " * (event.depth - 1)
     if isinstance(event, AgentMessageEvent):
         if text := _text(event.parts):
             print(f"{pad}💬 [{event.emitter}] {text}")
     elif isinstance(event, ToolCallEvent):
-        # message_agent renders like any tool call — name({json args}) — so the raw JSON is visible.
         print(f"{pad}🔧 [{event.emitter}] {event.name}({event.args})")
     elif isinstance(event, ToolResultEvent):
         print(f"{pad}↩  [{event.name}] replies: {_text(event.parts)}")
