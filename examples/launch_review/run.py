@@ -9,7 +9,6 @@ Run it with:  python run.py   (start service.py first — see the README.)
 """
 
 import asyncio
-import json
 
 from calfkit import (
     AgentMessageEvent,
@@ -33,16 +32,8 @@ def _show(event) -> None:
         if text := _text(event.parts):
             print(f"{pad}💬 [{event.emitter}] {text}")
     elif isinstance(event, ToolCallEvent):
-        args = event.args
-        if isinstance(args, str):  # the raw model emission may arrive as a JSON string
-            try:
-                args = json.loads(args)
-            except ValueError:
-                pass
-        if event.name == "message_agent" and isinstance(args, dict):
-            print(f"{pad}📨 [{event.emitter}] asks [{args.get('name')}]: {args.get('message')}")
-        else:
-            print(f"{pad}🔧 [{event.emitter}] {event.name}({event.args})")
+        # message_agent renders like any tool call — name({json args}) — so the raw JSON is visible.
+        print(f"{pad}🔧 [{event.emitter}] {event.name}({event.args})")
     elif isinstance(event, ToolResultEvent):
         print(f"{pad}↩  [{event.name}] replies: {_text(event.parts)}")
     elif isinstance(event, HandoffEvent):

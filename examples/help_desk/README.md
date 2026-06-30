@@ -44,7 +44,7 @@ directly:
 
 ```text
 >>> How many vacation days do I have left? I'm Sam Rivera.
-📨 [help_desk] asks [hr]: How many PTO days does Sam Rivera have left?
+🔧 [help_desk] message_agent({"name": "hr", "message": "How many PTO days does Sam Rivera have left?"})
   🔧 [hr] pto_balance({'employee': 'Sam Rivera'})
 ↩  [hr] replies: Sam Rivera has 12 paid-time-off days remaining this year.
 --- answer ---
