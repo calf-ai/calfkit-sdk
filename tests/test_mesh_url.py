@@ -1,4 +1,4 @@
-"""Unit tests for mesh-URL resolution (``calfkit.client._mesh``).
+"""Unit tests for mesh-URL resolution (``calfkit.client._mesh_url``).
 
 ``resolve_mesh_url`` is the single source of truth for the
 arg > ``$CALFKIT_MESH_URL`` > localhost precedence and the normalization to the
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit.client._mesh import DEFAULT_MESH_URL, MESH_URL_ENV_VAR, resolve_mesh_url
+from calfkit.client._mesh_url import DEFAULT_MESH_URL, MESH_URL_ENV_VAR, resolve_mesh_url
 
 
 def test_env_var_name_is_calfkit_mesh_url() -> None:
