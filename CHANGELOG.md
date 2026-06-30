@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.2...v0.12.3) (2026-06-30)
+
+
+### Features
+
+* **cli:** add ck chat interactive agent REPL ([#308](https://github.com/calf-ai/calfkit-sdk/issues/308)) ([4a51b2b](https://github.com/calf-ai/calfkit-sdk/commit/4a51b2b9daec20eda8867a224ab1a322d174f701))
+
 ## [0.12.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.1...v0.12.2) (2026-06-30)
 
 
