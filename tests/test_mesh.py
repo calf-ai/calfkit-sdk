@@ -7,18 +7,24 @@ feature's commits; this module holds them (the URL-resolver tests moved to
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
+import subprocess
+import sys
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
-from calfkit import MeshUnavailableError
+from calfkit import ClientClosedError, MeshUnavailableError
+from calfkit.client.caller import Client
 from calfkit.client.mesh import (
     AgentInfo,
+    Mesh,
     MeshViewConfig,
     ToolboxInfo,
     ToolInfo,
@@ -28,6 +34,7 @@ from calfkit.client.mesh import (
     _project_tool,
     _Projector,
 )
+from calfkit.controlplane.view import ControlPlaneView
 from calfkit.models.agents import AgentCard
 from calfkit.models.capability import CapabilityRecord, CapabilityToolDef
 from calfkit.tuning import KTableReaderTuning
@@ -302,3 +309,317 @@ def test_projector_dedupes_the_skip_log_across_repeated_projections(caplog: pyte
         projector(snapshot)  # the same skip again — must not re-log
     skip_warnings = [r for r in caplog.records if "weird" in r.getMessage()]
     assert len(skip_warnings) == 1
+
+
+# === Mesh cache: stubs + helpers =================================================
+
+
+class _StubClient:
+    """A minimal stand-in for Client — the Mesh reads only ``server_urls`` (spec §7.3)."""
+
+    def __init__(self, server_urls: str | None = "localhost:9092") -> None:
+        self.server_urls = server_urls
+
+
+def _make_mesh(*, server_urls: str | None = "localhost:9092", config: MeshViewConfig | None = None) -> Mesh:
+    return Mesh(cast(Client, _StubClient(server_urls)), config)
+
+
+class _StubView:
+    """A controllable stand-in for ControlPlaneView, driving the Mesh cache offline.
+
+    ``snapshot`` holds real wire records (so the kind's projector runs); ``failure`` /
+    ``is_caught_up`` drive the health checks; ``start_error`` makes ``start()`` raise;
+    ``start_gate`` makes ``start()`` block until released (to exercise cancel-safety).
+    """
+
+    def __init__(
+        self,
+        *,
+        snapshot: dict[str, Any] | None = None,
+        failure: BaseException | None = None,
+        is_caught_up: bool = True,
+        start_error: BaseException | None = None,
+        start_gate: asyncio.Event | None = None,
+    ) -> None:
+        self._snapshot = snapshot if snapshot is not None else {}
+        self.failure = failure
+        self.is_caught_up = is_caught_up
+        self._start_error = start_error
+        self._start_gate = start_gate
+        self.start_count = 0
+        self.stopped = False
+        self.entered = asyncio.Event()
+
+    async def start(self) -> None:
+        self.start_count += 1
+        self.entered.set()
+        if self._start_gate is not None:
+            await self._start_gate.wait()
+        if self._start_error is not None:
+            raise self._start_error
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    def snapshot(self) -> dict[str, Any]:
+        return dict(self._snapshot)
+
+
+def _install_opener(monkeypatch: pytest.MonkeyPatch, view_for: Callable[..., _StubView]) -> list[dict[str, Any]]:
+    """Replace ``ControlPlaneView.open`` (as the mesh imports it) with a factory; record each open."""
+    calls: list[dict[str, Any]] = []
+
+    def _open(**kwargs: Any) -> _StubView:
+        calls.append(kwargs)
+        return view_for(**kwargs)
+
+    monkeypatch.setattr(ControlPlaneView, "open", staticmethod(_open))
+    return calls
+
+
+# === Mesh cache: basic open / reuse / config ====================================
+
+
+async def test_get_agents_opens_once_and_reuses_the_cached_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    view = _StubView(snapshot={"billing": _agent_card(description="Invoices")})
+    calls = _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    first = await mesh.get_agents()
+    second = await mesh.get_agents()
+    assert first == {"billing": AgentInfo(name="billing", description="Invoices", last_seen=_NOW)}
+    assert second == first
+    assert len(calls) == 1  # one open, reused
+    assert view.start_count == 1
+    await mesh.aclose()
+
+
+async def test_get_tools_projects_the_tools_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _capability_record(node_kind="tool", tools=[_tool_def("add", description="Add")])
+    view = _StubView(snapshot={"add": record})
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    tools = await mesh.get_tools()
+    assert isinstance(tools["add"], ToolNodeInfo)
+    assert tools["add"].description == "Add"
+    await mesh.aclose()
+
+
+async def test_open_passes_ensure_topic_false_and_the_kind_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_opener(monkeypatch, lambda **kw: _StubView())
+    mesh = _make_mesh()
+    await mesh.get_agents()
+    assert calls[0]["ensure_topic"] is False  # the observer never creates a topic
+    assert calls[0]["topic"] == "calf.agents"
+    assert calls[0]["record_type"] is AgentCard
+    await mesh.aclose()
+
+
+async def test_reads_return_a_read_only_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    view = _StubView(snapshot={"billing": _agent_card()})
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    agents = await mesh.get_agents()
+    with pytest.raises(TypeError):
+        agents["x"] = agents["billing"]  # type: ignore[index]
+    await mesh.aclose()
+
+
+async def test_unconnected_client_raises_value_error_synchronously(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_opener(monkeypatch, lambda **kw: _StubView())
+    mesh = _make_mesh(server_urls=None)
+    with pytest.raises(ValueError, match="connected client"):
+        await mesh.get_agents()
+    assert calls == []  # never even attempted an open
+
+
+async def test_config_is_threaded_into_the_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_opener(monkeypatch, lambda **kw: _StubView())
+    tuning = KTableReaderTuning(poll_timeout_ms=15)
+    mesh = _make_mesh(config=MeshViewConfig(stale_after=12.0, catchup_timeout=7.0, reader_tuning=tuning))
+    await mesh.get_agents()
+    assert calls[0]["catchup_timeout"] == 7.0
+    assert calls[0]["stale_after"] == 12.0
+    assert calls[0]["reader_tuning"] is tuning
+    await mesh.aclose()
+
+
+# === Mesh cache: concurrency + single-flight ====================================
+
+
+async def test_concurrent_first_calls_of_one_kind_open_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = asyncio.Event()
+    view = _StubView(start_gate=gate)
+    calls = _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    waiters = asyncio.gather(mesh.get_agents(), mesh.get_agents(), mesh.get_agents())
+    await view.entered.wait()  # the single shared open is in-flight
+    gate.set()
+    results = await waiters
+    assert results == [{}, {}, {}]
+    assert len(calls) == 1  # single-flight: one open for three concurrent callers
+    await mesh.aclose()
+
+
+async def test_the_two_kinds_open_concurrently_without_cross_serialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = asyncio.Event()
+    agents_view = _StubView(start_gate=gate)
+    tools_view = _StubView(start_gate=gate)
+    views = {"calf.agents": agents_view, "calf.capabilities": tools_view}
+    _install_opener(monkeypatch, lambda **kw: views[kw["topic"]])
+    mesh = _make_mesh()
+    waiters = asyncio.gather(mesh.get_agents(), mesh.get_tools())
+    # both opens reach start() — the lock is NOT held across start(), so neither blocks the other
+    await asyncio.wait_for(asyncio.gather(agents_view.entered.wait(), tools_view.entered.wait()), timeout=1.0)
+    assert agents_view.start_count == 1 and tools_view.start_count == 1
+    gate.set()
+    await waiters
+    await mesh.aclose()
+
+
+# === Mesh cache: cancel-safety (the round-3 CRITICAL) ===========================
+
+
+async def test_a_waiter_cancel_does_not_kill_the_shared_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = asyncio.Event()
+    view = _StubView(start_gate=gate)
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(mesh.get_agents(), timeout=0.05)  # waiter cancelled mid-open
+    gate.set()  # release the shared open, which must have survived the waiter's cancel
+    result = await mesh.get_agents()  # a fresh read reuses the SAME open
+    assert result == {}
+    assert view.start_count == 1  # not re-opened — shield absorbed the waiter's cancel
+    assert not view.stopped  # not torn down
+    await mesh.aclose()
+
+
+async def test_aclose_cancels_an_in_flight_open_and_tears_it_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = asyncio.Event()  # never released → the open stays in-flight
+    view = _StubView(start_gate=gate)
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    waiter = asyncio.ensure_future(mesh.get_agents())
+    await view.entered.wait()
+    await mesh.aclose()  # cancels the in-flight open
+    assert view.stopped  # the teardown-guard stopped the half-built view (no leaked consumer)
+    with pytest.raises(ClientClosedError):
+        await waiter
+
+
+async def test_get_after_aclose_raises_client_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_opener(monkeypatch, lambda **kw: _StubView())
+    mesh = _make_mesh()
+    await mesh.aclose()
+    with pytest.raises(ClientClosedError):
+        await mesh.get_agents()
+
+
+# === Mesh cache: aclose teardown ================================================
+
+
+async def test_aclose_stops_a_completed_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    view = _StubView()
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    await mesh.get_agents()
+    await mesh.aclose()
+    assert view.stopped
+
+
+async def test_aclose_logs_a_failing_view_stop_and_still_completes(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class _FailStopView(_StubView):
+        async def stop(self) -> None:
+            raise RuntimeError("stop boom")
+
+    view = _FailStopView()
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    await mesh.get_agents()
+    with caplog.at_level(logging.ERROR, logger="calfkit.client.mesh"):
+        await mesh.aclose()  # best-effort: must not raise
+    assert any("stop failed" in r.getMessage() for r in caplog.records)
+
+
+# === Mesh cache: health by reason (spec §6.4) ===================================
+
+
+async def test_reader_dead_raises_reader_dead_and_retains_the_cell(monkeypatch: pytest.MonkeyPatch) -> None:
+    boom = RuntimeError("authorization failed")
+    # failure set AND is_caught_up True (the sticky latch) -> reader_dead, NOT establishing:
+    # the load-bearing check order tests failure before is_caught_up (spec §6.4).
+    view = _StubView(failure=boom, is_caught_up=True)
+    calls = _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    with pytest.raises(MeshUnavailableError) as first:
+        await mesh.get_agents()
+    assert first.value.reason == "reader_dead"
+    assert first.value.__cause__ is boom
+    with pytest.raises(MeshUnavailableError) as second:
+        await mesh.get_agents()  # the same dead view, not re-opened (terminal)
+    assert second.value.reason == "reader_dead"
+    assert len(calls) == 1
+    await mesh.aclose()
+
+
+async def test_not_caught_up_raises_establishing(monkeypatch: pytest.MonkeyPatch) -> None:
+    view = _StubView(is_caught_up=False)
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    with pytest.raises(MeshUnavailableError) as e:
+        await mesh.get_agents()
+    assert e.value.reason == "establishing"
+    await mesh.aclose()
+
+
+async def test_establishing_self_heals_on_the_same_cached_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    view = _StubView(is_caught_up=False)
+    calls = _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    with pytest.raises(MeshUnavailableError):
+        await mesh.get_agents()
+    view.is_caught_up = True  # the background reader latched
+    assert await mesh.get_agents() == {}  # same cached view now returns
+    assert len(calls) == 1  # no re-open — self-healed on the same view
+    await mesh.aclose()
+
+
+async def test_caught_up_empty_returns_an_empty_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_opener(monkeypatch, lambda **kw: _StubView(snapshot={}))
+    mesh = _make_mesh()
+    assert await mesh.get_agents() == {}  # empty is a value, not an error
+    await mesh.aclose()
+
+
+async def test_open_failure_raises_open_failed_then_is_evicted_and_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    failing = _StubView(start_error=RuntimeError("topic missing"))
+    healthy = _StubView()
+    seq = iter([failing, healthy])
+    calls = _install_opener(monkeypatch, lambda **kw: next(seq))
+    mesh = _make_mesh()
+    with pytest.raises(MeshUnavailableError) as e:
+        await mesh.get_agents()
+    assert e.value.reason == "open_failed"
+    assert isinstance(e.value.__cause__, RuntimeError)
+    assert failing.stopped  # the teardown-guard tore down the half-built view
+    await asyncio.sleep(0)  # let the done-callback eviction run
+    assert "agents" not in mesh._cells  # the failed open was evicted
+    assert await mesh.get_agents() == {}  # a retry re-opens (the healthy view)
+    assert len(calls) == 2
+    await mesh.aclose()
+
+
+# === Mesh module: lazy import (no eager ktables) ================================
+
+
+def test_importing_mesh_pulls_no_ktables() -> None:
+    # mesh.py must not eagerly import ktables (it stays lazy inside ControlPlaneView.open).
+    # A subprocess avoids prior in-process imports polluting sys.modules.
+    code = (
+        "import sys, calfkit.client.mesh\n"
+        "leaked = sorted(m for m in sys.modules if m == 'ktables' or m.startswith('ktables.'))\n"
+        "assert not leaked, leaked\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

@@ -10,19 +10,27 @@ The surface, DTOs, cache, and projections are built up across this feature's com
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import copy
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from calfkit.controlplane.records import ControlPlaneRecord
-from calfkit.models.agents import AgentCard
-from calfkit.models.capability import CapabilityRecord
+from calfkit.controlplane.view import ControlPlaneView
+from calfkit.exceptions import ClientClosedError, MeshUnavailableError
+from calfkit.models.agents import AGENTS_TOPIC, AgentCard
+from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
 from calfkit.tuning import KTableReaderTuning, PositiveFiniteFloat
+
+if TYPE_CHECKING:
+    from calfkit.client.caller import Client
 
 logger = logging.getLogger(__name__)
 
@@ -202,3 +210,144 @@ class _Projector(Generic[_R, _D]):
             node_id,
             record.node_kind,
         )
+
+
+# === The mesh cache (per-kind single-flight, cancel-safe; spec §7) ===============
+
+
+@dataclass(frozen=True)
+class _Kind(Generic[_R, _D]):
+    """Binds one control-plane kind: its cache key + label, topic, wire record type, and projector."""
+
+    name: str
+    label: str
+    topic: str
+    record_type: type[_R]
+    project_one: Callable[[str, _R], _D | None]
+
+
+_AGENTS: _Kind[AgentCard, AgentInfo] = _Kind(name="agents", label="agents", topic=AGENTS_TOPIC, record_type=AgentCard, project_one=_project_agent)
+_TOOLS: _Kind[CapabilityRecord, ToolInfo] = _Kind(
+    name="tools", label="tools", topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, project_one=_project_tool
+)
+
+
+@dataclass
+class _Cell(Generic[_R, _D]):
+    """The per-kind cache cell — the open ``Task`` IS the single-flight slot; ``project`` carries the
+    kind-bound projector + its deduped skip-log (1:1 with the cached view)."""
+
+    task: asyncio.Task[ControlPlaneView[_R]]
+    project: _Projector[_R, _D]
+
+
+class Mesh:
+    """Caller-side ``client.mesh`` — a cached singleton owning one Control Plane View per kind (spec §7).
+
+    Zero-I/O until the first ``get_*``; that lazily opens and catches up the kind's view (per-kind
+    single-flight, cancel-safe), and every later read is an O(1) snapshot of the live cached view.
+    The views are torn down at ``Client.aclose()``.
+    """
+
+    def __init__(self, client: Client, config: MeshViewConfig | None = None) -> None:
+        self._client = client
+        self._config = config if config is not None else MeshViewConfig()
+        self._cells: dict[str, _Cell[Any, Any]] = {}
+        self._lock = asyncio.Lock()  # guards _cells + _closed only — NEVER held across start()
+        self._closed = False
+
+    async def get_agents(self) -> Mapping[str, AgentInfo]:
+        return await self._read(_AGENTS)
+
+    async def get_tools(self) -> Mapping[str, ToolInfo]:
+        return await self._read(_TOOLS)
+
+    async def _read(self, kind: _Kind[_R, _D]) -> Mapping[str, _D]:
+        cell = await self._cell(kind)
+        view = cell.task.result()  # the resolved view, read as a local (no _cells re-index → no aclose-race KeyError)
+        # Load-bearing order: test `failure` BEFORE `is_caught_up` (a sticky one-time latch). A reader
+        # that died AFTER catching up has is_caught_up=True AND failure set; checking is_caught_up first
+        # would return a stale snapshot from a dead view instead of raising reader_dead (spec §6.4).
+        if view.failure is not None:
+            raise MeshUnavailableError(f"the {kind.label} reader died", reason="reader_dead") from view.failure
+        if not view.is_caught_up:
+            raise MeshUnavailableError(f"the {kind.label} directory is still establishing", reason="establishing")
+        return MappingProxyType(cell.project(view.snapshot()))
+
+    async def _cell(self, kind: _Kind[_R, _D]) -> _Cell[_R, _D]:
+        bootstrap = self._client.server_urls
+        if not bootstrap:  # a directly-built client (no connect()) — a programming error, not retriable
+            raise ValueError("client.mesh requires a connected client — build it with Client.connect(...).")
+        async with self._lock:
+            if self._closed:
+                raise ClientClosedError()
+            cell: _Cell[_R, _D] | None = self._cells.get(kind.name)
+            if cell is None:
+                cell = self._make_cell(kind, bootstrap)
+        try:
+            await asyncio.shield(cell.task)  # a waiter's cancel is absorbed here, not propagated into the shared open
+        except asyncio.CancelledError:
+            if self._closed:
+                raise ClientClosedError() from None  # aclose cancelled us → the closed contract
+            raise  # the waiter's OWN cancellation propagates
+        except Exception as exc:  # the open task raised (start() failed); its done-callback evicted the cell
+            raise MeshUnavailableError(f"could not open the {kind.label} directory", reason="open_failed") from exc
+        return cell
+
+    def _make_cell(self, kind: _Kind[_R, _D], bootstrap: str) -> _Cell[_R, _D]:  # caller holds self._lock
+        cell: _Cell[_R, _D] = _Cell(
+            task=asyncio.create_task(self._open(kind, bootstrap)),
+            project=_Projector(kind.project_one, label=kind.label),
+        )
+        name = kind.name
+
+        def _on_done(task: asyncio.Future[Any]) -> None:  # the open's terminal state — evict iff it failed
+            self._evict(name, cell, task)
+
+        cell.task.add_done_callback(_on_done)
+        self._cells[name] = cell
+        return cell
+
+    def _evict(self, name: str, cell: _Cell[Any, Any], task: asyncio.Future[Any]) -> None:
+        # done-callback: drop ONLY on the open's own failure — not an aclose-cancel, not success. The
+        # identity guard never drops a retry's newer cell. No await: runs as one event-loop step (do not add one).
+        if task.cancelled() or task.exception() is None:
+            return
+        if self._cells.get(name) is cell:
+            self._cells.pop(name, None)
+
+    async def _open(self, kind: _Kind[_R, _D], bootstrap_servers: str) -> ControlPlaneView[_R]:
+        # Naive open: ensure_topic=False, always — the observer never creates a control-plane topic and
+        # never consults client._provisioning (spec §6.3 / §7.1).
+        view = ControlPlaneView.open(
+            bootstrap_servers=bootstrap_servers,
+            topic=kind.topic,
+            record_type=kind.record_type,
+            ensure_topic=False,
+            catchup_timeout=self._config.catchup_timeout,
+            stale_after=self._config.stale_after,
+            reader_tuning=self._config.reader_tuning,
+        )
+        try:
+            await view.start()  # start() IS the catch-up gate
+        except BaseException:  # incl. CancelledError → stop the half-built view (no leaked consumer / reader task)
+            with contextlib.suppress(Exception):
+                await view.stop()
+            raise
+        return view
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            self._closed = True
+            cells = list(self._cells.values())
+            self._cells.clear()
+        for cell in cells:  # cancel in-flight; stop completed; best-effort (log per-view, don't aggregate-raise)
+            cell.task.cancel()
+            try:
+                view = await cell.task
+            except (asyncio.CancelledError, Exception):
+                continue  # in-flight (the §7.1 guard tore it down) / failed open — nothing to stop
+            try:
+                await view.stop()
+            except Exception:
+                logger.exception("mesh view stop failed during aclose")
