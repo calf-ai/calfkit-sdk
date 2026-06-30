@@ -114,3 +114,17 @@ def test_client_timeout_error_reconstructs_from_its_fields() -> None:
 def test_client_closed_error_reconstructs_from_its_fields() -> None:
     restored = copy.deepcopy(ClientClosedError(correlation_id="cid-1"))
     assert restored.correlation_id == "cid-1"
+
+
+def test_client_closed_error_without_correlation_id_is_a_generic_signal() -> None:
+    # A non-run wait (e.g. a client.mesh read) interrupted by aclose() carries no run id —
+    # the message is generic, not the reply-specific "awaiting a reply for correlation_id=...".
+    err = ClientClosedError()
+    assert err.correlation_id is None
+    assert "client closed" in str(err)
+    assert "correlation_id" not in str(err)
+
+
+def test_client_closed_error_without_correlation_id_reconstructs() -> None:
+    restored = copy.deepcopy(ClientClosedError())
+    assert restored.correlation_id is None

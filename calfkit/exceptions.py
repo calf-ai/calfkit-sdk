@@ -161,19 +161,20 @@ class ClientTimeoutError(Exception):
 
 
 class ClientClosedError(Exception):
-    """Raised when the client is closed (``aclose()``) with this run's ``result()`` still
-    pending (spec §2.5 / §5.8).
+    """Raised when the client is closed (``aclose()``) with work still pending.
 
-    A typed, run-survives signal — never a bare ``CancelledError``. The run itself is
-    unaffected; the client simply stopped consuming its replies. Carries the ``correlation_id``
-    of the run that was awaiting.
+    A typed, run-survives signal — never a bare ``CancelledError``. Two shapes: with a
+    ``correlation_id`` it names the run whose ``result()`` was still pending (spec §2.5 / §5.8);
+    without one it marks a non-run wait interrupted by close (e.g. a ``client.mesh`` read). The
+    run itself is unaffected; the client simply stopped consuming.
     """
 
-    def __init__(self, correlation_id: str):
+    def __init__(self, correlation_id: str | None = None):
         self.correlation_id = correlation_id
-        super().__init__(f"client closed while awaiting a reply for correlation_id={correlation_id!r}")
+        message = f"client closed while awaiting a reply for correlation_id={correlation_id!r}" if correlation_id is not None else "client closed"
+        super().__init__(message)
 
-    def __reduce__(self) -> tuple[Any, tuple[str]]:
+    def __reduce__(self) -> tuple[Any, tuple[str | None]]:
         return (self.__class__, (self.correlation_id,))
 
 
