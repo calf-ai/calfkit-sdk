@@ -40,13 +40,13 @@ answers you, because the handoff transferred the conversation:
 
 ```text
 >>> Write a short news brief about the city's new downtown bike-share program.
-📨 [editor] asks researcher: Background on the downtown bike-share program?
+📨 [editor] asks [researcher]: Background on the downtown bike-share program?
   🔧 [researcher] search_archive({'topic': 'downtown bike-share program'})
-↩  researcher replies: City council approved it 7-2; 120 docks across 15 stations; first month free...
-📨 [editor] asks fact_checker: Verify the dock counts and the 'first month free' claim.
+↩  [researcher] replies: City council approved it 7-2; 120 docks across 15 stations; first month free...
+📨 [editor] asks [fact_checker]: Verify the dock counts and the 'first month free' claim.
   🔧 [fact_checker] check_claim({'claim': '120 docks, 15 stations, first month free'})
-↩  fact_checker replies: Verified with the transit authority; caveat: launch date is 'late spring'...
-🤝 [editor] hands off → writer (draft the final brief)
+↩  [fact_checker] replies: Verified with the transit authority; caveat: launch date is 'late spring'...
+🤝 [editor] hands off → [writer] (draft the final brief)
 --- the writer's brief ---
 The city council has approved a downtown bike-share program in a 7-2 vote ...
 ```

@@ -40,15 +40,15 @@ itself, because it never handed off:
 
 ```text
 >>> Are we go for the v2.0 launch on Friday?
-📨 [release_manager] asks engineering: What's the build and test status?
+📨 [release_manager] asks [engineering]: What's the build and test status?
   🔧 [engineering] build_status()
-↩  engineering replies: Build green; 2 flaky tests (non-blocking); release branch cut.
-📨 [release_manager] asks security: Any blocking findings?
+↩  [engineering] replies: Build green; 2 flaky tests (non-blocking); release branch cut.
+📨 [release_manager] asks [security]: Any blocking findings?
   🔧 [security] security_scan()
-↩  security replies: No critical/high; 1 medium scheduled next sprint.
-📨 [release_manager] asks legal: Are we cleared?
+↩  [security] replies: No critical/high; 1 medium scheduled next sprint.
+📨 [release_manager] asks [legal]: Are we cleared?
   🔧 [legal] compliance_status()
-↩  legal replies: ToS approved; DPA signed; cleared for launch.
+↩  [legal] replies: ToS approved; DPA signed; cleared for launch.
 --- recommendation ---
 GO.
 - Engineering: green, only non-blocking flakes.

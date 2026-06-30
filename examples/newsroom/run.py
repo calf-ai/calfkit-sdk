@@ -40,13 +40,13 @@ def _show(event) -> None:
             except ValueError:
                 pass
         if event.name == "message_agent" and isinstance(args, dict):
-            print(f"{pad}📨 [{event.emitter}] asks {args.get('name')}: {args.get('message')}")
+            print(f"{pad}📨 [{event.emitter}] asks [{args.get('name')}]: {args.get('message')}")
         else:
             print(f"{pad}🔧 [{event.emitter}] {event.name}({event.args})")
     elif isinstance(event, ToolResultEvent):
-        print(f"{pad}↩  {event.name} replies: {_text(event.parts)}")
+        print(f"{pad}↩  [{event.name}] replies: {_text(event.parts)}")
     elif isinstance(event, HandoffEvent):
-        print(f"{pad}🤝 [{event.emitter}] hands off → {event.target} ({event.reason})")
+        print(f"{pad}🤝 [{event.emitter}] hands off → [{event.target}] ({event.reason})")
 
 
 async def _ask(client: Client, prompt: str) -> None:

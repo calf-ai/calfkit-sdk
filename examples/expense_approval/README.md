@@ -42,8 +42,8 @@ all the way to the VP, who approves and answers you:
 
 ```text
 >>> Please approve a $40,000 expense for our annual company offsite.
-🤝 [team_lead] hands off → director ($40,000 exceeds my $1,000 limit)
-🤝 [director] hands off → vp ($40,000 exceeds my $10,000 limit)
+🤝 [team_lead] hands off → [director] ($40,000 exceeds my $1,000 limit)
+🤝 [director] hands off → [vp] ($40,000 exceeds my $10,000 limit)
 --- decision ---
 Approved: $40,000 for the annual company offsite. — VP
 ```
