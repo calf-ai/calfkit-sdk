@@ -207,7 +207,7 @@ class MeshUnavailableError(Exception):
         # The keyword-only `reason` breaks the default reduction (which would replay only the
         # message string through __init__ and silently drop `reason`); rebuild from both fields
         # via a module-level reconstructor (cf. ClientTimeoutError / ClientClosedError).
-        return (_rebuild_mesh_unavailable, (str(self), self.reason))
+        return (_rebuild_mesh_unavailable, (self.args[0], self.reason))
 
 
 def _rebuild_mesh_unavailable(message: str, reason: _MeshUnavailableReason) -> MeshUnavailableError:

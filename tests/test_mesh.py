@@ -8,14 +8,16 @@ feature's commits; this module holds them (the URL-resolver tests moved to
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import logging
 import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
@@ -30,6 +32,7 @@ from calfkit.client.mesh import (
     ToolInfo,
     ToolNodeInfo,
     ToolSpec,
+    _Cell,
     _project_agent,
     _project_tool,
     _Projector,
@@ -37,6 +40,7 @@ from calfkit.client.mesh import (
 from calfkit.controlplane.view import ControlPlaneView
 from calfkit.models.agents import AgentCard
 from calfkit.models.capability import CapabilityRecord, CapabilityToolDef
+from calfkit.provisioning import ProvisioningConfig
 from calfkit.tuning import KTableReaderTuning
 
 _NOW = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
@@ -512,8 +516,9 @@ async def test_get_after_aclose_raises_client_closed(monkeypatch: pytest.MonkeyP
     _install_opener(monkeypatch, lambda **kw: _StubView())
     mesh = _make_mesh()
     await mesh.aclose()
-    with pytest.raises(ClientClosedError):
+    with pytest.raises(ClientClosedError) as e:
         await mesh.get_agents()
+    assert e.value.correlation_id is None  # a non-run wait — the generalized ClientClosedError form
 
 
 # === Mesh cache: aclose teardown ================================================
@@ -570,6 +575,7 @@ async def test_not_caught_up_raises_establishing(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(MeshUnavailableError) as e:
         await mesh.get_agents()
     assert e.value.reason == "establishing"
+    assert e.value.__cause__ is None  # establishing has no cause — just an unlatched event (spec §6.4)
     await mesh.aclose()
 
 
@@ -601,6 +607,7 @@ async def test_open_failure_raises_open_failed_then_is_evicted_and_retried(monke
     with pytest.raises(MeshUnavailableError) as e:
         await mesh.get_agents()
     assert e.value.reason == "open_failed"
+    assert "directory" in str(e.value) and "provision" in str(e.value)  # actionable message (spec §6.3)
     assert isinstance(e.value.__cause__, RuntimeError)
     assert failing.stopped  # the teardown-guard tore down the half-built view
     await asyncio.sleep(0)  # let the done-callback eviction run
@@ -712,3 +719,139 @@ def test_wire_records_and_topics_stay_unexported() -> None:
     for name in ("AgentCard", "CapabilityRecord", "AGENTS_TOPIC", "CAPABILITY_TOPIC"):
         assert name not in calfkit.__all__
         assert name not in calfkit.client.__all__
+
+
+# === Review-round additions (deeper health-order / cancel / aclose / projection coverage) =======
+
+
+async def test_reader_dead_takes_precedence_over_not_caught_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A reader that died BEFORE catching up has failure set AND is_caught_up=False. The load-bearing
+    # check order (failure BEFORE is_caught_up) must yield reader_dead, not establishing — a swapped
+    # check would diverge only in exactly this state (spec §6.4).
+    boom = RuntimeError("authorization failed during cold start")
+    view = _StubView(failure=boom, is_caught_up=False)
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    with pytest.raises(MeshUnavailableError) as e:
+        await mesh.get_agents()
+    assert e.value.reason == "reader_dead"  # NOT "establishing"
+    assert e.value.__cause__ is boom
+    await mesh.aclose()
+
+
+async def test_a_waiter_cancel_does_not_poison_a_co_waiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two concurrent waiters share one open; cancelling one must not poison the other (spec §8, the
+    # round-3 CRITICAL): the survivor resolves on the SAME open, with no re-open and no teardown.
+    gate = asyncio.Event()
+    view = _StubView(start_gate=gate)
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    victim = asyncio.ensure_future(asyncio.wait_for(mesh.get_agents(), timeout=0.05))
+    survivor = asyncio.ensure_future(mesh.get_agents())
+    await view.entered.wait()  # the single shared open is in-flight; both waiters are on it
+    with pytest.raises(asyncio.TimeoutError):
+        await victim  # the victim's wait_for cancels its waiter
+    gate.set()  # release the shared open
+    assert await survivor == {}  # the co-waiter still resolves on the shared open
+    assert view.start_count == 1  # one open — neither cancel re-opened
+    assert not view.stopped  # the shared open was never torn down
+    await mesh.aclose()
+
+
+async def test_aclose_isolates_a_failing_view_stop_from_the_other_kind(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    # One kind's stop() raising must not skip the other kind's stop() (per-view isolation), and the
+    # ERROR log names which view failed.
+    class _FailStopView(_StubView):
+        async def stop(self) -> None:
+            raise RuntimeError("agents stop boom")
+
+    agents_view = _FailStopView()
+    tools_view = _StubView()
+    views: dict[str, _StubView] = {"calf.agents": agents_view, "calf.capabilities": tools_view}
+    _install_opener(monkeypatch, lambda **kw: views[kw["topic"]])
+    mesh = _make_mesh()
+    await mesh.get_agents()
+    await mesh.get_tools()
+    with caplog.at_level(logging.ERROR, logger="calfkit.client.mesh"):
+        await mesh.aclose()  # agents' stop() raises; tools' must still be stopped
+    assert tools_view.stopped  # the other kind's view was still stopped
+    assert any("agents" in r.getMessage() for r in caplog.records)  # the failing view is named
+
+
+def test_project_tool_deep_copies_toolbox_tool_schemas() -> None:
+    # The toolbox path deep-copies each tool's schema too (mirrors the tool-node path, spec §6.5).
+    record = _capability_record(node_kind="toolbox", tools=[_tool_def("search", schema={"type": "object", "nested": {"k": "v"}})])
+    info = _project_tool("docs", record)
+    assert isinstance(info, ToolboxInfo)
+    info.tools[0].parameters_schema["nested"]["k"] = "MUTATED"
+    assert record.tools[0].parameters_json_schema["nested"]["k"] == "v"
+
+
+async def test_evict_keeps_a_retrys_newer_cell(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The identity guard: a stale failed-open's done-callback must NOT drop a newer cell a retry
+    # installed under the same key (the §7.2 "never drop a retry's newer cell" guarantee).
+    _install_opener(monkeypatch, lambda **kw: _StubView())
+    mesh = _make_mesh()
+    await mesh.get_agents()
+    current = mesh._cells["agents"]  # the live cell a retry would have installed
+
+    async def _boom() -> None:
+        raise RuntimeError("a prior open that failed")
+
+    stale_task: asyncio.Task[Any] = asyncio.ensure_future(_boom())
+    with contextlib.suppress(RuntimeError):
+        await stale_task
+    stale_cell = _Cell(task=stale_task, project=_Projector(_project_agent, label="agents"))
+    mesh._evict("agents", stale_cell, stale_task)  # the stale callback fires after the retry installed `current`
+    assert mesh._cells["agents"] is current  # the newer cell was NOT dropped
+    await mesh.aclose()
+
+
+def _agent_card_at(*, age_s: float) -> AgentCard:
+    hb = datetime.now(tz=timezone.utc) - timedelta(seconds=age_s)
+    return AgentCard(started_at=hb, last_heartbeat_at=hb, heartbeat_interval=30.0, node_kind="agent", description=None)
+
+
+def test_projection_over_a_real_view_drops_stale_nodes() -> None:
+    # The spec §8 strategy: drive the projection through a REAL ControlPlaneView over a dict-backed
+    # fake table, so the view's staleness filter (a stale node -> absent) is exercised end to end.
+    from tests.test_controlplane_view import _FakeTable
+
+    fresh = _agent_card_at(age_s=0.0)
+    stale = _agent_card_at(age_s=10_000.0)
+    view = ControlPlaneView(_FakeTable({"fresh": {"w1": fresh}, "stale": {"w1": stale}}), AgentCard, stale_after=30.0)
+    projected = _Projector(_project_agent, label="agents")(view.snapshot())
+    assert set(projected) == {"fresh"}  # the stale node is filtered out before projection
+    assert projected["fresh"].name == "fresh"
+
+
+async def test_get_agents_mapping_supports_membership_get_len_iteration(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The documented Mapping surface (spec §5.2): membership, .get()->None, len, iteration.
+    view = _StubView(snapshot={"billing": _agent_card(description="X")})
+    _install_opener(monkeypatch, lambda **kw: view)
+    mesh = _make_mesh()
+    agents = await mesh.get_agents()
+    assert "billing" in agents and "ghost" not in agents
+    assert agents.get("ghost") is None
+    assert len(agents) == 1
+    assert [name for name in agents] == ["billing"]
+    assert list(agents.items()) == [("billing", agents["billing"])]
+    await mesh.aclose()
+
+
+def test_directly_built_client_mesh_does_not_attribute_error() -> None:
+    # A Client built directly (no connect()) still has a working client.mesh — __init__ unconditionally
+    # inits _mesh=None, so the accessor never AttributeErrors (plan §4 Commit 4).
+    client = Client(
+        Mock(),
+        Mock(),
+        "inbox",
+        emitter_id="e",
+        firehose_buffer_size=1024,
+        deps_factory=None,
+        provisioning=ProvisioningConfig(),
+        startup_ensurer=Mock(),
+        server_urls=None,
+    )
+    assert client._mesh is None
+    assert isinstance(client.mesh, Mesh)

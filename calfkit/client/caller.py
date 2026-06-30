@@ -209,7 +209,7 @@ class Client:
 
     @property
     def mesh(self) -> Mesh:
-        """The caller-side mesh view — a cached, zero-I/O ``Mesh`` singleton (spec §5.1).
+        """The caller-side mesh view — a cached, zero-I/O ``Mesh`` singleton (mesh-view spec §5.1).
 
         Read which agents/tools are online via ``client.mesh.get_agents()`` / ``get_tools()``; the
         per-kind views open lazily on first read and are torn down by :meth:`aclose`.
@@ -289,7 +289,7 @@ class Client:
         self._hub.close()
         try:
             if self._mesh is not None:
-                await self._mesh.aclose()  # stop the mesh views before the broker (spec §6.2)
+                await self._mesh.aclose()  # stop the mesh views before the broker (mesh-view spec §6.2)
         finally:
             if self._broker._connection:
                 await self._broker.stop()

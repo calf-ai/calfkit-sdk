@@ -4,8 +4,6 @@ A supported, read-only window onto the live control plane for a non-agent proces
 (a gateway, a bridge, a CLI, a dashboard): ``client.mesh.get_agents()`` /
 ``get_tools()`` return a fresh, name-keyed ``Mapping`` of the agents and tools
 currently online, projecting the internal control-plane records to public DTOs.
-
-The surface, DTOs, cache, and projections are built up across this feature's commits.
 """
 
 from __future__ import annotations
@@ -68,8 +66,8 @@ class ToolSpec:
 class ToolNodeInfo:
     """One online function tool node — its single tool inlined (spec §5.3).
 
-    A function tool node advertises exactly one tool, so it maps to a flat record (only a
-    toolbox carries a list). ``name`` is the node name == tool name == capability key.
+    A function tool node advertises exactly one tool, so it maps to a flat ``ToolNodeInfo`` (only
+    ``ToolboxInfo`` carries a list). ``name`` is the node name == tool name == capability key.
     """
 
     name: str
@@ -105,7 +103,7 @@ class MeshViewConfig(BaseModel):
     (spec §5.4).
 
     Deliberately *not* the worker's ``ControlPlaneConfig``: it omits the publisher-only
-    ``heartbeat_interval`` and ``bootstrap_servers`` (the client supplies that), and there is no
+    ``heartbeat_interval``, and ``bootstrap_servers`` (which the client supplies), and there is no
     ``ensure_topic`` (the observer opens naively) and no ``probe_interval`` (no probe).
     """
 
@@ -217,22 +215,20 @@ class _Projector(Generic[_R, _D]):
 
 @dataclass(frozen=True)
 class _Kind(Generic[_R, _D]):
-    """Binds one control-plane kind: its cache key + label, topic, wire record type, and projector."""
+    """Binds one control-plane kind: its ``name`` (cache key + message/log label), topic, wire record
+    type, and projector."""
 
     name: str
-    label: str
     topic: str
     record_type: type[_R]
     project_one: Callable[[str, _R], _D | None]
 
 
-_AGENTS: _Kind[AgentCard, AgentInfo] = _Kind(name="agents", label="agents", topic=AGENTS_TOPIC, record_type=AgentCard, project_one=_project_agent)
-_TOOLS: _Kind[CapabilityRecord, ToolInfo] = _Kind(
-    name="tools", label="tools", topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, project_one=_project_tool
-)
+_AGENTS: _Kind[AgentCard, AgentInfo] = _Kind(name="agents", topic=AGENTS_TOPIC, record_type=AgentCard, project_one=_project_agent)
+_TOOLS: _Kind[CapabilityRecord, ToolInfo] = _Kind(name="tools", topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, project_one=_project_tool)
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Cell(Generic[_R, _D]):
     """The per-kind cache cell — the open ``Task`` IS the single-flight slot; ``project`` carries the
     kind-bound projector + its deduped skip-log (1:1 with the cached view)."""
@@ -269,9 +265,9 @@ class Mesh:
         # that died AFTER catching up has is_caught_up=True AND failure set; checking is_caught_up first
         # would return a stale snapshot from a dead view instead of raising reader_dead (spec §6.4).
         if view.failure is not None:
-            raise MeshUnavailableError(f"the {kind.label} reader died", reason="reader_dead") from view.failure
+            raise MeshUnavailableError(f"the {kind.name} reader died", reason="reader_dead") from view.failure
         if not view.is_caught_up:
-            raise MeshUnavailableError(f"the {kind.label} directory is still establishing", reason="establishing")
+            raise MeshUnavailableError(f"the {kind.name} directory is still establishing", reason="establishing")
         return MappingProxyType(cell.project(view.snapshot()))
 
     async def _cell(self, kind: _Kind[_R, _D]) -> _Cell[_R, _D]:
@@ -291,13 +287,17 @@ class Mesh:
                 raise ClientClosedError() from None  # aclose cancelled us → the closed contract
             raise  # the waiter's OWN cancellation propagates
         except Exception as exc:  # the open task raised (start() failed); its done-callback evicted the cell
-            raise MeshUnavailableError(f"could not open the {kind.label} directory", reason="open_failed") from exc
+            raise MeshUnavailableError(
+                f"could not open the {kind.name} directory — the topic isn't present yet "
+                "(it is created when an agent or tool comes online, or provision it via ops)",
+                reason="open_failed",
+            ) from exc
         return cell
 
     def _make_cell(self, kind: _Kind[_R, _D], bootstrap: str) -> _Cell[_R, _D]:  # caller holds self._lock
         cell: _Cell[_R, _D] = _Cell(
             task=asyncio.create_task(self._open(kind, bootstrap)),
-            project=_Projector(kind.project_one, label=kind.label),
+            project=_Projector(kind.project_one, label=kind.name),
         )
         name = kind.name
 
@@ -350,4 +350,4 @@ class Mesh:
             try:
                 await view.stop()
             except Exception:
-                logger.exception("mesh view stop failed during aclose")
+                logger.exception("mesh %s view stop failed during aclose", cell.project._label)

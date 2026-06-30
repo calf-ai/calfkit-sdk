@@ -444,5 +444,9 @@ async def test_client_mesh_open_fails_loud_on_a_missing_directory_topic() -> Non
         with pytest.raises(MeshUnavailableError) as exc:
             await client.mesh.get_agents()
         assert exc.value.reason == "open_failed"
+        # the message is actionable (spec §6.3 / plan §6 watch-item) and the cause is attached
+        assert "directory" in str(exc.value)
+        assert "provision" in str(exc.value)
+        assert exc.value.__cause__ is not None
     finally:
         await client.aclose()
