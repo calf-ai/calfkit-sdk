@@ -16,8 +16,4 @@ def search_archive(topic: str) -> str:
 @agent_tool
 def check_claim(claim: str) -> str:
     """Verify a claim against the newsroom's confirmed record."""
-    return (
-        f'Checked "{claim}" against the confirmed record: consistent with the transit authority\'s '
-        "figures and the city's official press release. One caveat on the overall story: the launch is "
-        "described as 'late spring', not yet a firm calendar date."
-    )
+    return f'"{claim}" — verified against the confirmed record.'
