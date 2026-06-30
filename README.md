@@ -13,7 +13,7 @@
   <a href="https://deepwiki.com/calf-ai/calfkit-sdk"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
-Calfkit agents dynamically find each other at runtime and choreograph work. No hard-coded orchestrator or extra wiring. The framework for building free-flowing and powerful multi-agent teams.
+Calfkit agents dynamically find each other at runtime and choreograph work. No hard-coded orchestrator or wiring. The framework for building free-flowing and powerful multi-agent teams.
 
 <br>
 
@@ -63,35 +63,38 @@ def lookup_account_balance(ctx: ToolContext) -> str:
 
 ## Running your agents
 
-Agents sit on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
+Agents run on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
 
-Start the general assistant independently. Assuming it's saved in `general_help.py`.
+Start the general assistant. Assuming it's saved in `general_help.py`.
 
 ```bash
-# using the ck CLI
+# Start the agent on the mesh (requires CALFKIT_MESH_URL)
 ck run general_help:general
+
+# Interactive chat with agent
+ck chat
 ```
 
 Separately, start the `finance` agent and the `lookup_account_balance` tool node. Assuming it's saved in `finance_help.py`.
 
 ```bash
+# Start the finance agent and tool on the mesh
 ck run finance_help:finance finance_help:lookup_account_balance
-```
 
-Ask the general assistant a question. Notice it's able to dynamically discover and consult the `finance` agent for help without any hard-coded configuration of `finance` agent's existence.
-
-```bash
+# Interactive chat with finance agent + general agent
 ck chat
 ```
 
+Ask the general assistant a question. Notice it's able to dynamically discover and consult the `finance` agent for help without any hard-coded configuration of `finance` agent's existence. You can start more agents and the existing running agents will automatically discover their new peers.
+
 Calfkit agents discover and communicate over an agent mesh, provided by either Calfkit Cloud (in alpha) or your own self-hosted version. 
 
-Start one locally with Docker:
+Start a mesh locally with Docker:
 ```bash
 git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
 ```
 
-Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8) — a fully-managed agent mesh your agents can join from anywhere.
+Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8) — a fully-managed agent mesh server your agents can join from anywhere.
 
 ## Why Calfkit?
 
