@@ -16,7 +16,7 @@ from typing import Any
 import typer
 
 from calfkit.cli._loader import load_nodes
-from calfkit.client._mesh import resolve_mesh_url
+from calfkit.client._mesh_url import resolve_mesh_url
 
 
 def _load_env(env_file: str | None) -> None:

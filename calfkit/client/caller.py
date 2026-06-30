@@ -21,7 +21,7 @@ from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client._broker import _PreStartHookBroker
-from calfkit.client._mesh import resolve_mesh_url
+from calfkit.client._mesh_url import resolve_mesh_url
 from calfkit.client.events import DEFAULT_FIREHOSE_BUFFER_SIZE, EventStream
 from calfkit.client.gateway import AgentGateway
 from calfkit.client.hub import _Hub
@@ -111,7 +111,7 @@ class Client:
         boot-check posture — see :meth:`_make_provisioned_broker`.
         """
         # Resolve the mesh URL once (arg > $CALFKIT_MESH_URL > localhost) and normalize to the list
-        # form the broker needs — see calfkit.client._mesh.resolve_mesh_url.
+        # form the broker needs — see calfkit.client._mesh_url.resolve_mesh_url.
         server_list = resolve_mesh_url(server_urls)
 
         rejected_security = [k for k in broker_kwargs if k in ("security_protocol", "ssl_context") or k.startswith(("sasl_plain_", "sasl_mechanism"))]

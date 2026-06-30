@@ -21,7 +21,7 @@ from typing import Any
 
 from faststream.kafka import KafkaBroker
 
-from calfkit.client._mesh import DEFAULT_MESH_URL
+from calfkit.client._mesh_url import DEFAULT_MESH_URL
 
 PreStartHook = Callable[[KafkaBroker], Awaitable[None]]
 
