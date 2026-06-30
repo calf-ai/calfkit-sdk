@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # A caller-side mesh view opens naively; the directory topic's existence is an operational precondition (graceful-empty tolerance rejected, and the observer does not ensure)

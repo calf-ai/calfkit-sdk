@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Caller-side reads of the control plane are a projected `client.mesh` surface, not exported internals
