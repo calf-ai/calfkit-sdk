@@ -10,50 +10,13 @@ it in a fresh process on every file change.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
 import typer
 
+from calfkit.cli._common import _load_env, _parse_host
 from calfkit.cli._loader import load_nodes
 from calfkit.client._mesh_url import resolve_mesh_url
-
-
-def _load_env(env_file: str | None) -> None:
-    """Load environment variables from a dotenv file.
-
-    An explicit ``env_file`` is loaded as given; otherwise ``./.env`` is loaded
-    if present. A development convenience so ``OPENAI_API_KEY`` and friends are
-    available without exporting them by hand.
-
-    An explicit ``env_file`` that does not exist is surfaced as a warning rather
-    than silently ignored (``load_dotenv`` no-ops on a missing path), so a typo'd
-    ``--env-file`` doesn't turn into a confusing "missing API key" failure later.
-    """
-    from dotenv import load_dotenv
-
-    if env_file:
-        if not os.path.exists(env_file):
-            typer.echo(f"Warning: --env-file {env_file!r} not found; continuing without it.", err=True)
-            return
-        load_dotenv(env_file)
-    elif os.path.exists(".env"):
-        load_dotenv(".env")
-
-
-def _parse_host(host: str | None) -> str | list[str] | None:
-    """Map the ``--host`` flag to a ``server_urls`` value for ``Client.connect``.
-
-    ``None`` (flag omitted) is passed through unchanged so ``Client.connect``
-    applies its ``CALFKIT_MESH_URL`` → ``localhost`` fallback — preserving the
-    flag > env > localhost precedence. A comma-separated value becomes a list.
-    """
-    if not host:
-        return None
-    parts = [s.strip() for s in host.split(",") if s.strip()]
-    if not parts:
-        return None
-    return parts if len(parts) > 1 else parts[0]
 
 
 def _print_banner(nodes: list[Any], server_urls: str | list[str] | None, provision: bool) -> None:

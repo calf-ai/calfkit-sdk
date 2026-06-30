@@ -21,12 +21,14 @@ def _build_app() -> Any:
     """
     import typer
 
+    from calfkit.cli.chat import chat as chat_command
     from calfkit.cli.run import run as run_command
     from calfkit.cli.topics import app as topics_app
 
     app = typer.Typer(name="ck", help="Calfkit SDK command-line tools.", no_args_is_help=True)
     app.add_typer(topics_app, name="topics")
     app.command(name="run")(run_command)
+    app.command(name="chat")(chat_command)
     return app
 
 

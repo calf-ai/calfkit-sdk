@@ -7,6 +7,7 @@ Commands:
 | Command | Purpose |
 | --- | --- |
 | [`ck run`](#ck-run) | Run node(s) as a worker for local development (no `Worker` boilerplate). |
+| [`ck chat`](#ck-chat) | Chat with an online agent from an interactive terminal REPL. |
 | [`ck topics`](#ck-topics) | Best-effort create the Kafka topics a set of nodes reference. |
 
 ---
@@ -149,6 +150,85 @@ if __name__ == "__main__":
 ```console
 $ python serve_tool.py
 ```
+
+---
+
+## `ck chat`
+
+Chat with an agent running on your mesh from an interactive REPL — discover the
+agents currently online, pick one (or name it directly), then hold a multi-turn
+conversation. Each turn streams the agent's intermediate work — its messages, tool
+calls and results, and any handoffs — live, followed by its answer.
+
+```text
+ck chat [NAME] [OPTIONS]
+```
+
+With no `NAME`, `ck chat` lists the agents online and prompts you to choose;
+`ck chat researcher` skips the picker and connects to that agent directly (and
+exits `2` if it isn't online). There is no "back" — leave and rerun to switch
+agents.
+
+### A session
+
+```console
+$ ck chat
+Discovering agents...
+Online agents
+
+  1  researcher   Deep web research with citations
+  2  support-bot  Handles customer support tickets and refunds
+
+Select an agent [1-2, q to quit]: 2
+
+Chatting with support-bot. Type /exit or press Ctrl-D to leave.
+----------------------------------------------------------------
+
+you > my order #4471 never arrived
+
+support-bot
+  [message]      Let me pull up that order for you.
+  [tool call]    lookup_order(id='4471')
+  [tool result]  shipped 2026-06-24, in transit
+
+support-bot > Order #4471 shipped on the 24th and is in transit.
+Estimated delivery is tomorrow. Want me to start a trace?
+
+you >
+```
+
+Each turn renders in three tiers: **your input** (`you >`), the agent's live
+**work log** (indented, one line per step, tagged `[message]` / `[tool call]` /
+`[tool result]` / `[tool error]` / `[handoff]`), and the agent's **answer**
+(`‹agent› >`). The work log is headed by the agent's name, so it is always clear
+which agent did the work; a mid-turn handoff prints the new agent's name as its
+own header.
+
+### Leaving
+
+`/exit`, `/quit`, or Ctrl-D end the session; Ctrl-C exits at any time, including
+mid-turn. Any other input is sent to the agent verbatim.
+
+### Options
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--host`, `-H` | `$CALFKIT_MESH_URL` → `localhost` | Kafka bootstrap server(s), comma-separated. Precedence: this flag **>** `$CALFKIT_MESH_URL` **>** `localhost`. |
+| `--env-file` | `./.env` if present | dotenv file to load before connecting. A *missing explicit* `--env-file` warns (it is not silently ignored). |
+| `--timeout` | wait indefinitely | Per-turn patience, in seconds. A turn that exceeds it prints a notice and the session continues. (Ctrl-C exits the whole session — see [Leaving](#leaving).) |
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Clean exit (`/exit`, `/quit`, Ctrl-D, or Ctrl-C), or when no agents are online. |
+| `2` | A named agent that isn't online, or an unusable mesh directory (`MeshUnavailableError`: still catching up, the directory topic absent, or the broker unreachable). A bad `--env-file` warns and continues. |
+
+> **Replies are rendered as text.** `ck chat` connects with a string output type,
+> so an agent whose output is structured data shows that data as JSON on the answer
+> line. It's a conversational tool for trying agents out and watching their work —
+> for typed structured output, call the agent from a client (see
+> [How to call nodes from a client](client-features.md)).
 
 ---
 
