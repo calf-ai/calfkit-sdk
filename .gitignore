@@ -43,11 +43,11 @@ uv.lock
 # env file
 .env
 
-# Internal notes
-notes/
-docs/internal/
-
 # Local scratch / experiments
 scratch/
-
+docs/plans/
 examples/deprecated/
+notes/
+docs/internal/
+docs/adr/
+docs/designs/
