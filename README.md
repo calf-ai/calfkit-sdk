@@ -1,7 +1,7 @@
 <h1 align="center">🐮 Calfkit</h1>
 
 <h3 align="center">
-  Build powerful AI agents that automatically discover each other and collaborate.
+  Build powerful AI agents with automatic, open inter-agent discovery and communication.
 </h3>
 
 <p align="center">
@@ -13,9 +13,15 @@
   <a href="https://deepwiki.com/calf-ai/calfkit-sdk"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
-Calfkit agents dynamically find each other at runtime and choreograph work. No hard-coded orchestrator or wiring. The framework for building free-flowing and powerful multi-agent teams.
+Calfkit agents dynamically find each other at runtime and choreograph work, with no hard-coded orchestrator or wiring. Build free-flowing and flexible multi-agent workflows.
 
 <br>
+
+## Why Calfkit?
+
+- **Dynamic agent-to-agent discovery and collaboration.** Agents find each other at runtime and work together — messaging each other and handing off tasks — so you build multi-agent systems without complex wiring or orchestration, and extend team capabilities at any time.
+- **No bottleneck, no single point of failure.** Every agent runs and scales as an independent microservice, so your agent teams are resilient and scalable from day one.
+- **Act on live data in realtime.** Agents are event-driven so they act on realtime data streams, sending live results wherever they're needed — build agents that work like continuous workflows, not one-off requests.
 
 ## Installation
 
@@ -25,7 +31,9 @@ pip install calfkit
 
 ## Quickstart
 
-### An agent (that can discover other agents)
+Agents run on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
+
+### Agent
 
 ```python
 from calfkit import Agent, Handoff, Messaging, Tools, OpenAIResponsesModelClient
@@ -42,7 +50,22 @@ general = Agent(
 )
 ```
 
-### Runtime discoverability allows you to add new agents and tools to the team at any time
+### Run locally
+
+You can add more agents to the team as you keep this agent's process running in the background.
+
+```bash
+# `CALFKIT_MESH_URL` required
+
+# Start the agent process (general_help.py): 
+# ck run file_name:agent_name
+ck run general_help:general  
+
+# Interactive agent chat CLI
+ck chat
+```
+
+### Add another agent to the team
 
 ```python
 from calfkit import Agent, agent_tool, Tools, ToolContext, OpenAIResponsesModelClient
@@ -50,42 +73,20 @@ from calfkit import Agent, agent_tool, Tools, ToolContext, OpenAIResponsesModelC
 finance = Agent(
     name="finance",
     description="Answers the user's personal finance questions.",
-    system_prompt="You are the personal finance specialist. Use tools to look up user data.",
+    system_prompt="You are the personal finance specialist. Answer finance-related questions.",
     model_client=OpenAIResponsesModelClient(model_name="gpt-5.4-mini"),
-    tools=[Tools(discover=True)],   # discover and use any tool at runtime
 )
-
-@agent_tool
-def lookup_account_balance(ctx: ToolContext) -> str:
-    """Look up the user's current account balance in USD."""
-    return f"Account balance: ${ctx.deps.get('balance', '0.00')}"
 ```
 
-## Running your agents
-
-Agents run on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
-
-Start the general assistant. Assuming it's saved in `general_help.py`.
+### Run new agent locally
 
 ```bash
-# Start the agent on the mesh (requires CALFKIT_MESH_URL)
-ck run general_help:general
+ck run finance_help:finance
 
-# Interactive chat with agent
 ck chat
 ```
 
-Separately, start the `finance` agent and the `lookup_account_balance` tool node. Assuming it's saved in `finance_help.py`.
-
-```bash
-# Start the finance agent and tool on the mesh
-ck run finance_help:finance finance_help:lookup_account_balance
-
-# Interactive chat with finance agent + general agent
-ck chat
-```
-
-Ask the general assistant a question. Notice it's able to dynamically discover and consult the `finance` agent for help without any hard-coded configuration of `finance` agent's existence. You can start more agents and the existing running agents will automatically discover their new peers.
+## Running on a mesh
 
 Calfkit agents discover and communicate over an agent mesh, provided by either Calfkit Cloud (in alpha) or your own self-hosted version. 
 
@@ -94,61 +95,18 @@ Start a mesh locally with Docker:
 git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
 ```
 
-Or skip the self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8) — a fully-managed agent mesh server your agents can join from anywhere.
-
-## Why Calfkit?
-
-- **Dynamic agent-to-agent discovery and collaboration.** Agents find each other at runtime and work together — messaging each other and handing off tasks — so you build multi-agent systems without complex wiring or orchestration, and extend team capabilities at any time.
-- **No bottleneck, no single point of failure.** Every agent runs and scales as an independent microservice, so your agent teams are resilient and scalable from day one.
-- **Act on live data in realtime.** Agents are event-driven so they act on realtime data streams, sending live results wherever they're needed — build agents that work like continuous workflows, not one-off requests.
-
-## Examples
-
-See [`examples/`](examples/) for more examples.
-
-**Agent teams** — dynamic multi-agent choreography with `Messaging`, `Handoff`, and runtime discovery:
-
-- **[Internal help desk](examples/help_desk/)** — a front desk that discovers expert teams at runtime (`discover=True`) and either messages them or hands off a task; deploy a new expert and it's reachable next turn, no code change.
-- **[Newsroom](examples/newsroom/)** — an editor consults a researcher and a fact-checker (messaging), then hands off to a writer — both peer verbs in one run.
-- **[Expense approval](examples/expense_approval/)** — a request climbs a `team_lead` → `director` → `vp` handoff chain until someone is authorized to clear it.
-- **[Launch review](examples/launch_review/)** — a release manager fans out to engineering, security, and legal (messaging), then synthesizes a go/no-go itself.
-
-**More examples:**
-
-- **[Streaming intermediate work](examples/streaming/)** — a trip-planner agent whose preamble, tool calls, and tool results stream to the caller via `handle.stream()`, for a live view of a run's progress.
-- **[Agent, tool & consumer](examples/quickstart/)** — a weather agent and its `get_weather` tool deployed as separate services and invoked over the broker, with a consumer node tapping the agent's output stream.
-- **[Multi-agent panel](examples/multi_agent_panel/)** — three persona agents (`optimist`, `skeptic`, `pragmatist`) debate over one shared transcript, each automatically seeing the thread from its own point of view.
-- **[MCP toolbox](examples/quickstart_mcp/)** — give an agent a live web-`fetch` tool from an MCP server, deployed as its own node and referenced by name — the agent's code never imports it.
+Or skip self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8) — a fully-managed agent mesh server your agents can join from anywhere. Currently in alpha.
 
 ## Documentation
 
-In-repo documentation lives under [`docs/`](docs/).
-
-**New to building agent teams?** Start with the tutorial **[Build a multi-agent support desk](docs/multi-agent-support-desk.md)** — build and run three agents that discover each other and collaborate by messaging and handoff.
-
-**How-to guides** — goal-oriented walkthroughs:
-
-- **[How to call agents from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, streaming a run's intermediate steps live with `handle.stream()`, the `events()` firehose, and the typed client errors.
-- **[How to chat with an agent from the terminal](docs/chat-with-agents.md)** — discover the agents online, pick one (or name it), and hold a multi-turn conversation in an interactive `ck chat` REPL, watching each turn's tool calls and results stream live.
-- **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
-- **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
-- **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.
-- **[How to let agents discover and use tools at runtime](docs/tool-discovery.md)** — reference deployed function tool nodes by name (or every live one with `discover=True`) with `Tools`; agents discover their schemas at runtime, so an agent's deployment never imports the tool's code.
-- **[How to give agents MCP tools](docs/mcp-tool-discovery.md)** — deploy an `MCPToolboxNode` fronting an MCP server and pass it to agents like a tool node; tools are discovered and kept fresh across processes automatically.
-- **[How to let agents find and reach each other at runtime](docs/agent-peers.md)** — agents discover each other by name (no hardcoded addresses) and collaborate two ways: consult a peer and keep control (`Messaging`), or transfer control to a specialist (`Handoff`).
-- **[Worker lifecycle & embedding](docs/worker-lifecycle.md)** — open long-lived resources at startup and close them on shutdown, publish presence events, and run with `run()`, the embeddable `start()`/`stop()`, or `async with worker:`.
-
-**Reference:**
-
-- **[API reference](docs/api.md)** — the public surface re-exported from the top-level `calfkit` package, with the key entry-point signatures.
-- **[CLI reference](docs/cli.md)** — the `ck run`, `ck chat`, and `ck topics` commands.
-- **[Topic provisioning](docs/topic-provisioning.md)** — the experimental, opt-in topic-creation helper for dev/CI.
+* **Getting started**: See [`docs/`](docs/).
+* **Examples**: See [`examples/`](examples/) multi-agent team and general framework API examples.
 
 ## Contributing
 
 Issues and pull requests are welcome. Please [open an issue](https://github.com/calf-ai/calfkit-sdk/issues) to discuss substantial changes before sending a PR.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the quality gates (`make fix` / `make check` / `make test`), PR conventions, and how to write and run tests — including the real-broker integration tests.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the quality gates (`make fix` / `make check` / `make test`), PR conventions, and how to write and run tests — including integration tests.
 
 ## License
 
