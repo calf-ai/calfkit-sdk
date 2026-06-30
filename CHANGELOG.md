@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.2](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.1...v0.12.2) (2026-06-30)
+
+
+### Features
+
+* caller-side mesh view for live agents and tools  ([#307](https://github.com/calf-ai/calfkit-sdk/issues/307)) ([58c9bf5](https://github.com/calf-ai/calfkit-sdk/commit/58c9bf56f276736c28ec5023b49183df75c42aef))
+
+
+### Documentation
+
+* add four agent-team examples for dynamic multi-agent choreography ([#306](https://github.com/calf-ai/calfkit-sdk/issues/306)) ([c9d2195](https://github.com/calf-ai/calfkit-sdk/commit/c9d21954bdfaa6e8720ebc5d540efbdeabc9864c))
+* add intermediate-step streaming example; surface it in README + api.md ([#304](https://github.com/calf-ai/calfkit-sdk/issues/304)) ([d07122d](https://github.com/calf-ai/calfkit-sdk/commit/d07122d15232f6d6141fdadcd7427cfbc4ad82de))
+
 ## [0.12.1](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.0...v0.12.1) (2026-06-29)
 
 
