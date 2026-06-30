@@ -80,24 +80,8 @@ ck run finance_help:finance finance_help:lookup_account_balance
 
 Ask the general assistant a question. Notice it's able to dynamically discover and consult the `finance` agent for help without any hard-coded configuration of `finance` agent's existence.
 
-```python
-import asyncio
-from calfkit import Client
-
-async def main():
-    async with Client.connect() as client:
-        result = await client.agent(name="general").execute(
-            "Do I have enough money to afford a new car?"
-        )
-        print(result.output)
-        # LOL nah twin
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
 ```bash
-python ask.py
+ck chat
 ```
 
 Calfkit agents discover and communicate over an agent mesh, provided by either Calfkit Cloud (in alpha) or your own self-hosted version. 
@@ -142,6 +126,7 @@ In-repo documentation lives under [`docs/`](docs/).
 **How-to guides** — goal-oriented walkthroughs:
 
 - **[How to call agents from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, streaming a run's intermediate steps live with `handle.stream()`, the `events()` firehose, and the typed client errors.
+- **[How to chat with an agent from the terminal](docs/chat-with-agents.md)** — discover the agents online, pick one (or name it), and hold a multi-turn conversation in an interactive `ck chat` REPL, watching each turn's tool calls and results stream live.
 - **[How to tap a topic with a consumer node](docs/consumer-nodes.md)** — terminal sinks that run arbitrary Python against every event on a topic; tap an agent's `publish_topic` to log, persist, or fan out.
 - **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
 - **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.
@@ -153,7 +138,7 @@ In-repo documentation lives under [`docs/`](docs/).
 **Reference:**
 
 - **[API reference](docs/api.md)** — the public surface re-exported from the top-level `calfkit` package, with the key entry-point signatures.
-- **[CLI reference](docs/cli.md)** — the `ck run` and `ck topics` commands.
+- **[CLI reference](docs/cli.md)** — the `ck run`, `ck chat`, and `ck topics` commands.
 - **[Topic provisioning](docs/topic-provisioning.md)** — the experimental, opt-in topic-creation helper for dev/CI.
 
 ## Contributing

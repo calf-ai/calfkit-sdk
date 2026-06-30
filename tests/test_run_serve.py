@@ -143,13 +143,13 @@ def test_serve_banner_shows_env_host_when_no_flag(captured: dict, capsys: pytest
 
 
 def test_parse_host_none_returns_none() -> None:
-    from calfkit.cli._run import _parse_host
+    from calfkit.cli._common import _parse_host
 
     assert _parse_host(None) is None
 
 
 def test_parse_host_empty_returns_none() -> None:
-    from calfkit.cli._run import _parse_host
+    from calfkit.cli._common import _parse_host
 
     assert _parse_host("") is None
 
@@ -157,19 +157,19 @@ def test_parse_host_empty_returns_none() -> None:
 def test_parse_host_separators_only_returns_none() -> None:
     """A non-empty value that strips to nothing falls back to None (so env/
     localhost still win), not an empty/garbage server list."""
-    from calfkit.cli._run import _parse_host
+    from calfkit.cli._common import _parse_host
 
     assert _parse_host(" , ") is None
 
 
 def test_parse_host_single_returns_str() -> None:
-    from calfkit.cli._run import _parse_host
+    from calfkit.cli._common import _parse_host
 
     assert _parse_host("h:9092") == "h:9092"
 
 
 def test_parse_host_comma_returns_list() -> None:
-    from calfkit.cli._run import _parse_host
+    from calfkit.cli._common import _parse_host
 
     assert _parse_host("a:9092, b:9092") == ["a:9092", "b:9092"]
 
@@ -183,14 +183,14 @@ def test_load_env_explicit_file_is_loaded(monkeypatch: pytest.MonkeyPatch, tmp_p
     """An explicit --env-file that exists is passed to load_dotenv."""
     import dotenv
 
-    import calfkit.cli._run as run_mod
+    import calfkit.cli._common as common_mod
 
     env_path = tmp_path / "custom.env"  # type: ignore[operator]
     env_path.write_text("FOO=bar\n")
     calls: list[str] = []
     monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
 
-    run_mod._load_env(str(env_path))
+    common_mod._load_env(str(env_path))
     assert calls == [str(env_path)]
 
 
@@ -198,12 +198,12 @@ def test_load_env_missing_explicit_file_warns_and_skips(monkeypatch: pytest.Monk
     """A missing explicit --env-file warns (not silent) and does not load."""
     import dotenv
 
-    import calfkit.cli._run as run_mod
+    import calfkit.cli._common as common_mod
 
     calls: list[str] = []
     monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
 
-    run_mod._load_env("/no/such/file.env")
+    common_mod._load_env("/no/such/file.env")
     assert calls == []
     assert "not found" in capsys.readouterr().err
 
@@ -212,14 +212,14 @@ def test_load_env_autoloads_dotenv_when_present(monkeypatch: pytest.MonkeyPatch,
     """With no explicit file, ./.env is auto-loaded when it exists."""
     import dotenv
 
-    import calfkit.cli._run as run_mod
+    import calfkit.cli._common as common_mod
 
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     (tmp_path / ".env").write_text("FOO=bar\n")  # type: ignore[operator]
     calls: list[str] = []
     monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
 
-    run_mod._load_env(None)
+    common_mod._load_env(None)
     assert calls == [".env"]
 
 
@@ -227,11 +227,11 @@ def test_load_env_no_file_no_autoload(monkeypatch: pytest.MonkeyPatch, tmp_path:
     """With no explicit file and no ./.env, load_dotenv is not called."""
     import dotenv
 
-    import calfkit.cli._run as run_mod
+    import calfkit.cli._common as common_mod
 
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     calls: list[str] = []
     monkeypatch.setattr(dotenv, "load_dotenv", lambda p: calls.append(p) or True)
 
-    run_mod._load_env(None)
+    common_mod._load_env(None)
     assert calls == []
