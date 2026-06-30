@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import pydantic_core
 
@@ -161,20 +161,57 @@ class ClientTimeoutError(Exception):
 
 
 class ClientClosedError(Exception):
-    """Raised when the client is closed (``aclose()``) with this run's ``result()`` still
-    pending (spec §2.5 / §5.8).
+    """Raised when the client is closed (``aclose()``) with work still pending.
 
-    A typed, run-survives signal — never a bare ``CancelledError``. The run itself is
-    unaffected; the client simply stopped consuming its replies. Carries the ``correlation_id``
-    of the run that was awaiting.
+    A typed, run-survives signal — never a bare ``CancelledError``. Two shapes: with a
+    ``correlation_id`` it names the run whose ``result()`` was still pending (spec §2.5 / §5.8);
+    without one it marks a non-run wait interrupted by close (e.g. a ``client.mesh`` read). The
+    run itself is unaffected; the client simply stopped consuming.
     """
 
-    def __init__(self, correlation_id: str):
+    def __init__(self, correlation_id: str | None = None):
         self.correlation_id = correlation_id
-        super().__init__(f"client closed while awaiting a reply for correlation_id={correlation_id!r}")
+        message = f"client closed while awaiting a reply for correlation_id={correlation_id!r}" if correlation_id is not None else "client closed"
+        super().__init__(message)
 
-    def __reduce__(self) -> tuple[Any, tuple[str]]:
+    def __reduce__(self) -> tuple[Any, tuple[str | None]]:
         return (self.__class__, (self.correlation_id,))
+
+
+_MeshUnavailableReason = Literal["establishing", "reader_dead", "open_failed"]
+
+
+class MeshUnavailableError(Exception):
+    """A ``client.mesh`` read could not return a roster — the per-kind view is not usable.
+
+    Raised by ``client.mesh.get_agents()`` / ``get_tools()`` (spec §6.4) rather than ever
+    returning a silently-partial roster. Branch on ``reason`` to route without string-matching
+    the message (the discriminate-by-field precedent is ``NodeFaultError.report.retryable``):
+
+    - ``reason="establishing"`` — the view is still catching up (a cold-start latch; no cause
+      attached). It self-heals on the **same** client, so retry with a short backoff.
+    - ``reason="reader_dead"`` — the reader died on a non-retriable error (cause attached).
+      Terminal for the view's lifetime: alert; recovery needs a fresh ``Client``.
+    - ``reason="open_failed"`` — the open itself raised (a missing directory topic or an
+      unreachable broker; cause attached). The next read re-opens, so retry with backoff.
+
+    A misconfigured client (``server_urls is None``) raises a synchronous ``ValueError`` instead
+    — you never retry a programming bug.
+    """
+
+    def __init__(self, message: str, *, reason: _MeshUnavailableReason) -> None:
+        self.reason: _MeshUnavailableReason = reason
+        super().__init__(message)
+
+    def __reduce__(self) -> tuple[Any, tuple[str, _MeshUnavailableReason]]:
+        # The keyword-only `reason` breaks the default reduction (which would replay only the
+        # message string through __init__ and silently drop `reason`); rebuild from both fields
+        # via a module-level reconstructor (cf. ClientTimeoutError / ClientClosedError).
+        return (_rebuild_mesh_unavailable, (self.args[0], self.reason))
+
+
+def _rebuild_mesh_unavailable(message: str, reason: _MeshUnavailableReason) -> MeshUnavailableError:
+    return MeshUnavailableError(message, reason=reason)
 
 
 class MissingTopicsError(RuntimeError):

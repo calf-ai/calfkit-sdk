@@ -8,12 +8,14 @@ from calfkit.client.events import (
 )
 from calfkit.client.gateway import AgentGateway, Dispatch
 from calfkit.client.hub import InvocationHandle
+from calfkit.client.mesh import AgentInfo, Mesh, MeshViewConfig, ToolboxInfo, ToolInfo, ToolNodeInfo, ToolSpec
 from calfkit.models.node_result import InvocationResult
 from calfkit.models.step import AgentMessageEvent, HandoffEvent, ToolCallEvent, ToolResultEvent  # RunEvent members, re-exported here
 
 __all__ = [
     "DEFAULT_FIREHOSE_BUFFER_SIZE",
     "AgentGateway",
+    "AgentInfo",
     "AgentMessageEvent",
     "Client",
     "Dispatch",
@@ -21,9 +23,15 @@ __all__ = [
     "HandoffEvent",
     "InvocationHandle",
     "InvocationResult",
+    "Mesh",
+    "MeshViewConfig",
     "RunCompleted",
     "RunEvent",
     "RunFailed",
+    "ToolboxInfo",
     "ToolCallEvent",
+    "ToolInfo",
+    "ToolNodeInfo",
     "ToolResultEvent",
+    "ToolSpec",
 ]

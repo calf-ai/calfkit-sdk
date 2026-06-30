@@ -21,10 +21,11 @@ from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client._broker import _PreStartHookBroker
-from calfkit.client._mesh import resolve_mesh_url
+from calfkit.client._mesh_url import resolve_mesh_url
 from calfkit.client.events import DEFAULT_FIREHOSE_BUFFER_SIZE, EventStream
 from calfkit.client.gateway import AgentGateway
 from calfkit.client.hub import _Hub
+from calfkit.client.mesh import Mesh, MeshViewConfig
 from calfkit.client.middleware import ContextInjectionMiddleware, DecodeFloorMiddleware
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.envelope import Envelope
@@ -62,6 +63,7 @@ class Client:
         provisioning: ProvisioningConfig,
         startup_ensurer: StartupTopicEnsurer,
         server_urls: str | None,
+        mesh_config: MeshViewConfig | None = None,
     ) -> None:
         self._broker = broker
         self._hub = hub
@@ -70,6 +72,8 @@ class Client:
         self._firehose_buffer_size = firehose_buffer_size
         self._deps_factory = deps_factory
         self._server_urls = server_urls
+        self._mesh_config = mesh_config
+        self._mesh: Mesh | None = None  # the cached client.mesh singleton (created lazily, zero-I/O)
         # EXPERIMENTAL opt-in topic provisioning (issue #180), kept as a removable unit (see connect()'s
         # _make_provisioned_broker). The co-located Worker reuses these for its own node-topic
         # provisioning (worker.py reads `_provisioning` / `_startup_ensurer`).
@@ -91,6 +95,7 @@ class Client:
         deps_factory: Callable[[], dict[str, Any]] | None = None,
         firehose_buffer_size: int = DEFAULT_FIREHOSE_BUFFER_SIZE,
         provisioning: ProvisioningConfig | None = None,
+        mesh_config: MeshViewConfig | None = None,
         **broker_kwargs: Any,
     ) -> Client:
         """Build the client — **sync, lazy, no I/O** (spec §2.1/§2.7). Registers the hub's groupless
@@ -111,7 +116,7 @@ class Client:
         boot-check posture — see :meth:`_make_provisioned_broker`.
         """
         # Resolve the mesh URL once (arg > $CALFKIT_MESH_URL > localhost) and normalize to the list
-        # form the broker needs — see calfkit.client._mesh.resolve_mesh_url.
+        # form the broker needs — see calfkit.client._mesh_url.resolve_mesh_url.
         server_list = resolve_mesh_url(server_urls)
 
         rejected_security = [k for k in broker_kwargs if k in ("security_protocol", "ssl_context") or k.startswith(("sasl_plain_", "sasl_mechanism"))]
@@ -154,6 +159,7 @@ class Client:
             provisioning=provisioning,
             startup_ensurer=ensurer,
             server_urls=",".join(server_list),
+            mesh_config=mesh_config,
         )
 
     @staticmethod
@@ -200,6 +206,17 @@ class Client:
     def server_urls(self) -> str | None:
         """The bootstrap server URL(s), comma-joined; ``None`` for a directly-constructed client."""
         return self._server_urls
+
+    @property
+    def mesh(self) -> Mesh:
+        """The caller-side mesh view — a cached, zero-I/O ``Mesh`` singleton (mesh-view spec §5.1).
+
+        Read which agents/tools are online via ``client.mesh.get_agents()`` / ``get_tools()``; the
+        per-kind views open lazily on first read and are torn down by :meth:`aclose`.
+        """
+        if self._mesh is None:
+            self._mesh = Mesh(self, self._mesh_config)
+        return self._mesh
 
     # Four overloads (spec §2.2): a dedicated no-output_type form per address so the str default is
     # actually bound — a `= str` parameter default does NOT bind a TypeVar (OutT would fall back to Any).
@@ -261,7 +278,8 @@ class Client:
 
     async def aclose(self) -> None:
         """Graceful shutdown (spec §5.8): resolve every pending ``result()`` with ``ClientClosedError``,
-        then stop the broker's reader.
+        tear down the mesh views, then stop the broker's reader (the broker is closed even if mesh
+        teardown raises).
 
         **Co-located ``Worker`` ownership:** the broker is SHARED with a co-located ``Worker``, and
         this stops it. In co-located mode let the ``Worker`` own the broker lifecycle (``async with
@@ -269,9 +287,13 @@ class Client:
         the Worker is serving, or you stop the broker out from under it. Standalone clients close
         normally."""
         self._hub.close()
-        if self._broker._connection:
-            await self._broker.stop()
-        self._started = False
+        try:
+            if self._mesh is not None:
+                await self._mesh.aclose()  # stop the mesh views before the broker (mesh-view spec §6.2)
+        finally:
+            if self._broker._connection:
+                await self._broker.stop()
+            self._started = False
 
     async def __aenter__(self) -> Client:
         return self
