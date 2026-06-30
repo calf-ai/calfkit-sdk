@@ -54,6 +54,7 @@ import pytest
 
 from calfkit._protocol import HDR_WIRE
 from calfkit.client import Client
+from calfkit.exceptions import MeshUnavailableError
 from calfkit.models.envelope import Envelope
 from calfkit.models.payload import TextPart
 from calfkit.models.reply import ReturnMessage
@@ -428,3 +429,20 @@ async def test_issue_180_worker_run_does_not_hang_on_reply_topic() -> None:
     async with _running_worker(worker):
         async with _admin() as admin:
             await _await_topics_visible(admin, [inbox, reply])
+
+
+async def test_client_mesh_open_fails_loud_on_a_missing_directory_topic() -> None:
+    """On a no-auto-create broker, a genuinely-missing control-plane topic makes the naive mesh
+    open fail loud: ``get_*`` raises ``MeshUnavailableError(reason="open_failed")`` (ADR-0029 / spec §6.3).
+
+    This is the half of the mesh-view kafka coverage that needs auto-create OFF, which only this
+    provisioning lane guarantees; the worker-advertises-then-read happy path lives on the main
+    ``kafka`` lane (``test_mesh_view_kafka.py``), whose Redpanda dev-container auto-creates the topic
+    (yielding an empty roster, not ``open_failed``)."""
+    client = Client.connect(BOOTSTRAP)
+    try:
+        with pytest.raises(MeshUnavailableError) as exc:
+            await client.mesh.get_agents()
+        assert exc.value.reason == "open_failed"
+    finally:
+        await client.aclose()
