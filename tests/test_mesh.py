@@ -680,3 +680,35 @@ async def test_client_aclose_runs_the_broker_close_path_even_if_mesh_teardown_ra
     with pytest.raises(RuntimeError, match="mesh teardown boom"):
         await client.aclose()
     assert client._started is False  # the broker-close path (finally) ran despite the mesh raise
+
+
+# === Public exports (Commit 5) ==================================================
+
+_PUBLIC_MESH_NAMES = ("Mesh", "MeshViewConfig", "AgentInfo", "ToolInfo", "ToolNodeInfo", "ToolboxInfo", "ToolSpec")
+
+
+def test_mesh_surface_is_exported_from_calfkit_top_level() -> None:
+    import calfkit
+
+    for name in _PUBLIC_MESH_NAMES:
+        assert name in calfkit.__all__, f"{name} missing from calfkit.__all__"
+        assert hasattr(calfkit, name), f"{name} not importable from calfkit"
+
+
+def test_mesh_surface_is_exported_from_calfkit_client() -> None:
+    import calfkit.client
+
+    for name in _PUBLIC_MESH_NAMES:
+        assert name in calfkit.client.__all__, f"{name} missing from calfkit.client.__all__"
+        assert hasattr(calfkit.client, name)
+
+
+def test_wire_records_and_topics_stay_unexported() -> None:
+    # ADR-0028: callers depend only on the projected DTOs; the wire records and topic names
+    # stay internal so the records stay free to change behind them.
+    import calfkit
+    import calfkit.client
+
+    for name in ("AgentCard", "CapabilityRecord", "AGENTS_TOPIC", "CAPABILITY_TOPIC"):
+        assert name not in calfkit.__all__
+        assert name not in calfkit.client.__all__

@@ -2,6 +2,7 @@ from importlib.metadata import version
 
 from calfkit.client import (
     AgentGateway,
+    AgentInfo,
     AgentMessageEvent,
     Client,
     Dispatch,
@@ -9,11 +10,17 @@ from calfkit.client import (
     HandoffEvent,
     InvocationHandle,
     InvocationResult,
+    Mesh,
+    MeshViewConfig,
     RunCompleted,
     RunEvent,
     RunFailed,
+    ToolboxInfo,
     ToolCallEvent,
+    ToolInfo,
+    ToolNodeInfo,
     ToolResultEvent,
+    ToolSpec,
 )
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView, advertises
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, MeshUnavailableError, NodeFaultError
@@ -43,6 +50,14 @@ __all__ = [
     "ToolCallEvent",
     "ToolResultEvent",
     "HandoffEvent",
+    # client — mesh view (caller-side directory)
+    "Mesh",
+    "MeshViewConfig",
+    "AgentInfo",
+    "ToolInfo",
+    "ToolNodeInfo",
+    "ToolboxInfo",
+    "ToolSpec",
     # models
     "ErrorReport",
     "ExceptionInfo",
