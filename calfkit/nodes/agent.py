@@ -160,7 +160,7 @@ class BaseAgentNodeDef(
             name=self.name,
             output_type=[final_output_type, DeferredToolRequests],
             deps_type=dict,
-            instructions=system_prompt,
+            instructions=self._compose_instructions(self.name, system_prompt),
             model_settings=cast(ModelSettings | None, model_settings),
         )
 
@@ -173,6 +173,18 @@ class BaseAgentNodeDef(
             # @resource never runs under the synchronous TestKafkaBroker — offline, the test harness
             # injects a fake into the bag instead (tests/providers.py::prepare_worker).
             self.resource(name=FANOUT_STORE_KEY)(self._fanout_store_resource)
+
+    @staticmethod
+    def _compose_instructions(name: str, system_prompt: str) -> str:
+        """Bake the agent's identity into the leading line of its instructions.
+
+        Every agent's constructor ``name`` is injected as a leading ``You are {name}.`` line ahead of
+        the user's ``system_prompt``, so the model always knows its own identity on every invocation.
+        This is the construction-time literal (``self._instructions``), so it rides through the vendored
+        loop's additive instruction pipeline — ``temp_instructions``, ``@instructions`` functions, and the
+        handoff note all still compose after it (never replacing it, since calfkit never uses ``override``).
+        """
+        return f"You are {name}.\n\n{system_prompt}"
 
     @advertises(topic=AGENTS_TOPIC, record=AgentCard)
     def _agent_card_advert(self, stamp: ControlPlaneStamp) -> AgentCard:
