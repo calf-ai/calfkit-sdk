@@ -50,8 +50,27 @@ support-bot > Order #4471 shipped on the 24th and is in transit.
 ```
 
 The conversation is multi-turn — keep typing and the agent remembers the earlier
-turns. If it hands off to another agent mid-turn, that agent's name appears as its
-own header, so you can follow who did what.
+turns. If it **hands off** to another agent, that agent's name heads its part of the
+work log and the answer line, and the handoff **sticks**: because a handoff transfers
+control, your next message goes to the agent that took over — not back to the one you
+started with. When control moves, `ck chat` prints a short `(now chatting with …)`
+note so it's clear where your next message will go:
+
+```text
+you > I want to work directly with your billing specialist
+
+support-bot
+  [handoff]      billing (transferring the refund request)
+
+billing > Hi — I've got your refund request. What's the order number?
+
+(now chatting with billing)
+
+you > it's #4471            ← this goes to billing, not support-bot
+```
+
+A **consult** is different: when an agent quietly asks a peer for help and answers
+you itself, control never moves, so you stay with the same agent.
 
 ## Skip the picker
 

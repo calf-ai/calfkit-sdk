@@ -205,6 +205,13 @@ Each turn renders in three tiers: **your input** (`you >`), the agent's live
 which agent did the work; a mid-turn handoff prints the new agent's name as its
 own header.
 
+**Handoffs stick.** A handoff transfers control, so when a turn's answer comes from
+a different agent than you addressed, `ck chat` re-binds to that agent — your next
+message goes to it, not back to the one you started with — and prints a
+`(now chatting with ‹agent›)` note. A consult (`message_agent`) keeps control, so it
+does not move you. `message_history` is threaded across the change, so the agent that
+takes over has the full conversation.
+
 ### Leaving
 
 `/exit`, `/quit`, or Ctrl-D end the session; Ctrl-C exits at any time, including
