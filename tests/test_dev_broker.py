@@ -123,6 +123,15 @@ def test_multi_address_key_normalizes_each_element() -> None:
     assert target.registry_key == "127.0.0.1:9092,other.example:9093"
 
 
+def test_comma_joined_element_is_flattened() -> None:
+    # resolve_mesh_url does not comma-split an env-provided CALFKIT_MESH_URL, so a comma-joined
+    # value reaches normalize as ONE element; without flattening, "a:1,b:2" would silently
+    # misparse as host "a:1,b" port 2.
+    flattened = normalize(["a.example:1,b.example:2"])
+    assert flattened.is_single is False
+    assert flattened.registry_key == normalize(["a.example:1", "b.example:2"]).registry_key
+
+
 def test_multi_address_has_no_single_listener() -> None:
     target = normalize(["a.example:1", "b.example:2"])
     assert target.listen_ip is None

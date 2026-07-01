@@ -108,7 +108,12 @@ def _is_loopback(host: str) -> bool:
 
 
 def normalize(servers: Sequence[str]) -> Target:
-    """Normalize the resolved bootstrap list (from ``resolve_mesh_url``) to a :class:`Target`."""
+    """Normalize the resolved bootstrap list (from ``resolve_mesh_url``) to a :class:`Target`.
+
+    Each element is comma-flattened first: ``resolve_mesh_url`` does not split a comma-joined
+    ``$CALFKIT_MESH_URL``, and without flattening ``"a:1,b:2"`` would misparse as host ``a:1,b``.
+    """
+    servers = [part.strip() for element in servers for part in element.split(",") if part.strip()]
     if not servers:
         raise ValueError("no bootstrap address to normalize")
     parsed = [_parse_element(element) for element in servers]
