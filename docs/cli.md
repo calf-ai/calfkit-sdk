@@ -215,6 +215,7 @@ mid-turn. Any other input is sent to the agent verbatim.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--host`, `-H` | `$CALFKIT_MESH_URL` → `localhost` | Kafka bootstrap server(s), comma-separated. Precedence: this flag **>** `$CALFKIT_MESH_URL` **>** `localhost`. |
+| `--provision` | off | Opt-in creation of this client's reply inbox topic (**experimental**). Needed on brokers that don't auto-create topics (e.g. Tansu). The agent's own topics are provisioned by *its* worker (`ck run --provision`), not here. See [Topic provisioning](topic-provisioning.md). |
 | `--env-file` | `./.env` if present | dotenv file to load before connecting. A *missing explicit* `--env-file` warns (it is not silently ignored). |
 | `--timeout` | wait indefinitely | Per-turn patience, in seconds. A turn that exceeds it prints a notice and the session continues. (Ctrl-C exits the whole session — see [Leaving](#leaving).) |
 

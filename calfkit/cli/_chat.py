@@ -21,6 +21,7 @@ from calfkit.cli._chat_io import make_reader
 from calfkit.cli._chat_render import _error_line, _render_answer, _render_fault, _render_step, format_picker
 from calfkit.client import Client, RunCompleted, RunFailed
 from calfkit.exceptions import NodeFaultError
+from calfkit.provisioning import ProvisioningConfig
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -42,15 +43,20 @@ def _emit(lines: list[str]) -> None:
         print(line)
 
 
-async def run_chat_session(name: str | None, server_urls: str | list[str] | None, timeout: float | None) -> None:
+async def run_chat_session(name: str | None, server_urls: str | list[str] | None, timeout: float | None, provision: bool = False) -> None:
     """Connect, discover the online agents, resolve the target, and run the REPL.
 
     A not-ready mesh raises ``MeshUnavailableError`` from ``get_agents()`` — left to
     bubble to the ``chat.py`` boundary (F2). The ``async with`` closes the client
     (mesh views then broker) on every exit path.
+
+    ``provision`` (``--provision``) opt-in creates this client's reply inbox topic at broker
+    start — needed on brokers that don't auto-create topics (e.g. Tansu). The agent's own topics
+    are provisioned by its worker (``ck run --provision``), not here.
     """
     read_line = make_reader(asyncio.get_running_loop())
-    async with Client.connect(server_urls) as client:
+    provisioning = ProvisioningConfig(enabled=True) if provision else None
+    async with Client.connect(server_urls, provisioning=provisioning) as client:
         print("Discovering agents...")
         agents = await client.mesh.get_agents()
         if not agents:  # ready, but zero live agents

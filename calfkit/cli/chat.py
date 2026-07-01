@@ -41,6 +41,11 @@ def chat(
         "-H",
         help="Kafka bootstrap server(s), comma-separated. Precedence: this flag > $CALFKIT_MESH_URL > localhost.",
     ),
+    provision: bool = typer.Option(
+        False,
+        "--provision",
+        help="Opt-in creation of this client's reply inbox topic (experimental); for brokers without topic auto-create (e.g. Tansu).",
+    ),
     env_file: str | None = typer.Option(
         None,
         "--env-file",
@@ -66,7 +71,7 @@ def chat(
     # ValidationError, which subclasses ValueError) is a real bug and must propagate with its
     # traceback — not be masked as a clean config-error Exit(2).
     try:
-        asyncio.run(run_chat_session(name, server_urls, timeout))
+        asyncio.run(run_chat_session(name, server_urls, timeout, provision))
     except KeyboardInterrupt:
         # Ctrl-C at a prompt or mid-turn: a clean stop, not a traceback (the
         # add_reader-based reader cancels cleanly — see _chat_io).
