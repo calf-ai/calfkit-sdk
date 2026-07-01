@@ -9,6 +9,7 @@
 
 - **[How to call agents from a client](docs/client-features.md)** — the `agent(name)` gateway and its `send` / `start` / `execute` triad, multi-turn conversations, runtime dependency injection (`deps`), temporary instructions, streaming a run's intermediate steps live with `handle.stream()`, the `events()` firehose, and the typed client errors.
 - **[How to chat with an agent from the terminal](docs/chat-with-agents.md)** — discover the agents online, pick one (or name it), and hold a multi-turn conversation in an interactive `ck chat` REPL, watching each turn's tool calls and results stream live.
+- **[How to run a local mesh with `ck dev`](docs/local-dev-mesh.md)** — run and iterate with zero broker setup: `ck dev run`/`ck dev chat` connect to (or spawn) a managed in-memory dev broker, with provisioning and reload preset on.
 - **[How to guard and transform node invocations](docs/policy-seams.md)** — guard an invocation with `before_node` (transform the input, short-circuit the body, or raise to block), and validate or reshape its output with `after_node`.
 - **[How to handle errors and faults](docs/error-handling.md)** — recover from a failed node or callee with `on_node_error` / `on_callee_error`, mint typed faults with `NodeFaultError`, and inspect an `ErrorReport`.
 - **[How to let agents discover and use tools at runtime](docs/tool-discovery.md)** — reference deployed function tool nodes by name (or every live one with `discover=True`) with `Tools`; agents discover their schemas at runtime, so an agent's deployment never imports the tool's code.
@@ -20,5 +21,5 @@
 ## References
 
 - **[API reference](docs/api.md)** — the public surface re-exported from the top-level `calfkit` package, with the key entry-point signatures.
-- **[CLI reference](docs/cli.md)** — the `ck run`, `ck chat`, and `ck topics` commands.
+- **[CLI reference](docs/cli.md)** — the `ck run`, `ck chat`, `ck dev`, and `ck topics` commands.
 - **[Topic provisioning](docs/topic-provisioning.md)** — the experimental, opt-in topic-creation helper for dev/CI.

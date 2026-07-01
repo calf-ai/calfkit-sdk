@@ -27,11 +27,16 @@ Calfkit agents dynamically find each other at runtime and choreograph work, with
 
 ```bash
 pip install calfkit
+
+# or, with a zero-setup local dev broker included:
+pip install 'calfkit[mesh]'
 ```
 
 ## Quickstart
 
-Agents run on a mesh. Set the `CALFKIT_MESH_URL` environment variable.
+Agents run on a mesh. With the `[mesh]` extra installed, `ck dev` starts a local
+one for you — no setup, no `CALFKIT_MESH_URL` needed. (To use your own broker
+instead, set `CALFKIT_MESH_URL` and use plain `ck run` / `ck chat`.)
 
 ### Agent
 
@@ -55,14 +60,12 @@ general = Agent(
 You can add more agents to the team as you keep this agent's process running in the background.
 
 ```bash
-# `CALFKIT_MESH_URL` required
+# Start the agent process (general_help.py), spawning a local mesh if needed:
+# ck dev run file_name:agent_name
+ck dev run general_help:general
 
-# Start the agent process (general_help.py): 
-# ck run file_name:agent_name
-ck run general_help:general  
-
-# Interactive agent chat CLI
-ck chat
+# Interactive agent chat CLI (second terminal — reuses the same mesh)
+ck dev chat
 ```
 
 ### Add another agent to the team
@@ -81,19 +84,27 @@ finance = Agent(
 ### Run new agent locally
 
 ```bash
-ck run finance_help:finance
+ck dev run finance_help:finance
 
-ck chat
+ck dev chat
 ```
 
 ## Running an agent mesh
 
 Calfkit agents discover and communicate over an agent mesh (`CALFKIT_MESH_URL`), which you can run locally yourself.
 
-Start one with Docker:
+The easiest local mesh is the bundled dev broker — in-memory, zero setup
+(see [How to run a local mesh with `ck dev`](docs/local-dev-mesh.md)):
 
 ```bash
-git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
+pip install 'calfkit[mesh]'
+ck dev broker start
+```
+
+Or start a persistent one with Docker:
+
+```bash
+git clone https://github.com/calf-ai/calfkit-mesh && cd calfkit-mesh && make dev-up
 ```
 
 If you might be interested in a fully-managed mesh server your agents can join from anywhere, [let me know](https://forms.gle/Rk61GmHyJzequEPm8).

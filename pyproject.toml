@@ -63,11 +63,11 @@ Issues = "https://github.com/calf-ai/calfkit-sdk/issues"
 ck = "calfkit.cli:main"
 
 [project.optional-dependencies]
-# The bundled local dev-mesh broker is opt-in. `psutil` (used by the `ck dev` broker supervisor for
-# cross-platform process inspection) lives ONLY here, so a core `pip install calfkit` stays pure-Python.
-# NOTE: the `calfkit-mesh` binary wheel is added to this list once the upstream `calfkit-mesh` package
-# publishes (ADR-0031 prerequisites); until then `ck dev` finds a broker via `CALF_TANSU_BIN`.
-mesh = ["psutil>=5.9"]
+# The bundled local dev-mesh broker is opt-in (ADR-0031): `calfkit-mesh` ships the Tansu binary +
+# locator (own semver; the wrapped Tansu version lives in its metadata), and `psutil` gives the
+# `ck dev` supervisor its process-table ownership scan. Both live ONLY here, so a core
+# `pip install calfkit` stays pure-Python and no production install carries the broker binary.
+mesh = ["calfkit-mesh>=0.1", "psutil>=5.9"]
 
 [build-system]
 requires = ["hatchling"]

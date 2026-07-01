@@ -22,7 +22,7 @@ _PYPROJECT = Path(__file__).parents[1] / "pyproject.toml"
 def test_mesh_extra_replaces_dead_dev_extra() -> None:
     text = _PYPROJECT.read_text()
     assert "dev = []" not in text, "the dead empty `dev` extra must be removed"
-    assert "mesh = [" in text and '"psutil>=5.9"]' in text
+    assert 'mesh = ["calfkit-mesh>=0.1", "psutil>=5.9"]' in text
 
 
 def test_ck_app_builds_without_mesh_deps() -> None:
