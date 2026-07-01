@@ -46,20 +46,43 @@ class Registry:
         self._root = root if root is not None else _state_dir()
         self._json = self._root / "dev-mesh.json"
         self._lock_path = self._root / "dev-mesh.lock"
+        self._lock_depth = 0
+
+    @property
+    def root(self) -> Path:
+        """The state directory this registry lives in (``~/.calfkit`` by default) — the supervisor
+        derives sibling paths (the ``logs/`` dir) from it."""
+        return self._root
 
     @contextmanager
     def lock(self) -> Iterator[None]:
         """Hold a blocking, exclusive advisory lock over the registry.
 
         Released by the OS if the holder dies, so a crashed process never deadlocks the file.
+        Reentrant **per instance**: ``put``/``remove`` take the lock themselves, and the supervisor
+        also calls them while already holding ``lock()`` across its probe→spawn→record critical
+        section (spec §5.3) — a second ``flock`` on a fresh fd would self-deadlock, so a nested
+        enter on the same instance just rides the outer hold.
         """
         import fcntl
+
+        if self._lock_depth > 0:
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
+            return
 
         self._root.mkdir(parents=True, exist_ok=True)
         fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            self._lock_depth = 1
+            try:
+                yield
+            finally:
+                self._lock_depth = 0
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -100,19 +123,30 @@ class Registry:
                 self._write_raw(data)
 
 
-def is_ours(record: BrokerRecord) -> bool:
-    """Return ``True`` iff the live process at ``record.pid`` is the Tansu **we** spawned (spec §5.4).
+def owned_process(record: BrokerRecord) -> Any | None:
+    """Return the live ``psutil.Process`` at ``record.pid`` iff it is the Tansu **we** spawned
+    (spec §5.4), else ``None``.
 
     Verified by argv rather than the bare pid: ``psutil.cmdline()`` (a list) must have our
     ``binary_path`` as ``argv[0]`` **and** contain ``tcp://<listener>`` as a substring of some argument
     (the listener is one ``=``-joined arg, e.g. ``--kafka-listener-url=tcp://127.0.0.1:9092``). Anything
     else — a dead pid, a recycled pid holding a foreign process, a zombie, an inaccessible process — is
-    *not ours*, so the caller cleans the stale record and never signals it.
+    *not ours*, so the caller cleans the stale record and never signals it. Returning the verified
+    ``Process`` handle (typed ``Any`` — psutil ships no type stubs) lets the supervisor signal the
+    *same* process it just verified, rather than re-resolving the pid.
     """
     import psutil  # type: ignore[import-untyped]
 
     try:
-        cmd = psutil.Process(record.pid).cmdline()
+        proc = psutil.Process(record.pid)
+        cmd = proc.cmdline()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return False
-    return bool(cmd) and cmd[0] == record.binary_path and any(f"tcp://{record.listener}" in arg for arg in cmd)
+        return None
+    if bool(cmd) and cmd[0] == record.binary_path and any(f"tcp://{record.listener}" in arg for arg in cmd):
+        return proc
+    return None
+
+
+def is_ours(record: BrokerRecord) -> bool:
+    """Return ``True`` iff the live process at ``record.pid`` is the Tansu **we** spawned (spec §5.4)."""
+    return owned_process(record) is not None

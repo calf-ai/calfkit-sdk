@@ -154,3 +154,85 @@ def test_default_root_is_dot_calfkit() -> None:
     expected = Path.home() / ".calfkit"
     assert _state_dir() == expected
     assert Registry()._root == expected
+
+
+def test_root_property_exposes_the_state_dir(tmp_path: Path) -> None:
+    # The supervisor derives the log dir (~/.calfkit/logs) from the same root as the registry.
+    assert Registry(root=tmp_path).root == tmp_path
+    assert Registry().root == Path.home() / ".calfkit"
+
+
+# --- owned_process (fake psutil) -------------------------------------------------------------------
+
+
+def test_owned_process_returns_the_process_when_ours(monkeypatch: pytest.MonkeyPatch) -> None:
+    from calfkit.cli._dev_state import owned_process
+
+    _install_fake_psutil(monkeypatch, cmdline=[_BIN, "broker", "--kafka-listener-url=tcp://127.0.0.1:9092"])
+    proc = owned_process(_rec())
+    assert proc is not None
+    assert proc.pid == 4242
+
+
+def test_owned_process_none_for_foreign_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    from calfkit.cli._dev_state import owned_process
+
+    _install_fake_psutil(monkeypatch, cmdline=["/usr/bin/python", "-m", "http.server"])
+    assert owned_process(_rec()) is None
+
+
+def test_owned_process_none_when_pid_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    from calfkit.cli._dev_state import owned_process
+
+    _install_fake_psutil(monkeypatch, raises="nosuch")
+    assert owned_process(_rec()) is None
+
+
+# --- lock reentrancy --------------------------------------------------------------------------------
+
+
+def test_lock_is_reentrant_within_the_same_instance(tmp_path: Path) -> None:
+    """``put``/``remove`` take the lock themselves; the supervisor also calls them while already
+    holding ``lock()`` across its probe→spawn→record critical section (spec §5.3). A second
+    ``flock`` on a fresh fd would deadlock the process, so ``lock()`` must be reentrant
+    per-instance. Run in a watchdog thread so a regression fails instead of hanging the suite."""
+    import threading
+
+    reg = Registry(root=tmp_path)
+    done = threading.Event()
+
+    def _locked_put() -> None:
+        with reg.lock():
+            reg.put("a:1", _rec())
+            reg.remove("a:1")
+            with reg.lock():
+                reg.put("b:2", _rec())
+        done.set()
+
+    worker = threading.Thread(target=_locked_put, daemon=True)
+    worker.start()
+    assert done.wait(timeout=5.0), "Registry.lock() deadlocked when re-entered (put under lock)"
+    assert set(reg.read()) == {"b:2"}
+
+
+def test_lock_still_excludes_other_processes(tmp_path: Path) -> None:
+    """Reentrancy is in-process convenience only — the on-disk flock must still be held (a second
+    *process* has to block). Asserted by probing the lock file from a subprocess while held."""
+    import subprocess
+    import sys
+
+    reg = Registry(root=tmp_path)
+    probe = (
+        "import fcntl, sys\n"
+        f"fd = open({str(tmp_path / 'dev-mesh.lock')!r}, 'w')\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n"
+        "    sys.exit(42)\n"
+        "sys.exit(0)\n"
+    )
+    with reg.lock():
+        held = subprocess.run([sys.executable, "-c", probe])
+    released = subprocess.run([sys.executable, "-c", probe])
+    assert held.returncode == 42, "lock file was not exclusively held while inside lock()"
+    assert released.returncode == 0
