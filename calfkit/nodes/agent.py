@@ -211,6 +211,8 @@ class BaseAgentNodeDef(
             reader_tuning=fcfg.reader_tuning,
             catchup_timeout=fcfg.catchup_timeout,
             barrier_timeout=fcfg.barrier_timeout,
+            # One knob: the fan-out writers inherit the client's producer idempotence posture.
+            enable_idempotence=worker._client._enable_idempotence,
         )
         await store.start()
         try:

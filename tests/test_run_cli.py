@@ -32,6 +32,7 @@ def test_run_mounted_on_top_level_cli() -> None:
     assert "--reload" in out
     assert "--host" in out
     assert "--provision" in out
+    assert "--enable-idempotence" in out
 
 
 def test_run_no_reload_calls_serve(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -41,7 +42,15 @@ def test_run_no_reload_calls_serve(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cap: dict = {}
 
-    def fake_serve(targets: list[str], host: str | None, provision: bool, group_id: str | None, env_file: str | None, app_dir: str) -> None:
+    def fake_serve(
+        targets: list[str],
+        host: str | None,
+        provision: bool,
+        group_id: str | None,
+        env_file: str | None,
+        app_dir: str,
+        enable_idempotence: bool = False,
+    ) -> None:
         cap.update(targets=targets, host=host, provision=provision, group_id=group_id, env_file=env_file, app_dir=app_dir)
 
     monkeypatch.setattr(run_mod, "serve", fake_serve)
@@ -62,7 +71,15 @@ def test_run_forwards_flags_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cap: dict = {}
 
-    def fake_serve(targets: list[str], host: str | None, provision: bool, group_id: str | None, env_file: str | None, app_dir: str) -> None:
+    def fake_serve(
+        targets: list[str],
+        host: str | None,
+        provision: bool,
+        group_id: str | None,
+        env_file: str | None,
+        app_dir: str,
+        enable_idempotence: bool = False,
+    ) -> None:
         cap.update(host=host, provision=provision, group_id=group_id)
 
     monkeypatch.setattr(run_mod, "serve", fake_serve)
@@ -149,7 +166,15 @@ def test_run_multiple_targets_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch
 
     cap: dict = {}
 
-    def fake_serve(targets: list[str], host: str | None, provision: bool, group_id: str | None, env_file: str | None, app_dir: str) -> None:
+    def fake_serve(
+        targets: list[str],
+        host: str | None,
+        provision: bool,
+        group_id: str | None,
+        env_file: str | None,
+        app_dir: str,
+        enable_idempotence: bool = False,
+    ) -> None:
         cap["targets"] = targets
 
     monkeypatch.setattr(run_mod, "serve", fake_serve)
@@ -166,7 +191,15 @@ def test_run_custom_app_dir_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch, 
 
     cap: dict = {}
 
-    def fake_serve(targets: list[str], host: str | None, provision: bool, group_id: str | None, env_file: str | None, app_dir: str) -> None:
+    def fake_serve(
+        targets: list[str],
+        host: str | None,
+        provision: bool,
+        group_id: str | None,
+        env_file: str | None,
+        app_dir: str,
+        enable_idempotence: bool = False,
+    ) -> None:
         cap["app_dir"] = app_dir
 
     monkeypatch.setattr(run_mod, "serve", fake_serve)
@@ -175,6 +208,35 @@ def test_run_custom_app_dir_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch, 
     result = CliRunner().invoke(_build_app(), ["run", "m:a", "--app-dir", target_dir])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert cap["app_dir"] == os.path.abspath(target_dir)
+
+
+def test_run_enable_idempotence_flag_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--enable-idempotence reaches serve() as True; absent it is False (opt-in)."""
+    import calfkit.cli.run as run_mod
+    from calfkit.cli import _build_app
+
+    cap: dict = {}
+
+    def fake_serve(
+        targets: list[str],
+        host: str | None,
+        provision: bool,
+        group_id: str | None,
+        env_file: str | None,
+        app_dir: str,
+        enable_idempotence: bool = False,
+    ) -> None:
+        cap["enable_idempotence"] = enable_idempotence
+
+    monkeypatch.setattr(run_mod, "serve", fake_serve)
+
+    result_on = CliRunner().invoke(_build_app(), ["run", "mymod:agent", "--enable-idempotence"])
+    assert result_on.exit_code == 0, result_on.stdout + result_on.stderr
+    assert cap["enable_idempotence"] is True
+
+    result_off = CliRunner().invoke(_build_app(), ["run", "mymod:agent"])
+    assert result_off.exit_code == 0, result_off.stdout + result_off.stderr
+    assert cap["enable_idempotence"] is False
 
 
 def test_run_bad_spec_exits_2() -> None:

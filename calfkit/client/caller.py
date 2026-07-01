@@ -64,6 +64,7 @@ class Client:
         startup_ensurer: StartupTopicEnsurer,
         server_urls: str | None,
         mesh_config: MeshViewConfig | None = None,
+        enable_idempotence: bool | None = None,
     ) -> None:
         self._broker = broker
         self._hub = hub
@@ -71,6 +72,11 @@ class Client:
         self._emitter_id = emitter_id
         self._firehose_buffer_size = firehose_buffer_size
         self._deps_factory = deps_factory
+        # The resolved producer idempotence posture, tri-state: None = calfkit sets nothing (the
+        # library default applies), True/False = force it. Stored so a co-located Worker + its nodes
+        # wire their control-plane / fan-out writers to the SAME posture — one knob, single source
+        # (worker.py / agent.py read self._client._enable_idempotence).
+        self._enable_idempotence = enable_idempotence
         self._server_urls = server_urls
         self._mesh_config = mesh_config
         self._mesh: Mesh | None = None  # the cached client.mesh singleton (created lazily, zero-I/O)
@@ -96,6 +102,7 @@ class Client:
         firehose_buffer_size: int = DEFAULT_FIREHOSE_BUFFER_SIZE,
         provisioning: ProvisioningConfig | None = None,
         mesh_config: MeshViewConfig | None = None,
+        enable_idempotence: bool | None = None,
         **broker_kwargs: Any,
     ) -> Client:
         """Build the client — **sync, lazy, no I/O** (spec §2.1/§2.7). Registers the hub's groupless
@@ -107,9 +114,13 @@ class Client:
         Security is configured the broker's way (a FastStream ``security=`` object in ``broker_kwargs``);
         raw security kwargs are rejected with an actionable error.
 
-        The shared producer is hardened to ``acks="all"`` + ``enable_idempotence=True`` by default (so a
-        broker-acked publish survives leader failover and retries can't duplicate/reorder, per the fault
-        rail). Override either via ``broker_kwargs`` if you must.
+        calfkit imposes **no** producer posture by default: with ``enable_idempotence`` left unset
+        (``None``) the SDK sets neither ``acks`` nor ``enable_idempotence``, so the library defaults
+        apply (aiokafka ``acks=1``, no idempotence) — which keeps the SDK working against brokers
+        without producer-id support (e.g. Tansu rejects ``InitProducerIdRequest``). Pass
+        ``enable_idempotence=True`` (or ``ck run --enable-idempotence``) to turn idempotence on
+        consistently across the shared producer **and** a co-located worker's control-plane / fan-out
+        writers (one knob). ``acks`` stays overridable via ``broker_kwargs``.
 
         ``provisioning`` is an **experimental** opt-in (issue #180; default disabled): when enabled,
         topics are auto-created at broker start. It is a separate, removable concern from the §2.7
@@ -138,11 +149,11 @@ class Client:
             )
 
         hub = _Hub()
-        # The broker hardens the shared producer (acks=all + idempotence) so a broker-acked publish
-        # survives leader failover and retries can't duplicate/reorder. Defaults only — a user may
-        # override via broker_kwargs. The decode floor is OUTERMOST, carrying the undecodable-sink
+        # calfkit sets no producer posture by default (idempotence unset -> library default). Only when
+        # the caller opts in does enable_idempotence reach the broker producer; acks is never hardcoded
+        # (override via broker_kwargs). The decode floor is OUTERMOST, carrying the undecodable-sink
         # registry {inbox -> hub.fail_run} (spec §5.8); ContextInjection populates correlation_id.
-        producer_posture = {"acks": "all", "enable_idempotence": True}
+        producer_posture: dict[str, Any] = {} if enable_idempotence is None else {"enable_idempotence": enable_idempotence}
         middlewares = [DecodeFloorMiddleware.builder({inbox_topic: hub.fail_run}), ContextInjectionMiddleware]
         broker, ensurer, provisioning = cls._make_provisioned_broker(
             server_list, middlewares, {**producer_posture, **broker_kwargs}, inbox_topic, provisioning
@@ -156,6 +167,7 @@ class Client:
             emitter_id=_new_client_emitter_id(client_id),
             firehose_buffer_size=firehose_buffer_size,
             deps_factory=deps_factory,
+            enable_idempotence=enable_idempotence,
             provisioning=provisioning,
             startup_ensurer=ensurer,
             server_urls=",".join(server_list),

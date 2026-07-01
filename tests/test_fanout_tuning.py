@@ -180,6 +180,78 @@ async def test_fanout_resource_passes_worker_fanout(monkeypatch: pytest.MonkeyPa
         await anext(gen)
 
 
+# ── enable_idempotence: one knob threaded from the client (default: calfkit sets nothing) ─────
+
+
+def test_store_forwards_enable_idempotence_to_both_writers(fake_ktables: None) -> None:
+    _store(enable_idempotence=True)
+    writers = FakeKafkaTableWriter.instances
+    assert len(writers) == 2  # state + basestate
+    for writer in writers:
+        assert writer.kwargs["enable_idempotence"] is True
+
+
+def test_store_forwards_explicit_false_idempotence(fake_ktables: None) -> None:
+    _store(enable_idempotence=False)
+    for writer in FakeKafkaTableWriter.instances:
+        assert writer.kwargs["enable_idempotence"] is False
+
+
+def test_store_default_omits_enable_idempotence(fake_ktables: None) -> None:
+    # Unset (None) -> calfkit passes nothing; the ktables writer default applies.
+    _store()
+    for writer in FakeKafkaTableWriter.instances:
+        assert "enable_idempotence" not in writer.kwargs
+
+
+async def test_fanout_resource_threads_client_idempotence_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class SpyStore:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def start(self) -> None: ...
+
+        async def stop(self) -> None: ...
+
+    monkeypatch.setattr("calfkit.nodes.agent.KtablesFanoutBatchStore", SpyStore)
+    from calfkit.nodes.agent import Agent
+
+    agent = Agent("a", subscribe_topics="a.in", model_client=_FakeModel())
+    worker = Worker(Client.connect("kafka:9092", enable_idempotence=True), nodes=[agent])
+    agent._worker = worker
+    gen = agent._fanout_store_resource(None)  # type: ignore[arg-type]
+    await anext(gen)
+    assert captured["enable_idempotence"] is True
+    with pytest.raises(StopAsyncIteration):
+        await anext(gen)
+
+
+async def test_fanout_resource_defaults_to_unset_idempotence(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class SpyStore:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def start(self) -> None: ...
+
+        async def stop(self) -> None: ...
+
+    monkeypatch.setattr("calfkit.nodes.agent.KtablesFanoutBatchStore", SpyStore)
+    from calfkit.nodes.agent import Agent
+
+    agent = Agent("a", subscribe_topics="a.in", model_client=_FakeModel())
+    worker = Worker(Client.connect("kafka:9092"), nodes=[agent])
+    agent._worker = worker
+    gen = agent._fanout_store_resource(None)  # type: ignore[arg-type]
+    await anext(gen)
+    assert captured["enable_idempotence"] is None
+    with pytest.raises(StopAsyncIteration):
+        await anext(gen)
+
+
 async def test_fanout_resource_boots_through_offline_store_mirror() -> None:
     # No SpyStore re-patch here: the autouse `_offline_fanout_store` fixture swaps in the real
     # `OfflineFanoutBatchStore`, so this exercises its signature mirror — it must accept the new

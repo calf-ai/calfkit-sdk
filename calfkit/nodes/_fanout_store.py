@@ -276,6 +276,7 @@ class KtablesFanoutBatchStore:
         reader_tuning: KTableReaderTuning | None = None,
         catchup_timeout: float | None = None,
         barrier_timeout: float = 30.0,
+        enable_idempotence: bool | None = None,
     ) -> None:
         import ktables  # lazy: keep ktables off the offline import path (only a real store touches it)
 
@@ -285,17 +286,20 @@ class KtablesFanoutBatchStore:
         reader_kwargs: dict[str, Any] = {"ensure_topic": True, **(reader_tuning.as_kwargs() if reader_tuning else {})}
         if catchup_timeout is not None:
             reader_kwargs["catchup_timeout"] = catchup_timeout
+        # Producer posture is the client's single knob (threaded via agent.py): None => set nothing
+        # (the ktables writer default applies), True/False => force it on both writers.
+        writer_idempotence: dict[str, Any] = {} if enable_idempotence is None else {"enable_idempotence": enable_idempotence}
         self._state_reader: KafkaTable[FanoutState] = ktables.KafkaTable.json(
             bootstrap_servers=bootstrap_servers, topic=state_topic, model=FanoutState, **reader_kwargs
         )
         self._state_writer: KafkaTableWriter[FanoutState] = ktables.KafkaTableWriter.json(
-            bootstrap_servers=bootstrap_servers, topic=state_topic, model=FanoutState, ensure_topic=True, enable_idempotence=True
+            bootstrap_servers=bootstrap_servers, topic=state_topic, model=FanoutState, ensure_topic=True, **writer_idempotence
         )
         self._base_reader: KafkaTable[FanoutBaseState] = ktables.KafkaTable.json(
             bootstrap_servers=bootstrap_servers, topic=basestate_topic, model=FanoutBaseState, **reader_kwargs
         )
         self._base_writer: KafkaTableWriter[FanoutBaseState] = ktables.KafkaTableWriter.json(
-            bootstrap_servers=bootstrap_servers, topic=basestate_topic, model=FanoutBaseState, ensure_topic=True, enable_idempotence=True
+            bootstrap_servers=bootstrap_servers, topic=basestate_topic, model=FanoutBaseState, ensure_topic=True, **writer_idempotence
         )
 
     async def start(self) -> None:

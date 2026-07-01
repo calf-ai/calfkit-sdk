@@ -51,6 +51,11 @@ def run(
         "--provision",
         help="Opt-in dev topic auto-creation (EXPERIMENTAL; rf=1, no ACLs). Off by default.",
     ),
+    enable_idempotence: bool = typer.Option(
+        False,
+        "--enable-idempotence",
+        help="Turn on idempotent producers across every producer (needs a broker with producer-id support). Off by default.",
+    ),
     reload: bool = typer.Option(
         False,
         "--reload",
@@ -98,12 +103,12 @@ def run(
         run_process(
             *dirs,
             target=serve,
-            args=(list(targets), host, provision, group_id, env_file, abs_app_dir),
+            args=(list(targets), host, provision, group_id, env_file, abs_app_dir, enable_idempotence),
             watch_filter=PythonFilter(),
         )
     else:
         try:
-            serve(list(targets), host, provision, group_id, env_file, abs_app_dir)
+            serve(list(targets), host, provision, group_id, env_file, abs_app_dir, enable_idempotence)
         except KeyboardInterrupt:
             # Ctrl-C in a window where FastStream's own SIGINT handler isn't
             # active yet (startup/teardown), or on a platform whose event loop
