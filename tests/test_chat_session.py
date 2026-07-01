@@ -125,6 +125,34 @@ async def test_run_chat_session_no_agents_prints_and_returns(monkeypatch: pytest
     assert "No agents are online" in out
 
 
+def _spy_client_connect(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Spy ``Client.connect``, capturing its ``provisioning`` kwarg while keeping the real (lazy) connect."""
+    captured: dict = {}
+    real_connect = Client.connect
+
+    def spy(server_urls: object = None, **kwargs: object) -> object:
+        captured["provisioning"] = kwargs.get("provisioning")
+        return real_connect(server_urls, **kwargs)
+
+    monkeypatch.setattr(Client, "connect", spy)
+    return captured
+
+
+async def test_run_chat_session_provision_enables_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_get_agents(monkeypatch, result={})  # early return after connect — no broker I/O
+    captured = _spy_client_connect(monkeypatch)
+    await run_chat_session(None, "localhost:9092", None, provision=True)
+    assert captured["provisioning"] is not None
+    assert captured["provisioning"].enabled is True
+
+
+async def test_run_chat_session_default_passes_no_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_get_agents(monkeypatch, result={})
+    captured = _spy_client_connect(monkeypatch)
+    await run_chat_session(None, "localhost:9092", None, provision=False)
+    assert captured["provisioning"] is None
+
+
 async def test_run_chat_session_offline_name_exits_2(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     _patch_get_agents(monkeypatch, result={"helpbot": _agent("helpbot", "x")})
     with pytest.raises(typer.Exit) as exc:

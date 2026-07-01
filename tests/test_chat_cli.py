@@ -33,6 +33,27 @@ def test_chat_mounted_with_options() -> None:
     assert "--host" in out
     assert "--timeout" in out
     assert "--env-file" in out
+    assert "--provision" in out
+
+
+def test_chat_provision_flag_forwarded_to_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--provision reaches run_chat_session as True; absent it is False (opt-in)."""
+    from calfkit.cli import _build_app
+
+    cap: dict = {}
+
+    async def fake_session(name: object, server_urls: object, timeout: object, provision: bool = False) -> None:
+        cap["provision"] = provision
+
+    monkeypatch.setattr("calfkit.cli._chat.run_chat_session", fake_session)
+
+    result_on = CliRunner().invoke(_build_app(), ["chat", "--provision"])
+    assert result_on.exit_code == 0, result_on.stdout + result_on.stderr
+    assert cap["provision"] is True
+
+    result_off = CliRunner().invoke(_build_app(), ["chat"])
+    assert result_off.exit_code == 0, result_off.stdout + result_off.stderr
+    assert cap["provision"] is False
 
 
 def test_chat_offline_name_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
