@@ -343,17 +343,90 @@ async def test_render_and_collect_attributes_handoff_to_actual_responder(capsys:
     channel.push(_completed(agent="billing"))
     handle = InvocationHandle(correlation_id="c", _channel=channel)
 
-    history = await _render_and_collect(handle, "support-bot")
+    outcome = await _render_and_collect(handle, "support-bot")
     out = capsys.readouterr().out
     assert out.index("support-bot") < out.index("billing")  # the new emitter's header follows the handoff
     assert "billing > " in out  # the answer is attributed to the ACTUAL responder (billing)...
     assert "support-bot > " not in out  # ...not the addressed agent
-    assert isinstance(history, list)
+    assert isinstance(outcome.history, list)
+    assert outcome.responder == "billing"  # the responder the REPL re-binds to (sticky handoff)
 
 
 async def test_render_and_collect_falls_back_to_addressed_agent_when_responder_unknown(capsys: pytest.CaptureFixture[str]) -> None:
     channel = _RunChannel()
     channel.push(_completed(agent=None))  # terminal carries no emitter
     handle = InvocationHandle(correlation_id="c", _channel=channel)
-    await _render_and_collect(handle, "support-bot")
+    outcome = await _render_and_collect(handle, "support-bot")
     assert "support-bot > " in capsys.readouterr().out  # the `or agent_name` fallback
+    assert outcome.responder == "support-bot"  # no emitter -> stays with the addressed agent (no spurious re-bind)
+
+
+# --- sticky handoff: the REPL follows a transfer across turns --------------------
+# A handoff moves control to a peer that answers the original caller; the next turn should go
+# to THAT peer (the transfer sticks), not back to the originally-picked agent. A consult
+# (message_agent) keeps control, so the responder stays the current agent and nothing re-binds.
+
+
+class _ScriptedStickyGateway:
+    """A gateway bound to one agent name; each ``start()`` yields a handle whose terminal is
+    attributed to the responder the script maps this agent to (default: itself)."""
+
+    def __init__(self, name: str, responders: dict[str, str]) -> None:
+        self._name = name
+        self._responders = responders
+
+    async def start(self, _prompt: str, *, message_history: list[ModelMessage] | None = None) -> InvocationHandle:
+        channel = _RunChannel()
+        channel.push(_completed(agent=self._responders.get(self._name, self._name)))
+        return InvocationHandle(correlation_id="c", _channel=channel)
+
+
+class _RecordingStickyClient:
+    """Records every ``agent(name)`` bind and hands back a gateway scripted per name — so a
+    test can assert which agent each turn was dispatched to."""
+
+    def __init__(self, responders: dict[str, str]) -> None:
+        self._responders = responders
+        self.binds: list[str] = []
+
+    def agent(self, name: str) -> _ScriptedStickyGateway:
+        self.binds.append(name)
+        return _ScriptedStickyGateway(name, self._responders)
+
+
+async def test_chat_loop_sticks_to_handoff_target_on_next_turn(capsys: pytest.CaptureFixture[str]) -> None:
+    # Turn 1: support-bot hands off -> the answer comes from 'billing'. The REPL must re-bind to
+    # 'billing' so turn 2 dispatches THERE (billing then answers as itself -> no further re-bind).
+    client = _RecordingStickyClient({"support-bot": "billing", "billing": "billing"})
+    await _chat_loop(client, "support-bot", None, _scripted(["q1", "q2", "/exit"]))
+    assert client.binds == ["support-bot", "billing"]  # bound at start, re-bound to the handoff target
+    assert "(now chatting with billing)" in capsys.readouterr().out
+
+
+async def test_chat_loop_does_not_rebind_when_answer_stays_with_current_agent(capsys: pytest.CaptureFixture[str]) -> None:
+    # support-bot answers every turn itself (e.g. it consulted a peer but kept control): the
+    # responder equals the current agent, so the REPL never re-binds and prints no move notice.
+    client = _RecordingStickyClient({"support-bot": "support-bot"})
+    await _chat_loop(client, "support-bot", None, _scripted(["q1", "q2", "/exit"]))
+    assert client.binds == ["support-bot"]  # bound once, never re-bound
+    assert "now chatting with" not in capsys.readouterr().out
+
+
+async def test_chat_loop_keeps_current_agent_when_a_turn_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    # A faulting turn returns None: the REPL keeps the current agent (no re-bind off a failed turn).
+    channel = _RunChannel()
+    channel.push(RunFailed(report=ErrorReport(error_type="x", message="boom"), correlation_id="c"))
+    handle = InvocationHandle(correlation_id="c", _channel=channel)
+
+    class _FaultingBindClient:
+        def __init__(self) -> None:
+            self.binds: list[str] = []
+
+        def agent(self, name: str) -> _FakeGateway:
+            self.binds.append(name)
+            return _FakeGateway(handle)
+
+    client = _FaultingBindClient()
+    await _chat_loop(client, "bot", None, _scripted(["boom", "/exit"]))
+    assert client.binds == ["bot"]  # never re-bound despite the fault
+    assert "bot > [error] boom" in capsys.readouterr().out

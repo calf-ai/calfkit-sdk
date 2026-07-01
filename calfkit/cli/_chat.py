@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import typer
 
@@ -41,6 +41,16 @@ def _width() -> int:
 def _emit(lines: list[str]) -> None:
     for line in lines:
         print(line)
+
+
+class _TurnResult(NamedTuple):
+    """One turn's outcome threaded back to the REPL: the ``history`` for the next turn and the
+    ``responder`` — the agent that produced the answer. On a handoff the responder is the *target*
+    (control transferred), on a consult or a direct answer it stays the addressed agent. The loop
+    re-binds to ``responder`` so a handoff **sticks** across turns."""
+
+    history: list[ModelMessage]
+    responder: str
 
 
 async def run_chat_session(name: str | None, server_urls: str | list[str] | None, timeout: float | None, provision: bool = False) -> None:
@@ -93,11 +103,16 @@ async def _resolve_target(name: str | None, agents: Mapping[str, AgentInfo], rea
 
 
 async def _chat_loop(client: Client, agent_name: str, timeout: float | None, read_line: ReadLine) -> None:
-    """The multi-turn REPL with one agent. ``message_history`` is threaded turn to
-    turn — the only continuity mechanism."""
-    gw = client.agent(agent_name)
+    """The multi-turn REPL. Starts with the picked agent; a handoff **sticks** — when a turn's
+    answer comes from a different agent (the handoff target, ``RunCompleted.agent``), the REPL
+    re-binds to it so the *next* turn goes there, honoring the transfer (the handing agent
+    relinquishes and does not regain control). A consult (``message_agent``) keeps control, so its
+    responder is the current agent and nothing re-binds. ``message_history`` is threaded turn to
+    turn — the continuity mechanism across the (possibly changing) responder."""
+    active = agent_name
+    gw = client.agent(active)
     history: list[ModelMessage] = []
-    print(f"\nChatting with {agent_name}. Type /exit or press Ctrl-D to leave.")
+    print(f"\nChatting with {active}. Type /exit or press Ctrl-D to leave.")
     print("-" * _width())
     while True:
         try:
@@ -109,9 +124,14 @@ async def _chat_loop(client: Client, agent_name: str, timeout: float | None, rea
             break
         if not line:
             continue
-        new_history = await _run_turn(gw, agent_name, line, history, timeout)
-        if new_history is not None:  # None == the turn failed / timed out: keep the old history
-            history = new_history
+        outcome = await _run_turn(gw, active, line, history, timeout)
+        if outcome is None:  # the turn failed / timed out: keep the old history AND the current agent
+            continue
+        history = outcome.history
+        if outcome.responder != active:  # a handoff moved control — follow it so the transfer sticks
+            active = outcome.responder
+            gw = client.agent(active)
+            print(f"\n(now chatting with {active})")
 
 
 async def _run_turn(
@@ -120,10 +140,10 @@ async def _run_turn(
     prompt: str,
     history: list[ModelMessage],
     timeout: float | None,
-) -> list[ModelMessage] | None:
-    """Dispatch one turn, render it, and return the next history — or ``None`` if the
-    dispatch failed, the turn faulted, or it exceeded ``--timeout`` (the REPL keeps
-    going either way)."""
+) -> _TurnResult | None:
+    """Dispatch one turn, render it, and return its ``_TurnResult`` (next history + responder) —
+    or ``None`` if the dispatch failed, the turn faulted, or it exceeded ``--timeout`` (the REPL
+    keeps going, and keeps the current agent, either way)."""
     try:
         handle = await gw.start(prompt, message_history=history)
     except Exception as exc:  # the turn could not be dispatched (broker I/O, or building/serializing the request): surface it, keep the REPL alive
@@ -143,9 +163,11 @@ async def _run_turn(
         return None
 
 
-async def _render_and_collect(handle: InvocationHandle, agent_name: str) -> list[ModelMessage]:
-    """Render the turn's live step events (the work-log) as they stream, then the
-    projected final answer; return the message history for the next turn."""
+async def _render_and_collect(handle: InvocationHandle, agent_name: str) -> _TurnResult:
+    """Render the turn's live step events (the work-log) as they stream, then the projected final
+    answer; return the next-turn history plus the ``responder`` — who actually answered
+    (``RunCompleted.agent``: the handoff target when control moved, else ``agent_name``). The
+    responder heads the answer line AND is what the REPL re-binds to for the next turn."""
     responder = agent_name
     current_emitter: str | None = None
     async for event in handle.stream():  # intermediates, then the terminal (last)
@@ -158,4 +180,4 @@ async def _render_and_collect(handle: InvocationHandle, agent_name: str) -> list
             _emit(lines)
     result = await handle.result()  # cached terminal: projects str + history (or raises NodeFaultError)
     _emit(_render_answer(responder, result.output))
-    return result.message_history
+    return _TurnResult(result.message_history, responder)
