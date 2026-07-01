@@ -19,8 +19,7 @@ from typer.testing import CliRunner
 
 import calfkit.cli._dev_broker as dev_broker
 import calfkit.cli.dev as dev_cli
-from calfkit.cli._dev_broker import DevBrokerError, ManagedBroker, MeshStatus
-from calfkit.cli._dev_state import BrokerRecord
+from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, MeshStatus
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _KEY = "127.0.0.1:9092"
@@ -30,18 +29,15 @@ def _plain(text: str) -> str:
     return _ANSI.sub("", text)
 
 
-def _rec(**kw: object) -> BrokerRecord:
+def _info(**kw: object) -> BrokerInfo:
     defaults: dict[str, object] = dict(
-        pid=4242,
-        bootstrap="localhost",
         listener=_KEY,
-        binary_path="/fake/bin/tansu",
+        pid=4242,
+        managed=True,
         started_at="2026-07-01T00:00:00+00:00",
-        log_path="/tmp/tansu.log",
-        spawned_by_calfkit=True,
     )
     defaults.update(kw)
-    return BrokerRecord(**defaults)  # type: ignore[arg-type]
+    return BrokerInfo(**defaults)  # type: ignore[arg-type]
 
 
 def _invoke(args: list[str]) -> Any:
@@ -62,9 +58,9 @@ def ensure_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Monkeypatch ``ensure_broker`` at the supervisor seam, recording each call."""
     calls: list[dict[str, Any]] = []
 
-    def fake_ensure(target: Any, *, resolve_bin: Any, timeout: float, registry: Any = None) -> BrokerRecord:
+    def fake_ensure(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
         calls.append({"target": target, "resolve_bin": resolve_bin, "timeout": timeout})
-        return _rec(listener=target.registry_key, bootstrap=target.bootstrap)
+        return _info(listener=target.key)
 
     monkeypatch.setattr(dev_broker, "ensure_broker", fake_ensure)
     return calls
@@ -207,7 +203,7 @@ def test_dev_run_unreachable_remote_exits_2_without_spawning(monkeypatch: pytest
 
 
 def test_dev_run_broker_ensure_failure_exits_2(monkeypatch: pytest.MonkeyPatch, run_calls: list[dict[str, Any]]) -> None:
-    def boom(target: Any, *, resolve_bin: Any, timeout: float, registry: Any = None) -> BrokerRecord:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
         raise DevBrokerError("did not become ready")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
@@ -248,7 +244,7 @@ def test_dev_chat_forwards_name_timeout_and_no_provision(ensure_calls: list[dict
 
 
 def test_dev_chat_broker_ensure_failure_exits_2(monkeypatch: pytest.MonkeyPatch, chat_calls: list[dict[str, Any]]) -> None:
-    def boom(target: Any, *, resolve_bin: Any, timeout: float, registry: Any = None) -> BrokerRecord:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
         raise DevBrokerError("nope")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
@@ -268,7 +264,7 @@ def test_broker_start_ensures_and_reports(ensure_calls: list[dict[str, Any]]) ->
 
 
 def test_broker_start_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(target: Any, *, resolve_bin: Any, timeout: float, registry: Any = None) -> BrokerRecord:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
         raise DevBrokerError("no binary")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
@@ -278,8 +274,8 @@ def test_broker_start_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_broker_stop_reports_a_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     stopped: list[Any] = []
 
-    def fake_stop(target: Any, *, registry: Any = None, grace: float = 5.0) -> bool:
-        stopped.append(target.registry_key)
+    def fake_stop(target: Any, *, grace: float = 5.0) -> bool:
+        stopped.append(target.key)
         return True
 
     monkeypatch.setattr(dev_broker, "stop", fake_stop)
@@ -290,7 +286,7 @@ def test_broker_stop_reports_a_stop(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_broker_stop_noop_reports_nothing_managed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dev_broker, "stop", lambda target, *, registry=None, grace=5.0: False)
+    monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: False)
     result = _invoke(["dev", "broker", "stop"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert "no managed broker" in _plain(result.stdout).lower()
@@ -298,7 +294,7 @@ def test_broker_stop_noop_reports_nothing_managed(monkeypatch: pytest.MonkeyPatc
 
 def test_broker_stop_all_stops_everything(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(dev_broker, "stop_all", lambda *, registry=None, grace=5.0: calls.append("all") or ["a:1", "b:2"])
+    monkeypatch.setattr(dev_broker, "stop_all", lambda *, grace=5.0: calls.append("all") or ["a:1", "b:2"])
     monkeypatch.setattr(dev_broker, "stop", lambda *a, **kw: pytest.fail("stop --all must call stop_all, not stop"))
     result = _invoke(["dev", "broker", "stop", "--all"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
@@ -309,19 +305,38 @@ def test_broker_stop_all_stops_everything(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_broker_stop_all_with_nothing_to_stop(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dev_broker, "stop_all", lambda *, registry=None, grace=5.0: [])
+    monkeypatch.setattr(dev_broker, "stop_all", lambda *, grace=5.0: [])
     result = _invoke(["dev", "broker", "stop", "--all"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert "no managed brokers" in _plain(result.stdout).lower()
+
+
+def test_broker_stop_without_mesh_extra_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scan needs psutil (the [mesh] extra); the supervisor raises an actionable DevBrokerError.
+    def boom(target: Any, *, grace: float = 5.0) -> bool:
+        raise DevBrokerError("needs the `calfkit[mesh]` extra")
+
+    monkeypatch.setattr(dev_broker, "stop", boom)
+    result = _invoke(["dev", "broker", "stop"])
+    assert result.exit_code == 2
+    assert "calfkit[mesh]" in _plain(result.stdout) + _plain(result.output)
+
+
+def test_broker_status_without_mesh_extra_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(target: Any, *, timeout: float = 5.0) -> MeshStatus:
+        raise DevBrokerError("needs the `calfkit[mesh]` extra")
+
+    monkeypatch.setattr(dev_broker, "status", boom)
+    assert _invoke(["dev", "broker", "status"]).exit_code == 2
 
 
 def test_broker_status_reports_managed_and_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
     report = MeshStatus(
         target_key=_KEY,
         reachable=True,
-        brokers=(ManagedBroker(key=_KEY, record=_rec(), running=True),),
+        brokers=(_info(),),
     )
-    monkeypatch.setattr(dev_broker, "status", lambda target, *, registry=None, timeout=5.0: report)
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
     out = _plain(_invoke(["dev", "broker", "status"]).stdout)
     assert _KEY in out
     assert "4242" in out
@@ -330,7 +345,7 @@ def test_broker_status_reports_managed_and_reachable(monkeypatch: pytest.MonkeyP
 
 def test_broker_status_reports_reachable_not_managed(monkeypatch: pytest.MonkeyPatch) -> None:
     report = MeshStatus(target_key=_KEY, reachable=True, brokers=())
-    monkeypatch.setattr(dev_broker, "status", lambda target, *, registry=None, timeout=5.0: report)
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
     out = _plain(_invoke(["dev", "broker", "status"]).stdout)
     assert "reachable" in out.lower()
     assert "not managed by calfkit" in out.lower()
@@ -338,7 +353,7 @@ def test_broker_status_reports_reachable_not_managed(monkeypatch: pytest.MonkeyP
 
 def test_broker_status_reports_nothing_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
     report = MeshStatus(target_key=_KEY, reachable=False, brokers=())
-    monkeypatch.setattr(dev_broker, "status", lambda target, *, registry=None, timeout=5.0: report)
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
     out = _plain(_invoke(["dev", "broker", "status"]).stdout)
     assert "no broker" in out.lower()
 
@@ -346,9 +361,9 @@ def test_broker_status_reports_nothing_reachable(monkeypatch: pytest.MonkeyPatch
 def test_broker_restart_reports_the_new_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    def fake_restart(target: Any, *, resolve_bin: Any, timeout: float, registry: Any = None, grace: float = 5.0) -> BrokerRecord:
-        calls.append(target.registry_key)
-        return _rec()
+    def fake_restart(target: Any, *, resolve_bin: Any, timeout: float, grace: float = 5.0) -> BrokerInfo:
+        calls.append(target.key)
+        return _info()
 
     monkeypatch.setattr(dev_broker, "restart", fake_restart)
     result = _invoke(["dev", "broker", "restart"])
@@ -358,7 +373,7 @@ def test_broker_restart_reports_the_new_broker(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_broker_restart_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(target: Any, *, resolve_bin: Any, timeout: float, registry: Any = None, grace: float = 5.0) -> BrokerRecord:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float, grace: float = 5.0) -> BrokerInfo:
         raise DevBrokerError("no binary")
 
     monkeypatch.setattr(dev_broker, "restart", boom)

@@ -21,8 +21,7 @@ import typer
 
 from calfkit.cli import _dev_broker
 from calfkit.cli._common import _load_env, _parse_host
-from calfkit.cli._dev_broker import DevBrokerError, Target, normalize
-from calfkit.cli._dev_state import BrokerRecord
+from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, Target, normalize
 from calfkit.cli.chat import chat as _chat_command
 from calfkit.cli.run import run as _run_command
 from calfkit.client._mesh_url import resolve_mesh_url
@@ -58,21 +57,21 @@ def _normalize_or_exit(servers: list[str]) -> Target:
         raise typer.Exit(2) from exc
 
 
-def _echo_broker_line(record: BrokerRecord) -> None:
-    if record.spawned_by_calfkit:
-        typer.echo(f"ck dev: managed broker at {record.listener} (pid {record.pid})")
+def _echo_broker_line(broker: BrokerInfo) -> None:
+    if broker.managed:
+        typer.echo(f"ck dev: managed broker at {broker.listener} (pid {broker.pid})")
     else:
-        typer.echo(f"ck dev: reusing broker at {record.listener} — not managed by calfkit")
+        typer.echo(f"ck dev: reusing broker at {broker.listener} — not managed by calfkit")
 
 
-def _ensure_or_exit(target: Target) -> BrokerRecord:
+def _ensure_or_exit(target: Target) -> BrokerInfo:
     try:
-        record = _dev_broker.ensure_broker(target, resolve_bin=_resolve_bin, timeout=_dev_broker.DEFAULT_TIMEOUT)
+        broker = _dev_broker.ensure_broker(target, resolve_bin=_resolve_bin, timeout=_dev_broker.DEFAULT_TIMEOUT)
     except DevBrokerError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
-    _echo_broker_line(record)
-    return record
+    _echo_broker_line(broker)
+    return broker
 
 
 def _forward_host(target: Target, servers: list[str]) -> str:
@@ -199,32 +198,42 @@ def broker_stop(
         help="Stop every calfkit-spawned dev broker (ignores --host).",
     ),
 ) -> None:
-    """Stop the dev broker calfkit spawned for the target address (a no-op for one it merely reused)."""
-    if stop_all:
-        stopped = _dev_broker.stop_all()
-        if stopped:
-            for key in stopped:
-                typer.echo(f"stopped {key}")
+    """Stop the dev broker at the target address — the memory-engine tansu the §5.4 scan finds.
+
+    A no-op for anything else reachable there (a durable tansu, your own Kafka — never signalled).
+    """
+    try:
+        if stop_all:
+            stopped = _dev_broker.stop_all()
+            if stopped:
+                for key in stopped:
+                    typer.echo(f"stopped {key}")
+            else:
+                typer.echo("no managed brokers to stop")
+            return
+        target = _target_or_exit(host)
+        if _dev_broker.stop(target):
+            typer.echo(f"stopped {target.key}")
         else:
-            typer.echo("no managed brokers to stop")
-        return
-    target = _target_or_exit(host)
-    if _dev_broker.stop(target):
-        typer.echo(f"stopped {target.registry_key}")
-    else:
-        typer.echo(f"no managed broker at {target.registry_key} (calfkit spawned nothing there)")
+            typer.echo(f"no managed broker at {target.key} (no memory-engine tansu is bound there)")
+    except DevBrokerError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
 
 
 @broker_app.command(name="status")
 def broker_status(host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP)) -> None:
-    """Report the managed broker(s) and probe the target address."""
+    """Report the running dev broker(s) and probe the target address."""
     target = _target_or_exit(host)
-    report = _dev_broker.status(target)
+    try:
+        report = _dev_broker.status(target)
+    except DevBrokerError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
     for broker in report.brokers:
-        state = "running" if broker.running else "dead (stale record)"
-        typer.echo(f"{broker.key}: pid {broker.record.pid}, {state}, started {broker.record.started_at}")
-    managed_keys = {broker.key for broker in report.brokers}
-    if report.target_key not in managed_keys:
+        typer.echo(f"{broker.listener}: pid {broker.pid}, running, started {broker.started_at}")
+    managed_listeners = {broker.listener for broker in report.brokers}
+    if report.target_key not in managed_listeners:
         if report.reachable:
             typer.echo(f"{report.target_key}: reachable, not managed by calfkit")
         else:

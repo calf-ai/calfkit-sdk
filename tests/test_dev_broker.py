@@ -1,51 +1,56 @@
 """Tests for ``calfkit.cli._dev_broker`` — the ``ck dev`` connect-or-spawn supervisor (spec §5).
 
-All offline: the reachability probe, ``Popen``, and ``psutil`` are faked. The real-broker spawn path
-lives in the kafka lane (``tests/integration/test_dev_broker_kafka.py``).
+All offline: the reachability probe, ``Popen``, and ``psutil`` are faked. Ownership is the
+**stateless process-table scan** (spec §5.4): a dev broker is any live process whose argv carries
+the memory-engine anchor and the target listener — no persisted registry. The real-broker spawn
+path lives in the kafka lane (``tests/integration/test_dev_broker_kafka.py``).
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 import calfkit.cli._dev_broker as dev_broker
-from calfkit.cli._dev_broker import DEFAULT_PORT, DevBrokerError, Target, ensure_broker, normalize
-from calfkit.cli._dev_state import BrokerRecord, Registry
+from calfkit.cli._dev_broker import (
+    DEFAULT_PORT,
+    BrokerInfo,
+    DevBrokerError,
+    Target,
+    ensure_broker,
+    normalize,
+)
 from tests._dev_fakes import CountingResolveBin, FakePopen, FakeProc, MustNotCall, install_fake_psutil, scripted_probe
 
 _BIN = "/fake/bin/tansu"
 _KEY = "127.0.0.1:9092"
-_OUR_ARGV = [_BIN, "broker", "--storage-engine=memory://tansu/", f"--kafka-listener-url=tcp://{_KEY}"]
+_STARTED = "2026-07-01T00:00:00+00:00"  # FAKE_CREATE_TIME rendered as UTC ISO
 
 
-def _rec(**kw: object) -> BrokerRecord:
-    defaults: dict[str, object] = dict(
-        pid=4242,
-        bootstrap="localhost",
-        listener=_KEY,
-        binary_path=_BIN,
-        started_at="2026-07-01T00:00:00+00:00",
-        log_path="/tmp/tansu.log",
-        spawned_by_calfkit=True,
-    )
-    defaults.update(kw)
-    return BrokerRecord(**defaults)  # type: ignore[arg-type]
+def _broker_argv(listener: str = _KEY, engine: str = "memory://tansu/") -> list[str]:
+    return [
+        _BIN,
+        "broker",
+        f"--storage-engine={engine}",
+        f"--kafka-listener-url=tcp://{listener}",
+        f"--kafka-advertised-listener-url=tcp://{listener}",
+    ]
 
 
-@pytest.fixture
-def reg(tmp_path: Path) -> Registry:
-    return Registry(root=tmp_path)
+@pytest.fixture(autouse=True)
+def _home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Keep the spawn lock + logs out of the real ``~/.calfkit``."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
 
 
-def _capture_popen(monkeypatch: pytest.MonkeyPatch, **proc_kw: object) -> list[FakePopen]:
+def _capture_popen(monkeypatch: pytest.MonkeyPatch) -> list[FakePopen]:
     spawned: list[FakePopen] = []
 
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
         proc = FakePopen(cmd, **kwargs)
-        for name, value in proc_kw.items():
-            setattr(proc, name, value)
         spawned.append(proc)
         return proc
 
@@ -61,7 +66,7 @@ def test_bare_localhost_normalizes_to_ipv4_default_port() -> None:
     assert target.listen_ip == "127.0.0.1"
     assert target.port == DEFAULT_PORT == 9092
     assert target.listener == "127.0.0.1:9092"
-    assert target.registry_key == "127.0.0.1:9092"
+    assert target.key == "127.0.0.1:9092"
     assert target.servers == ("127.0.0.1:9092",)
     assert target.is_loopback is True
     assert target.is_single is True
@@ -114,13 +119,13 @@ def test_multi_address_gets_canonical_key_and_never_spawns() -> None:
     target = normalize(["b.example:2", "a.example:1"])
     assert target.is_single is False
     assert target.is_loopback is False
-    assert target.registry_key == "a.example:1,b.example:2"
+    assert target.key == "a.example:1,b.example:2"
     assert target.servers == ("b.example:2", "a.example:1")
 
 
 def test_multi_address_key_normalizes_each_element() -> None:
     target = normalize(["localhost", "other.example:9093"])
-    assert target.registry_key == "127.0.0.1:9092,other.example:9093"
+    assert target.key == "127.0.0.1:9092,other.example:9093"
 
 
 def test_comma_joined_element_is_flattened() -> None:
@@ -129,7 +134,7 @@ def test_comma_joined_element_is_flattened() -> None:
     # misparse as host "a:1,b" port 2.
     flattened = normalize(["a.example:1,b.example:2"])
     assert flattened.is_single is False
-    assert flattened.registry_key == normalize(["a.example:1", "b.example:2"]).registry_key
+    assert flattened.key == normalize(["a.example:1", "b.example:2"]).key
 
 
 def test_multi_address_has_no_single_listener() -> None:
@@ -169,7 +174,7 @@ def test_normalize_accepts_target_roundtrip_servers() -> None:
     # The normalized single-address servers tuple is itself a valid normalize() input (idempotent).
     target = normalize(["localhost"])
     again = normalize(list(target.servers))
-    assert again.registry_key == target.registry_key
+    assert again.key == target.key
     assert again.listener == target.listener
 
 
@@ -177,81 +182,87 @@ def test_target_type_is_exported() -> None:
     assert isinstance(normalize(["localhost"]), Target)
 
 
-# --- ensure_broker: reuse / borrow / connect-only (spec §5.2, §5.7) --------------------------------
+# --- ensure_broker: reuse / borrow / connect-only (spec §5.2, §5.4, §5.7) ---------------------------
 
 
-def test_reuses_a_reachable_broker_we_own(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _rec()
-    reg.put(_KEY, rec)
-    install_fake_psutil(monkeypatch, {4242: FakeProc(4242, _OUR_ARGV)})
+def test_reuses_a_reachable_dev_broker_as_managed(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [FakeProc(4242, _broker_argv())])
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
-    out = ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall(), registry=reg)
-    assert out == rec
-    assert reg.get(_KEY) == rec
+    out = ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall())
+    assert out == BrokerInfo(listener=_KEY, pid=4242, managed=True, started_at=_STARTED)
 
 
-def test_borrows_a_reachable_broker_we_did_not_spawn(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_borrows_a_reachable_broker_that_is_not_a_dev_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Something answers on the loopback address, but no memory-engine tansu is bound there
+    # (e.g. the developer's own Redpanda): reused, not managed.
+    install_fake_psutil(monkeypatch, [FakeProc(4242, ["/usr/local/bin/redpanda", "--kafka-addr", _KEY])])
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
-    out = ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall(), registry=reg)
-    assert out.spawned_by_calfkit is False
-    assert out.listener == _KEY
-    assert out.bootstrap == "localhost"
-    assert reg.read() == {}, "a borrowed broker must never be persisted"
+    out = ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall())
+    assert out == BrokerInfo(listener=_KEY, pid=None, managed=False, started_at=None)
 
 
-def test_reachable_with_stale_record_cleans_and_borrows(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Our record's pid now holds a foreign process, yet SOMETHING answers at the address: whatever
-    # answers is not ours (a live tansu of ours would pass is_ours) — clean the record, borrow.
-    reg.put(_KEY, _rec())
-    install_fake_psutil(monkeypatch, {4242: FakeProc(4242, ["/usr/bin/python", "-m", "http.server"])})
+def test_borrows_a_reachable_remote_without_scanning(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A non-loopback address can never host a local dev broker, so the scan (and psutil) is
+    # skipped entirely — the pure-client path works on a core install. No fake psutil is
+    # installed here: an import would fail loudly.
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
-    out = ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall(), registry=reg)
-    assert out.spawned_by_calfkit is False
-    assert reg.read() == {}
+    out = ensure_broker(normalize(["203.0.113.7:9092"]), resolve_bin=MustNotCall())
+    assert out.managed is False
+    assert out.listener == "203.0.113.7:9092"
 
 
-def test_multi_address_borrows_when_reachable(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reachable_loopback_without_psutil_degrades_to_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Core install (no [mesh]): the managed-vs-reused classification cannot scan, and managing is
+    # impossible without the extra anyway — report the broker as reused rather than failing.
+    monkeypatch.setitem(sys.modules, "psutil", None)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
-    out = ensure_broker(normalize(["a.example:1", "b.example:2"]), resolve_bin=MustNotCall(), registry=reg)
-    assert out.spawned_by_calfkit is False
+    out = ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall())
+    assert out.managed is False
 
 
-def test_errors_for_unreachable_non_loopback(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_multi_address_borrows_when_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
+    out = ensure_broker(normalize(["a.example:1", "b.example:2"]), resolve_bin=MustNotCall())
+    assert out.managed is False
+    assert out.listener == "a.example:1,b.example:2"
+
+
+def test_errors_for_unreachable_non_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
-    with pytest.raises(DevBrokerError, match="connect-only|not a loopback"):
-        ensure_broker(normalize(["kafka.internal:9092"]), resolve_bin=MustNotCall(), registry=reg)
+    with pytest.raises(DevBrokerError, match="connect-only|not a single loopback"):
+        ensure_broker(normalize(["kafka.internal:9092"]), resolve_bin=MustNotCall())
 
 
-def test_errors_for_unreachable_wildcard_bind(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_errors_for_unreachable_wildcard_bind(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError):
-        ensure_broker(normalize(["0.0.0.0:9092"]), resolve_bin=MustNotCall(), registry=reg)
+        ensure_broker(normalize(["0.0.0.0:9092"]), resolve_bin=MustNotCall())
 
 
-def test_errors_for_unreachable_multi_address(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_errors_for_unreachable_multi_address(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError):
-        ensure_broker(normalize(["a.example:1", "b.example:2"]), resolve_bin=MustNotCall(), registry=reg)
+        ensure_broker(normalize(["a.example:1", "b.example:2"]), resolve_bin=MustNotCall())
 
 
-def test_detection_probe_targets_the_normalized_servers(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_detection_probe_targets_the_normalized_servers(monkeypatch: pytest.MonkeyPatch) -> None:
     probe = scripted_probe(True)
     monkeypatch.setattr(dev_broker, "is_reachable", probe)
-    ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall(), timeout=3.0, registry=reg)
-    assert probe.calls == [(["127.0.0.1:9092"], 3.0)]
+    ensure_broker(normalize(["203.0.113.7:9092"]), resolve_bin=MustNotCall(), timeout=3.0)
+    assert probe.calls == [(["203.0.113.7:9092"], 3.0)]
 
 
 # --- ensure_broker: the spawn branch (spec §5.2, §5.5) ---------------------------------------------
 
 
-def test_spawns_detached_when_loopback_unreachable(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spawns_detached_when_loopback_unreachable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import subprocess
 
     spawned = _capture_popen(monkeypatch)
     resolve_bin = CountingResolveBin(_BIN)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False, True))  # detect: absent; ready: yes
 
-    out = ensure_broker(normalize(["localhost"]), resolve_bin=resolve_bin, registry=reg)
+    out = ensure_broker(normalize(["localhost"]), resolve_bin=resolve_bin)
 
     assert resolve_bin.calls == 1
     (proc,) = spawned
@@ -265,15 +276,14 @@ def test_spawns_detached_when_loopback_unreachable(reg: Registry, monkeypatch: p
     assert proc.kwargs["start_new_session"] is True
     assert proc.kwargs["stdin"] is subprocess.DEVNULL
     assert out.pid == proc.pid
-    assert out.spawned_by_calfkit is True
+    assert out.managed is True
     assert out.listener == _KEY
-    assert out.binary_path == _BIN
     assert out.started_at  # a real timestamp, not empty
-    assert reg.get(_KEY) == out, "a spawned broker must be persisted under its registry key"
+    assert out.log_path == str(tmp_path / ".calfkit" / "logs" / f"tansu-{_KEY}.log")
 
 
-def test_spawn_logs_to_a_real_file_overwritten_each_spawn(reg: Registry, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    log_path = tmp_path / "logs" / f"tansu-{_KEY}.log"
+def test_spawn_logs_to_a_real_file_overwritten_each_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    log_path = tmp_path / ".calfkit" / "logs" / f"tansu-{_KEY}.log"
     log_path.parent.mkdir(parents=True)
     log_path.write_bytes(b"stale output from a previous spawn\n")
     spawned: list[FakePopen] = []
@@ -287,7 +297,7 @@ def test_spawn_logs_to_a_real_file_overwritten_each_spawn(reg: Registry, monkeyp
     monkeypatch.setattr(dev_broker, "Popen", factory)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False, True))
 
-    out = ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), registry=reg)
+    out = ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
 
     (proc,) = spawned
     assert out.log_path == str(log_path)
@@ -296,17 +306,17 @@ def test_spawn_logs_to_a_real_file_overwritten_each_spawn(reg: Registry, monkeyp
     assert proc.kwargs["stdout"].closed, "the parent must close its copy of the log fd after spawn"
 
 
-def test_spawn_waits_for_readiness_via_the_probe(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spawn_waits_for_readiness_via_the_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     _capture_popen(monkeypatch)
     probe = scripted_probe(False, False, False, True)
     monkeypatch.setattr(dev_broker, "is_reachable", probe)
-    ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), registry=reg)
+    ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
     # 1 detection probe + 3 readiness probes; readiness targets the single bind address.
     assert len(probe.calls) == 4
     assert probe.calls[-1][0] == _KEY
 
 
-def test_readiness_timeout_kills_the_spawn_and_surfaces_the_log_tail(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_readiness_timeout_kills_the_spawn_and_surfaces_the_log_tail(monkeypatch: pytest.MonkeyPatch) -> None:
     spawned: list[FakePopen] = []
 
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
@@ -318,87 +328,41 @@ def test_readiness_timeout_kills_the_spawn_and_surfaces_the_log_tail(reg: Regist
     monkeypatch.setattr(dev_broker, "Popen", factory)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError, match="address already in use"):
-        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), timeout=0.05, registry=reg)
+        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), timeout=0.05)
     (proc,) = spawned
     assert proc.killed is True
-    assert reg.read() == {}, "a never-ready spawn must not be recorded"
 
 
-def test_spawn_that_exits_during_startup_fails_fast_with_the_log_tail(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    spawned: list[FakePopen] = []
-
+def test_spawn_that_exits_during_startup_fails_fast_with_the_log_tail(monkeypatch: pytest.MonkeyPatch) -> None:
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
         proc = FakePopen(cmd, **kwargs)
         proc.write_log(b"panic: bind failed\n")
         proc.returncode = 1  # died immediately (spec §7.2)
-        spawned.append(proc)
         return proc
 
     monkeypatch.setattr(dev_broker, "Popen", factory)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError, match="bind failed"):
-        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), timeout=30.0, registry=reg)
-    assert reg.read() == {}
+        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), timeout=30.0)
 
 
-def test_wrong_arch_binary_surfaces_a_distinct_error(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wrong_arch_binary_surfaces_a_distinct_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
         raise OSError(8, "Exec format error")
 
     monkeypatch.setattr(dev_broker, "Popen", factory)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError, match="Exec format error"):
-        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), registry=reg)
-    assert reg.read() == {}
+        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
 
 
-def test_unreachable_stale_record_is_cleaned_then_respawned(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec(pid=9999))  # a record whose process is long gone (spec §7.7)
-    _capture_popen(monkeypatch)
-    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False, True))
-    out = ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), registry=reg)
-    assert out.pid == 5555
-    assert reg.get(_KEY) == out
-
-
-def test_missing_mesh_extra_yields_an_actionable_error(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_mesh_extra_yields_an_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def resolve_bin() -> str:
         raise ModuleNotFoundError("No module named 'calfkit_mesh'")
 
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError, match=r"calfkit\[mesh\].*CALF_TANSU_BIN"):
-        ensure_broker(normalize(["localhost"]), resolve_bin=resolve_bin, registry=reg)
-
-
-def test_lock_is_held_across_probe_spawn_and_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spec §5.3: releasing before readiness would let a second invocation double-spawn."""
-    depth_at: dict[str, int] = {}
-
-    class SpyRegistry(Registry):
-        @property
-        def depth(self) -> int:
-            return self._lock_depth
-
-    spy = SpyRegistry(root=tmp_path)
-
-    def factory(cmd: list[str], **kwargs: object) -> FakePopen:
-        depth_at["popen"] = spy.depth
-        return FakePopen(cmd, **kwargs)
-
-    probe = scripted_probe(False, True)
-
-    def probing(bootstrap: object, *, timeout: float) -> bool:
-        depth_at.setdefault("first_probe", spy.depth)
-        depth_at["last_probe"] = spy.depth
-        result: bool = probe(bootstrap, timeout=timeout)
-        return result
-
-    monkeypatch.setattr(dev_broker, "Popen", factory)
-    monkeypatch.setattr(dev_broker, "is_reachable", probing)
-    ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), registry=spy)
-    assert depth_at["first_probe"] >= 1, "detection probe must run under the lock"
-    assert depth_at["popen"] >= 1, "spawn must run under the lock"
-    assert depth_at["last_probe"] >= 1, "readiness probe must run under the lock"
+        ensure_broker(normalize(["localhost"]), resolve_bin=resolve_bin)
 
 
 def test_detach_kwargs_per_platform(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,166 +376,201 @@ def test_detach_kwargs_per_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dev_broker._detach_kwargs() == {"creationflags": expected}
 
 
-# --- stop / stop_all (spec §5.4, §5.6) --------------------------------------------------------------
+# --- the spawn lock (spec §5.3) ---------------------------------------------------------------------
 
 
-def test_stop_terminates_an_owned_broker(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec())
-    proc = FakeProc(4242, _OUR_ARGV)
-    install_fake_psutil(monkeypatch, {4242: proc})
-    assert dev_broker.stop(normalize(["localhost"]), registry=reg) is True
+def test_lock_is_held_across_probe_spawn_and_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec §5.3: releasing before readiness would let a second invocation double-spawn."""
+    from contextlib import contextmanager
+
+    events: list[str] = []
+
+    @contextmanager
+    def spy_lock():  # type: ignore[no-untyped-def]
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    def factory(cmd: list[str], **kwargs: object) -> FakePopen:
+        events.append("popen")
+        return FakePopen(cmd, **kwargs)
+
+    probe = scripted_probe(False, True)
+
+    def probing(bootstrap: object, *, timeout: float) -> bool:
+        events.append("probe")
+        result: bool = probe(bootstrap, timeout=timeout)
+        return result
+
+    monkeypatch.setattr(dev_broker, "_spawn_lock", spy_lock)
+    monkeypatch.setattr(dev_broker, "Popen", factory)
+    monkeypatch.setattr(dev_broker, "is_reachable", probing)
+    ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
+    assert events[0] == "lock"
+    assert events[-1] == "unlock"
+    assert events[1:-1] == ["probe", "popen", "probe"], "probe→spawn→readiness must all run under the lock"
+
+
+def test_spawn_lock_excludes_other_processes(tmp_path: Path) -> None:
+    """The flock must be held for real — a second *process* has to block (probed with LOCK_NB)."""
+    import subprocess
+    import sys as _sys
+
+    lock_file = tmp_path / ".calfkit" / "dev-mesh.lock"
+    probe = (
+        "import fcntl, sys\n"
+        f"fd = open({str(lock_file)!r}, 'w')\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n"
+        "    sys.exit(42)\n"
+        "sys.exit(0)\n"
+    )
+    with dev_broker._spawn_lock():
+        held = subprocess.run([_sys.executable, "-c", probe])
+    released = subprocess.run([_sys.executable, "-c", probe])
+    assert held.returncode == 42, "lock file was not exclusively held while inside _spawn_lock()"
+    assert released.returncode == 0
+
+
+def test_stop_takes_no_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec §5.3: the lock exists only for the spawn race — stop must never contend on it."""
+    monkeypatch.setattr(dev_broker, "_spawn_lock", lambda: pytest.fail("stop must not take the spawn lock"))
+    install_fake_psutil(monkeypatch, [FakeProc(4242, _broker_argv())])
+    assert dev_broker.stop(normalize(["localhost"])) is True
+
+
+# --- stop / stop_all — the memory-engine tansu stopper (spec §5.4, §5.6) ----------------------------
+
+
+def test_stop_terminates_the_dev_broker_at_the_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    proc = FakeProc(4242, _broker_argv())
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"])) is True
     assert proc.events == ["terminate", "wait"]
-    assert reg.read() == {}
 
 
-def test_stop_escalates_to_sigkill_after_grace(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec())
-    proc = FakeProc(4242, _OUR_ARGV, survives_sigterm=True)
-    install_fake_psutil(monkeypatch, {4242: proc})
-    assert dev_broker.stop(normalize(["localhost"]), registry=reg, grace=0.01) is True
+def test_stop_escalates_to_sigkill_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    proc = FakeProc(4242, _broker_argv(), survives_sigterm=True)
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"]), grace=0.01) is True
     assert proc.events == ["terminate", "wait", "kill", "wait"]
-    assert reg.read() == {}
 
 
-def test_stop_is_a_noop_without_a_record(reg: Registry) -> None:
-    assert dev_broker.stop(normalize(["localhost"]), registry=reg) is False
+def test_stop_is_a_noop_when_no_dev_broker_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [])
+    assert dev_broker.stop(normalize(["localhost"])) is False
 
 
-def test_stop_never_signals_a_foreign_pid(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    """C3: a recycled pid holding a foreign process is cleaned, NEVER signalled (spec §5.4)."""
-    reg.put(_KEY, _rec())
-    foreign = FakeProc(4242, ["/usr/bin/postgres", "-D", "/data"])
-    install_fake_psutil(monkeypatch, {4242: foreign})
-    assert dev_broker.stop(normalize(["localhost"]), registry=reg) is False
-    assert foreign.events == [], "a foreign process must never be signalled"
-    assert reg.read() == {}, "the stale record must be cleaned"
+def test_stop_never_signals_non_matching_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C3: only a memory-engine tansu bound to the target listener may ever be signalled."""
+    durable_tansu = FakeProc(1111, _broker_argv(engine="s3://bucket/"))  # durable engine — not a dev broker
+    other_listener = FakeProc(2222, _broker_argv(listener="127.0.0.1:19092"))
+    postgres = FakeProc(3333, ["/usr/bin/postgres", "-D", "/data"])
+    unreadable = FakeProc(4444, raises="denied")
+    install_fake_psutil(monkeypatch, [durable_tansu, other_listener, postgres, unreadable])
+    assert dev_broker.stop(normalize(["localhost"])) is False
+    for proc in (durable_tansu, other_listener, postgres, unreadable):
+        assert proc.events == [], "a non-matching process must never be signalled"
 
 
-def test_stop_cleans_the_record_when_the_pid_is_gone(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec())
-    install_fake_psutil(monkeypatch, {})
-    assert dev_broker.stop(normalize(["localhost"]), registry=reg) is False
-    assert reg.read() == {}
-
-
-def test_stop_never_signals_a_record_not_spawned_by_calfkit(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Borrowed records are never persisted; if one ever were, the ownership guard still holds.
-    reg.put(_KEY, _rec(spawned_by_calfkit=False))
-    proc = FakeProc(4242, _OUR_ARGV)
-    install_fake_psutil(monkeypatch, {4242: proc})
-    assert dev_broker.stop(normalize(["localhost"]), registry=reg) is False
+def test_memory_tansu_without_a_listener_arg_never_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A memory-engine tansu whose listener came from env/defaults has no listener arg to match —
+    # the scan cannot prove which address it is bound to, so it is never managed or signalled.
+    proc = FakeProc(4242, [_BIN, "broker", "--storage-engine=memory://tansu/"])
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"])) is False
     assert proc.events == []
 
 
-def test_stop_signals_outside_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spec §5.3: the SIGTERM grace wait must not stall other invocations on the registry lock."""
-
-    class SpyRegistry(Registry):
-        @property
-        def depth(self) -> int:
-            return self._lock_depth
-
-    spy = SpyRegistry(root=tmp_path)
-    spy.put(_KEY, _rec())
-    depth_at: dict[str, int] = {}
-
-    class DepthProc(FakeProc):
-        def terminate(self) -> None:
-            depth_at["terminate"] = spy.depth
-            super().terminate()
-
-    install_fake_psutil(monkeypatch, {4242: DepthProc(4242, _OUR_ARGV)})
-    assert dev_broker.stop(normalize(["localhost"]), registry=spy) is True
-    assert depth_at["terminate"] == 0, "signalling must happen outside the registry lock"
+def test_stop_handles_a_process_that_vanishes_mid_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The broker exits between the scan and the SIGTERM: the goal state (stopped) is reached.
+    proc = FakeProc(4242, _broker_argv(), vanishes_on_signal=True)
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"])) is True
 
 
-def test_stop_all_stops_every_owned_broker(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec())
-    other_key = "127.0.0.1:19092"
-    reg.put(other_key, _rec(pid=4343, listener=other_key))
-    proc_a = FakeProc(4242, _OUR_ARGV)
-    proc_b = FakeProc(4343, [_BIN, "broker", f"--kafka-listener-url=tcp://{other_key}"])
-    install_fake_psutil(monkeypatch, {4242: proc_a, 4343: proc_b})
-    stopped = dev_broker.stop_all(registry=reg)
-    assert sorted(stopped) == sorted([_KEY, other_key])
+def test_stop_multi_address_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A multi-address target is never a spawn target, so there is nothing local to stop —
+    # and psutil is never consulted (no fake installed: an import would fail loudly).
+    assert dev_broker.stop(normalize(["a.example:1", "b.example:2"])) is False
+
+
+def test_stop_without_the_mesh_extra_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    with pytest.raises(DevBrokerError, match=r"calfkit\[mesh\]"):
+        dev_broker.stop(normalize(["localhost"]))
+
+
+def test_stop_all_stops_every_dev_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    proc_a = FakeProc(4242, _broker_argv())
+    proc_b = FakeProc(4343, _broker_argv(listener="127.0.0.1:19092"))
+    not_a_broker = FakeProc(3333, ["/usr/bin/postgres"])
+    install_fake_psutil(monkeypatch, [proc_a, proc_b, not_a_broker])
+    assert dev_broker.stop_all() == [_KEY, "127.0.0.1:19092"]
     assert proc_a.events == ["terminate", "wait"]
     assert proc_b.events == ["terminate", "wait"]
-    assert reg.read() == {}
+    assert not_a_broker.events == []
 
 
-def test_stop_all_with_empty_registry(reg: Registry) -> None:
-    assert dev_broker.stop_all(registry=reg) == []
+def test_stop_all_with_nothing_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [])
+    assert dev_broker.stop_all() == []
 
 
 # --- status (spec §4.2) -----------------------------------------------------------------------------
 
 
-def test_status_reports_managed_records_and_target_probe(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec())
-    install_fake_psutil(monkeypatch, {4242: FakeProc(4242, _OUR_ARGV)})
+def test_status_reports_scan_hits_and_target_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [FakeProc(4242, _broker_argv())])
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
-    report = dev_broker.status(normalize(["localhost"]), registry=reg)
+    report = dev_broker.status(normalize(["localhost"]))
     assert report.target_key == _KEY
     assert report.reachable is True
     (broker,) = report.brokers
-    assert broker.key == _KEY
-    assert broker.record == _rec()
-    assert broker.running is True
+    assert broker == BrokerInfo(listener=_KEY, pid=4242, managed=True, started_at=_STARTED)
 
 
-def test_status_flags_a_dead_managed_record(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec())
-    install_fake_psutil(monkeypatch, {})
-    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
-    report = dev_broker.status(normalize(["localhost"]), registry=reg)
-    (broker,) = report.brokers
-    assert broker.running is False
-
-
-def test_status_reachable_but_not_managed(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A borrowed/pre-existing broker answers, but calfkit spawned nothing: reachable, no record.
+def test_status_reachable_but_not_managed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A borrowed/pre-existing broker answers, but no dev broker is bound there.
+    install_fake_psutil(monkeypatch, [])
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
-    report = dev_broker.status(normalize(["localhost"]), registry=reg)
+    report = dev_broker.status(normalize(["localhost"]))
     assert report.reachable is True
     assert report.brokers == ()
 
 
-def test_status_probes_outside_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    class SpyRegistry(Registry):
-        @property
-        def depth(self) -> int:
-            return self._lock_depth
+def test_status_nothing_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [])
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    report = dev_broker.status(normalize(["localhost"]))
+    assert report.reachable is False
 
-    spy = SpyRegistry(root=tmp_path)
-    depth_at: dict[str, int] = {}
 
-    def probing(bootstrap: object, *, timeout: float) -> bool:
-        depth_at["probe"] = spy.depth
-        return False
-
-    monkeypatch.setattr(dev_broker, "is_reachable", probing)
-    dev_broker.status(normalize(["localhost"]), registry=spy)
-    assert depth_at["probe"] == 0, "the status probe must run outside the registry lock"
+def test_status_without_the_mesh_extra_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    with pytest.raises(DevBrokerError, match=r"calfkit\[mesh\]"):
+        dev_broker.status(normalize(["localhost"]))
 
 
 # --- restart (spec §4.2) ----------------------------------------------------------------------------
 
 
-def test_restart_stops_the_owned_broker_then_spawns_fresh(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    reg.put(_KEY, _rec())
-    old = FakeProc(4242, _OUR_ARGV)
-    install_fake_psutil(monkeypatch, {4242: old})
+def test_restart_stops_the_dev_broker_then_spawns_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    old = FakeProc(4242, _broker_argv())
+    install_fake_psutil(monkeypatch, [old])
     spawned = _capture_popen(monkeypatch)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False, True))  # post-stop: absent, then ready
-    out = dev_broker.restart(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), registry=reg)
+    out = dev_broker.restart(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
     assert old.events == ["terminate", "wait"]
     assert len(spawned) == 1
     assert out.pid == 5555
-    assert reg.get(_KEY) == out
+    assert out.managed is True
 
 
-def test_restart_of_a_borrowed_broker_just_reuses_it(reg: Registry, monkeypatch: pytest.MonkeyPatch) -> None:
-    # stop is a no-op on a broker we don't own, so restart re-reuses the still-running one.
+def test_restart_of_a_borrowed_broker_just_reuses_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # stop is a no-op when no dev broker matches, so restart re-reuses the still-running one.
+    install_fake_psutil(monkeypatch, [])
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
-    out = dev_broker.restart(normalize(["localhost"]), resolve_bin=MustNotCall(), registry=reg)
-    assert out.spawned_by_calfkit is False
+    out = dev_broker.restart(normalize(["localhost"]), resolve_bin=MustNotCall())
+    assert out.managed is False

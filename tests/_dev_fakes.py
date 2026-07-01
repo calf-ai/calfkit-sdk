@@ -1,8 +1,10 @@
 """Shared fakes for the ``ck dev`` supervisor tests (offline lane).
 
 ``psutil`` ships only in the ``[mesh]`` extra and is lazily imported by the supervisor, so tests
-inject a fake module into ``sys.modules`` (same pattern as ``test_dev_state.py``). ``FakePopen``
-stands in for ``subprocess.Popen`` via the ``calfkit.cli._dev_broker.Popen`` seam.
+inject a fake module into ``sys.modules``. The fake models the surface the stateless ownership
+scan uses: ``process_iter()`` over :class:`FakeProc` objects with scripted argv, ``create_time``,
+and signal bookkeeping. ``FakePopen`` stands in for ``subprocess.Popen`` via the
+``calfkit.cli._dev_broker.Popen`` seam.
 """
 
 from __future__ import annotations
@@ -12,6 +14,9 @@ import types
 from typing import IO, Any
 
 import pytest
+
+# 2026-07-01T00:00:00Z — a fixed, timezone-stable create_time for scripted processes.
+FAKE_CREATE_TIME = 1_782_864_000.0
 
 
 class FakeProc:
@@ -24,24 +29,34 @@ class FakeProc:
         *,
         raises: str | None = None,
         survives_sigterm: bool = False,
+        vanishes_on_signal: bool = False,
     ) -> None:
         self.pid = pid
         self._cmdline = cmdline or []
         self._raises = raises
         self._survives_sigterm = survives_sigterm
+        self._vanishes_on_signal = vanishes_on_signal
         self.alive = True
         self.events: list[str] = []
 
     def cmdline(self) -> list[str]:
         psutil = sys.modules["psutil"]
+        if self._raises == "nosuch":
+            raise psutil.NoSuchProcess()  # type: ignore[attr-defined]
         if self._raises == "zombie":
             raise psutil.ZombieProcess()  # type: ignore[attr-defined]
         if self._raises == "denied":
             raise psutil.AccessDenied()  # type: ignore[attr-defined]
         return list(self._cmdline)
 
+    def create_time(self) -> float:
+        return FAKE_CREATE_TIME
+
     def terminate(self) -> None:
         self.events.append("terminate")
+        if self._vanishes_on_signal:
+            psutil = sys.modules["psutil"]
+            raise psutil.NoSuchProcess()  # type: ignore[attr-defined]
         if not self._survives_sigterm:
             self.alive = False
 
@@ -56,8 +71,8 @@ class FakeProc:
             raise psutil.TimeoutExpired(timeout, self.pid)  # type: ignore[attr-defined]
 
 
-def install_fake_psutil(monkeypatch: pytest.MonkeyPatch, procs: dict[int, FakeProc]) -> types.ModuleType:
-    """Install a fake ``psutil`` module whose ``Process(pid)`` resolves from *procs*."""
+def install_fake_psutil(monkeypatch: pytest.MonkeyPatch, procs: list[FakeProc]) -> types.ModuleType:
+    """Install a fake ``psutil`` module whose ``process_iter()`` yields *procs*."""
     fake = types.ModuleType("psutil")
 
     class NoSuchProcess(Exception): ...  # noqa: N818 -- mirrors psutil's real exception name
@@ -68,17 +83,11 @@ def install_fake_psutil(monkeypatch: pytest.MonkeyPatch, procs: dict[int, FakePr
 
     class TimeoutExpired(Exception): ...  # noqa: N818
 
-    def process(pid: int) -> FakeProc:
-        proc = procs.get(pid)
-        if proc is None or proc._raises == "nosuch":
-            raise NoSuchProcess()
-        return proc
-
     fake.NoSuchProcess = NoSuchProcess  # type: ignore[attr-defined]
     fake.AccessDenied = AccessDenied  # type: ignore[attr-defined]
     fake.ZombieProcess = ZombieProcess  # type: ignore[attr-defined]
     fake.TimeoutExpired = TimeoutExpired  # type: ignore[attr-defined]
-    fake.Process = process  # type: ignore[attr-defined]
+    fake.process_iter = lambda: list(procs)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "psutil", fake)
     return fake
 
