@@ -509,9 +509,10 @@ See also: [How to let agents find and reach each other at runtime](agent-peers.m
 | `calfkit[mesh]` | `calfkit-mesh` (the bundled [Tansu](https://tansu.io) dev-broker binary + its locator) and `psutil` | The zero-setup local mesh behind [`ck dev`](cli.md#ck-dev). Dev-only — never needed by a production install, and `ck dev` against an already-reachable broker works without it. |
 
 The env var `CALF_TANSU_BIN` points `ck dev` at your own broker binary instead
-of the bundled one (resolution order: `CALF_TANSU_BIN` → bundled → `tansu` on
-`PATH`) — the escape hatch for unsupported platforms (e.g. Windows, which has
-no bundled binary) or a pinned custom build.
+of the bundled one, with or without the extra installed (resolution order:
+`CALF_TANSU_BIN` → bundled → `tansu` on `PATH`) — the escape hatch for a Unix
+platform without a bundled wheel, or a pinned custom build. Native Windows is
+unsupported (the broker is Unix-only); use WSL2.
 
 ## Other public modules
 

@@ -259,10 +259,12 @@ ck dev broker (start | stop | status | restart) [OPTIONS]
 
 The bundled broker requires the **`[mesh]` extra** (`pip install 'calfkit[mesh]'`),
 which ships the binary (Linux x86_64/aarch64 glibc+musl, macOS arm64/x86_64 — no
-Windows; the broker is Unix-only) and `psutil`. `CALF_TANSU_BIN` overrides the
-bundled binary with your own (resolution order: `CALF_TANSU_BIN` → bundled →
-`tansu` on `PATH`). Without the extra, `ck dev` still works as a pure client
-against an already-reachable broker. See
+Windows; the broker is Unix-only) and `psutil` (the ownership scan).
+`CALF_TANSU_BIN` overrides the bundled binary with your own, with or without the
+extra installed (resolution order: `CALF_TANSU_BIN` → bundled → `tansu` on
+`PATH`). Without the extra, `ck dev run`/`ck dev chat` still work as pure
+clients against an already-reachable broker; the `ck dev broker` management
+commands need the extra's process scan. See
 [How to run a local mesh with `ck dev`](local-dev-mesh.md).
 
 ### Spawn rules
@@ -299,7 +301,9 @@ workers only reconnect — and each command first prints whether the broker is
 
 Direct control of the dev broker daemon, decoupled from any app run. Every
 subcommand takes `--host`/`-H` (same precedence as above; default
-`127.0.0.1:9092`).
+`127.0.0.1:9092`) and loads `./.env` first, like `ck dev run`/`ck dev chat` —
+so a `.env`-set `CALFKIT_MESH_URL` targets the same address across every
+`ck dev` command.
 
 | Command | Behavior |
 | --- | --- |

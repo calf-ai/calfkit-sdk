@@ -150,10 +150,9 @@ def test_dev_run_loads_env_before_resolving_the_host(
     monkeypatch: pytest.MonkeyPatch, ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]
 ) -> None:
     """A .env-set CALFKIT_MESH_URL must be visible when the address is normalized (spec §4.3)."""
-    import os
 
     def fake_load_env(env_file: str | None) -> None:
-        os.environ["CALFKIT_MESH_URL"] = "127.0.0.1:7777"
+        monkeypatch.setenv("CALFKIT_MESH_URL", "127.0.0.1:7777")
 
     monkeypatch.setattr(dev_cli, "_load_env", fake_load_env)
     result = _invoke(["dev", "run", "app:agent"])
@@ -383,7 +382,25 @@ def test_broker_restart_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None
 # --- the resolve_bin thunk ------------------------------------------------------------------------------
 
 
+def test_resolve_bin_honors_calf_tansu_bin_without_the_extra(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The escape hatch must work on a core install: CALF_TANSU_BIN is read BEFORE calfkit_mesh
+    is imported (the upstream locator that also reads it may not exist)."""
+    binary = tmp_path / "tansu"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("CALF_TANSU_BIN", str(binary))
+    monkeypatch.setitem(sys.modules, "calfkit_mesh", None)  # an import would raise
+    assert dev_cli._resolve_bin() == str(binary)
+
+
+def test_resolve_bin_rejects_a_bad_calf_tansu_bin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALF_TANSU_BIN", "/nonexistent/tansu")
+    with pytest.raises(DevBrokerError, match="CALF_TANSU_BIN"):
+        dev_cli._resolve_bin()
+
+
 def test_resolve_bin_thunk_lazily_imports_calfkit_mesh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CALF_TANSU_BIN", raising=False)
     import types
 
     fake = types.ModuleType("calfkit_mesh")
@@ -393,6 +410,67 @@ def test_resolve_bin_thunk_lazily_imports_calfkit_mesh(monkeypatch: pytest.Monke
 
 
 def test_resolve_bin_thunk_raises_module_not_found_without_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CALF_TANSU_BIN", raising=False)
     monkeypatch.setitem(sys.modules, "calfkit_mesh", None)  # forces ModuleNotFoundError on import
     with pytest.raises(ModuleNotFoundError):
         dev_cli._resolve_bin()
+
+
+def test_dev_run_forwards_every_parameter_of_run(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:
+    """Drift guard for the §4.3 delegation contract: a parameter added to run() but not forwarded
+    would silently receive a typer OptionInfo sentinel instead of its real default."""
+    import inspect
+
+    from calfkit.cli.run import run as run_command
+
+    result = _invoke(["dev", "run", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert set(run_calls[0]) == set(inspect.signature(run_command).parameters)
+
+
+def test_dev_chat_forwards_every_parameter_of_chat(ensure_calls: list[dict[str, Any]], chat_calls: list[dict[str, Any]]) -> None:
+    import inspect
+
+    from calfkit.cli.chat import chat as chat_command
+
+    result = _invoke(["dev", "chat"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert set(chat_calls[0]) == set(inspect.signature(chat_command).parameters)
+
+
+def test_dev_run_forwards_every_option_value(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:
+    result = _invoke(
+        [
+            "dev",
+            "run",
+            "app:agent",
+            "--reload-dir",
+            "dir_one",
+            "--reload-dir",
+            "dir_two",
+            "--app-dir",
+            "some/dir",
+            "--group-id",
+            "my-group",
+            "--env-file",
+            "missing.env",  # warns (not found) and continues
+        ]
+    )
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    (call,) = run_calls
+    assert call["reload_dir"] == ["dir_one", "dir_two"]
+    assert call["app_dir"] == "some/dir"
+    assert call["group_id"] == "my-group"
+    assert call["env_file"] == "missing.env"
+
+
+def test_broker_commands_load_dotenv_before_resolving(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A .env-set CALFKIT_MESH_URL must target the SAME address across every ck dev command,
+    or `broker stop` would miss the broker `dev run` spawned."""
+    loaded: list[str | None] = []
+    monkeypatch.setattr(dev_cli, "_load_env", lambda env_file: loaded.append(env_file))
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: MeshStatus(target.key, False, ()))
+    monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: False)
+    _invoke(["dev", "broker", "status"])
+    _invoke(["dev", "broker", "stop"])
+    assert loaded == [None, None]

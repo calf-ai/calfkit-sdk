@@ -150,13 +150,30 @@ def test_invalid_port_raises_value_error() -> None:
         normalize(["host:notaport"])
 
 
+def test_out_of_range_ports_are_rejected() -> None:
+    # Port 0 would bind an ephemeral port the probe can never hit; >65535 crashes deep in the
+    # socket layer. Both are config errors that must surface immediately.
+    for bad in ("host:0", "host:65536", "host:99999"):
+        with pytest.raises(ValueError, match="port"):
+            normalize([bad])
+
+
+def test_aliased_duplicates_collapse_to_a_single_address() -> None:
+    # localhost:9092,127.0.0.1:9092 is semantically ONE loopback address — it must stay
+    # spawn-eligible, not fall into the borrow-or-error multi branch.
+    target = normalize(["localhost:9092", "127.0.0.1:9092"])
+    assert target.is_single is True
+    assert target.listener == "127.0.0.1:9092"
+
+
 def test_empty_host_raises_value_error() -> None:
     with pytest.raises(ValueError, match="invalid bootstrap address"):
         normalize([":9092"])
 
 
-def test_log_tail_of_an_unreadable_log_is_empty() -> None:
-    assert dev_broker._log_tail(Path("/nonexistent/tansu.log")) == ""
+def test_log_tail_of_an_unreadable_log_says_so() -> None:
+    # An empty tail would be indistinguishable from "the broker printed nothing".
+    assert "could not read the log" in dev_broker._log_tail(Path("/nonexistent/tansu.log"))
 
 
 def test_empty_servers_raises_value_error() -> None:
@@ -317,10 +334,17 @@ def test_spawn_waits_for_readiness_via_the_probe(monkeypatch: pytest.MonkeyPatch
 
 
 def test_readiness_timeout_kills_the_spawn_and_surfaces_the_log_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
     spawned: list[FakePopen] = []
 
+    class UnreapablePopen(FakePopen):
+        def wait(self, timeout: float | None = None) -> int | None:
+            # The post-kill reap must never let a slow exit escape as a raw exception.
+            raise subprocess.TimeoutExpired(cmd=self.cmd, timeout=timeout or 0)
+
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
-        proc = FakePopen(cmd, **kwargs)
+        proc = UnreapablePopen(cmd, **kwargs)
         proc.write_log(b"error: address already in use\n")
         spawned.append(proc)
         return proc
@@ -363,6 +387,78 @@ def test_missing_mesh_extra_yields_an_actionable_error(monkeypatch: pytest.Monke
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError, match=r"calfkit\[mesh\].*CALF_TANSU_BIN"):
         ensure_broker(normalize(["localhost"]), resolve_bin=resolve_bin)
+
+
+def test_locator_failure_maps_to_a_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # calfkit_mesh.TansuBinaryNotFound is a RuntimeError: exit-2 material, never a raw traceback.
+    def resolve_bin() -> str:
+        raise RuntimeError("No tansu binary: install a platform wheel or set CALF_TANSU_BIN.")
+
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="No tansu binary"):
+        ensure_broker(normalize(["localhost"]), resolve_bin=resolve_bin)
+
+
+def test_readiness_probe_attempts_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Per-attempt budget ≤ 1s (so proc.poll() keeps being re-checked) and ≤ the remaining
+    # deadline (so the total wait never overshoots `timeout`).
+    _capture_popen(monkeypatch)
+    probe = scripted_probe(False, False, False, True)
+    monkeypatch.setattr(dev_broker, "is_reachable", probe)
+    ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), timeout=5.0)
+    readiness_timeouts = [timeout for _, timeout in probe.calls[1:]]
+    assert readiness_timeouts, "expected readiness probes"
+    assert all(t <= 1.0 for t in readiness_timeouts)
+
+
+def test_unwritable_state_dir_is_a_clean_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / ".calfkit").write_text("a file where the state dir should be")
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="calfkit state dir"):
+        ensure_broker(normalize(["localhost"]), resolve_bin=MustNotCall())
+
+
+def test_unwritable_log_dir_is_a_clean_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calfkit_dir = tmp_path / ".calfkit"
+    calfkit_dir.mkdir()
+    (calfkit_dir / "logs").write_text("a file where the log dir should be")
+    _capture_popen(monkeypatch)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="dev broker log"):
+        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
+
+
+def test_contended_spawn_lock_announces_itself(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Spec §5.3: a blocked second invocation prints 'waiting for the dev broker to start…'."""
+    import types
+
+    real_fcntl = __import__("fcntl")
+    fake = types.ModuleType("fcntl")
+    fake.LOCK_EX = real_fcntl.LOCK_EX  # type: ignore[attr-defined]
+    fake.LOCK_NB = real_fcntl.LOCK_NB  # type: ignore[attr-defined]
+    fake.LOCK_UN = real_fcntl.LOCK_UN  # type: ignore[attr-defined]
+    state = {"nb_attempted": False}
+
+    def flock(fd: int, flags: int) -> None:
+        if flags & real_fcntl.LOCK_NB and not state["nb_attempted"]:
+            state["nb_attempted"] = True
+            raise BlockingIOError  # someone else is mid-spawn
+        # the message must precede the blocking acquire; the lock is then granted
+
+    fake.flock = flock  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    with dev_broker._spawn_lock():
+        pass
+    assert "waiting for the dev broker to start" in capsys.readouterr().err
+
+
+def test_restart_without_the_mesh_extra_reuses_a_borrowed_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.2: on a borrowed broker restart just re-reuses it — including on a core install,
+    # where the ownership scan (psutil) cannot run at all.
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
+    out = dev_broker.restart(normalize(["localhost"]), resolve_bin=MustNotCall())
+    assert out.managed is False
 
 
 def test_detach_kwargs_per_platform(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -474,6 +570,38 @@ def test_stop_never_signals_non_matching_processes(monkeypatch: pytest.MonkeyPat
         assert proc.events == [], "a non-matching process must never be signalled"
 
 
+def test_scan_matches_the_space_separated_argv_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    # clap accepts both `--flag=value` and `--flag value`; a hand-started dev broker may use either.
+    proc = FakeProc(
+        4242,
+        [_BIN, "broker", "--storage-engine", "memory://tansu/", "--kafka-listener-url", "tcp://127.0.0.1:9092"],
+    )
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"])) is True
+    assert proc.events == ["terminate", "wait"]
+
+
+def test_scan_normalizes_the_hand_started_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A hand-started `tcp://localhost:9092` must compare equal to the normalized 127.0.0.1:9092.
+    proc = FakeProc(4242, [_BIN, "broker", "--storage-engine=memory://x/", "--kafka-listener-url=tcp://localhost:9092"])
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"])) is True
+
+
+def test_scan_skips_an_unparseable_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    proc = FakeProc(4242, [_BIN, "broker", "--storage-engine=memory://x/", "--kafka-listener-url=tcp://127.0.0.1:bad"])
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"])) is False
+    assert proc.events == []
+
+
+def test_scan_skips_an_empty_cmdline(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A Linux zombie reads back an empty cmdline (no exception) — by definition not manageable.
+    proc = FakeProc(4242, [])
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"])) is False
+
+
 def test_memory_tansu_without_a_listener_arg_never_matches(monkeypatch: pytest.MonkeyPatch) -> None:
     # A memory-engine tansu whose listener came from env/defaults has no listener arg to match —
     # the scan cannot prove which address it is bound to, so it is never managed or signalled.
@@ -488,6 +616,56 @@ def test_stop_handles_a_process_that_vanishes_mid_signal(monkeypatch: pytest.Mon
     proc = FakeProc(4242, _broker_argv(), vanishes_on_signal=True)
     install_fake_psutil(monkeypatch, [proc])
     assert dev_broker.stop(normalize(["localhost"])) is True
+
+
+def test_stop_treats_an_unreaped_zombie_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The blessed two-terminal flow: the broker's spawning `ck dev run` is still alive, so the
+    SIGTERM'd broker becomes an unreaped zombie — psutil's non-child wait never returns for it
+    (spec §5.8). That IS the stopped state; it must not crash or escalate to SIGKILL."""
+    proc = FakeProc(4242, _broker_argv(), zombie_on_term=True)
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"]), grace=0.01) is True
+    assert proc.events == ["terminate", "wait"], "a zombie needs no SIGKILL"
+
+
+def test_stop_treats_a_zombie_after_sigkill_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SIGTERM ignored (slow shutdown), SIGKILL lands but the parent hasn't reaped yet.
+    proc = FakeProc(4242, _broker_argv(), survives_sigterm=True, zombie_on_kill=True)
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"]), grace=0.01) is True
+    assert proc.events == ["terminate", "wait", "kill", "wait"]
+
+
+def test_stop_treats_a_vanish_during_the_status_check_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The process disappears between the wait timeout and the zombie check.
+    proc = FakeProc(4242, _broker_argv(), survives_sigterm=True, nosuch_on_status=True)
+    install_fake_psutil(monkeypatch, [proc])
+    assert dev_broker.stop(normalize(["localhost"]), grace=0.01) is True
+    assert proc.events == ["terminate", "wait"], "a vanished process needs no SIGKILL"
+
+
+def test_stop_surfaces_a_sigkill_survivor_actionably(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A D-state/unkillable process: exit-2 material (DevBrokerError), never a raw traceback.
+    proc = FakeProc(4242, _broker_argv(), survives_sigterm=True, survives_sigkill=True)
+    install_fake_psutil(monkeypatch, [proc])
+    with pytest.raises(DevBrokerError, match="survived SIGKILL"):
+        dev_broker.stop(normalize(["localhost"]), grace=0.01)
+
+
+def test_stop_of_another_users_broker_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Linux cmdlines are world-readable, so the scan can match a broker we cannot signal.
+    proc = FakeProc(4242, _broker_argv(), denied_on_signal=True)
+    install_fake_psutil(monkeypatch, [proc])
+    with pytest.raises(DevBrokerError, match="another user"):
+        dev_broker.stop(normalize(["localhost"]))
+
+
+def test_stop_all_skips_a_denied_broker_and_continues(monkeypatch: pytest.MonkeyPatch) -> None:
+    denied = FakeProc(4242, _broker_argv(), denied_on_signal=True)
+    ours = FakeProc(4343, _broker_argv(listener="127.0.0.1:19092"))
+    install_fake_psutil(monkeypatch, [denied, ours])
+    assert dev_broker.stop_all() == ["127.0.0.1:19092"]
+    assert ours.events == ["terminate", "wait"], "one denied broker must not abort the sweep"
 
 
 def test_stop_multi_address_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:

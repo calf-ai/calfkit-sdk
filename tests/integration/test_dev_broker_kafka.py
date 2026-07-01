@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from calfkit.cli._dev_broker import ensure_broker, normalize, stop
+from calfkit.cli._dev_broker import ensure_broker, normalize, restart, stop
 from calfkit.cli._dev_probe import is_reachable
 from tests._dev_fakes import MustNotCall
 
@@ -56,6 +56,13 @@ def test_spawn_reuse_stop_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         again = ensure_broker(target, resolve_bin=MustNotCall(), timeout=10.0)
         assert again.managed is True
         assert again.pid == spawned.pid
+
+        # The clean slate: restart stops the broker and spawns a fresh one on the same listener
+        # (the port must free fast enough after SIGTERM for the immediate re-bind).
+        fresh = restart(target, resolve_bin=calfkit_mesh.resolve_broker_bin, timeout=30.0)
+        assert fresh.managed is True
+        assert fresh.pid != spawned.pid
+        assert is_reachable(target.listener, timeout=10.0) is True
     finally:
         stopped = stop(target)
 

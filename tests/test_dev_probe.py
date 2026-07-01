@@ -29,6 +29,8 @@ class _FakeAIOKafkaClient:
             from aiokafka.errors import KafkaConnectionError
 
             raise KafkaConnectionError("no broker there")
+        if _BEHAVIOR == "oserror":
+            raise OSError("socket-level failure surfaced unwrapped (e.g. DNS)")
         if _BEHAVIOR == "hang":
             await asyncio.sleep(10)
         # "ok": return immediately
@@ -59,6 +61,14 @@ async def test_reachable_true_on_successful_bootstrap() -> None:
 async def test_reachable_false_on_connection_error() -> None:
     _set("refused")
     assert await probe.broker_reachable(["127.0.0.1:9092"], timeout=1.0) is False
+    assert _FakeAIOKafkaClient.instances[-1].closed
+
+
+async def test_reachable_false_on_raw_os_error() -> None:
+    # Not every socket failure arrives wrapped in a KafkaError; a raw OSError (DNS, address
+    # family) must read as "unreachable", never crash ensure_broker.
+    _set("oserror")
+    assert await probe.broker_reachable("nosuch.invalid:9092", timeout=1.0) is False
     assert _FakeAIOKafkaClient.instances[-1].closed
 
 

@@ -16,8 +16,9 @@ pip install 'calfkit[mesh]'
 ```
 
 Wheels cover Linux (x86_64/aarch64, glibc and musl) and macOS (Apple Silicon
-and Intel). There is no Windows wheel (the broker is Unix-only) — on Windows,
-use WSL2, or point `CALF_TANSU_BIN` at your own build (see
+and Intel). There is no Windows wheel — the broker itself is Unix-only, so on
+Windows use WSL2. On a Unix platform without a bundled wheel, point
+`CALF_TANSU_BIN` at your own build (see
 [Using your own broker binary](#using-your-own-broker-binary)).
 
 ## Run your agents
@@ -83,7 +84,8 @@ ck dev: reusing broker at broker.staging.internal:9092 — not managed by calfki
 - A reachable address (local or remote) is used as-is — `ck dev` is then a pure
   client, and the `[mesh]` extra isn't needed.
 - An **unreachable remote** address is an error (exit `2`), never a spawn:
-  spawning is reserved for loopback addresses (`127.x.x.x` / `::1`).
+  spawning is reserved for a single loopback address (`127.x.x.x` / `::1`);
+  multi-address lists never spawn.
 - A SASL/TLS-secured broker fails the plaintext reachability probe, so it reads
   as absent — `ck dev` does not transparently reuse secured brokers.
 
@@ -93,7 +95,8 @@ ck dev: reusing broker at broker.staging.internal:9092 — not managed by calfki
 ## Using your own broker binary
 
 Set `CALF_TANSU_BIN` to an executable to bypass the bundled binary entirely —
-for an unsupported platform, a local `cargo` build, or a pinned version:
+for a Unix platform without a bundled wheel, a local `cargo` build, or a pinned
+version. It works with or without the `[mesh]` extra installed:
 
 ```bash
 CALF_TANSU_BIN=~/src/tansu/target/release/tansu ck dev run app:agent

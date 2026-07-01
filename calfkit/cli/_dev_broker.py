@@ -26,6 +26,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -58,6 +59,14 @@ class DevBrokerError(Exception):
     address, missing ``[mesh]`` extra, …).
 
     The ``ck dev`` commands surface it and exit ``2``, for parity with config errors (spec §7.8).
+    """
+
+
+class MeshExtraMissingError(DevBrokerError):
+    """The ownership scan needs ``psutil`` (the ``[mesh]`` extra), which is not installed.
+
+    A dedicated type so ``ensure_broker`` can degrade its managed-vs-reused *classification*
+    on exactly this failure — and nothing else — while ``stop``/``status`` surface it.
     """
 
 
@@ -134,8 +143,8 @@ def _parse_element(element: str) -> tuple[str, int]:
 
 
 def _parse_port(raw: str, element: str) -> int:
-    if not raw.isdigit():
-        raise ValueError(f"invalid port in bootstrap address {element!r}")
+    if not (raw.isascii() and raw.isdigit()) or not 0 < int(raw) <= 65535:
+        raise ValueError(f"invalid port in bootstrap address {element!r} (expected 1-65535)")
     return int(raw)
 
 
@@ -161,7 +170,9 @@ def normalize(servers: Sequence[str]) -> Target:
     servers = [part.strip() for element in servers for part in element.split(",") if part.strip()]
     if not servers:
         raise ValueError("no bootstrap address to normalize")
-    parsed = [_parse_element(element) for element in servers]
+    # Dedup post-normalization: "localhost:9092,127.0.0.1:9092" is semantically ONE loopback
+    # address and must stay spawn-eligible, not fall into the borrow-or-error multi branch.
+    parsed = list(dict.fromkeys(_parse_element(element) for element in servers))
     normalized = tuple(_format_address(host, port) for host, port in parsed)
     if len(parsed) == 1:
         host, port = parsed[0]
@@ -202,13 +213,35 @@ class _ScanHit:
 
 
 def _dev_broker_listener(cmd: list[str]) -> str | None:
-    """Return the listener a dev broker's argv binds, or ``None`` if *cmd* is not a dev broker."""
-    if not any(arg.startswith(_MEMORY_ENGINE_PREFIX) for arg in cmd):
+    """Return the **normalized** listener a dev broker's argv binds, or ``None`` if *cmd* is not
+    a dev broker.
+
+    Both clap argv forms match (``--flag=value`` and ``--flag value``), and the extracted address
+    is normalized through the same parser as the target (a hand-started
+    ``--kafka-listener-url tcp://localhost:9092`` must compare equal to the normalized target
+    ``127.0.0.1:9092``). An address that does not parse is not a broker we can manage.
+    """
+    if not _flag_value(cmd, "--storage-engine", "").startswith("memory://"):
         return None
-    for arg in cmd:
-        if arg.startswith(_LISTENER_PREFIX):
-            return arg[len(_LISTENER_PREFIX) :]
-    return None
+    listener_url = _flag_value(cmd, "--kafka-listener-url", "")
+    if not listener_url.startswith("tcp://"):
+        return None
+    try:
+        host, port = _parse_element(listener_url[len("tcp://") :])
+    except ValueError:
+        return None
+    return _format_address(host, port)
+
+
+def _flag_value(cmd: list[str], flag: str, default: str) -> str:
+    """The value of *flag* in argv, accepting both ``--flag=value`` and ``--flag value``."""
+    prefix = f"{flag}="
+    for index, arg in enumerate(cmd):
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+        if arg == flag and index + 1 < len(cmd):
+            return cmd[index + 1]
+    return default
 
 
 def _scan_dev_brokers() -> list[_ScanHit]:
@@ -217,7 +250,7 @@ def _scan_dev_brokers() -> list[_ScanHit]:
     try:
         import psutil  # type: ignore[import-untyped]
     except ModuleNotFoundError as exc:
-        raise DevBrokerError(_MESH_EXTRA_HINT) from exc
+        raise MeshExtraMissingError(_MESH_EXTRA_HINT) from exc
 
     hits: list[_ScanHit] = []
     for proc in psutil.process_iter():
@@ -248,15 +281,23 @@ def _spawn_lock() -> Iterator[None]:
     """Hold a blocking, exclusive advisory lock over the spawn critical section.
 
     Exists ONLY for the double-spawn race (spec §5.3); ``stop``/``status`` never take it. Released
-    by the OS if the holder dies, so a crashed process never deadlocks the file.
+    by the OS if the holder dies, so a crashed process never deadlocks the file. A contended lock
+    announces itself ("waiting for the dev broker to start…") before blocking.
     """
     import fcntl
 
     root = _calfkit_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    fd = os.open(root / "dev-mesh.lock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        root.mkdir(parents=True, exist_ok=True)
+        fd = os.open(root / "dev-mesh.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError as exc:
+        raise DevBrokerError(f"cannot access the calfkit state dir {root}: {exc}") from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("waiting for the dev broker to start…", file=sys.stderr)
+            fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -275,8 +316,10 @@ def ensure_broker(
     """Connect-or-spawn: return the broker serving *target*, spawning one only when the address is
     a single loopback address with nothing reachable there (spec §5.2).
 
-    Reachable → reuse: managed if the §5.4 scan finds a dev broker bound to the listener, else a
-    plain borrow. Unreachable loopback → resolve the binary via the *resolve_bin* thunk, spawn
+    Reachable → reuse: managed if the §5.4 scan finds a dev broker bound to the listener (the
+    scan runs only for single loopback targets — a remote address can never host a local dev
+    broker, and skipping it keeps the pure-client path free of the ``[mesh]`` deps), else a plain
+    borrow. Unreachable loopback → resolve the binary via the *resolve_bin* thunk, spawn
     detached, wait for readiness, return managed. Unreachable anywhere else →
     :class:`DevBrokerError` (connect-only — a down remote must never trigger a local bind).
     """
@@ -285,13 +328,15 @@ def ensure_broker(
             if target.is_single and target.is_loopback:
                 try:
                     hit = _find_dev_broker(target.listener)
-                except DevBrokerError:
+                except MeshExtraMissingError:
                     # Core install (no [mesh]): the scan cannot run, so the managed-vs-reused
                     # CLASSIFICATION degrades to "reused" — honest, since without the extra
                     # nothing can be managed anyway. Display-only; no behavior depends on it.
                     hit = None
                 if hit is not None:
                     return BrokerInfo(listener=hit.listener, pid=hit.pid, managed=True, started_at=hit.started_at)
+            # Borrowed: `listener` carries the display address — for a multi-address borrow
+            # that is the canonical key, not any single listener.
             return BrokerInfo(listener=target.key, pid=None, managed=False)
         if not (target.is_single and target.is_loopback):
             raise DevBrokerError(
@@ -311,6 +356,10 @@ def _resolve_binary(resolve_bin: Callable[[], str]) -> str:
             "the bundled dev broker is not installed. Install it with `pip install 'calfkit[mesh]'` "
             "(or `uv add 'calfkit[mesh]'`), or point CALF_TANSU_BIN at a tansu binary."
         ) from exc
+    except RuntimeError as exc:
+        # The locator's own failure (calfkit_mesh.TansuBinaryNotFound is a RuntimeError): no
+        # bundled binary for this platform, nothing on PATH, … — exit-2 material, not a crash.
+        raise DevBrokerError(str(exc)) from exc
 
 
 def _detach_kwargs() -> dict[str, object]:
@@ -324,14 +373,13 @@ def _detach_kwargs() -> dict[str, object]:
 def _log_tail(log_path: Path) -> str:
     try:
         return log_path.read_text(errors="replace")[-_LOG_TAIL_BYTES:]
-    except OSError:
-        return ""
+    except OSError as exc:
+        return f"(could not read the log: {exc})"
 
 
 def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
     listener = target.listener
     log_path = _calfkit_dir() / "logs" / f"tansu-{target.key}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         binary,
         "broker",
@@ -341,7 +389,12 @@ def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
     ]
     # Overwritten each spawn — bounded logs, one daemon per address (spec §5.2). A real file fd,
     # never PIPE: an unread pipe would deadlock Tansu once its buffer fills.
-    with log_path.open("wb") as log_file:
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = log_path.open("wb")
+    except OSError as exc:
+        raise DevBrokerError(f"cannot write the dev broker log at {log_path}: {exc}") from exc
+    with log_file:
         try:
             proc = Popen(cmd, stdin=subprocess.DEVNULL, stdout=log_file, stderr=log_file, **_detach_kwargs())  # type: ignore[call-overload]
         except OSError as exc:
@@ -353,11 +406,18 @@ def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
             raise DevBrokerError(
                 f"the dev broker exited during startup (exit code {proc.returncode}); log tail from {log_path}:\n{_log_tail(log_path)}"
             )
-        if is_reachable(listener, timeout=min(1.0, timeout)):
-            break
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             proc.kill()
+            try:
+                proc.wait(timeout=DEFAULT_GRACE)  # reap our own child — no zombie for long-lived callers
+            except subprocess.TimeoutExpired:
+                pass  # kill was delivered; the CLI exits next and init reaps
             raise DevBrokerError(f"the dev broker did not become ready within {timeout:.1f}s; log tail from {log_path}:\n{_log_tail(log_path)}")
+        # Per-attempt probe budget: capped at 1s so proc.poll() keeps getting re-checked, and
+        # bounded by the remaining deadline so the total wait never overshoots `timeout`.
+        if is_reachable(listener, timeout=min(1.0, max(0.1, remaining))):
+            break
         time.sleep(_READINESS_POLL_INTERVAL)
     return BrokerInfo(
         listener=listener,
@@ -376,33 +436,72 @@ def stop(target: Target, *, grace: float = DEFAULT_GRACE) -> bool:
     target listener — the §5.4 scan hit, whoever started it — and nothing else (spec §5.6).
 
     ``False`` (a no-op) when nothing matches: a borrowed broker, a durable tansu, the developer's
-    own Kafka, or a multi-address target (never a spawn target) are never signalled.
+    own Kafka, or a multi-address target (never a spawn target) are never signalled. A matching
+    broker that cannot be signalled (owned by another user) raises :class:`DevBrokerError`.
     """
     if not target.is_single:
         return False
     hit = _find_dev_broker(target.listener)
     if hit is None:
         return False
-    return _signal(hit, grace)
+    if not _signal(hit, grace):
+        raise DevBrokerError(f"cannot stop the dev broker at {hit.listener} (pid {hit.pid}) — it is owned by another user.")
+    return True
 
 
 def stop_all(*, grace: float = DEFAULT_GRACE) -> list[str]:
-    """Stop every running local dev broker; return the listeners that were actually stopped."""
+    """Stop every running local dev broker; return the listeners that were actually stopped.
+
+    A broker owned by another user is skipped (it is simply absent from the returned list) so
+    one denied process never aborts the sweep.
+    """
     return [hit.listener for hit in _scan_dev_brokers() if _signal(hit, grace)]
 
 
 def _signal(hit: _ScanHit, grace: float) -> bool:
+    """SIGTERM → *grace* → SIGKILL one scan hit. ``True`` = stopped, ``False`` = access denied.
+
+    A broker whose spawning ``ck dev run`` is still alive dies into an **unreaped zombie** (spec
+    §5.8: the parent reaps only at its own exit), and psutil's non-child ``wait`` never returns
+    for a zombie — so a post-wait timeout with ``status() == zombie`` IS the stopped state, not
+    a failure.
+    """
     import psutil  # already importable: the scan produced the hit (mypy flags the module once, on the scan's import)
+
+    def _is_gone() -> bool:
+        try:
+            zombie: bool = hit.proc.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return True
+        return zombie
+
+    def _wait_or_gone() -> bool:
+        # psutil's non-child wait polls pid_exists, which a zombie passes — it would eat the
+        # whole grace for an already-dead broker. Wait in short slices, checking the zombie
+        # status between them, so the common case (stop while `ck dev run` is alive) is instant.
+        deadline = time.monotonic() + grace
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                hit.proc.wait(min(0.1, max(0.01, remaining)))
+                return True
+            except psutil.TimeoutExpired:
+                if _is_gone():
+                    return True
+                if remaining <= 0.1:
+                    return False
 
     try:
         hit.proc.terminate()
-        try:
-            hit.proc.wait(grace)
-        except psutil.TimeoutExpired:
-            hit.proc.kill()
-            hit.proc.wait(grace)
+        if _wait_or_gone():
+            return True
+        hit.proc.kill()
+        if not _wait_or_gone():
+            raise DevBrokerError(f"the dev broker at {hit.listener} (pid {hit.pid}) survived SIGKILL for {grace:.1f}s.")
     except psutil.NoSuchProcess:
         pass  # exited between the scan and the signal — the goal state (stopped) is reached
+    except psutil.AccessDenied:
+        return False  # someone else's broker — never signalled further; callers decide how to report
     return True
 
 
@@ -426,7 +525,11 @@ def restart(
     """``stop`` then ``ensure_broker`` — the clean slate (the memory engine is ephemeral, spec §4.2).
 
     Only truly restarts a dev broker the scan finds; on a borrowed broker ``stop`` is a no-op, so
-    this just re-reuses the still-running one.
+    this just re-reuses the still-running one — including on a core install, where the scan
+    cannot run at all (spec §4.2's borrowed-broker promise outranks the ``[mesh]`` requirement).
     """
-    stop(target, grace=grace)
+    try:
+        stop(target, grace=grace)
+    except MeshExtraMissingError:
+        pass  # no [mesh] extra → nothing can be stopped anyway; the ensure below reuses/borrows
     return ensure_broker(target, resolve_bin=resolve_bin, timeout=timeout)

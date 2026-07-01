@@ -20,7 +20,12 @@ FAKE_CREATE_TIME = 1_782_864_000.0
 
 
 class FakeProc:
-    """A fake ``psutil.Process`` with scripted argv and signal bookkeeping."""
+    """A fake ``psutil.Process`` with scripted argv and signal bookkeeping.
+
+    Models the non-child ``wait`` semantics the supervisor relies on: a process that dies into an
+    **unreaped zombie** (its spawning ``ck dev run`` is still alive) keeps timing ``wait`` out —
+    psutil polls ``pid_exists``, which a zombie passes — while ``status()`` reports ``"zombie"``.
+    """
 
     def __init__(
         self,
@@ -29,14 +34,25 @@ class FakeProc:
         *,
         raises: str | None = None,
         survives_sigterm: bool = False,
+        survives_sigkill: bool = False,
         vanishes_on_signal: bool = False,
+        zombie_on_term: bool = False,
+        zombie_on_kill: bool = False,
+        denied_on_signal: bool = False,
+        nosuch_on_status: bool = False,
     ) -> None:
         self.pid = pid
         self._cmdline = cmdline or []
         self._raises = raises
         self._survives_sigterm = survives_sigterm
+        self._survives_sigkill = survives_sigkill
         self._vanishes_on_signal = vanishes_on_signal
+        self._zombie_on_term = zombie_on_term
+        self._zombie_on_kill = zombie_on_kill
+        self._denied_on_signal = denied_on_signal
+        self._nosuch_on_status = nosuch_on_status
         self.alive = True
+        self.zombie = False
         self.events: list[str] = []
 
     def cmdline(self) -> list[str]:
@@ -52,21 +68,34 @@ class FakeProc:
     def create_time(self) -> float:
         return FAKE_CREATE_TIME
 
-    def terminate(self) -> None:
-        self.events.append("terminate")
-        if self._vanishes_on_signal:
+    def status(self) -> str:
+        if self._nosuch_on_status:
             psutil = sys.modules["psutil"]
             raise psutil.NoSuchProcess()  # type: ignore[attr-defined]
-        if not self._survives_sigterm:
+        return "zombie" if self.zombie else "running"
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        psutil = sys.modules["psutil"]
+        if self._denied_on_signal:
+            raise psutil.AccessDenied()  # type: ignore[attr-defined]
+        if self._vanishes_on_signal:
+            raise psutil.NoSuchProcess()  # type: ignore[attr-defined]
+        if self._zombie_on_term:
+            self.zombie = True  # dead but unreaped: wait keeps timing out, status says zombie
+        elif not self._survives_sigterm:
             self.alive = False
 
     def kill(self) -> None:
         self.events.append("kill")
-        self.alive = False
+        if self._zombie_on_kill:
+            self.zombie = True
+        elif not self._survives_sigkill:
+            self.alive = False
 
     def wait(self, timeout: float | None = None) -> None:
         self.events.append("wait")
-        if self.alive:
+        if self.alive or self.zombie:
             psutil = sys.modules["psutil"]
             raise psutil.TimeoutExpired(timeout, self.pid)  # type: ignore[attr-defined]
 
@@ -87,6 +116,7 @@ def install_fake_psutil(monkeypatch: pytest.MonkeyPatch, procs: list[FakeProc]) 
     fake.AccessDenied = AccessDenied  # type: ignore[attr-defined]
     fake.ZombieProcess = ZombieProcess  # type: ignore[attr-defined]
     fake.TimeoutExpired = TimeoutExpired  # type: ignore[attr-defined]
+    fake.STATUS_ZOMBIE = "zombie"  # type: ignore[attr-defined]
     fake.process_iter = lambda: list(procs)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "psutil", fake)
     return fake
@@ -114,6 +144,9 @@ class FakePopen:
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        return self.returncode
 
 
 class MustNotCall:

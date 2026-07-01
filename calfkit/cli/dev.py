@@ -42,7 +42,19 @@ _HOST_HELP = "Kafka bootstrap server(s), comma-separated. Precedence: this flag 
 
 
 def _resolve_bin() -> str:
-    """The binary locator thunk: lazily import ``calfkit_mesh`` only when a spawn is imminent."""
+    """The binary locator thunk, called only when a spawn is imminent.
+
+    ``CALF_TANSU_BIN`` is honored HERE, before ``calfkit_mesh`` is imported — the escape hatch
+    must work on a core install (no ``[mesh]`` extra), where the upstream locator that also reads
+    it does not exist. Unset, the bundled locator resolves (bundled binary → ``tansu`` on PATH).
+    """
+    import os
+
+    override = os.environ.get("CALF_TANSU_BIN")
+    if override:
+        if not (os.path.isfile(override) and os.access(override, os.X_OK)):
+            raise DevBrokerError(f"CALF_TANSU_BIN={override!r} does not point at an executable file.")
+        return override
     from calfkit_mesh import resolve_broker_bin  # type: ignore[import-not-found]
 
     path: str = resolve_broker_bin()
@@ -74,11 +86,12 @@ def _ensure_or_exit(target: Target) -> BrokerInfo:
     return broker
 
 
-def _forward_host(target: Target, servers: list[str]) -> str:
+def _forward_host(target: Target) -> str:
     """The host the delegated command connects to: the normalized listener, so the worker targets
     the exact address the broker bound (never bare ``localhost``/``::1`` while Tansu is on
-    ``127.0.0.1``). A multi-address borrow forwards the user's explicit list unchanged (spec §4.3)."""
-    return target.listener if target.is_single else ",".join(servers)
+    ``127.0.0.1``). A multi-address borrow forwards the user's elements unchanged (spec §4.3) —
+    ``target.bootstrap`` preserves them verbatim."""
+    return target.listener if target.is_single else target.bootstrap
 
 
 @dev_app.command(name="run")
@@ -131,7 +144,7 @@ def dev_run(
     _ensure_or_exit(target)  # in the PARENT: reload children only ever connect (spec §4.3)
     _run_command(
         targets=targets,
-        host=_forward_host(target, servers),
+        host=_forward_host(target),
         provision=provision,
         enable_idempotence=enable_idempotence,
         reload=reload,
@@ -172,7 +185,7 @@ def dev_chat(
     _ensure_or_exit(target)
     _chat_command(
         name=name,
-        host=_forward_host(target, servers),
+        host=_forward_host(target),
         provision=provision,
         env_file=env_file,
         timeout=timeout,
@@ -180,6 +193,10 @@ def dev_chat(
 
 
 def _target_or_exit(host: str | None) -> Target:
+    # Load ./.env first, exactly like `dev run`/`dev chat`: a .env-set CALFKIT_MESH_URL must
+    # target the SAME address across every `ck dev` command, or `broker stop` would miss the
+    # broker `dev run` spawned.
+    _load_env(None)
     return _normalize_or_exit(resolve_mesh_url(_parse_host(host)))
 
 
@@ -195,7 +212,7 @@ def broker_stop(
     stop_all: bool = typer.Option(
         False,
         "--all",
-        help="Stop every calfkit-spawned dev broker (ignores --host).",
+        help="Stop every running dev broker (ignores --host).",
     ),
 ) -> None:
     """Stop the dev broker at the target address — the memory-engine tansu the §5.4 scan finds.
@@ -245,8 +262,8 @@ def broker_restart(host: str | None = typer.Option(None, "--host", "-H", help=_H
     """Stop then start the target's managed broker — the clean slate (the memory engine is ephemeral)."""
     target = _target_or_exit(host)
     try:
-        record = _dev_broker.restart(target, resolve_bin=_resolve_bin, timeout=_dev_broker.DEFAULT_TIMEOUT)
+        broker = _dev_broker.restart(target, resolve_bin=_resolve_bin, timeout=_dev_broker.DEFAULT_TIMEOUT)
     except DevBrokerError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
-    _echo_broker_line(record)
+    _echo_broker_line(broker)
