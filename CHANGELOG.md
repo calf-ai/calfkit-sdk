@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.3...v0.12.4) (2026-07-01)
+
+
+### Features
+
+* make producer idempotence opt-in ([#315](https://github.com/calf-ai/calfkit-sdk/issues/315)) ([0b10538](https://github.com/calf-ai/calfkit-sdk/commit/0b105386500d5dc68e68d9a8e4e0bc0dea05637e))
+
+
+### Documentation
+
+* cleanup top level readme and add readme to `examples/` and `docs/` ([#313](https://github.com/calf-ai/calfkit-sdk/issues/313)) ([718eccd](https://github.com/calf-ai/calfkit-sdk/commit/718eccdec5a00b8cbc495fe65505518be88f6e8e))
+* update README ([#310](https://github.com/calf-ai/calfkit-sdk/issues/310)) ([3109399](https://github.com/calf-ai/calfkit-sdk/commit/31093992bfa1d35410660e4888c4294ebbbfaea4))
+* update README.md ([#314](https://github.com/calf-ai/calfkit-sdk/issues/314)) ([ade96e0](https://github.com/calf-ai/calfkit-sdk/commit/ade96e002b48e7f67160108dc24c195d13b7c2b8))
+
 ## [0.12.3](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.2...v0.12.3) (2026-06-30)
 
 
