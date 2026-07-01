@@ -86,16 +86,17 @@ ck run finance_help:finance
 ck chat
 ```
 
-## Running on a mesh
+## Running an agent mesh
 
-Calfkit agents discover and communicate over an agent mesh, provided by either Calfkit Cloud (in alpha) or your own self-hosted version. 
+Calfkit agents discover and communicate over an agent mesh (`CALFKIT_MESH_URL`), which you can run locally yourself.
 
-Start a mesh locally with Docker:
+Start one with Docker:
+
 ```bash
 git clone https://github.com/calf-ai/calfkit-broker && cd calfkit-broker && make dev-up
 ```
 
-Or skip self-hosting with [Calfkit Cloud](https://forms.gle/Rk61GmHyJzequEPm8) — a fully-managed agent mesh server your agents can join from anywhere. Currently in alpha.
+If you might be interested in a fully-managed mesh server your agents can join from anywhere, [let me know](https://forms.gle/Rk61GmHyJzequEPm8).
 
 ## Documentation
 
