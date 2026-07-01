@@ -1,10 +1,12 @@
-"""PR-2: ``Client.connect()`` hardens the shared producer.
+"""``Client.connect()`` producer posture: calfkit imposes **no** ``acks`` / ``enable_idempotence``
+value by default, but exposes a unified opt-in override.
 
-aiokafka defaults the producer to ``acks=1`` with no idempotence — under which a
-broker-acked publish can vanish on leader failover and retries can duplicate or reorder.
-calfkit defaults the shared producer to ``acks=all`` + ``enable_idempotence=True`` for
-durable, non-duplicating publishes. A user may still override via
-``Client.connect(**broker_kwargs)`` (document-don't-police).
+The libraries supply the defaults (ktables writers and aiokafka both default to no idempotence;
+aiokafka defaults ``acks=1``). Passing ``enable_idempotence=True`` (or ``False``) via
+``Client.connect`` — or ``ck run --enable-idempotence`` — turns it on (off) consistently across the
+shared broker producer *and* the co-located worker's control-plane / fan-out writers. The resolved
+tri-state (``None`` = unset, ``True``, ``False``) is stored on the client so those writers wire to
+the same posture. ``acks`` stays overridable via ``broker_kwargs`` (document-don't-police).
 """
 
 from calfkit.client import Client
@@ -24,16 +26,25 @@ def _spy_broker_kwargs(monkeypatch) -> dict:  # noqa: ANN001
     return captured
 
 
-def test_connect_defaults_to_acks_all_and_idempotence(monkeypatch) -> None:  # noqa: ANN001
+def test_connect_sets_no_producer_posture_by_default(monkeypatch) -> None:  # noqa: ANN001
     captured = _spy_broker_kwargs(monkeypatch)
 
     Client.connect(server_urls="localhost:9092")
 
-    assert captured.get("acks") == "all"
+    # calfkit imposes nothing — the libraries' defaults apply (ktables/aiokafka: no idempotence).
+    assert "acks" not in captured
+    assert "enable_idempotence" not in captured
+
+
+def test_connect_opt_in_threads_idempotence_true(monkeypatch) -> None:  # noqa: ANN001
+    captured = _spy_broker_kwargs(monkeypatch)
+
+    Client.connect(server_urls="localhost:9092", enable_idempotence=True)
+
     assert captured.get("enable_idempotence") is True
 
 
-def test_connect_lets_user_override_producer_posture(monkeypatch) -> None:  # noqa: ANN001
+def test_connect_explicit_false_threads_idempotence_false(monkeypatch) -> None:  # noqa: ANN001
     captured = _spy_broker_kwargs(monkeypatch)
 
     Client.connect(server_urls="localhost:9092", enable_idempotence=False)
@@ -41,12 +52,19 @@ def test_connect_lets_user_override_producer_posture(monkeypatch) -> None:  # no
     assert captured.get("enable_idempotence") is False
 
 
-def test_connect_user_can_relax_acks_with_idempotence_off(monkeypatch) -> None:  # noqa: ANN001
-    # Both posture keys are overridable. Relaxing acks below "all" requires turning
-    # idempotence off too (aiokafka rejects acks<all with idempotence on).
+def test_connect_stores_resolved_idempotence_for_colocated_workers() -> None:
+    # A co-located worker/nodes read the resolved tri-state off the client
+    # (self._client._enable_idempotence) to wire their writers to the same posture — one knob.
+    assert Client.connect(server_urls="localhost:9092")._enable_idempotence is None
+    assert Client.connect(server_urls="localhost:9092", enable_idempotence=True)._enable_idempotence is True
+    assert Client.connect(server_urls="localhost:9092", enable_idempotence=False)._enable_idempotence is False
+
+
+def test_connect_acks_override_via_broker_kwargs(monkeypatch) -> None:  # noqa: ANN001
     captured = _spy_broker_kwargs(monkeypatch)
 
-    Client.connect(server_urls="localhost:9092", acks=1, enable_idempotence=False)
+    Client.connect(server_urls="localhost:9092", acks="all")
 
-    assert captured.get("acks") == 1
-    assert captured.get("enable_idempotence") is False
+    assert captured.get("acks") == "all"
+    # acks alone does not turn idempotence on.
+    assert "enable_idempotence" not in captured

@@ -24,6 +24,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict:
         def connect(cls, server_urls: object = None, **kwargs: object) -> FakeClient:
             cap["server_urls"] = server_urls
             cap["provisioning"] = kwargs.get("provisioning")
+            cap["enable_idempotence"] = kwargs.get("enable_idempotence")
             return cls()
 
     class FakeWorker:
@@ -100,6 +101,30 @@ def test_serve_group_id_passthrough(captured: dict) -> None:
 
     serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id="mygroup", env_file=None, app_dir=".")
     assert captured["group_id"] == "mygroup"
+
+
+def test_serve_default_sets_no_idempotence(captured: dict) -> None:
+    """Without --enable-idempotence, serve passes enable_idempotence=None (calfkit sets nothing)."""
+    from calfkit.cli._run import serve
+
+    serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
+    assert captured["enable_idempotence"] is None
+
+
+def test_serve_enable_idempotence_opts_in(captured: dict) -> None:
+    """--enable-idempotence forwards enable_idempotence=True to Client.connect."""
+    from calfkit.cli._run import serve
+
+    serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".", enable_idempotence=True)
+    assert captured["enable_idempotence"] is True
+
+
+def test_serve_banner_shows_idempotence_state(captured: dict, capsys: pytest.CaptureFixture[str]) -> None:
+    """The banner reports the producer idempotence posture (off by default)."""
+    from calfkit.cli._run import serve
+
+    serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
+    assert "idempotence: off" in capsys.readouterr().out
 
 
 def test_serve_empty_resolution_exits_2(captured: dict) -> None:

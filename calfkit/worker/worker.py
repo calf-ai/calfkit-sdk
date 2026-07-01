@@ -324,11 +324,17 @@ class Worker(LifecycleHookMixin):
                     f"cannot derive Kafka bootstrap servers for control-plane topic {topic!r} "
                     "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
                 )
+            # Producer posture is the client's single knob: None => set nothing (ktables writer
+            # default applies), True/False => force it. Same rule as the shared + fan-out producers.
+            writer_idempotence: dict[str, Any] = (
+                {} if self._client._enable_idempotence is None else {"enable_idempotence": self._client._enable_idempotence}
+            )
             writer: GroupedKafkaTableWriter[Any] = GroupedKafkaTableWriter.json(
                 bootstrap_servers=bootstrap,
                 topic=topic,
                 # Writers ensure only in dev/CI; production topics are ops-governed.
                 ensure_topic=self._client._provisioning.enabled,
+                **writer_idempotence,
             )
             await writer.start()
             yield writer

@@ -81,6 +81,7 @@ would block the import; keep it under the guard.)
 | --- | --- | --- |
 | `--host`, `-H` | `$CALFKIT_MESH_URL` → `localhost` | Kafka bootstrap server(s), comma-separated. Precedence: this flag **>** `$CALFKIT_MESH_URL` **>** `localhost`. |
 | `--provision` | off | Opt-in dev topic auto-creation (**experimental**; `replication_factor=1`, no ACLs). See [Topic provisioning](topic-provisioning.md). |
+| `--enable-idempotence` | off | Turn on idempotent producers across every producer the worker runs. Off by default so the worker runs against brokers without producer-id support; needs a broker that implements the producer-id / transaction coordinator to enable. |
 | `--reload` | off | Watch source files and restart the worker on change (see [Reload](#reload)). |
 | `--reload-dir` | current dir | Directory to watch with `--reload`. Repeatable. |
 | `--app-dir` | `.` (current dir) | Directory inserted on `sys.path` for resolving `module:attr` targets. |

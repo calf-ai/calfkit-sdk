@@ -144,11 +144,14 @@ Client.connect(
     deps_factory: Callable[[], dict] | None = None,
     firehose_buffer_size: int = DEFAULT_FIREHOSE_BUFFER_SIZE,
     provisioning: ProvisioningConfig | None = None,
+    enable_idempotence: bool | None = None,
     **broker_kwargs,
 ) -> Client
 ```
 
 Build a `Client` — **synchronous and lazy**: no I/O until the first dispatch / `events()`, so a connection error surfaces there, not from `connect()`. `server_urls` defaults to the `CALFKIT_MESH_URL` environment variable, then `"localhost"`. `inbox_topic` is the named topic this client receives its runs' replies on and routes callbacks to — `None` gives an ephemeral per-client inbox; set it for a durable, shareable one. `deps_factory` seeds ambient `deps` merged under each call's `deps`. `firehose_buffer_size` bounds each `events()` observer's drop-oldest buffer. Configure auth with a FastStream `security=` object in `broker_kwargs` (raw security kwargs are rejected).
+
+`enable_idempotence` is the single knob for producer idempotence across **every** producer this client drives — the shared broker producer and, for a co-located `Worker`, its control-plane and fan-out writers. Left unset (`None`), calfkit imposes nothing and the library defaults apply (no idempotence; aiokafka `acks=1`), which keeps the SDK working against brokers that lack producer-id support (e.g. Tansu). Set it to `True` to turn idempotence on consistently, or `False` to force it off. `acks` is not set by calfkit either; override it per-producer via `broker_kwargs` (e.g. `acks="all"`).
 
 ### `Client.agent`
 

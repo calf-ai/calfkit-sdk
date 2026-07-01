@@ -84,6 +84,7 @@ class OfflineFanoutBatchStore(FakeFanoutBatchStore):
         reader_tuning: object | None = None,
         catchup_timeout: float | None = None,
         barrier_timeout: float = 30.0,
+        enable_idempotence: bool | None = None,
     ) -> None:
         super().__init__()
 
