@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from calfkit.dev import probe
+from calfkit.cli import _dev_probe as probe
 
 # Per-test behavior for the fake client: "ok" | "refused" | "hang".
 _BEHAVIOR = "ok"
