@@ -8,7 +8,8 @@ from tests.providers import INSTRUCTIONS_TEST_SYSTEM_PROMPT, prepare_worker
 
 
 async def test_init_instructions_only(container, deploy_instructions_agent):
-    """When no temp_instructions or dynamic instructions are provided, the model should receive only the system_prompt."""
+    """With no temp_instructions or dynamic instructions, the model receives exactly the injected
+    identity line (``You are {name}.``) leading the system_prompt — and nothing else."""
     prepare_worker(container)
     broker = container.get(KafkaBroker)
     client = container.get(Client)
@@ -18,8 +19,26 @@ async def test_init_instructions_only(container, deploy_instructions_agent):
 
     assert result.output is not None
     assert isinstance(result.output, str)
-    assert INSTRUCTIONS_TEST_SYSTEM_PROMPT.strip().lower() == result.output.strip().lower()
+    identity = f"You are {deploy_instructions_agent.name}."
+    assert result.output.strip() == f"{identity}\n\n{INSTRUCTIONS_TEST_SYSTEM_PROMPT}"
     assert result.output.count(INSTRUCTIONS_TEST_SYSTEM_PROMPT) == 1
+
+
+async def test_name_injected_as_leading_line(container, deploy_instructions_agent):
+    """The constructor name is baked into the agent's instructions as the leading
+    ``You are {name}.`` line, ahead of the system_prompt, on every invocation."""
+    prepare_worker(container)
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    async with TestKafkaBroker(broker):
+        result = await client.agent(topic="test_instructions_agent.input").execute("hello")
+
+    assert result.output is not None and isinstance(result.output, str)
+    identity = f"You are {deploy_instructions_agent.name}."
+    assert result.output.startswith(identity)
+    assert result.output.index(identity) < result.output.index(INSTRUCTIONS_TEST_SYSTEM_PROMPT)
+    assert result.output.count(identity) == 1
 
 
 async def test_runtime_instructions_appended(container, deploy_instructions_agent):
