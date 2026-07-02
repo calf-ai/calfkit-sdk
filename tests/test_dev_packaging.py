@@ -25,6 +25,15 @@ def test_mesh_extra_replaces_dead_dev_extra() -> None:
     assert 'mesh = ["calfkit-mesh>=0.1", "psutil>=5.9"]' in text
 
 
+def test_python_dash_m_calfkit_cli_runs_the_ck_app() -> None:
+    """The ``-d`` daemon spawn re-invokes the CLI as ``python -m calfkit.cli run ...``
+    (dev-agent-lifecycle plan §3.1): the module must be executable without the ``ck`` console
+    script being on PATH."""
+    result = subprocess.run([sys.executable, "-m", "calfkit.cli", "--help"], capture_output=True, text=True)
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "dev" in result.stdout
+
+
 def test_ck_app_builds_without_mesh_deps() -> None:
     """Building the ``ck`` app must not import ``psutil``/``calfkit_mesh`` (the ``[mesh]`` deps).
 

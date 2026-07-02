@@ -428,6 +428,24 @@ def test_dev_run_forwards_every_parameter_of_run(ensure_calls: list[dict[str, An
     assert set(run_calls[0]) == set(inspect.signature(run_command).parameters)
 
 
+def test_dev_run_forwards_the_hidden_internals_explicitly(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:
+    """The parity-guard contract (impl plan CG-B): `dev run` forwards the hidden internals with
+    their preset values — the 5s dev heartbeat (spec §5.6 covers foreground dev runs too) and no
+    ownership marker (a foreground run is not a daemon) — so the forwards-every-parameter guard
+    above keeps its simple equality contract."""
+    result = _invoke(["dev", "run", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert run_calls[0]["heartbeat_interval"] == 5.0
+    assert run_calls[0]["dev_daemon"] is None
+
+
+def test_dev_run_help_hides_the_internal_flags() -> None:
+    """R1 guard, dev side: the hidden internals must not leak into ck dev run --help either."""
+    out = _plain(_invoke(["dev", "run", "--help"]).stdout)
+    assert "--dev-daemon" not in out
+    assert "--heartbeat-interval" not in out
+
+
 def test_dev_chat_forwards_every_parameter_of_chat(ensure_calls: list[dict[str, Any]], chat_calls: list[dict[str, Any]]) -> None:
     import inspect
 

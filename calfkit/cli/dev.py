@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import typer
 
-from calfkit.cli import _dev_broker
+from calfkit.cli import _dev_agents, _dev_broker
 from calfkit.cli._common import _load_env, _parse_host
 from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, Target, normalize
 from calfkit.cli.chat import chat as _chat_command
@@ -152,6 +152,12 @@ def dev_run(
         app_dir=app_dir,
         group_id=group_id,
         env_file=env_file,
+        # The hidden internals, forwarded explicitly with their dev presets so the
+        # forwards-every-parameter guard keeps its equality contract: the 5s heartbeat applies
+        # to foreground dev runs too (agent-lifecycle spec §5.6); a foreground run is never a
+        # daemon, so no ownership marker.
+        dev_daemon=None,
+        heartbeat_interval=_dev_agents.DEV_HEARTBEAT_INTERVAL,
     )
 
 

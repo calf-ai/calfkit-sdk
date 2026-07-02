@@ -31,6 +31,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict:
         def __init__(self, client: object, nodes: object = None, group_id: object = None, **kwargs: object) -> None:
             cap["nodes"] = nodes
             cap["group_id"] = group_id
+            cap["control_plane"] = kwargs.get("control_plane")
 
         async def run(self, **kwargs: object) -> None:
             cap["ran"] = True
@@ -117,6 +118,25 @@ def test_serve_enable_idempotence_opts_in(captured: dict) -> None:
 
     serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".", enable_idempotence=True)
     assert captured["enable_idempotence"] is True
+
+
+def test_serve_heartbeat_interval_threads_a_control_plane_config(captured: dict) -> None:
+    """The hidden --heartbeat-interval (the ck dev 5s preset, dev-agent-lifecycle spec §5.6)
+    reaches the Worker as ControlPlaneConfig(heartbeat_interval=...)."""
+    from calfkit.cli._run import serve
+    from calfkit.controlplane import ControlPlaneConfig
+
+    serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".", heartbeat_interval=5.0)
+    assert captured["control_plane"] == ControlPlaneConfig(heartbeat_interval=5.0)
+
+
+def test_serve_default_passes_no_control_plane(captured: dict) -> None:
+    """Without a heartbeat override, serve passes control_plane=None so the worker's own
+    defaults apply — production cadence is untouched by the dev plumbing."""
+    from calfkit.cli._run import serve
+
+    serve([f"{_FIXTURE}:single"], host=None, provision=False, group_id=None, env_file=None, app_dir=".")
+    assert captured["control_plane"] is None
 
 
 def test_serve_banner_shows_idempotence_state(captured: dict, capsys: pytest.CaptureFixture[str]) -> None:
