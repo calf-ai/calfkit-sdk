@@ -268,9 +268,11 @@ def _format_age(seconds: float) -> str:
 
 @dev_app.command(name="chat")
 def dev_chat(
-    name: str | None = typer.Argument(
+    args: list[str] | None = typer.Argument(
         None,
-        help="Agent to chat with. Omit to pick from the list of online agents.",
+        help="An agent NAME to attach to, or 'module:attr' TARGET(s) to run as a session worker "
+        "inside this chat process (they stop when the session ends). Omit to pick from the "
+        "online agents.",
     ),
     host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
     provision: bool = typer.Option(
@@ -291,16 +293,59 @@ def dev_chat(
 ) -> None:
     """Chat with an agent on the local dev mesh, spawning its broker if needed."""
     _load_env(env_file)
+    # The §3.2 grammar: an argument containing ':' is a module:attr target; a bare word is an
+    # agent name. Mixing them, or more than one bare name, is a usage error.
+    values = list(args or [])
+    target_specs = [value for value in values if ":" in value]
+    names = [value for value in values if ":" not in value]
+    if target_specs and names:
+        typer.echo(
+            "Error: cannot mix agent names and 'module:attr' targets — attach to ONE online agent by name, or launch target(s) for this session.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if len(names) > 1:
+        typer.echo(
+            f"Error: chat attaches to one agent, got {len(names)} names ({', '.join(names)}); pass one name or omit it to pick.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if target_specs:
+        _chat_targets(target_specs, host=host, provision=provision, env_file=env_file, timeout=timeout)
+        return
     servers = resolve_mesh_url(_parse_host(host))
     target = _normalize_or_exit(servers)
     _ensure_or_exit(target)
     _chat_command(
-        name=name,
+        name=names[0] if names else None,
         host=_forward_host(target),
         provision=provision,
         env_file=env_file,
         timeout=timeout,
     )
+
+
+def _chat_targets(targets: list[str], *, host: str | None, provision: bool, env_file: str | None, timeout: float | None) -> None:
+    """The ``chat TARGET...`` session mode (agent-lifecycle spec §3.2): ensure the broker,
+    preflight the targets, then run the in-process session — the worker lives inside the chat
+    process and dies with it, atomically, by construction. No reload (an in-process worker
+    cannot re-import user code): the edit loop is save → /exit → rerun."""
+    target = _normalize_or_exit(resolve_mesh_url(_parse_host(host)))
+    _ensure_or_exit(target)
+    try:
+        plan = _dev_agents.preflight(targets, app_dir=".")
+    except _dev_agents.DevAgentError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    from calfkit.cli import chat as chat_module
+    from calfkit.cli._chat import run_chat_session
+
+    session = run_chat_session(None, _forward_host(target), timeout, provision, session_plan=plan, session_host_key=target.key)
+    try:
+        chat_module.run_session_command(session)
+    except _dev_agents.DevAgentError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
 
 
 _ENV_FILE_HELP = "Path to a dotenv file to load. Defaults to ./.env if present."

@@ -590,6 +590,76 @@ def test_dev_run_detach_closes_the_readiness_client(detach_seams: dict[str, Any]
     assert detach_seams["ensure"]["mesh"] is client.mesh
 
 
+# --- dev chat grammar: names attach, targets launch in-process (agent-lifecycle spec §3.2) -------------
+
+
+def test_dev_chat_bare_name_attaches_via_the_delegate(ensure_calls: list[dict[str, Any]], chat_calls: list[dict[str, Any]]) -> None:
+    result = _invoke(["dev", "chat", "general"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert chat_calls[0]["name"] == "general"
+
+
+def test_dev_chat_mixing_names_and_targets_is_a_usage_error(chat_calls: list[dict[str, Any]]) -> None:
+    result = _invoke(["dev", "chat", "general", "app:agent"])
+    assert result.exit_code == 2
+    assert "mix" in _plain(result.stderr)
+    assert chat_calls == []
+
+
+def test_dev_chat_more_than_one_bare_name_is_a_usage_error(chat_calls: list[dict[str, Any]]) -> None:
+    result = _invoke(["dev", "chat", "general", "finance"])
+    assert result.exit_code == 2
+    assert chat_calls == []
+
+
+def test_dev_chat_targets_dispatch_to_the_session_launcher_not_the_delegate(
+    monkeypatch: pytest.MonkeyPatch, chat_calls: list[dict[str, Any]]
+) -> None:
+    launched: dict[str, Any] = {}
+
+    def fake_chat_targets(targets: list[str], **kwargs: Any) -> None:
+        launched["targets"] = targets
+        launched.update(kwargs)
+
+    monkeypatch.setattr(dev_cli, "_chat_targets", fake_chat_targets)
+    result = _invoke(["dev", "chat", "app:agent", "tools:all", "--timeout", "7"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert launched["targets"] == ["app:agent", "tools:all"]
+    assert launched["timeout"] == 7.0
+    assert chat_calls == []
+
+
+def test_dev_chat_target_session_ensures_broker_then_preflights(detach_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.2 order: ensure the broker, preflight the targets, then run the session."""
+    session_runs: list[Any] = []
+    monkeypatch.setattr("calfkit.cli.chat.run_session_command", lambda coro: (coro.close(), session_runs.append(coro))[1])
+    result = _invoke(["dev", "chat", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert detach_seams["order"][:2] == ["ensure_broker", "preflight"]
+    assert len(session_runs) == 1
+
+
+def test_dev_chat_target_preflight_error_exits_2(detach_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken_preflight(targets: list[str], *, app_dir: str | None = None) -> list[TargetNodes]:
+        raise DevAgentError("duplicate node name 'general'")
+
+    monkeypatch.setattr(dev_agents, "preflight", broken_preflight)
+    result = _invoke(["dev", "chat", "app:agent"])
+    assert result.exit_code == 2
+    assert "duplicate node name" in _plain(result.stderr)
+
+
+def test_dev_chat_target_session_supervisor_error_exits_2(detach_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    def raising_run(coro: Any) -> None:
+        coro.close()
+        raise DevAgentError("no agents among the given targets")
+
+    monkeypatch.setattr("calfkit.cli.chat.run_session_command", raising_run)
+    result = _invoke(["dev", "chat", "app:agent"])
+    assert result.exit_code == 2
+    assert "no agents among" in _plain(result.stderr)
+
+
 def test_dev_run_forwards_the_hidden_internals_explicitly(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:
     """The parity-guard contract (impl plan CG-B): `dev run` forwards the hidden internals with
     their preset values — the 5s dev heartbeat (spec §5.6 covers foreground dev runs too) and no

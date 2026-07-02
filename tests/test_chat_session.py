@@ -20,7 +20,9 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo as _FnAgentInfo
 from calfkit._vendor.pydantic_ai.models.function import FunctionModel
+from calfkit.cli import _dev_agents
 from calfkit.cli._chat import _chat_loop, _render_and_collect, _resolve_target, _run_turn, run_chat_session
+from calfkit.cli._dev_agents import DevAgentError, TargetNodes, TargetOutcome
 from calfkit.client import Client
 from calfkit.client.events import RunCompleted, RunFailed
 from calfkit.client.hub import InvocationHandle, _RunChannel
@@ -430,3 +432,190 @@ async def test_chat_loop_keeps_current_agent_when_a_turn_fails(capsys: pytest.Ca
     await _chat_loop(client, "bot", None, _scripted(["boom", "/exit"]))
     assert client.binds == ["bot"]  # never re-bound despite the fault
     assert "bot > [error] boom" in capsys.readouterr().out
+
+
+# --- ck dev chat TARGET: the in-process session worker (agent-lifecycle spec §3.2) ---------------------
+
+
+@pytest.fixture
+def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> object:
+    """The session takes the agent-layer flock under ~/.calfkit — keep it out of the real home."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+def _target_nodes(spec: str = "app:agent", agent_names: tuple[str, ...] = ("general",), tool_names: tuple[str, ...] = ()) -> TargetNodes:
+    nodes = tuple(object() for _ in (*agent_names, *tool_names))
+    return TargetNodes(spec=spec, nodes=nodes, agent_names=agent_names, tool_names=tool_names)
+
+
+class _SessionWorker:
+    """Captures the in-process worker construction + lifecycle the session drives."""
+
+    instances: list[_SessionWorker] = []
+
+    def __init__(self, client: object, nodes: object = None, **kwargs: object) -> None:
+        self.client = client
+        self.nodes = nodes
+        self.kwargs = kwargs
+        self.started = False
+        self.stopped = False
+        _SessionWorker.instances.append(self)
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.fixture
+def session_seams(monkeypatch: pytest.MonkeyPatch, isolated_home: object) -> dict:
+    """Default drivable seams: one launched target, readiness OK, picker quit immediately."""
+    seams: dict = {"evaluate": ([], [_target_nodes()]), "waits": []}
+    _SessionWorker.instances = []
+
+    async def fake_evaluate(plan: object, host_key: object, mesh: object) -> tuple:
+        seams["evaluate_args"] = (plan, host_key, mesh)
+        result: tuple = seams["evaluate"]
+        return result
+
+    async def fake_wait(proc: object, agent_names: object, tool_names: object, mesh: object, **kwargs: object) -> None:
+        seams["waits"].append({"proc": proc, "agent_names": agent_names, "tool_names": tool_names, **kwargs})
+
+    monkeypatch.setattr(_dev_agents, "evaluate_targets", fake_evaluate)
+    monkeypatch.setattr(_dev_agents, "wait_agents_ready", fake_wait)
+    monkeypatch.setattr("calfkit.worker.Worker", _SessionWorker)
+    _patch_get_agents(monkeypatch, result={"general": _agent("general", None)})
+    monkeypatch.setattr("calfkit.cli._chat.make_reader", lambda _loop: _scripted(["q"]))
+    return seams
+
+
+async def test_session_launches_the_worker_on_the_shared_client_and_stops_it(session_seams: dict, capsys: pytest.CaptureFixture[str]) -> None:
+    """The co-located contract (spec §9 'Session worker's Client'): the worker shares the chat
+    session's Client, carries the 5s dev heartbeat preset explicitly, hosts the launched nodes,
+    and is stopped before the client closes — on the session's normal end."""
+    from calfkit.controlplane import ControlPlaneConfig
+
+    plan = [_target_nodes()]
+    session_seams["evaluate"] = ([], plan)  # the worker hosts what the evaluation says to launch
+    await run_chat_session(None, "localhost:9092", None, session_plan=plan, session_host_key="127.0.0.1:9092")
+    (worker,) = _SessionWorker.instances
+    assert isinstance(worker.client, Client)
+    assert worker.started and worker.stopped
+    assert list(worker.nodes) == list(plan[0].nodes)  # type: ignore[call-overload]
+    assert worker.kwargs["control_plane"] == ControlPlaneConfig(heartbeat_interval=5.0)
+    out = capsys.readouterr().out
+    assert "✦ stopped 'general' (ran in this session)" in out
+    assert "still running" not in out
+    # The chat variant of the readiness gate: no process arm.
+    (wait,) = session_seams["waits"]
+    assert wait["proc"] is None
+    assert wait["agent_names"] == ["general"]
+
+
+async def test_session_all_reused_starts_no_worker(session_seams: dict, capsys: pytest.CaptureFixture[str]) -> None:
+    """All targets reused: attach-plus-narration only (spec §3.2) — nothing is started, and the
+    exit line's still-running names are the reused ones."""
+    target = _target_nodes()
+    session_seams["evaluate"] = ([TargetOutcome(target=target, reused=True, ages={"general": 2.0})], [])
+    await run_chat_session(None, "localhost:9092", None, session_plan=[target], session_host_key="127.0.0.1:9092")
+    assert _SessionWorker.instances == []
+    assert session_seams["waits"] == []
+    out = capsys.readouterr().out
+    assert "✦ still running: general — 'ck dev chat' to rejoin, 'ck dev down' to stop everything" in out
+    assert "ran in this session" not in out
+
+
+async def test_session_mixed_launch_and_reuse_narrates_both(session_seams: dict, capsys: pytest.CaptureFixture[str]) -> None:
+    launched = _target_nodes(spec="app:general", agent_names=("general",))
+    reused = _target_nodes(spec="app:finance", agent_names=("finance",))
+    session_seams["evaluate"] = ([TargetOutcome(target=reused, reused=True, ages={"finance": 1.0})], [launched])
+    await run_chat_session(None, "localhost:9092", None, session_plan=[launched, reused], session_host_key="127.0.0.1:9092")
+    out = capsys.readouterr().out
+    assert "✦ stopped 'general' (ran in this session)" in out
+    assert "✦ still running: finance" in out
+
+
+async def test_session_requires_an_agent_among_launched_and_reused(session_seams: dict) -> None:
+    """§7: tools-only launched+reused = nobody to chat with — a preflight-style error, NOT
+    softened into a picker over unrelated online agents; nothing is started."""
+    tools_only = _target_nodes(spec="tools:get_weather", agent_names=(), tool_names=("get_weather",))
+    session_seams["evaluate"] = ([], [tools_only])
+    with pytest.raises(DevAgentError, match=r"nobody to chat with"):
+        await run_chat_session(None, "localhost:9092", None, session_plan=[tools_only], session_host_key="127.0.0.1:9092")
+    assert _SessionWorker.instances == []
+
+
+async def test_session_worker_stopped_when_readiness_fails(session_seams: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Teardown on every exit path (§10): a readiness deadline after a successful start must
+    still stop the in-process worker."""
+
+    async def deadline(*args: object, **kwargs: object) -> None:
+        raise DevAgentError("the launched agents did not come online within 15.0s")
+
+    monkeypatch.setattr(_dev_agents, "wait_agents_ready", deadline)
+    with pytest.raises(DevAgentError, match="did not come online"):
+        await run_chat_session(None, "localhost:9092", None, session_plan=[_target_nodes()], session_host_key="127.0.0.1:9092")
+    (worker,) = _SessionWorker.instances
+    assert worker.started and worker.stopped
+
+
+async def test_session_worker_start_failure_surfaces_directly(
+    session_seams: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§7: an in-process Worker.start() failure surfaces in the terminal (same process) and is
+    exit-2 material for the command boundary."""
+
+    async def broken_start(self: object) -> None:
+        raise RuntimeError("kafka down")
+
+    monkeypatch.setattr(_SessionWorker, "start", broken_start)
+    with pytest.raises(DevAgentError, match="failed to start"):
+        await run_chat_session(None, "localhost:9092", None, session_plan=[_target_nodes()], session_host_key="127.0.0.1:9092")
+    assert "kafka down" in capsys.readouterr().err  # the traceback, surfaced directly
+
+
+async def test_session_holds_the_flock_through_readiness_and_releases_before_the_repl(
+    session_seams: dict, monkeypatch: pytest.MonkeyPatch, isolated_home: object
+) -> None:
+    """Chat flock scope (spec §9): evaluate→start→readiness under the agent-layer lock, released
+    before the REPL opens."""
+    import fcntl
+    from pathlib import Path
+
+    lock_path = Path(str(isolated_home)) / ".calfkit" / "dev-agents.lock"
+    states: dict[str, bool] = {}
+
+    def _held() -> bool:
+        with lock_path.open("rb") as fd:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+
+    async def probing_wait(*args: object, **kwargs: object) -> None:
+        states["during_readiness"] = _held()
+
+    monkeypatch.setattr(_dev_agents, "wait_agents_ready", probing_wait)
+
+    def probing_reader(_loop: object) -> object:
+        async def read_line(_prompt: str) -> str:
+            states.setdefault("at_repl", _held())
+            return "q"
+
+        return read_line
+
+    monkeypatch.setattr("calfkit.cli._chat.make_reader", probing_reader)
+    await run_chat_session(None, "localhost:9092", None, session_plan=[_target_nodes()], session_host_key="127.0.0.1:9092")
+    assert states == {"during_readiness": True, "at_repl": False}
+
+
+async def test_attach_only_sessions_exit_silently(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """No session_plan = today's attach behavior exactly: no ✦ narration on exit (spec §3.2)."""
+    _patch_get_agents(monkeypatch, result={"alpha": _agent("alpha", "x")})
+    monkeypatch.setattr("calfkit.cli._chat.make_reader", lambda _loop: _scripted(["q"]))
+    await run_chat_session(None, "localhost:9092", None)
+    assert "✦" not in capsys.readouterr().out

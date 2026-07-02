@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import traceback
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import typer
 
+from calfkit.cli import _dev_agents
 from calfkit.cli._chat_io import make_reader
 from calfkit.cli._chat_render import _error_line, _render_answer, _render_fault, _render_step, format_picker
 from calfkit.client import Client, RunCompleted, RunFailed
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
     from calfkit._vendor.pydantic_ai.messages import ModelMessage
+    from calfkit.cli._dev_agents import TargetNodes, TargetOutcome
     from calfkit.client import AgentGateway
     from calfkit.client.hub import InvocationHandle
     from calfkit.client.mesh import AgentInfo
@@ -53,7 +56,15 @@ class _TurnResult(NamedTuple):
     responder: str
 
 
-async def run_chat_session(name: str | None, server_urls: str | list[str] | None, timeout: float | None, provision: bool = False) -> None:
+async def run_chat_session(
+    name: str | None,
+    server_urls: str | list[str] | None,
+    timeout: float | None,
+    provision: bool = False,
+    *,
+    session_plan: list[TargetNodes] | None = None,
+    session_host_key: str | None = None,
+) -> None:
     """Connect, discover the online agents, resolve the target, and run the REPL.
 
     A not-ready mesh raises ``MeshUnavailableError`` from ``get_agents()`` — left to
@@ -63,19 +74,108 @@ async def run_chat_session(name: str | None, server_urls: str | list[str] | None
     ``provision`` (``--provision``) opt-in creates this client's reply inbox topic at broker
     start — needed on brokers that don't auto-create topics (e.g. Tansu). The agent's own topics
     are provisioned by its worker (``ck run --provision``), not here.
+
+    ``session_plan`` is ``ck dev chat TARGET...`` (agent-lifecycle spec §3.2): host the plan's
+    non-reused targets on an in-process Worker sharing THIS session's client, gate on their
+    presence readiness, then enter the normal picker; the worker is stopped on every session end
+    (before the client closes). ``session_host_key`` scopes the connect-or-spawn evaluation.
     """
     read_line = make_reader(asyncio.get_running_loop())
     provisioning = ProvisioningConfig(enabled=True) if provision else None
     async with Client.connect(server_urls, provisioning=provisioning) as client:
-        print("Discovering agents...")
-        agents = await client.mesh.get_agents()
-        if not agents:  # ready, but zero live agents
-            print("No agents are online on the mesh.")
+        if session_plan is None:
+            await _attach(client, name, timeout, read_line)
             return
-        picked = await _resolve_target(name, agents, read_line)
-        if picked is None:  # user quit at the picker
-            return
-        await _chat_loop(client, picked, timeout, read_line)
+        if session_host_key is None:
+            raise ValueError("session_plan requires session_host_key (the connect-or-spawn address scope)")
+        await _target_session(client, session_plan, session_host_key, timeout, read_line)
+
+
+async def _attach(client: Client, name: str | None, timeout: float | None, read_line: ReadLine) -> None:
+    """Today's attach flow: discover -> pick (or resolve the name) -> REPL."""
+    print("Discovering agents...")
+    agents = await client.mesh.get_agents()
+    if not agents:  # ready, but zero live agents
+        print("No agents are online on the mesh.")
+        return
+    picked = await _resolve_target(name, agents, read_line)
+    if picked is None:  # user quit at the picker
+        return
+    await _chat_loop(client, picked, timeout, read_line)
+
+
+async def _target_session(
+    client: Client,
+    plan: list[TargetNodes],
+    host_key: str,
+    timeout: float | None,
+    read_line: ReadLine,
+) -> None:
+    """The ``ck dev chat TARGET...`` session (agent-lifecycle spec §3.2).
+
+    Under the agent-layer flock (released before the REPL opens): connect-or-spawn evaluation —
+    reused targets are excluded — then the non-reused nodes are hosted on an in-process
+    ``Worker`` **sharing this session's Client** (the co-located contract ``client/caller.py``
+    documents: the start-lock serializes the co-located ``app.start()``, and the worker stops
+    before the client closes), with the 5s dev heartbeat preset set explicitly at construction.
+    The worker dies with this process by construction — no reload, no child to orphan. Worker
+    logs stay on this terminal (v1). On any session end the worker is stopped and the §3.2 exit
+    narration prints.
+    """
+    from calfkit.controlplane import ControlPlaneConfig
+    from calfkit.worker import Worker
+
+    worker: Any = None
+    reused: list[TargetOutcome] = []
+    launched: list[TargetNodes] = []
+    repl_entered = False
+    try:
+        with _dev_agents.agents_lock():
+            reused, to_launch = await _dev_agents.evaluate_targets(plan, host_key, client.mesh)
+            session_agents = [n for t in to_launch for n in t.agent_names] + [n for o in reused for n in o.target.agent_names]
+            if not session_agents:  # §7: a precondition over the launched+reused set only
+                raise _dev_agents.DevAgentError(
+                    "the given targets resolve to no agents (tools only) — nobody to chat with. "
+                    "Launch tools with 'ck dev run -d' and chat with an agent that uses them."
+                )
+            if to_launch:
+                worker = Worker(
+                    client,  # the SHARED session client — caller.py's documented co-located mode
+                    nodes=[node for target in to_launch for node in target.nodes],
+                    control_plane=ControlPlaneConfig(heartbeat_interval=_dev_agents.DEV_HEARTBEAT_INTERVAL),
+                )
+                try:
+                    await worker.start()
+                except Exception as exc:
+                    traceback.print_exc()  # §7: surface directly — it IS this process
+                    raise _dev_agents.DevAgentError(f"the session worker failed to start: {exc}") from exc
+                launched = list(to_launch)
+                await _dev_agents.wait_agents_ready(
+                    None,  # the chat variant: no process arm — a failed start already raised above
+                    [n for t in to_launch for n in t.agent_names],
+                    [n for t in to_launch for n in t.tool_names],
+                    client.mesh,
+                    log_path=None,
+                )
+        repl_entered = True
+        await _attach(client, None, timeout, read_line)
+    finally:
+        if worker is not None:
+            await worker.stop()  # BEFORE the client closes (caller.py's aclose ordering)
+        if repl_entered:  # a launch that never reached the REPL reports its error, not narration
+            _print_session_narration(
+                [name for target in launched for name in target.names],
+                [name for outcome in reused for name in outcome.target.names],
+            )
+
+
+def _print_session_narration(launched_names: list[str], reused_names: list[str]) -> None:
+    """§3.2 exit narration — only when the session launched or reused something; attach-only
+    sessions exit silently."""
+    if launched_names:
+        print(f"✦ stopped '{', '.join(launched_names)}' (ran in this session)")
+    if reused_names:
+        print(f"✦ still running: {', '.join(reused_names)} — 'ck dev chat' to rejoin, 'ck dev down' to stop everything")
 
 
 async def _resolve_target(name: str | None, agents: Mapping[str, AgentInfo], read_line: ReadLine) -> str | None:

@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from typing import TYPE_CHECKING, Any
 
 import typer
 
 from calfkit.cli._common import _load_env, _parse_host
 from calfkit.exceptions import MeshUnavailableError
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
 
 # Reason -> remedy hint for an unusable mesh directory (the closed
 # MeshUnavailableError.reason set; ``.get`` degrades gracefully if it ever grows).
@@ -67,11 +71,18 @@ def chat(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
 
-    # The session runs in a SEPARATE try: a ValueError raised in here (e.g. a pydantic
-    # ValidationError, which subclasses ValueError) is a real bug and must propagate with its
-    # traceback — not be masked as a clean config-error Exit(2).
+    run_session_command(run_chat_session(name, server_urls, timeout, provision))
+
+
+def run_session_command(session: Coroutine[Any, Any, None]) -> None:
+    """The shared command boundary around a chat session (``ck chat`` and ``ck dev chat``).
+
+    Runs the session in a try SEPARATE from any config parsing: a ValueError raised in here
+    (e.g. a pydantic ValidationError, which subclasses ValueError) is a real bug and must
+    propagate with its traceback — not be masked as a clean config-error Exit(2).
+    """
     try:
-        asyncio.run(run_chat_session(name, server_urls, timeout, provision))
+        asyncio.run(session)
     except KeyboardInterrupt:
         # Ctrl-C at a prompt or mid-turn: a clean stop, not a traceback (the
         # add_reader-based reader cancels cleanly — see _chat_io).
