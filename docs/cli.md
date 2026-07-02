@@ -265,9 +265,12 @@ which ships the binary (Linux x86_64/aarch64 glibc+musl, macOS arm64/x86_64 — 
 Windows; the broker is Unix-only) and `psutil` (the ownership scan).
 `CALF_TANSU_BIN` overrides the bundled binary with your own, with or without the
 extra installed (resolution order: `CALF_TANSU_BIN` → bundled → `tansu` on
-`PATH`). Without the extra, `ck dev run`/`ck dev chat` still work as pure
-clients against an already-reachable broker; the `ck dev broker` management
-commands need the extra's process scan. See
+`PATH`). Without the extra, foreground `ck dev run` and the `ck dev chat`
+attach forms still work as pure clients against an already-reachable broker —
+but everything that manages agent daemons needs the extra's process scan:
+`ck dev run -d`, `ck dev chat TARGET…`, `ck dev status`, `ck dev stop`,
+`ck dev down`, and the `ck dev broker` management commands (each exits `2`
+with the install hint without it). See
 [How to run a local mesh with `ck dev`](local-dev-mesh.md).
 
 ### Spawn rules
@@ -318,6 +321,10 @@ returns only when its agents/tools are **online on the mesh** (bounded at
 - If a daemon for a name exists but its agents are offline (broken code or
   mid-restart), a relaunch is an **error** naming the pid, the logs, and the
   `stop` command — never a second daemon over a broken first.
+- If a target is **partially online** (some of its names online, others not),
+  launching it is an error naming the collision — a worker hosts all of a
+  target's nodes together, so it can neither be reused nor launched. Applies
+  to `chat TARGET…` too.
 - All targets of one invocation co-host in **one** worker (the `ck run`
   rule); they still discover and communicate over the mesh, never in-process.
 - A target must resolve to at least one agent or tool (a plain consumer node
@@ -326,10 +333,13 @@ returns only when its agents/tools are **online on the mesh** (bounded at
   `ck dev status`); exit `130`.
 
 Ownership is **stateless**: a daemon is recognized by an internal
-`--dev-daemon=<names>` marker in its command line (with its `--host` scoping
-it to an address), exactly like the broker's process scan — no registry file
-anywhere. The flag is internal `ck dev` plumbing; it is accepted (and ignored)
-by `ck run` purely so it lands in the daemon's argv.
+`--dev-daemon=<names>` marker in its command line — matched only in that
+exact emitted form, and only on a `run` command line, so the flag merely
+*appearing as data* in some other process's argv (say, a grep of it) never
+matches — with its `--host` scoping it to an address, exactly like the
+broker's process scan; no registry file anywhere. The flag is internal
+`ck dev` plumbing; it is accepted (and ignored) by `ck run` purely so it
+lands in the daemon's argv.
 
 ### `ck dev chat` targets — session workers
 
@@ -363,7 +373,15 @@ daemon-owned name with no mesh record reads `unknown (see logs)` (crashed
 edit, mid-restart, or still booting — indistinguishable from outside). A down
 broker never errors: its line reads `no broker reachable`, presence columns
 degrade to `unknown (mesh unreachable)`, daemon rows still render. Exit `0`
-always.
+whenever it can answer — a down broker or unreadable mesh never errors; only a
+missing `[mesh]` extra or an invalid address exits `2`, as everywhere in the
+family.
+
+Heartbeat cadence behind the ages: every worker `ck dev` launches (foreground
+runs, `-d` daemons, chat-session workers) heartbeats every **5 s**, so its
+crash-staleness window is ~15 s. A worker launched by plain `ck run` keeps the
+30 s production default — its "online" can lag a crash by up to ~90 s, ages
+shown all the same.
 
 ### `ck dev stop` and `ck dev down`
 

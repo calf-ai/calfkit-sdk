@@ -179,11 +179,26 @@ def test_scan_matches_only_the_supervisor_never_spawn_main_descendants(monkeypat
     assert [hit.pid for hit in hits] == [4055]
 
 
-def test_scan_accepts_the_space_separated_flag_form(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A hand-run ``ck run … --dev-daemon general`` is managed too (R3: whoever started it)."""
-    argv = [sys.executable, "-m", "calfkit.cli", "run", "app:agent", "--dev-daemon", "general"]
-    install_fake_psutil(monkeypatch, [FakeProc(4055, argv)])
+def test_scan_requires_the_emitted_marker_form_never_the_bare_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 1 (Ryan-approved): the marker matches ONLY its emitted ``--dev-daemon=<names>``
+    form — a bare ``--dev-daemon`` token appearing as *data* in some other process's argv (e.g.
+    ``rg -- --dev-daemon docs/``) must never be claimed as a daemon, or ``ck dev down`` would
+    group-kill an innocent process."""
+    searcher = FakeProc(6001, ["rg", "--", "--dev-daemon", "docs/"])
+    space_form = FakeProc(6002, [sys.executable, "-m", "calfkit.cli", "run", "app:agent", "--dev-daemon", "general"])
+    install_fake_psutil(monkeypatch, [searcher, space_form])
+    assert _dev_agents.scan_daemons() == []
+
+
+def test_scan_requires_a_run_token_alongside_the_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Second anchor (review round 1, Ryan-approved): the emitted marker only ever rides a
+    ``run`` command line, so a process merely *mentioning* the ``=``-form (e.g. a grep of a log
+    line) is still not a daemon."""
+    grepper = FakeProc(6003, ["rg", "--", "--dev-daemon=general", "notes.md"])
+    hand_run_ck = FakeProc(6004, ["/venv/bin/ck", "run", "app:agent", "--dev-daemon=general"])
+    install_fake_psutil(monkeypatch, [grepper, hand_run_ck])
     (hit,) = _dev_agents.scan_daemons()
+    assert hit.pid == 6004  # the hand-run `ck run` form stays managed (R3: whoever started it)
     assert hit.names == ("general",)
 
 
@@ -242,14 +257,12 @@ def test_find_daemons_filters_by_host_key(monkeypatch: pytest.MonkeyPatch) -> No
     assert [hit.pid for hit in _dev_agents.find_daemons(None)] == [4055, 4102]
 
 
-def test_scan_handles_a_marker_on_a_non_run_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A hand-set marker on an argv with no ``run`` verb still scans (whoever started it): no
-    positional targets, so the derived log slug is targets-less — best-effort, R3."""
+def test_scan_skips_a_marker_on_a_non_run_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``run`` anchor is required (review round 1): a marker on an argv with no ``run`` verb
+    is data, not a daemon — unmatchable, so unmanageable, so never signalled."""
     argv = [sys.executable, "-m", "calfkit.cli", "--dev-daemon=general", "--host", "127.0.0.1:9092"]
     install_fake_psutil(monkeypatch, [FakeProc(4055, argv)])
-    (hit,) = _dev_agents.scan_daemons()
-    assert hit.targets == ()
-    assert hit.names == ("general",)
+    assert _dev_agents.scan_daemons() == []
 
 
 def test_killpg_seam_delivers_via_os_killpg(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,6 +381,40 @@ async def test_wait_ready_reads_only_the_kinds_the_targets_advertise() -> None:
     assert set(mesh.reads) == {"agents"}
 
 
+async def test_wait_ready_reader_dead_fails_fast_naming_the_client_side_failure() -> None:
+    """Review round 1 (Ryan-approved): ``reader_dead`` is terminal for the view's lifetime —
+    polling it for 15s and then blaming the daemon's healthy log misdiagnoses a client-side
+    failure. Fail fast, naming the real culprit."""
+    dead = MeshUnavailableError("the agents reader died", reason="reader_dead")
+    mesh = FakeMesh(agents_frames=[dead])
+    with pytest.raises(DevAgentError, match=r"(?s)presence view died.*not the agents") as exc:
+        await _dev_agents.wait_agents_ready(None, ("general",), (), mesh, log_path=None, **_fast_wait())
+    assert exc.value.__cause__ is dead
+
+
+async def test_wait_ready_reader_dead_still_tears_down_the_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fail-fast arm must not strand a half-started spawn: the group is killed exactly as on
+    the deadline path."""
+    import signal
+
+    killed = _record_killpg(monkeypatch)
+    proc = FakePopen(["cmd"], stdout=None)
+    mesh = FakeMesh(agents_frames=[MeshUnavailableError("died", reason="reader_dead")])
+    with pytest.raises(DevAgentError, match="presence view died"):
+        await _dev_agents.wait_agents_ready(proc, ("general",), (), mesh, log_path=None, **_fast_wait())
+    assert killed == [(proc.pid, signal.SIGKILL)]
+
+
+async def test_wait_ready_deadline_names_the_unreadable_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deadline that never saw a readable view must say so — 'did not come online' would point
+    the user at their agent when the presence read itself was the problem."""
+    _record_killpg(monkeypatch)
+    establishing = MeshUnavailableError("catching up", reason="establishing")
+    mesh = FakeMesh(agents_frames=[establishing])
+    with pytest.raises(DevAgentError, match=r"(?s)never became readable.*establishing"):
+        await _dev_agents.wait_agents_ready(None, ("general",), (), mesh, log_path=None, **_fast_wait())
+
+
 # --- connect-or-spawn evaluation (spec §5.5) ----------------------------------------------------------
 
 
@@ -402,6 +449,19 @@ async def test_evaluate_unopenable_view_counts_as_none_online(monkeypatch: pytes
     mesh = FakeMesh(agents_frames=[_unavailable()])
     _, to_launch = await _dev_agents.evaluate_targets([_target("general")], _KEY, mesh)
     assert [t.spec for t in to_launch] == [f"{_NODES}:general"]
+
+
+async def test_evaluate_non_open_failed_read_failures_error_instead_of_classifying(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec §5.5 pins only ``open_failed`` as none-online. ``establishing``/``reader_dead`` are a
+    different class: classifying on them could brand a HEALTHY daemon 'broken' (and advise
+    'ck dev stop' against it) or double-spawn — error naming the read failure instead (review
+    round 1, Ryan-approved)."""
+    daemon = FakeProc(4055, _daemon_argv(marker="--dev-daemon=general"))
+    install_fake_psutil(monkeypatch, [daemon])
+    for reason in ("establishing", "reader_dead"):
+        mesh = FakeMesh(agents_frames=[MeshUnavailableError("unreadable", reason=reason)])
+        with pytest.raises(DevAgentError, match=rf"(?s)could not be read.*{reason}"):
+            await _dev_agents.evaluate_targets([_target("general")], _KEY, mesh)
 
 
 async def test_evaluate_broken_daemon_errors_instead_of_a_second_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -493,9 +553,16 @@ async def test_ensure_spawns_one_daemon_for_all_offline_targets(monkeypatch: pyt
     assert "--dev-daemon=general,get_weather" in proc.cmd
     heartbeat_index = proc.cmd.index("--heartbeat-interval")
     assert proc.cmd[heartbeat_index + 1] == "5.0"
-    # The detach + log-fd contract (the broker Popen pattern verbatim).
+    # The detach + log-fd contract (the broker Popen pattern verbatim): stdout and stderr share
+    # the REAL log-file fd (never PIPE — an unread pipe would deadlock a chatty worker), stdin is
+    # detached, and the parent closes its copy of the fd after the spawn.
+    import subprocess as subprocess_module
+
     assert proc.kwargs["start_new_session"] is True
-    assert proc.kwargs["stdin"] is not None
+    assert proc.kwargs["stdin"] is subprocess_module.DEVNULL
+    assert proc.kwargs["stdout"] is proc.kwargs["stderr"]
+    assert Path(proc.kwargs["stdout"].name) == Path(str(report.log_path))
+    assert proc.kwargs["stdout"].closed  # the parent's copy — the daemon holds its own
     assert report.pid == proc.pid
     assert report.log_path is not None and Path(report.log_path).exists()
     assert [o.reused for o in report.outcomes] == [False, False]
@@ -598,14 +665,51 @@ def _group_killer(monkeypatch: pytest.MonkeyPatch, procs: list[FakeProc], *, die
     return calls
 
 
-def test_stop_daemon_signals_the_process_group_term_first(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_daemon_signals_the_group_term_then_a_final_kill_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 1 (Ryan-approved): leader death alone must not declare the GROUP dead — a
+    SIGTERM-surviving grandchild (a node's own subprocess) would silently outlive the 'stopped'
+    report, markerless and unmanageable. After the leader is gone, one unconditional group
+    SIGKILL sweeps the now-headless tree."""
     import signal as signal_module
 
     install_fake_psutil(monkeypatch, [])
     proc = FakeProc(4055)
     calls = _group_killer(monkeypatch, [proc])
     assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
-    assert calls == [(4055, signal_module.SIGTERM)]
+    assert calls == [(4055, signal_module.SIGTERM), (4055, signal_module.SIGKILL)]
+
+
+def test_stop_daemon_final_sweep_tolerates_an_already_empty_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The final sweep is best-effort: a fully-dead group raises ProcessLookupError — the goal
+    state, not a failure."""
+    import signal as signal_module
+
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055)
+    calls: list[tuple[int, int]] = []
+
+    def killpg_then_gone(pgid: int, sig: int) -> None:
+        calls.append((pgid, sig))
+        if sig == signal_module.SIGTERM:
+            proc.alive = False
+        else:
+            raise ProcessLookupError("group already empty")
+
+    monkeypatch.setattr(dev_broker_module, "_killpg", killpg_then_gone)
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+    assert [sig for _, sig in calls] == [signal_module.SIGTERM, signal_module.SIGKILL]
+
+
+def test_stop_daemon_never_signals_a_recycled_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 1 (Ryan-approved): the group path must keep psutil's identity guard — if the
+    scanned daemon exited between scan and signal (its pid possibly recycled by an unrelated
+    process group), no raw killpg may ever be sent; the exit IS the goal state."""
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055)
+    proc.alive = False  # exited after the scan; pid may now belong to an innocent group
+    calls = _group_killer(monkeypatch, [proc])
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+    assert calls == []  # no signal was ever delivered to the (possibly recycled) pgid
 
 
 def test_stop_daemon_escalates_to_group_sigkill_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -655,7 +759,9 @@ def test_stop_daemon_zombie_leader_counts_as_stopped(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(dev_broker_module, "_killpg", zombify)
     assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
-    assert calls == [(4055, signal_module.SIGTERM)]
+    # The zombie leader is the stopped state; the final group sweep still fires (a zombie-only
+    # group absorbs it harmlessly, a straggler member gets reaped).
+    assert calls == [(4055, signal_module.SIGTERM), (4055, signal_module.SIGKILL)]
 
 
 def test_daemon_grace_is_at_least_eight_seconds() -> None:

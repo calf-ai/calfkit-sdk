@@ -202,12 +202,24 @@ def _sanitize(part: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", part)
 
 
+def _daemon_marker_names(cmd: list[str]) -> tuple[str, ...]:
+    """The marker's names, matched ONLY in its emitted shape (review round 1, Ryan-approved):
+    a ``--dev-daemon=<names>`` token on a command line that also carries a ``run`` token — the
+    two anchors every real spawn (and hand-run ``ck run``) has. A bare ``--dev-daemon`` token or
+    the ``=``-form appearing as *data* in some other process's argv (``rg -- --dev-daemon …``)
+    must never match: a false hit here is what ``stop``/``down`` group-kill."""
+    if "run" not in cmd:
+        return ()
+    prefix = f"{MARKER_FLAG}="
+    value = next((token[len(prefix) :] for token in cmd if token.startswith(prefix)), "")
+    return tuple(name for name in value.split(",") if name)
+
+
 def _daemon_hit(proc: Any, cmd: list[str]) -> DaemonHit | None:
     """Project one process's argv to a :class:`DaemonHit`, or ``None`` if it is not a manageable
-    agent daemon (no marker, an empty marker, or an address that cannot be normalized for the
-    join)."""
-    marker = _flag_value(cmd, MARKER_FLAG, "")
-    names = tuple(name for name in marker.split(",") if name)
+    agent daemon (no emitted-form marker on a ``run`` argv, an empty marker, or an address that
+    cannot be normalized for the join)."""
+    names = _daemon_marker_names(cmd)
     if not names:
         return None
     host = _flag_value(cmd, "--host", "")
@@ -235,11 +247,9 @@ def _positional_targets(cmd: list[str]) -> tuple[str, ...]:
     """The ``module:attr`` block of a daemon argv: the contiguous non-flag tokens after ``run``.
 
     The ``-d`` spawn always emits ``run *targets --host …``, so this is exact for managed
-    daemons; for a hand-run marker with interleaved flags it is best-effort (R3)."""
-    try:
-        start = cmd.index("run") + 1
-    except ValueError:
-        return ()
+    daemons; for a hand-run marker with interleaved flags it is best-effort (R3). A ``run``
+    token is guaranteed present: the marker anchor already required it."""
+    start = cmd.index("run") + 1
     targets: list[str] = []
     for token in cmd[start:]:
         if token.startswith("-"):
@@ -286,18 +296,20 @@ class _Presence:
     tools: Mapping[str, Any]
 
 
-async def _read_presence(mesh: PresenceReader, *, want_agents: bool, want_tools: bool) -> _Presence | None:
-    """One capture of the requested kinds, or ``None`` while the mesh is not usable yet.
+async def _read_presence(mesh: PresenceReader, *, want_agents: bool, want_tools: bool) -> _Presence | MeshUnavailableError:
+    """One capture of the requested kinds, or the ``MeshUnavailableError`` that prevented it.
 
-    Any ``MeshUnavailableError`` is *not ready yet*: ``open_failed`` is the fresh-broker race the
-    loop is specified to absorb (spec §5.5), and the other reasons are the same transient class —
-    a bounded deadline turns a persistent one into the honest exit-2 anyway.
+    The failure is returned (not swallowed) so each caller can branch on ``reason`` — the reasons
+    are NOT one class (review round 1): ``open_failed`` is the fresh-broker race the readiness
+    loop is specified to absorb (spec §5.5), ``establishing`` is a transient catch-up, and
+    ``reader_dead`` is documented terminal for the view's lifetime — misreporting it as "agents
+    offline" blames the wrong side.
     """
     try:
         agents = dict(await mesh.get_agents()) if want_agents else {}
         tools = dict(await mesh.get_tools()) if want_tools else {}
-    except MeshUnavailableError:
-        return None
+    except MeshUnavailableError as exc:
+        return exc
     return _Presence(agents=agents, tools=tools)
 
 
@@ -329,17 +341,36 @@ async def wait_agents_ready(
         DevAgentError: the supervisor died, or the deadline passed.
     """
     deadline = time.monotonic() + timeout
+    last_read_failure: MeshUnavailableError | None = None
     while True:
         if proc is not None and proc.poll() is not None:
             code = proc.returncode
             cause = f"killed by a signal ({code})" if code is not None and code < 0 else f"exit code {code}"
             raise DevAgentError(f"the agent daemon exited during startup ({cause}){_tail_suffix(log_path)}")
-        presence = await _read_presence(mesh, want_agents=bool(agent_names), want_tools=bool(tool_names))
-        if presence is not None and not _missing_names(agent_names, tool_names, presence):
-            return
+        result = await _read_presence(mesh, want_agents=bool(agent_names), want_tools=bool(tool_names))
+        if isinstance(result, MeshUnavailableError):
+            if result.reason == "reader_dead":
+                # Terminal for this client's view — retrying burns the deadline to then blame a
+                # healthy daemon's log. Name the real (client-side) culprit immediately.
+                if proc is not None:
+                    _kill_spawn_group(proc)
+                raise DevAgentError(
+                    f"the presence view died while waiting for the agents ({result}) — a client-side "
+                    f"read failure, not the agents{_tail_suffix(log_path)}"
+                ) from result
+            last_read_failure = result  # open_failed / establishing: not ready yet, keep polling
+        else:
+            last_read_failure = None
+            if not _missing_names(agent_names, tool_names, result):
+                return
         if time.monotonic() >= deadline:
             if proc is not None:
                 _kill_spawn_group(proc)
+            if last_read_failure is not None:
+                raise DevAgentError(
+                    f"the presence view never became readable within {timeout:.1f}s "
+                    f"({last_read_failure.reason}: {last_read_failure}){_tail_suffix(log_path)}"
+                ) from last_read_failure
             raise DevAgentError(f"the launched agents did not come online within {timeout:.1f}s{_tail_suffix(log_path)}")
         await asyncio.sleep(poll_interval)
 
@@ -386,11 +417,24 @@ async def evaluate_targets(
     Returns:
         ``(reused, to_launch)``, both in plan order.
     """
-    presence = await _read_presence(
+    result = await _read_presence(
         mesh,
         want_agents=any(t.agent_names for t in plan),
         want_tools=any(t.tool_names for t in plan),
     )
+    if isinstance(result, MeshUnavailableError):
+        if result.reason != "open_failed":
+            # Only the fresh-broker open_failed is spec'd as none-online (§5.5). Classifying on
+            # an establishing/reader_dead capture could brand a HEALTHY daemon "broken" (and
+            # advise stopping it) or double-spawn — error naming the read failure instead
+            # (review round 1, Ryan-approved).
+            raise DevAgentError(
+                f"the presence view could not be read ({result.reason}): {result} — cannot evaluate "
+                "which agents are online. Try again in a moment; if it persists, restart the command."
+            ) from result
+        presence = None
+    else:
+        presence = result
     now = datetime.now(tz=timezone.utc)
     reused: list[TargetOutcome] = []
     to_launch: list[TargetNodes] = []

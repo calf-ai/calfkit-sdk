@@ -64,6 +64,7 @@ async def run_chat_session(
     *,
     session_plan: list[TargetNodes] | None = None,
     session_host_key: str | None = None,
+    offline_daemon_hint: Callable[[str], str | None] | None = None,
 ) -> None:
     """Connect, discover the online agents, resolve the target, and run the REPL.
 
@@ -79,26 +80,37 @@ async def run_chat_session(
     non-reused targets on an in-process Worker sharing THIS session's client, gate on their
     presence readiness, then enter the normal picker; the worker is stopped on every session end
     (before the client closes). ``session_host_key`` scopes the connect-or-spawn evaluation.
+
+    ``offline_daemon_hint`` (spec §7, dev-layer only): called with a named agent that turned out
+    offline; a returned line (e.g. "a managed daemon for 'x' exists but its agents are offline —
+    logs: …") is appended to the shipped not-online error.
     """
     read_line = make_reader(asyncio.get_running_loop())
     provisioning = ProvisioningConfig(enabled=True) if provision else None
     async with Client.connect(server_urls, provisioning=provisioning) as client:
         if session_plan is None:
-            await _attach(client, name, timeout, read_line)
+            await _attach(client, name, timeout, read_line, offline_hint=offline_daemon_hint)
             return
         if session_host_key is None:
             raise ValueError("session_plan requires session_host_key (the connect-or-spawn address scope)")
         await _target_session(client, session_plan, session_host_key, timeout, read_line)
 
 
-async def _attach(client: Client, name: str | None, timeout: float | None, read_line: ReadLine) -> None:
+async def _attach(
+    client: Client,
+    name: str | None,
+    timeout: float | None,
+    read_line: ReadLine,
+    *,
+    offline_hint: Callable[[str], str | None] | None = None,
+) -> None:
     """Today's attach flow: discover -> pick (or resolve the name) -> REPL."""
     print("Discovering agents...")
     agents = await client.mesh.get_agents()
     if not agents:  # ready, but zero live agents
         print("No agents are online on the mesh.")
         return
-    picked = await _resolve_target(name, agents, read_line)
+    picked = await _resolve_target(name, agents, read_line, offline_hint=offline_hint)
     if picked is None:  # user quit at the picker
         return
     await _chat_loop(client, picked, timeout, read_line)
@@ -116,8 +128,9 @@ async def _target_session(
     Under the agent-layer flock (released before the REPL opens): connect-or-spawn evaluation —
     reused targets are excluded — then the non-reused nodes are hosted on an in-process
     ``Worker`` **sharing this session's Client** (the co-located contract ``client/caller.py``
-    documents: the start-lock serializes the co-located ``app.start()``, and the worker stops
-    before the client closes), with the 5s dev heartbeat preset set explicitly at construction.
+    documents: ``_ensure_started`` gates on ``broker.running`` so a co-located Worker's completed
+    ``app.start()`` is honored, and the worker stops before the client closes), with the 5s dev
+    heartbeat preset set explicitly at construction.
     The worker dies with this process by construction — no reload, no child to orphan. Worker
     logs stay on this terminal (v1). On any session end the worker is stopped and the §3.2 exit
     narration prints.
@@ -178,13 +191,22 @@ def _print_session_narration(launched_names: list[str], reused_names: list[str])
         print(f"✦ still running: {', '.join(reused_names)} — 'ck dev chat' to rejoin, 'ck dev down' to stop everything")
 
 
-async def _resolve_target(name: str | None, agents: Mapping[str, AgentInfo], read_line: ReadLine) -> str | None:
-    """The named agent (erroring if it isn't online), or the user's picker choice
-    (``None`` if they quit)."""
+async def _resolve_target(
+    name: str | None,
+    agents: Mapping[str, AgentInfo],
+    read_line: ReadLine,
+    *,
+    offline_hint: Callable[[str], str | None] | None = None,
+) -> str | None:
+    """The named agent (erroring if it isn't online — plus the dev layer's daemon hint when one
+    applies, spec §7), or the user's picker choice (``None`` if they quit)."""
     if name is not None:
         if name in agents:
             return name
         typer.echo(f"Agent {name!r} is not online. Online agents: {', '.join(sorted(agents))}.", err=True)
+        hint = offline_hint(name) if offline_hint is not None else None
+        if hint:
+            typer.echo(hint, err=True)
         raise typer.Exit(2)
 
     names = sorted(agents)  # sort ONCE — the displayed numbering and the index->name selection share it

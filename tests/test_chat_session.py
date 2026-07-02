@@ -94,6 +94,35 @@ async def test_resolve_target_name_offline_exits_2_listing_online(capsys: pytest
     assert "helpbot, researcher" in err  # alphabetical online list
 
 
+async def test_resolve_target_offline_name_appends_the_dev_daemon_hint(capsys: pytest.CaptureFixture[str]) -> None:
+    """Spec §7 (review round 1, Ryan-approved): when the dev layer knows a managed daemon owns
+    the offline name, the shipped not-online error gains the logs hint."""
+    agents = {"other": _agent("other", "x")}
+    hint_calls: list[str] = []
+
+    def hint(name: str) -> str | None:
+        hint_calls.append(name)
+        return f"a managed daemon for '{name}' exists but its agents are offline — logs: /tmp/agents-x.log (ck dev status)"
+
+    with pytest.raises(typer.Exit) as exc:
+        await _resolve_target("general", agents, _scripted([]), offline_hint=hint)
+    assert exc.value.exit_code == 2
+    err = capsys.readouterr().err
+    assert "is not online" in err
+    assert "a managed daemon for 'general' exists but its agents are offline — logs: /tmp/agents-x.log (ck dev status)" in err
+    assert hint_calls == ["general"]
+
+
+async def test_resolve_target_offline_name_hint_returning_none_adds_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    """No daemon owns the name (or the scan is unavailable on a core install): the shipped error
+    stands alone."""
+    with pytest.raises(typer.Exit):
+        await _resolve_target("general", {"other": _agent("other", "x")}, _scripted([]), offline_hint=lambda name: None)
+    err = capsys.readouterr().err
+    assert "is not online" in err
+    assert "managed daemon" not in err
+
+
 async def test_resolve_target_picker_selects_by_index() -> None:
     agents = {"beta": _agent("beta", "x"), "alpha": _agent("alpha", "y")}  # sorted: alpha, beta
     assert await _resolve_target(None, agents, _scripted(["2"])) == "beta"
@@ -619,3 +648,62 @@ async def test_attach_only_sessions_exit_silently(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("calfkit.cli._chat.make_reader", lambda _loop: _scripted(["q"]))
     await run_chat_session(None, "localhost:9092", None)
     assert "✦" not in capsys.readouterr().out
+
+
+async def test_session_worker_stopped_when_the_repl_is_cancelled(session_seams: dict) -> None:
+    """E9 (review round 1, Ryan-approved): a real Ctrl-C reaches the session as task
+    cancellation while the reader is parked in the REPL — the finally must still stop the
+    in-process worker (and the cancellation must propagate)."""
+    import asyncio
+
+    parked = asyncio.Event()
+
+    def parked_reader(_loop: object) -> object:
+        async def read_line(_prompt: str) -> str:
+            parked.set()
+            await asyncio.Event().wait()  # park forever until cancelled
+            raise AssertionError("unreachable")
+
+        return read_line
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr("calfkit.cli._chat.make_reader", parked_reader)
+        task = asyncio.create_task(run_chat_session(None, "localhost:9092", None, session_plan=[_target_nodes()], session_host_key="127.0.0.1:9092"))
+        await asyncio.wait_for(parked.wait(), timeout=5.0)
+        task.cancel()
+        with _pytest.raises(asyncio.CancelledError):
+            await task
+    (worker,) = _SessionWorker.instances
+    assert worker.started and worker.stopped
+
+
+async def test_session_worker_stopped_when_the_repl_raises(session_seams: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """E9: a mid-REPL failure (e.g. the mesh dying under the picker) still stops the worker and
+    propagates to the command boundary."""
+    _patch_get_agents(monkeypatch, raises=MeshUnavailableError("died mid-session", reason="reader_dead"))
+    with pytest.raises(MeshUnavailableError):
+        await run_chat_session(None, "localhost:9092", None, session_plan=[_target_nodes()], session_host_key="127.0.0.1:9092")
+    (worker,) = _SessionWorker.instances
+    assert worker.started and worker.stopped
+
+
+async def test_session_failed_launch_prints_no_narration(
+    session_seams: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """E11: a launch that never reached the REPL reports its error, not ✦ narration (the
+    repl_entered gate)."""
+
+    async def deadline(*args: object, **kwargs: object) -> None:
+        raise DevAgentError("the launched agents did not come online within 15.0s")
+
+    monkeypatch.setattr(_dev_agents, "wait_agents_ready", deadline)
+    with pytest.raises(DevAgentError):
+        await run_chat_session(None, "localhost:9092", None, session_plan=[_target_nodes()], session_host_key="127.0.0.1:9092")
+    assert "✦" not in capsys.readouterr().out
+
+
+async def test_session_plan_without_host_key_is_a_programming_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="session_host_key"):
+        await run_chat_session(None, "localhost:9092", None, session_plan=[])

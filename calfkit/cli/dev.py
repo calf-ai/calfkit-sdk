@@ -1,13 +1,18 @@
 """The ``ck dev`` command group — a calfkit project against a zero-setup local mesh (spec §4).
 
-``ck dev run`` / ``ck dev chat`` are thin wrappers: load ``.env`` **first** (so a ``.env``-set
-``CALFKIT_MESH_URL`` is visible when the address is normalized), resolve + normalize the host,
-**ensure** a broker there via the connect-or-spawn supervisor, print the managed-vs-reused line,
-then delegate to the existing ``run()``/``chat()`` command functions forwarding every argument
-explicitly — with the **normalized** ``listen_ip:port`` as ``host`` (a multi-address borrow
-forwards the user's list unchanged). The preset: provisioning ON (Tansu has no topic auto-create),
-reload ON (``dev run`` only), idempotence OFF. ``ck dev broker`` controls the managed daemon
-directly.
+Every command loads ``.env`` **first** (so a ``.env``-set ``CALFKIT_MESH_URL`` is visible when
+the address is normalized), resolves + normalizes the host, and **ensures** a broker there via
+the connect-or-spawn supervisor with the managed-vs-reused line printed — with the **normalized**
+``listen_ip:port`` as ``host`` (a multi-address borrow forwards the user's list unchanged). The
+preset: provisioning ON (Tansu has no topic auto-create), reload ON (``dev run`` only),
+idempotence OFF.
+
+Four surfaces (agent-lifecycle spec §3): foreground ``dev run`` delegates to the top-level
+``run()`` command function forwarding every argument explicitly; ``dev run -d`` connect-or-spawns
+a detached agent daemon via :mod:`calfkit.cli._dev_agents`; ``dev chat`` attaches (or, given
+targets, runs an in-process session worker) through ``run_chat_session`` directly; and
+``status``/``stop``/``down`` manage the daemons the argv-marker scan owns. ``ck dev broker``
+controls the broker daemon directly.
 
 Import hygiene (load-bearing): ``_build_app()`` imports this module on **every** ``ck``
 invocation, so nothing here may import ``psutil`` or ``calfkit_mesh`` at module top — both belong
@@ -25,7 +30,6 @@ import typer
 from calfkit.cli import _dev_agents, _dev_broker
 from calfkit.cli._common import _load_env, _parse_host
 from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, Target, normalize
-from calfkit.cli.chat import chat as _chat_command
 from calfkit.cli.run import run as _run_command
 from calfkit.client._mesh_url import resolve_mesh_url
 
@@ -107,7 +111,7 @@ def dev_run(
         False,
         "--detach",
         "-d",
-        help="Launch as a detached agent daemon: return once the agents are online; they run until 'ck dev stop'.",
+        help="Launch as a detached agent daemon: return once the agents/tools are online; they run until 'ck dev stop'.",
     ),
     host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
     provision: bool = typer.Option(
@@ -317,13 +321,43 @@ def dev_chat(
     servers = resolve_mesh_url(_parse_host(host))
     target = _normalize_or_exit(servers)
     _ensure_or_exit(target)
-    _chat_command(
-        name=names[0] if names else None,
-        host=_forward_host(target),
-        provision=provision,
-        env_file=env_file,
-        timeout=timeout,
+    _chat_attach(names[0] if names else None, target, provision=provision, timeout=timeout)
+
+
+def _chat_attach(name: str | None, target: Target, *, provision: bool, timeout: float | None) -> None:
+    """The attach path (no args / bare NAME): the plain chat session, plus the dev layer's §7
+    offline-daemon hint — a named agent that turns out offline gets the marker-scan diagnosis
+    (its daemon exists but stopped advertising: broken edit / mid-restart) appended to the
+    shipped not-online error."""
+    from calfkit.cli import chat as chat_module
+    from calfkit.cli._chat import run_chat_session
+
+    session = run_chat_session(
+        name,
+        _forward_host(target),
+        timeout,
+        provision,
+        offline_daemon_hint=_offline_daemon_hint(target.key),
     )
+    chat_module.run_session_command(session)
+
+
+def _offline_daemon_hint(host_key: str) -> Any:
+    """Build the §7 hint provider: scan the marker daemons at *host_key* for one owning the
+    offline name. Degrades to no hint on a core install (the scan needs the ``[mesh]`` extra) —
+    the shipped not-online error then stands alone."""
+
+    def hint(name: str) -> str | None:
+        try:
+            daemons = _dev_agents.find_daemons(host_key)
+        except DevBrokerError:  # incl. MeshExtraMissingError — never let the hint break the error
+            return None
+        owner = next((daemon for daemon in daemons if name in daemon.names), None)
+        if owner is None:
+            return None
+        return f"a managed daemon for '{name}' exists but its agents are offline — logs: {owner.log_path} (ck dev status)"
+
+    return hint
 
 
 def _chat_targets(targets: list[str], *, host: str | None, provision: bool, env_file: str | None, timeout: float | None) -> None:
@@ -344,7 +378,10 @@ def _chat_targets(targets: list[str], *, host: str | None, provision: bool, env_
     session = run_chat_session(None, _forward_host(target), timeout, provision, session_plan=plan, session_host_key=target.key)
     try:
         chat_module.run_session_command(session)
-    except _dev_agents.DevAgentError as exc:
+    except (_dev_agents.DevAgentError, DevBrokerError) as exc:
+        # DevBrokerError covers MeshExtraMissingError from the lazy daemon scan inside the
+        # session's connect-or-spawn evaluation (a core install): exit 2 with the install hint,
+        # never a raw traceback.
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
 
@@ -384,19 +421,31 @@ def dev_status(
 
 async def _read_presence_maps(target: Target) -> tuple[dict[str, Any], dict[str, Any]]:
     """One point-in-time presence snapshot per kind via a short-lived client; an unusable view
-    (not created yet / still establishing / reader died) degrades to empty, never errors."""
+    degrades to empty, never errors.
+
+    The degrade is silent only for ``open_failed`` (the spec'd first-run state: no presence
+    plane yet ⇒ zero online rows). Any other reason (``establishing``, ``reader_dead``) is a
+    read failure on a reachable mesh — rendered the same way, but announced on stderr so the
+    degraded table never masquerades as a healthy empty mesh (review round 1, Ryan-approved).
+    """
     from calfkit.client import Client
     from calfkit.exceptions import MeshUnavailableError
+
+    def _warn_unless_first_run(kind: str, exc: MeshUnavailableError) -> None:
+        if exc.reason != "open_failed":
+            typer.echo(f"warning: presence unreadable ({kind} view, {exc.reason}): {exc}", err=True)
 
     client = Client.connect(_forward_host(target))
     try:
         try:
             agents = dict(await client.mesh.get_agents())
-        except MeshUnavailableError:
+        except MeshUnavailableError as exc:
+            _warn_unless_first_run("agents", exc)
             agents = {}
         try:
             tools = dict(await client.mesh.get_tools())
-        except MeshUnavailableError:
+        except MeshUnavailableError as exc:
+            _warn_unless_first_run("tools", exc)
             tools = {}
     finally:
         await client.aclose()
@@ -497,13 +546,19 @@ def _echo_stopped(hit: _dev_agents.DaemonHit) -> None:
 
 
 def _stop_daemon_sweep(daemons: list[_dev_agents.DaemonHit]) -> None:
-    """Stop every given daemon, narrated; a denied one warns and never aborts the sweep (the
-    broker stop_all discipline)."""
+    """Stop every given daemon, narrated; a denied or stuck one warns and never aborts the sweep
+    (the broker stop_all discipline) — one bad daemon must not leave the rest running or skip
+    ``down``'s broker stop."""
     if not daemons:
         typer.echo("no agent daemons to stop")
         return
     for hit in daemons:
-        if _dev_agents.stop_daemon(hit):
+        try:
+            stopped = _dev_agents.stop_daemon(hit)
+        except DevBrokerError as exc:  # e.g. survived SIGKILL — warn and keep sweeping
+            typer.echo(f"warning: {exc}", err=True)
+            continue
+        if stopped:
             _echo_stopped(hit)
         else:
             typer.echo(f"warning: cannot stop the agent daemon (pid {hit.pid}) — it is owned by another user.", err=True)

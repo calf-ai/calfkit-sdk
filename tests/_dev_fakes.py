@@ -74,6 +74,11 @@ class FakeProc:
             raise psutil.NoSuchProcess()  # type: ignore[attr-defined]
         return "zombie" if self.zombie else "running"
 
+    def is_running(self) -> bool:
+        """psutil semantics: identity-checked liveness; a zombie still 'is running' (unreaped,
+        so its pid — and pgid — cannot have been recycled)."""
+        return self.alive or self.zombie
+
     def terminate(self) -> None:
         self.events.append("terminate")
         psutil = sys.modules["psutil"]

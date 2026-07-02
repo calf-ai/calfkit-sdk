@@ -527,19 +527,34 @@ def _signal(proc: Any, *, pid: int, label: str, grace: float, group: bool = Fals
     def _send(sig: int) -> None:
         # The group path signals via killpg (ProcessLookupError/PermissionError are the OS-level
         # twins of psutil's NoSuchProcess/AccessDenied, handled below); the single path keeps
-        # psutil's own calls so the scan-verified handle is what gets signalled.
+        # psutil's own calls so the scan-verified handle is what gets signalled. Before a raw
+        # killpg, the identity-checked handle must still be running (live or unreaped-zombie —
+        # either way the pgid cannot have been recycled): a daemon that exited between scan and
+        # signal may have had its pid reused by an innocent process GROUP (review round 1).
         if group:
+            if not proc.is_running():
+                raise psutil.NoSuchProcess(pid)
             _killpg(pid, sig)
         elif sig == signal_module.SIGTERM:
             proc.terminate()
         else:
             proc.kill()
 
+    def _final_group_sweep() -> None:
+        # Leader death says nothing about the rest of the group: a SIGTERM-surviving descendant
+        # (a node's own subprocess) would otherwise outlive the 'stopped' report — markerless,
+        # so unmanageable forever (review round 1). One unconditional SIGKILL sweeps the
+        # now-headless tree; an already-empty or zombie-only group absorbs it as a no-op.
+        with suppress(ProcessLookupError, PermissionError):
+            _killpg(pid, signal_module.SIGKILL)
+
     try:
         _send(signal_module.SIGTERM)
         if _wait_or_gone():
+            if group:
+                _final_group_sweep()
             return True
-        _send(signal_module.SIGKILL)
+        _send(signal_module.SIGKILL)  # group mode: this already swept the whole group
         if not _wait_or_gone():
             raise DevBrokerError(f"{label} survived SIGKILL for {grace:.1f}s.")
     except (psutil.NoSuchProcess, ProcessLookupError):

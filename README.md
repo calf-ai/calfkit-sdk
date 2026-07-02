@@ -61,10 +61,11 @@ needed) and drops you into a chat with it:
 ```console
 $ ck dev run -d general:general && ck dev chat
 ck dev: managed broker at 127.0.0.1:9092 (pid 51234)
-ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: ~/.calfkit/logs/agents-....log
+ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: /Users/you/.calfkit/logs/agents-127.0.0.1_9092-general_general.log
+ck dev: managed broker at 127.0.0.1:9092 (pid 51234)
 Discovering agents...
+Online agents
 
-Online agents:
   1  general  Answers simple questions and routes requests to whoever can handle it.
 
 Select an agent [1-1, q to quit]: 1

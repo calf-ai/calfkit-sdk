@@ -1,10 +1,11 @@
-"""CliRunner tests for the ``ck dev`` command group (spec §4).
+"""CliRunner tests for the ``ck dev`` command group (spec §4 + the agent-lifecycle surface).
 
-The supervisor is monkeypatched at its seams (``calfkit.cli._dev_broker.*`` for the broker
-commands, ``calfkit.cli.dev._run_command``/``_chat_command`` for delegation), so everything here
-is offline. The wrapper contract under test: ``.env`` loads **before** host resolution, the broker
-is ensured once in the parent with a lazy ``resolve_bin`` thunk, the managed-vs-reused line prints,
-and the delegate receives every argument explicitly with the **normalized** host.
+The supervisors are monkeypatched at their seams (``calfkit.cli._dev_broker.*`` /
+``calfkit.cli._dev_agents.*``; ``dev._run_command`` for the foreground-run delegation;
+``calfkit.cli._chat.run_chat_session`` for the attach path), so everything here is offline. The
+wrapper contract under test: ``.env`` loads **before** host resolution, the broker is ensured
+once in the parent with a lazy ``resolve_bin`` thunk, the managed-vs-reused line prints, and the
+delegate/session receives every argument explicitly with the **normalized** host.
 """
 
 from __future__ import annotations
@@ -76,9 +77,14 @@ def run_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def chat_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+def attach_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record the attach-path session launches (`run_chat_session` at its module seam)."""
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(dev_cli, "_chat_command", lambda **kw: calls.append(kw))
+
+    async def fake_session(name: Any, server_urls: Any, timeout: Any, provision: bool = False, **kwargs: Any) -> None:
+        calls.append({"name": name, "server_urls": server_urls, "timeout": timeout, "provision": provision, **kwargs})
+
+    monkeypatch.setattr("calfkit.cli._chat.run_chat_session", fake_session)
     return calls
 
 
@@ -223,35 +229,35 @@ def test_dev_run_invalid_address_exits_2(run_calls: list[dict[str, Any]]) -> Non
 # --- dev chat (spec §4.1) ------------------------------------------------------------------------------
 
 
-def test_dev_chat_ensures_then_delegates_with_presets(ensure_calls: list[dict[str, Any]], chat_calls: list[dict[str, Any]]) -> None:
+def test_dev_chat_ensures_then_runs_the_session_with_presets(ensure_calls: list[dict[str, Any]], attach_calls: list[dict[str, Any]]) -> None:
     result = _invoke(["dev", "chat"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert len(ensure_calls) == 1
-    (call,) = chat_calls
+    (call,) = attach_calls
     assert call["name"] is None
-    assert call["host"] == _KEY
+    assert call["server_urls"] == _KEY  # the NORMALIZED listener
     assert call["provision"] is True
     assert call["timeout"] is None
-    assert call["env_file"] is None
+    assert callable(call["offline_daemon_hint"])  # the §7 dev-layer hint is wired
 
 
-def test_dev_chat_forwards_name_timeout_and_no_provision(ensure_calls: list[dict[str, Any]], chat_calls: list[dict[str, Any]]) -> None:
+def test_dev_chat_forwards_name_timeout_and_no_provision(ensure_calls: list[dict[str, Any]], attach_calls: list[dict[str, Any]]) -> None:
     result = _invoke(["dev", "chat", "helpdesk", "--no-provision", "--timeout", "12.5"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
-    (call,) = chat_calls
+    (call,) = attach_calls
     assert call["name"] == "helpdesk"
     assert call["provision"] is False
     assert call["timeout"] == 12.5
 
 
-def test_dev_chat_broker_ensure_failure_exits_2(monkeypatch: pytest.MonkeyPatch, chat_calls: list[dict[str, Any]]) -> None:
+def test_dev_chat_broker_ensure_failure_exits_2(monkeypatch: pytest.MonkeyPatch, attach_calls: list[dict[str, Any]]) -> None:
     def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
         raise DevBrokerError("nope")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
     result = _invoke(["dev", "chat"])
     assert result.exit_code == 2
-    assert chat_calls == []
+    assert attach_calls == []
 
 
 # --- dev broker start/stop/status/restart (spec §4.2) ---------------------------------------------------
@@ -593,27 +599,27 @@ def test_dev_run_detach_closes_the_readiness_client(detach_seams: dict[str, Any]
 # --- dev chat grammar: names attach, targets launch in-process (agent-lifecycle spec §3.2) -------------
 
 
-def test_dev_chat_bare_name_attaches_via_the_delegate(ensure_calls: list[dict[str, Any]], chat_calls: list[dict[str, Any]]) -> None:
+def test_dev_chat_bare_name_attaches_via_the_session(ensure_calls: list[dict[str, Any]], attach_calls: list[dict[str, Any]]) -> None:
     result = _invoke(["dev", "chat", "general"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
-    assert chat_calls[0]["name"] == "general"
+    assert attach_calls[0]["name"] == "general"
 
 
-def test_dev_chat_mixing_names_and_targets_is_a_usage_error(chat_calls: list[dict[str, Any]]) -> None:
+def test_dev_chat_mixing_names_and_targets_is_a_usage_error(attach_calls: list[dict[str, Any]]) -> None:
     result = _invoke(["dev", "chat", "general", "app:agent"])
     assert result.exit_code == 2
     assert "mix" in _plain(result.stderr)
-    assert chat_calls == []
+    assert attach_calls == []
 
 
-def test_dev_chat_more_than_one_bare_name_is_a_usage_error(chat_calls: list[dict[str, Any]]) -> None:
+def test_dev_chat_more_than_one_bare_name_is_a_usage_error(attach_calls: list[dict[str, Any]]) -> None:
     result = _invoke(["dev", "chat", "general", "finance"])
     assert result.exit_code == 2
-    assert chat_calls == []
+    assert attach_calls == []
 
 
-def test_dev_chat_targets_dispatch_to_the_session_launcher_not_the_delegate(
-    monkeypatch: pytest.MonkeyPatch, chat_calls: list[dict[str, Any]]
+def test_dev_chat_targets_dispatch_to_the_session_launcher_not_the_attach_path(
+    monkeypatch: pytest.MonkeyPatch, attach_calls: list[dict[str, Any]]
 ) -> None:
     launched: dict[str, Any] = {}
 
@@ -626,7 +632,60 @@ def test_dev_chat_targets_dispatch_to_the_session_launcher_not_the_delegate(
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert launched["targets"] == ["app:agent", "tools:all"]
     assert launched["timeout"] == 7.0
-    assert chat_calls == []
+    assert attach_calls == []
+
+
+# --- the §7 offline-daemon hint on `dev chat NAME` (review round 1, Ryan-approved) ---------------------
+
+
+def test_dev_chat_offline_name_hint_names_the_daemon_and_logs(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The crashed-on-edit moment: the name is offline on the mesh but a marker daemon owns it —
+    the shipped not-online error gains the daemon + logs + status pointer."""
+    from calfkit.client.mesh import Mesh
+
+    async def other_agents(_self: Mesh) -> dict[str, Any]:
+        return {"other": _mesh_info("other")}  # SOME agents online, just not the named one
+
+    monkeypatch.setattr(Mesh, "get_agents", other_agents)
+    monkeypatch.setattr(dev_agents, "find_daemons", lambda host_key: [_daemon_hit(4055, ("general",))])
+    result = _invoke(["dev", "chat", "general"])
+    assert result.exit_code == 2
+    err = _plain(result.stderr)
+    assert "is not online" in err
+    assert "a managed daemon for 'general' exists but its agents are offline — logs: /tmp/agents-4055.log (ck dev status)" in err
+
+
+def test_dev_chat_offline_name_hint_degrades_without_the_mesh_extra(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Core install: the scan cannot run — the shipped error stands alone, no crash, no hint."""
+    from calfkit.cli._dev_broker import MeshExtraMissingError
+    from calfkit.client.mesh import Mesh
+
+    async def other_agents(_self: Mesh) -> dict[str, Any]:
+        return {"other": _mesh_info("other")}
+
+    def no_scan(host_key: Any) -> list[Any]:
+        raise MeshExtraMissingError("needs [mesh]")
+
+    monkeypatch.setattr(Mesh, "get_agents", other_agents)
+    monkeypatch.setattr(dev_agents, "find_daemons", no_scan)
+    result = _invoke(["dev", "chat", "general"])
+    assert result.exit_code == 2
+    err = _plain(result.stderr)
+    assert "is not online" in err
+    assert "managed daemon" not in err
+
+
+def test_dev_chat_offline_name_without_a_daemon_gets_no_hint(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    from calfkit.client.mesh import Mesh
+
+    async def other_agents(_self: Mesh) -> dict[str, Any]:
+        return {"other": _mesh_info("other")}
+
+    monkeypatch.setattr(Mesh, "get_agents", other_agents)
+    monkeypatch.setattr(dev_agents, "find_daemons", lambda host_key: [])
+    result = _invoke(["dev", "chat", "general"])
+    assert result.exit_code == 2
+    assert "managed daemon" not in _plain(result.stderr)
 
 
 def test_dev_chat_target_session_ensures_broker_then_preflights(detach_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -769,6 +828,76 @@ def test_dev_status_borrowed_broker_renders_the_shipped_shape(status_seams: dict
     assert "reachable, not managed by calfkit" in _plain(result.stdout)
 
 
+class _RaisingMesh:
+    """A mesh handle whose reads raise a scripted MeshUnavailableError (per kind)."""
+
+    def __init__(self, reason: str) -> None:
+        from calfkit.exceptions import MeshUnavailableError
+
+        self._exc = MeshUnavailableError("unreadable", reason=reason)
+
+    async def get_agents(self) -> dict[str, Any]:
+        raise self._exc
+
+    async def get_tools(self) -> dict[str, Any]:
+        raise self._exc
+
+
+@pytest.fixture
+def real_presence_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Like status_seams but with the REAL _read_presence_maps running over a fake client whose
+    mesh raises — the degrade arms themselves are under test (review round 1)."""
+    seams: dict[str, Any] = {
+        "broker": MeshStatus(target_key=_KEY, reachable=True, brokers=(_info(pid=4021),)),
+        "daemons": [_daemon_hit(4055, ("general",))],
+        "reason": "open_failed",
+    }
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: seams["broker"])
+    monkeypatch.setattr(dev_agents, "find_daemons", lambda host_key: list(seams["daemons"]))
+    _FakeDetachClient.instances = []
+
+    def make_client(server_urls: object = None, **kwargs: object) -> _FakeDetachClient:
+        client = _FakeDetachClient.connect(server_urls, **kwargs)
+        client.mesh = _RaisingMesh(seams["reason"])  # type: ignore[assignment]
+        return client
+
+    monkeypatch.setattr("calfkit.client.Client", type("_C", (), {"connect": staticmethod(make_client)}))
+    return seams
+
+
+def test_dev_status_real_degrade_open_failed_is_silent_zero_rows(real_presence_seams: dict[str, Any]) -> None:
+    """E10 (review round 1): the REAL _read_presence_maps degrades a fresh-broker open_failed to
+    zero online rows — silently (it is the spec'd first-run state), exit 0, client closed."""
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    out = _plain(result.stdout)
+    assert "online" not in out
+    assert "unknown (see logs)" in out
+    assert "presence unreadable" not in _plain(result.stderr)
+    (client,) = _FakeDetachClient.instances
+    assert client.closed is True
+
+
+def test_dev_status_reader_dead_degrades_with_a_warning(real_presence_seams: dict[str, Any]) -> None:
+    """B5 (review round 1, Ryan-approved): a dead reader on a REACHABLE mesh must not render as a
+    healthy-looking empty mesh with zero trace — one stderr line names the read failure."""
+    real_presence_seams["reason"] = "reader_dead"
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    err = _plain(result.stderr)
+    assert "presence unreadable" in err
+    assert "reader_dead" in err
+    assert "unknown (see logs)" in _plain(result.stdout)
+
+
+def test_dev_stop_online_check_uses_the_real_helper_and_degrades(real_presence_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """E10: the REAL _online_name_set path — an unreadable presence view degrades to the
+    unknown-name arm (still factually scoped to the scan) instead of crashing."""
+    result = _invoke(["dev", "stop", "nope"])
+    assert result.exit_code == 2
+    assert "running at 127.0.0.1:9092: general" in _plain(result.stderr)
+
+
 # --- dev stop / dev down (agent-lifecycle spec §3.4) ----------------------------------------------------
 
 
@@ -877,6 +1006,118 @@ def test_dev_down_with_nothing_is_a_messaged_noop(stop_seams: dict[str, Any], mo
     assert "no managed broker" in out
 
 
+def test_dev_sweep_denied_daemon_warns_and_continues(stop_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """E11 (review round 1): the sweep never aborts on a denied daemon — the second daemon still
+    stops and, for down, the broker stop still runs."""
+    stop_seams["daemons"] = [
+        _daemon_hit(4055, ("general",)),
+        _daemon_hit(4102, ("finance",)),
+    ]
+    denied = {4055}
+
+    def per_pid_stop(hit: Any, *, grace: float = dev_agents.DAEMON_GRACE) -> bool:
+        stop_seams["stopped"].append((hit.pid, grace))
+        return hit.pid not in denied
+
+    monkeypatch.setattr(dev_agents, "stop_daemon", per_pid_stop)
+    broker_stops: list[str] = []
+    monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: broker_stops.append(target.key) or True)
+    result = _invoke(["dev", "down"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "warning" in _plain(result.stderr) and "4055" in _plain(result.stderr)
+    assert "stopped daemon pid 4102" in _plain(result.stdout)
+    assert broker_stops == [_KEY]  # the broker stop still ran
+
+
+def test_dev_sweep_survives_a_raising_stop(stop_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """D7 (review round 1, Ryan-approved): stop_daemon can RAISE (survived-SIGKILL); the sweep
+    must warn and continue — the broker stop_all discipline the docstring cites — never abort
+    `down` mid-list."""
+    stop_seams["daemons"] = [
+        _daemon_hit(4055, ("general",)),
+        _daemon_hit(4102, ("finance",)),
+    ]
+
+    def raising_stop(hit: Any, *, grace: float = dev_agents.DAEMON_GRACE) -> bool:
+        if hit.pid == 4055:
+            raise DevBrokerError("the agent daemon (pid 4055) survived SIGKILL for 8.0s.")
+        stop_seams["stopped"].append((hit.pid, grace))
+        return True
+
+    monkeypatch.setattr(dev_agents, "stop_daemon", raising_stop)
+    broker_stops: list[str] = []
+    monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: broker_stops.append(target.key) or True)
+    result = _invoke(["dev", "down"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "survived SIGKILL" in _plain(result.stderr)
+    assert "stopped daemon pid 4102" in _plain(result.stdout)
+    assert broker_stops == [_KEY]
+
+
+def test_dev_chat_targets_supervisor_scan_error_is_exit_2_not_a_traceback(detach_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """D8 (review round 1, Ryan-approved): a core-install `chat TARGET` (borrowed broker, no
+    [mesh] extra) raises MeshExtraMissingError from the lazy scan — it must surface as the
+    exit-2 install hint, never a raw traceback."""
+    from calfkit.cli._dev_broker import MeshExtraMissingError
+
+    def raising_run(coro: Any) -> None:
+        coro.close()
+        raise MeshExtraMissingError("the dev broker supervisor needs the `calfkit[mesh]` extra (psutil).")
+
+    monkeypatch.setattr("calfkit.cli.chat.run_session_command", raising_run)
+    result = _invoke(["dev", "chat", "app:agent"])
+    assert result.exit_code == 2
+    assert "[mesh]" in _plain(result.stderr)
+
+
+def test_dev_run_detach_preflight_error_exits_2_before_broker_work(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    """E11: the -d preflight boundary arm — a DevAgentError at preflight exits 2 and the broker
+    is never ensured (spec §5.1 order)."""
+
+    def broken_preflight(targets: list[str], *, app_dir: str | None = None) -> list[TargetNodes]:
+        raise DevAgentError("target 'app:agent' resolves to no agents or tools")
+
+    monkeypatch.setattr(dev_agents, "preflight", broken_preflight)
+    result = _invoke(["dev", "run", "-d", "app:agent"])
+    assert result.exit_code == 2
+    assert "no agents or tools" in _plain(result.stderr)
+    assert ensure_calls == []
+
+
+def test_dev_status_without_the_mesh_extra_exits_2_with_the_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """E11: the scan is half the status join — without [mesh] the command cannot answer and says
+    how to fix it."""
+    from calfkit.cli._dev_broker import MeshExtraMissingError
+
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: MeshStatus(target.key, False, ()))
+
+    def no_scan(host_key: Any) -> list[Any]:
+        raise MeshExtraMissingError("the dev broker supervisor needs the `calfkit[mesh]` extra (psutil).")
+
+    monkeypatch.setattr(dev_agents, "find_daemons", no_scan)
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 2
+    assert "[mesh]" in _plain(result.stderr)
+
+
+def test_dev_status_renders_a_managed_tool_row(status_seams: dict[str, Any]) -> None:
+    """E11: a daemon-owned name online in the TOOLS view renders KIND tool with its age."""
+    status_seams["daemons"] = [_daemon_hit(4055, ("get_weather",), targets=("tools:get_weather",))]
+    status_seams["presence"] = ({}, {"get_weather": _mesh_info("get_weather", age=4.0)})
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    row = next(line for line in _plain(result.stdout).splitlines() if "get_weather" in line)
+    assert row.startswith("tool")
+    assert "online (last seen 4s ago)" in row
+    assert "4055" in row
+
+
+def test_format_age_renders_minutes_and_hours() -> None:
+    assert dev_cli._format_age(3.2) == "3s"
+    assert dev_cli._format_age(125) == "2m05s"
+    assert dev_cli._format_age(3900) == "1h05m"
+
+
 def test_dev_run_forwards_the_hidden_internals_explicitly(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:
     """The parity-guard contract (impl plan CG-B): `dev run` forwards the hidden internals with
     their preset values — the 5s dev heartbeat (spec §5.6 covers foreground dev runs too) and no
@@ -895,14 +1136,10 @@ def test_dev_run_help_hides_the_internal_flags() -> None:
     assert "--heartbeat-interval" not in out
 
 
-def test_dev_chat_forwards_every_parameter_of_chat(ensure_calls: list[dict[str, Any]], chat_calls: list[dict[str, Any]]) -> None:
-    import inspect
-
-    from calfkit.cli.chat import chat as chat_command
-
-    result = _invoke(["dev", "chat"])
-    assert result.exit_code == 0, result.stdout + str(result.exception)
-    assert set(chat_calls[0]) == set(inspect.signature(chat_command).parameters)
+# (The former dev_chat→chat() parameter-parity guard is gone with the delegation itself: the
+# attach path now calls run_chat_session directly — a plain function signature, so the sentinel
+# drift class the guard existed for is caught by mypy; the value-forwarding tests above pin the
+# behavior.)
 
 
 def test_dev_run_forwards_every_option_value(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:
@@ -981,3 +1218,15 @@ def test_missing_env_file_warns_only_once_per_process(tmp_path: Path) -> None:
         _load_env(missing)
         _load_env(missing)
     assert stderr.getvalue().count("not found") == 1
+
+
+def test_dev_down_broker_stop_failure_exits_2(stop_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broker that survives SIGKILL surfaces as the shipped exit-2 error after the daemon sweep."""
+
+    def raising_broker_stop(target: Any, *, grace: float = 5.0) -> bool:
+        raise DevBrokerError("the dev broker at 127.0.0.1:9092 (pid 4021) survived SIGKILL for 5.0s.")
+
+    monkeypatch.setattr(dev_broker, "stop", raising_broker_stop)
+    result = _invoke(["dev", "down"])
+    assert result.exit_code == 2
+    assert "survived SIGKILL" in _plain(result.stderr)

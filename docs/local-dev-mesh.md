@@ -41,9 +41,9 @@ share the same mesh.
 ## Launch agents in the background with `--detach`
 
 ```console
-$ ck dev run -d general_help:general
+$ ck dev run -d general:general
 ck dev: managed broker at 127.0.0.1:9092 (pid 51234)
-ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: ~/.calfkit/logs/agents-127.0.0.1_9092-general_help_general.log
+ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: /Users/you/.calfkit/logs/agents-127.0.0.1_9092-general_general.log
 ```
 
 `--detach/-d` (the `docker compose up -d` gesture) runs the same reload
@@ -76,7 +76,7 @@ session itself.
 process itself*, then opens the picker:
 
 ```console
-$ ck dev chat general_help:general
+$ ck dev chat general:general
 ```
 
 A session worker lives and dies with the chat — close the session (`/exit`,
@@ -96,9 +96,9 @@ want live reload while chatting. On exit the session narrates what it owned:
 The core lesson of the mesh — *agents are independent processes that discover
 each other at runtime* — is something you can watch happen:
 
-1. Terminal 1: `ck dev run -d general_help:general && ck dev chat` — launch
+1. Terminal 1: `ck dev run -d general:general && ck dev chat` — launch
    the generalist, start chatting.
-2. Terminal 2: `ck dev run -d finance_help:finance` — add a specialist to the
+2. Terminal 2: `ck dev run -d finance:finance` — add a specialist to the
    **live** team. The first agent's process is untouched.
 3. Back in the chat, ask a finance question — `general` discovers `finance`
    over the mesh and hands off to it, mid-conversation.
@@ -110,9 +110,9 @@ no orchestrator, no restarts.
 
 ```console
 $ ck dev status
-KIND    NAME             STATE                          PID    SINCE                      TARGET                LOGS
+KIND    NAME             STATE                          PID    SINCE                      TARGET           LOGS
 broker  127.0.0.1:9092   running                        51234  2026-07-02T14:00:12+00:00  —                     —
-agent   general          online (last seen 3s ago)      51288  2026-07-02T14:02:40+00:00  general_help:general  ~/.calfkit/logs/agents-….log
+agent   general          online (last seen 3s ago)      51288  2026-07-02T14:02:40+00:00  general:general  /Users/you/.calfkit/logs/agents-….log
 ```
 
 `ck dev status` shows everything, unfiltered: the broker, every managed
@@ -122,8 +122,10 @@ foreground run, a teammate's worker) annotated
 live mesh record shows `unknown (see logs)` — usually a broken edit mid-reload;
 its log path is right there in the row. When the broker itself is down, the
 presence columns degrade to `unknown (mesh unreachable)` and the daemon rows
-still render. Heartbeat ages are always shown: "online" can lag a crash by up
-to the ~15s staleness window, and the age is the honesty device.
+still render. Heartbeat ages are always shown: "online" can lag a crash — by
+up to ~15s for `ck dev`-launched workers (they heartbeat every 5s), and up to
+~90s for a plain `ck run` worker on the 30s production default — and the age
+is the honesty device.
 
 - `ck dev stop NAME…` — stop the daemon(s) owning those names. A stop is
   **whole-daemon**: co-hosted agents launched by one command go down together,
