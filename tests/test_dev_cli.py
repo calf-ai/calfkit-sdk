@@ -17,8 +17,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+import calfkit.cli._dev_agents as dev_agents
 import calfkit.cli._dev_broker as dev_broker
 import calfkit.cli.dev as dev_cli
+from calfkit.cli._dev_agents import DevAgentError, EnsureReport, TargetNodes, TargetOutcome
 from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, MeshStatus
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -426,6 +428,166 @@ def test_dev_run_forwards_every_parameter_of_run(ensure_calls: list[dict[str, An
     result = _invoke(["dev", "run", "app:agent"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert set(run_calls[0]) == set(inspect.signature(run_command).parameters)
+
+
+# --- dev run --detach: launch agent daemons (agent-lifecycle spec §3.1) --------------------------------
+
+
+def _plan(agent_names: tuple[str, ...] = ("general",), tool_names: tuple[str, ...] = (), spec: str = "app:agent") -> list[TargetNodes]:
+    return [TargetNodes(spec=spec, nodes=(), agent_names=agent_names, tool_names=tool_names)]
+
+
+class _FakeMeshHandle:
+    pass
+
+
+class _FakeDetachClient:
+    """Stands in for the short-lived readiness Client the -d path opens."""
+
+    instances: list[_FakeDetachClient] = []
+
+    def __init__(self) -> None:
+        self.mesh = _FakeMeshHandle()
+        self.closed = False
+        _FakeDetachClient.instances.append(self)
+
+    @classmethod
+    def connect(cls, server_urls: object = None, **kwargs: object) -> _FakeDetachClient:
+        client = cls()
+        client.server_urls_arg = server_urls  # type: ignore[attr-defined]
+        return client
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def detach_seams(monkeypatch: pytest.MonkeyPatch, ensure_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fake the supervisor seams for the -d path; records call order and arguments."""
+    seams: dict[str, Any] = {"order": [], "plan": _plan()}
+    _FakeDetachClient.instances = []
+
+    def fake_preflight(targets: list[str], *, app_dir: str | None = None) -> list[TargetNodes]:
+        seams["order"].append("preflight")
+        seams["preflight"] = {"targets": targets, "app_dir": app_dir}
+        plan: list[TargetNodes] = seams["plan"]
+        return plan
+
+    async def fake_ensure(plan: list[TargetNodes], target: Any, mesh: Any, *, run_args: Any, **kwargs: Any) -> EnsureReport:
+        seams["order"].append("ensure_agents")
+        seams["ensure"] = {"plan": plan, "target": target, "mesh": mesh, "run_args": run_args}
+        report: EnsureReport = seams.get("report") or EnsureReport(
+            outcomes=tuple(TargetOutcome(target=t, reused=False) for t in plan),
+            pid=4055,
+            log_path="/tmp/agents-x.log",
+        )
+        return report
+
+    original_ensure_broker = dev_broker.ensure_broker
+
+    def ordered_ensure_broker(*args: Any, **kwargs: Any) -> BrokerInfo:
+        seams["order"].append("ensure_broker")
+        result: BrokerInfo = original_ensure_broker(*args, **kwargs)
+        return result
+
+    monkeypatch.setattr(dev_broker, "ensure_broker", ordered_ensure_broker)
+    monkeypatch.setattr(dev_agents, "preflight", fake_preflight)
+    monkeypatch.setattr(dev_agents, "ensure_agents", fake_ensure)
+    monkeypatch.setattr("calfkit.client.Client", _FakeDetachClient)
+    return seams
+
+
+def test_dev_run_detach_prints_the_launched_line(detach_seams: dict[str, Any], run_calls: list[dict[str, Any]]) -> None:
+    """§3.1: per launched agent — the SUPERVISOR pid (what stop signals), the lifetime statement,
+    and the log path; the foreground delegation never runs."""
+    result = _invoke(["dev", "run", "-d", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    out = _plain(result.stdout)
+    assert "ck dev: launched agent 'general' (pid 4055) — runs until 'ck dev stop general' — logs: /tmp/agents-x.log" in out
+    assert run_calls == []
+
+
+def test_dev_run_detach_prints_the_reusing_line_with_age(detach_seams: dict[str, Any]) -> None:
+    plan = detach_seams["plan"]
+    detach_seams["report"] = EnsureReport(outcomes=(TargetOutcome(target=plan[0], reused=True, ages={"general": 3.2}),), pid=None, log_path=None)
+    result = _invoke(["dev", "run", "--detach", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "ck dev: reusing agent 'general' (online, last seen 3s ago)" in _plain(result.stdout)
+
+
+def test_dev_run_detach_tool_names_use_the_tool_word(detach_seams: dict[str, Any]) -> None:
+    """Tools-only targets are legitimate daemons (spec §5.1) — their lines say what they are."""
+    detach_seams["plan"] = _plan(agent_names=(), tool_names=("get_weather",), spec="tools:get_weather")
+    result = _invoke(["dev", "run", "-d", "tools:get_weather"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "ck dev: launched tool 'get_weather' (pid 4055)" in _plain(result.stdout)
+
+
+def test_dev_run_detach_preflights_before_the_broker_ensure(detach_seams: dict[str, Any]) -> None:
+    """Spec §5.1 order: preflight fails fast at the prompt BEFORE any broker work."""
+    result = _invoke(["dev", "run", "-d", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert detach_seams["order"] == ["preflight", "ensure_broker", "ensure_agents"]
+
+
+def test_dev_run_detach_supervisor_error_exits_2(detach_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    async def broken(*args: Any, **kwargs: Any) -> EnsureReport:
+        raise DevAgentError("a daemon for 'general' already exists (pid 4055)")
+
+    monkeypatch.setattr(dev_agents, "ensure_agents", broken)
+    result = _invoke(["dev", "run", "-d", "app:agent"])
+    assert result.exit_code == 2
+    assert "Error: a daemon for 'general' already exists" in _plain(result.stderr)
+    assert _FakeDetachClient.instances[0].closed is True  # the readiness client never leaks
+
+
+def test_dev_run_detach_interrupt_leaves_the_daemon_and_hints(detach_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.4: Ctrl-C during the readiness wait leaves the daemon running (recoverable) and says so."""
+
+    async def interrupted(*args: Any, **kwargs: Any) -> EnsureReport:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dev_agents, "ensure_agents", interrupted)
+    result = _invoke(["dev", "run", "-d", "app:agent"])
+    assert result.exit_code == 130
+    assert "ck dev status" in _plain(result.stderr)
+
+
+def test_dev_run_detach_forwards_the_run_options(detach_seams: dict[str, Any], tmp_path: Path) -> None:
+    result = _invoke(
+        [
+            "dev",
+            "run",
+            "-d",
+            "app:agent",
+            "--no-reload",
+            "--no-provision",
+            "--group-id",
+            "g1",
+            "--app-dir",
+            str(tmp_path),
+            "--reload-dir",
+            "src",
+            "--enable-idempotence",
+        ]
+    )
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    run_args = detach_seams["ensure"]["run_args"]
+    assert run_args.reload is False
+    assert run_args.provision is False
+    assert run_args.group_id == "g1"
+    assert run_args.app_dir == str(tmp_path)
+    assert list(run_args.reload_dir or []) == ["src"]
+    assert run_args.enable_idempotence is True
+    assert detach_seams["preflight"]["app_dir"] == str(tmp_path)
+
+
+def test_dev_run_detach_closes_the_readiness_client(detach_seams: dict[str, Any]) -> None:
+    result = _invoke(["dev", "run", "-d", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    (client,) = _FakeDetachClient.instances
+    assert client.closed is True
+    assert detach_seams["ensure"]["mesh"] is client.mesh
 
 
 def test_dev_run_forwards_the_hidden_internals_explicitly(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:

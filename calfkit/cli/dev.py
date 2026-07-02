@@ -17,6 +17,8 @@ the supervisor's spawn branch.
 
 from __future__ import annotations
 
+import asyncio
+
 import typer
 
 from calfkit.cli import _dev_agents, _dev_broker
@@ -100,6 +102,12 @@ def dev_run(
         ...,
         help="One or more 'module:attr' targets. Each attr is a node or an iterable of nodes.",
     ),
+    detach: bool = typer.Option(
+        False,
+        "--detach",
+        "-d",
+        help="Launch as a detached agent daemon: return once the agents are online; they run until 'ck dev stop'.",
+    ),
     host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
     provision: bool = typer.Option(
         True,
@@ -139,6 +147,19 @@ def dev_run(
 ) -> None:
     """Run node(s) against the local dev mesh, spawning its broker if needed."""
     _load_env(env_file)  # FIRST: a .env-set CALFKIT_MESH_URL must be visible to host resolution
+    if detach:
+        _detach_run(
+            targets,
+            host=host,
+            provision=provision,
+            enable_idempotence=enable_idempotence,
+            reload=reload,
+            reload_dir=reload_dir,
+            app_dir=app_dir,
+            group_id=group_id,
+            env_file=env_file,
+        )
+        return
     servers = resolve_mesh_url(_parse_host(host))
     target = _normalize_or_exit(servers)
     _ensure_or_exit(target)  # in the PARENT: reload children only ever connect (spec §4.3)
@@ -159,6 +180,90 @@ def dev_run(
         dev_daemon=None,
         heartbeat_interval=_dev_agents.DEV_HEARTBEAT_INTERVAL,
     )
+
+
+def _detach_run(
+    targets: list[str],
+    *,
+    host: str | None,
+    provision: bool,
+    enable_idempotence: bool,
+    reload: bool,
+    reload_dir: list[str] | None,
+    app_dir: str,
+    group_id: str | None,
+    env_file: str | None,
+) -> None:
+    """The ``run -d`` path (agent-lifecycle spec §3.1/§5.1): preflight fails fast at the prompt,
+    then broker ensure, then connect-or-spawn the agent daemon and return only once its names are
+    online — so ``... && ck dev chat`` lands on a mesh where the agents already exist."""
+    try:
+        plan = _dev_agents.preflight(targets, app_dir=app_dir)
+    except _dev_agents.DevAgentError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    target = _normalize_or_exit(resolve_mesh_url(_parse_host(host)))
+    _ensure_or_exit(target)
+    run_args = _dev_agents.RunOptions(
+        provision=provision,
+        reload=reload,
+        reload_dir=tuple(reload_dir) if reload_dir else None,
+        app_dir=app_dir,
+        group_id=group_id,
+        env_file=env_file,
+        enable_idempotence=enable_idempotence,
+    )
+    try:
+        report = asyncio.run(_ensure_agents_with_client(plan, target, run_args))
+    except KeyboardInterrupt:
+        # §3.4: the daemon (if one was spawned) is deliberately left running — recoverable state,
+        # never half-killed on an interrupted wait.
+        typer.echo("interrupted — a launched daemon may still be starting in the background; check 'ck dev status'.", err=True)
+        raise typer.Exit(130) from None
+    except (_dev_agents.DevAgentError, DevBrokerError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    _echo_detach_report(report)
+
+
+async def _ensure_agents_with_client(
+    plan: list[_dev_agents.TargetNodes],
+    target: Target,
+    run_args: _dev_agents.RunOptions,
+) -> _dev_agents.EnsureReport:
+    """Run the ensure under a short-lived readiness client: its ``mesh`` view is the §5.2 poll's
+    snapshot source; closed on every path so the CLI never leaks a consumer."""
+    from calfkit.client import Client
+
+    client = Client.connect(_forward_host(target))
+    try:
+        return await _dev_agents.ensure_agents(plan, target, client.mesh, run_args=run_args)
+    finally:
+        await client.aclose()
+
+
+def _echo_detach_report(report: _dev_agents.EnsureReport) -> None:
+    """§3.1's per-name lines: launched names state their lifetime + supervisor pid + log; reused
+    names state the heartbeat age (the staleness-window honesty device, spec §5.5)."""
+    for outcome in report.outcomes:
+        for kind_word, names in (("agent", outcome.target.agent_names), ("tool", outcome.target.tool_names)):
+            for name in names:
+                if outcome.reused:
+                    age = _format_age(outcome.ages.get(name, 0.0))
+                    typer.echo(f"ck dev: reusing {kind_word} '{name}' (online, last seen {age} ago)")
+                else:
+                    lifetime = f"runs until 'ck dev stop {name}'"
+                    typer.echo(f"ck dev: launched {kind_word} '{name}' (pid {report.pid}) — {lifetime} — logs: {report.log_path}")
+
+
+def _format_age(seconds: float) -> str:
+    """A compact heartbeat age: ``3s``, ``2m05s``, ``1h04m``."""
+    whole = max(0, int(seconds))
+    if whole < 60:
+        return f"{whole}s"
+    if whole < 3600:
+        return f"{whole // 60}m{whole % 60:02d}s"
+    return f"{whole // 3600}h{(whole % 3600) // 60:02d}m"
 
 
 @dev_app.command(name="chat")
