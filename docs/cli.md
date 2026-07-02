@@ -252,8 +252,11 @@ is spawned as a detached background daemon that persists until an explicit
 `ck dev broker stop`/`restart` or a reboot.
 
 ```text
-ck dev run TARGET [TARGET ...] [OPTIONS]
-ck dev chat [NAME] [OPTIONS]
+ck dev run  TARGET [TARGET ...] [--detach/-d] [OPTIONS]
+ck dev chat [NAME | TARGET ...] [OPTIONS]
+ck dev status [OPTIONS]
+ck dev stop (NAME [NAME ...] | --all) [OPTIONS]
+ck dev down [OPTIONS]
 ck dev broker (start | stop | status | restart) [OPTIONS]
 ```
 
@@ -297,6 +300,89 @@ workers only reconnect — and each command first prints whether the broker is
 **managed** (`ck dev: managed broker at 127.0.0.1:9092 (pid 51234)`) or
 **reused** (`… — not managed by calfkit`).
 
+### `ck dev run --detach/-d`
+
+Everything `ck dev run` is, with the attachment cut (the `docker compose up
+-d` gesture): the worker tree — the reload supervisor plus the worker it
+restarts on edits — is spawned as a **detached daemon** and the command
+returns only when its agents/tools are **online on the mesh** (bounded at
+15 s; a failure reports the daemon's log tail). Lifetime: until
+`ck dev stop <name>`, `ck dev down`, or a reboot.
+
+- Per launched name it prints the **supervisor pid** (the process `stop`
+  signals), the lifetime statement, and the log path
+  (`~/.calfkit/logs/agents-<address>-<targets>.log`, overwritten per launch).
+- If every name of a target is already online, the target is **reused**
+  (`ck dev: reusing agent '<name>' (online, last seen 3s ago)`) and nothing is
+  spawned. Reuse matches names **on the mesh**, never code identity.
+- If a daemon for a name exists but its agents are offline (broken code or
+  mid-restart), a relaunch is an **error** naming the pid, the logs, and the
+  `stop` command — never a second daemon over a broken first.
+- All targets of one invocation co-host in **one** worker (the `ck run`
+  rule); they still discover and communicate over the mesh, never in-process.
+- A target must resolve to at least one agent or tool (a plain consumer node
+  has no mesh presence to manage — run those in the foreground).
+- Ctrl-C during the readiness wait leaves the daemon running (recoverable —
+  `ck dev status`); exit `130`.
+
+Ownership is **stateless**: a daemon is recognized by an internal
+`--dev-daemon=<names>` marker in its command line (with its `--host` scoping
+it to an address), exactly like the broker's process scan — no registry file
+anywhere. The flag is internal `ck dev` plumbing; it is accepted (and ignored)
+by `ck run` purely so it lands in the daemon's argv.
+
+### `ck dev chat` targets — session workers
+
+An argument containing `:` is a `module:attr` **target**; a bare word is an
+agent **name** (mixing them, passing two names, or duplicate node names across
+targets: exit `2`). With targets, the chat runs them **inside its own
+process** — a *session worker* on the chat's own client — waits for them to be
+online, then opens the normal picker:
+
+- The session worker dies **with the chat process**, on any exit — there is no
+  child process to orphan. Its logs share the chat terminal.
+- **No reload in a chat session** (an in-process worker cannot re-import your
+  code): the edit loop is save → `/exit` → rerun, or use
+  `ck dev run -d … && ck dev chat` for live reload while chatting.
+- Targets already online are **reused**, not launched; if every target was
+  reused nothing is started at all. The exit narration says what was owned:
+  `✦ stopped '<names>' (ran in this session)` /
+  `✦ still running: <names> — 'ck dev chat' to rejoin, 'ck dev down' to stop
+  everything`.
+- The launched+reused set must contain at least one **agent** (tools alone are
+  nobody to chat with): exit `2`.
+
+### `ck dev status`
+
+One table, unfiltered, host-scoped (`--host` > `$CALFKIT_MESH_URL` >
+`localhost`): the broker, every managed daemon's names joined with a live mesh
+snapshot, and **every other online node** annotated `not a ck dev daemon (stop
+it where it runs)`. Heartbeat ages are always shown ("online" can lag a crash
+by up to the ~15 s staleness window — the age is the honesty device). A
+daemon-owned name with no mesh record reads `unknown (see logs)` (crashed
+edit, mid-restart, or still booting — indistinguishable from outside). A down
+broker never errors: its line reads `no broker reachable`, presence columns
+degrade to `unknown (mesh unreachable)`, daemon rows still render. Exit `0`
+always.
+
+### `ck dev stop` and `ck dev down`
+
+| Command | Behavior |
+| --- | --- |
+| `stop NAME…` | Stop the daemon(s) owning those names — **whole-daemon**: co-hosted names go down together and every one is narrated (`stopped daemon pid 51288 (agents: general, finance)`). SIGTERM → 8 s grace → SIGKILL, delivered to the daemon's whole **process group**. |
+| `stop --all` | Every `ck dev` agent daemon on **every** address (ignores `--host`). |
+| `down` | `stop --all`, then `broker stop` at the resolved address. |
+
+Names resolve **within the target address** while `--all`/`down` sweep
+globally — that is the one name-vs-address asymmetry in the family. An unknown
+name exits `2` listing what *is* running at the address (and hints at
+`--host`); a name that is online but not a daemon (a session worker, a
+foreground run, anything external) exits `2` with *stop it where it runs*; two
+same-named daemons at one address exit `2` listing both pids — never a guess.
+Foreground runs and chat-session workers **survive `down`** by design (they
+carry no marker) and will error against the stopped broker — stop them where
+they run. Finding nothing to stop is a messaged no-op, exit `0`.
+
 ### `ck dev broker`
 
 Direct control of the dev broker daemon, decoupled from any app run. Every
@@ -321,8 +407,9 @@ is never touched; no state is persisted anywhere to track this.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Clean exit (including a `stop`/`status` that found nothing to act on). |
-| `2` | Configuration or broker-ensure error — invalid address, unreachable non-loopback address, missing binary/`[mesh]` extra, spawn or readiness failure — plus everything that exits `2` in the delegated command. |
+| `0` | Clean exit (including a `stop`/`status`/`down` that found nothing to act on). |
+| `2` | Configuration or supervise error — invalid address, unreachable non-loopback address, missing binary/`[mesh]` extra, broker or agent spawn/readiness failure, a bad `chat` grammar, an unknown/unmanaged `stop` name — plus everything that exits `2` in the delegated command. |
+| `130` | Ctrl-C during a `run -d` readiness wait (the daemon is left running — `ck dev status`). |
 
 ---
 

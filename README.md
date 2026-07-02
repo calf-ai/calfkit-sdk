@@ -55,14 +55,24 @@ general = Agent(
 
 ### Run it and chat
 
-```bash
-# Starts the agent (and a local mesh if one isn't running):
-#   ck dev run <file>:<agent>
-ck dev run general:general
+One line launches the agent in the background (spinning up the local mesh if
+needed) and drops you into a chat with it:
 
-# In a second terminal, chat with the agent:
-ck dev chat
+```console
+$ ck dev run -d general:general && ck dev chat
+ck dev: managed broker at 127.0.0.1:9092 (pid 51234)
+ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: ~/.calfkit/logs/agents-....log
+Discovering agents...
+
+Online agents:
+  1  general  Answers simple questions and routes requests to whoever can handle it.
+
+Select an agent [1-1, q to quit]: 1
 ```
+
+`-d` detaches the agent as a managed background daemon — it keeps running
+(reloading on your edits) after the command returns, so the chat lands on a
+mesh where the agent already exists.
 
 ### Add another agent — and watch them discover each other
 
@@ -79,11 +89,21 @@ finance = Agent(
 )
 ```
 
+From a second terminal — while your chat is still open:
+
 ```bash
-ck dev run finance:finance
+ck dev run -d finance:finance
 ```
 
-Now ask a finance question in `ck dev chat` — `general` discovers `finance` at runtime and hands off automatically. No wiring, no orchestrator.
+Now ask a finance question in the chat — `general` discovers `finance` at
+runtime and hands off automatically. No wiring, no orchestrator: two separate
+processes finding each other over the mesh.
+
+When you're done, one command stops every launched agent and the broker:
+
+```bash
+ck dev down
+```
 
 ## Running an agent mesh
 

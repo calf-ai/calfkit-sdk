@@ -109,9 +109,7 @@ def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_run_detach_lifecycle_spawn_online_reuse_status_stop(
-    kafka_bootstrap: str, topic_namespace: str, isolated_home: Path, tmp_path: Path
-) -> None:
+def test_run_detach_lifecycle_spawn_online_reuse_status_stop(kafka_bootstrap: str, topic_namespace: str, isolated_home: Path, tmp_path: Path) -> None:
     """spawn → online → reuse-with-age → status → stop; the stop group-reaps the WHOLE daemon
     tree (supervisor + reload worker + multiprocessing helpers — no survivors)."""
     psutil = pytest.importorskip("psutil", reason="the [mesh] extra is not installed")
@@ -151,9 +149,7 @@ def test_run_detach_lifecycle_spawn_online_reuse_status_stop(
         _reap_tree(pid)
 
 
-def test_kill9_staleness_flip_and_no_flap_liveness_proof(
-    kafka_bootstrap: str, topic_namespace: str, isolated_home: Path, tmp_path: Path
-) -> None:
+def test_kill9_staleness_flip_and_no_flap_liveness_proof(kafka_bootstrap: str, topic_namespace: str, isolated_home: Path, tmp_path: Path) -> None:
     """Ryan's empirical gate (spec §5.6): a 5s-heartbeat daemon (a) never flaps offline while
     alive across many samples, and (b) after kill -9 (a crash: no tombstone) reads offline within
     the ~15–20s staleness window (3 × 5s from its last heartbeat)."""
@@ -193,7 +189,12 @@ def test_kill9_staleness_flip_and_no_flap_liveness_proof(
 
 
 async def test_chat_target_runs_an_in_process_session_worker(
-    kafka_bootstrap: str, topic_namespace: str, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    kafka_bootstrap: str,
+    topic_namespace: str,
+    isolated_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The §3.2 in-process session against a real broker: preflight → launch on the SHARED chat
     client → readiness → picker (the launched agent is listed) → exit narration; the worker is

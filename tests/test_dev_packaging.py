@@ -46,6 +46,8 @@ def test_ck_app_builds_without_mesh_deps() -> None:
         "sys.modules['calfkit_mesh'] = None\n"
         "from calfkit.cli import _build_app\n"
         "_build_app()\n"  # mounts topics/run/chat (+ dev, once it exists)
+        "import calfkit.cli._chat\n"  # the chat session path imports _dev_agents — psutil must stay scan-lazy there too
+        "import calfkit.cli._dev_agents\n"
         "print('HYGIENE_OK')\n"
     )
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
