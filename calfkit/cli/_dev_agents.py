@@ -13,13 +13,12 @@ extra and is imported lazily by the process scan.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,7 +35,9 @@ from calfkit.cli._dev_broker import (
     _detach_kwargs,
     _flag_value,
     _format_address,
+    _killpg,
     _log_tail,
+    _signal,
     _spawn_lock,
     normalize,
 )
@@ -67,14 +68,6 @@ class PresenceReader(Protocol):
     async def get_agents(self) -> Mapping[str, Any]: ...
 
     async def get_tools(self) -> Mapping[str, Any]: ...
-
-
-def _killpg(pgid: int, sig: int) -> None:
-    """Signal a whole process group — the ``-d`` spawn is a session leader, so its pid is the
-    pgid and one signal reaps supervisor + worker + multiprocessing helpers together (spec §3.4).
-    A call-time ``os`` lookup (``killpg`` does not exist on Windows, and module import must stay
-    platform-safe) and the test seam — tests replace this, never a live signal."""
-    os.killpg(pgid, sig)
 
 
 @contextmanager
@@ -428,6 +421,62 @@ async def evaluate_targets(
                 "invocation can neither reuse nor launch it. Stop the partial set or rename the collision."
             )
     return reused, to_launch
+
+
+# --- stop: whole-daemon, group-signalled, narrated by the caller (spec §3.4) --------------------------
+
+DAEMON_GRACE = 8.0
+"""Teardown grace for daemon trees (spec §3.4, ≥ 8s): the reload supervisor's own teardown budget
+is ~6s (SIGINT to the worker → join(5) → SIGKILL → join(1)), so a shorter grace would SIGKILL it
+mid-shutdown and orphan the worker. Parameterized per call site — the broker keeps its 5s
+default (R4)."""
+
+
+def stop_daemon(hit: DaemonHit, *, grace: float = DAEMON_GRACE) -> bool:
+    """SIGTERM → *grace* → SIGKILL the daemon's whole **process group** (the ``-d`` spawn is a
+    session leader, so one signal reaps supervisor + worker + multiprocessing helpers together).
+    Whole-daemon by design: co-hosted names go down together — the caller narrates every one.
+    ``False`` = access denied (someone else's daemon)."""
+    return _signal(hit.proc, pid=hit.pid, label=f"the agent daemon (pid {hit.pid})", grace=grace, group=True)
+
+
+def resolve_stop(
+    names: Sequence[str],
+    daemons: Sequence[DaemonHit],
+    *,
+    host_key: str,
+    online: Collection[str],
+) -> list[DaemonHit]:
+    """Resolve ``stop NAME...`` to the daemons owning those names within one address scope
+    (spec §3.4) — deduped (co-hosted names share a daemon; it is stopped once, narrated whole),
+    order of first mention.
+
+    Raises:
+        DevAgentError: an unknown name (listing what IS running at this address, and how to look
+            elsewhere); a name that is online but not a marker daemon (a session worker, a
+            foreground run, anything external — stop it where it runs); or two same-named hits at
+            one address (hand-run markers, dead-broker windows) — both pids listed, never a guess.
+    """
+    resolved: list[DaemonHit] = []
+    seen_pids: set[int] = set()
+    for name in names:
+        owners = [hit for hit in daemons if name in hit.names]
+        if len(owners) > 1:
+            pids = ", ".join(str(hit.pid) for hit in sorted(owners, key=lambda h: h.pid))
+            raise DevAgentError(
+                f"two ck dev daemons at {host_key} claim '{name}' (pids {pids}) — refusing to guess. "
+                "Stop them directly by pid, or 'ck dev down' to clear everything."
+            )
+        if not owners:
+            if name in online:
+                raise DevAgentError(f"'{name}' is not a ck dev daemon — stop it where it runs.")
+            live = ", ".join(sorted({n for hit in daemons for n in hit.names})) or "none"
+            raise DevAgentError(f"no ck dev daemon owns '{name}' (running at {host_key}: {live}; use --host for other meshes).")
+        (owner,) = owners
+        if owner.pid not in seen_pids:
+            seen_pids.add(owner.pid)
+            resolved.append(owner)
+    return resolved
 
 
 # --- the -d daemon spawn + ensure orchestration (spec §5.1) -------------------------------------------

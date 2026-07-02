@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 import typer
 
+import calfkit.cli._dev_broker as dev_broker_module
 from calfkit.cli import _dev_agents
 from calfkit.cli._dev_agents import DevAgentError
 from calfkit.cli._dev_broker import MeshExtraMissingError, normalize
@@ -239,6 +240,27 @@ def test_find_daemons_filters_by_host_key(monkeypatch: pytest.MonkeyPatch) -> No
     install_fake_psutil(monkeypatch, [here, elsewhere])
     assert [hit.pid for hit in _dev_agents.find_daemons("127.0.0.1:9092")] == [4055]
     assert [hit.pid for hit in _dev_agents.find_daemons(None)] == [4055, 4102]
+
+
+def test_scan_handles_a_marker_on_a_non_run_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hand-set marker on an argv with no ``run`` verb still scans (whoever started it): no
+    positional targets, so the derived log slug is targets-less — best-effort, R3."""
+    argv = [sys.executable, "-m", "calfkit.cli", "--dev-daemon=general", "--host", "127.0.0.1:9092"]
+    install_fake_psutil(monkeypatch, [FakeProc(4055, argv)])
+    (hit,) = _dev_agents.scan_daemons()
+    assert hit.targets == ()
+    assert hit.names == ("general",)
+
+
+def test_killpg_seam_delivers_via_os_killpg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seam's body is the one real ``os.killpg`` call site (call-time lookup so module import
+    stays platform-safe); everything else in the suite replaces the seam itself."""
+    import os as os_module
+
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(os_module, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    dev_broker_module._killpg(123, 15)
+    assert calls == [(123, 15)]
 
 
 # --- the log slug: derived identically at spawn and scan time (handoff rule) --------------------------
@@ -541,6 +563,172 @@ async def test_ensure_readiness_failure_propagates_after_the_group_kill(monkeypa
         await _dev_agents.ensure_agents([_target("general")], normalize([_KEY]), mesh, run_args=_run_args(), **_fast_wait())
     assert len(spawned) == 1
     assert killed and killed[0][0] == spawned[0].pid
+
+
+# --- stop: whole-daemon group signalling (spec §3.4) --------------------------------------------------
+
+
+def _hit(proc: FakeProc, names: tuple[str, ...] = ("general",), host_key: str = _KEY) -> _dev_agents.DaemonHit:
+    return _dev_agents.DaemonHit(
+        proc=proc,
+        pid=proc.pid,
+        names=names,
+        host_key=host_key,
+        targets=("app:agent",),
+        log_path="/tmp/agents-x.log",
+        started_at="2026-07-02T00:00:00+00:00",
+    )
+
+
+def _group_killer(monkeypatch: pytest.MonkeyPatch, procs: list[FakeProc], *, dies_on: int | None = None) -> list[tuple[int, int]]:
+    """Replace the killpg seam with a recorder that flips the leader's FakeProc state, modelling
+    the group signal reaching the tree. ``dies_on`` = the signal that actually kills (None = both)."""
+    import signal as signal_module
+
+    calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        calls.append((pgid, sig))
+        for proc in procs:
+            if proc.pid == pgid and (dies_on is None or sig == dies_on):
+                proc.alive = False
+
+    monkeypatch.setattr(dev_broker_module, "_killpg", fake_killpg)
+    assert signal_module.SIGTERM  # keep the import obviously used
+    return calls
+
+
+def test_stop_daemon_signals_the_process_group_term_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal as signal_module
+
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055)
+    calls = _group_killer(monkeypatch, [proc])
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+    assert calls == [(4055, signal_module.SIGTERM)]
+
+
+def test_stop_daemon_escalates_to_group_sigkill_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal as signal_module
+
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055, survives_sigterm=True)
+    calls = _group_killer(monkeypatch, [proc], dies_on=signal_module.SIGKILL)
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+    assert calls == [(4055, signal_module.SIGTERM), (4055, signal_module.SIGKILL)]
+
+
+def test_stop_daemon_denied_group_signal_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055)
+
+    def deny(pgid: int, sig: int) -> None:
+        raise PermissionError("not yours")
+
+    monkeypatch.setattr(dev_broker_module, "_killpg", deny)
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is False
+
+
+def test_stop_daemon_vanished_group_is_the_goal_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055)
+
+    def gone(pgid: int, sig: int) -> None:
+        raise ProcessLookupError("already gone")
+
+    monkeypatch.setattr(dev_broker_module, "_killpg", gone)
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+
+
+def test_stop_daemon_zombie_leader_counts_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The broker's zombie discipline holds one layer up: a dead-but-unreaped leader (its
+    spawning shell still alive) IS the stopped state, not a failure."""
+    import signal as signal_module
+
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055)
+    calls: list[tuple[int, int]] = []
+
+    def zombify(pgid: int, sig: int) -> None:
+        calls.append((pgid, sig))
+        proc.zombie = True
+
+    monkeypatch.setattr(dev_broker_module, "_killpg", zombify)
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+    assert calls == [(4055, signal_module.SIGTERM)]
+
+
+def test_daemon_grace_is_at_least_eight_seconds() -> None:
+    """Spec §3.4: the reload supervisor's own teardown budget is ~6s (SIGINT→join(5)→SIGKILL→
+    join(1)); a shorter grace would SIGKILL it mid-shutdown and orphan the worker. The broker's
+    own 5s default stays untouched (R4: parameterized per call site)."""
+    import inspect
+
+    assert _dev_agents.DAEMON_GRACE >= 8.0
+    assert inspect.signature(_dev_agents.stop_daemon).parameters["grace"].default == _dev_agents.DAEMON_GRACE
+    assert dev_broker_module.DEFAULT_GRACE == 5.0
+
+
+# --- stop resolution: names -> daemons at one address (spec §3.4) -------------------------------------
+
+
+def test_resolve_stop_dedupes_co_hosted_names_to_one_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    daemon = _hit(FakeProc(4055), names=("general", "finance"))
+    hits = _dev_agents.resolve_stop(["general", "finance"], [daemon], host_key=_KEY, online=set())
+    assert [h.pid for h in hits] == [4055]
+
+
+def test_resolve_stop_multiple_names_across_daemons(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _hit(FakeProc(4055), names=("general",))
+    second = _hit(FakeProc(4102), names=("finance",))
+    hits = _dev_agents.resolve_stop(["finance", "general"], [first, second], host_key=_KEY, online=set())
+    assert [h.pid for h in hits] == [4102, 4055]
+
+
+def test_resolve_stop_unknown_name_lists_the_address_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit-2 material naming what IS running at the target address and how to look elsewhere."""
+    daemon = _hit(FakeProc(4055), names=("general",))
+    with pytest.raises(DevAgentError, match=r"(?s)'nope'.*running at 127\.0\.0\.1:9092: general.*--host"):
+        _dev_agents.resolve_stop(["nope"], [daemon], host_key=_KEY, online=set())
+
+
+def test_resolve_stop_unknown_name_with_no_daemons_says_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(DevAgentError, match=r"(?s)running at 127\.0\.0\.1:9092: none.*--host"):
+        _dev_agents.resolve_stop(["nope"], [], host_key=_KEY, online=set())
+
+
+def test_resolve_stop_online_but_unmanaged_name_explains_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(DevAgentError, match=r"'support' is not a ck dev daemon — stop it where it runs"):
+        _dev_agents.resolve_stop(["support"], [], host_key=_KEY, online={"support"})
+
+
+def test_resolve_stop_two_same_named_hits_lists_both_pids_never_guesses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hand-run markers / dead-broker windows can leave two same-named daemons at one address —
+    exit 2 listing both pids, never a guess (spec §3.4)."""
+    first = _hit(FakeProc(4055), names=("general",))
+    second = _hit(FakeProc(4102), names=("general",))
+    with pytest.raises(DevAgentError, match=r"(?s)4055.*4102"):
+        _dev_agents.resolve_stop(["general"], [first, second], host_key=_KEY, online=set())
+
+
+async def test_ensure_unwritable_log_location_is_exit_2_material(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    install_fake_psutil(monkeypatch, [])
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory must go")
+    monkeypatch.setattr(_dev_agents, "daemon_log_path", lambda key, targets: blocker / "logs" / "agents-x.log")
+    with pytest.raises(DevAgentError, match=r"cannot write the agent daemon log"):
+        await _dev_agents.ensure_agents([_target("general")], normalize([_KEY]), FakeMesh(), run_args=_run_args(), **_fast_wait())
+
+
+async def test_ensure_exec_failure_is_exit_2_material(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_psutil(monkeypatch, [])
+
+    def boom(cmd: list[str], **kwargs: object) -> FakePopen:
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(_dev_agents, "Popen", boom)
+    with pytest.raises(DevAgentError, match=r"failed to launch the agent daemon"):
+        await _dev_agents.ensure_agents([_target("general")], normalize([_KEY]), FakeMesh(), run_args=_run_args(), **_fast_wait())
 
 
 async def test_ensure_holds_the_agents_flock_across_its_critical_section(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

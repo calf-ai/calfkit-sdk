@@ -457,7 +457,7 @@ def stop(target: Target, *, grace: float = DEFAULT_GRACE) -> bool:
     hit = _find_dev_broker(target.listener)
     if hit is None:
         return False
-    if not _signal(hit, grace):
+    if not _signal(hit.proc, pid=hit.pid, label=f"the dev broker at {hit.listener} (pid {hit.pid})", grace=grace):
         raise DevBrokerError(f"cannot stop the dev broker at {hit.listener} (pid {hit.pid}) — it is owned by another user.")
     return True
 
@@ -472,39 +472,51 @@ def stop_all(*, grace: float = DEFAULT_GRACE) -> list[str]:
     stopped: list[str] = []
     for hit in _scan_dev_brokers():
         try:
-            if _signal(hit, grace):
+            if _signal(hit.proc, pid=hit.pid, label=f"the dev broker at {hit.listener} (pid {hit.pid})", grace=grace):
                 stopped.append(hit.listener)
         except DevBrokerError as exc:
             print(f"warning: {exc}", file=sys.stderr)
     return stopped
 
 
-def _signal(hit: _ScanHit, grace: float) -> bool:
-    """SIGTERM → *grace* → SIGKILL one scan hit. ``True`` = stopped, ``False`` = access denied.
+def _killpg(pgid: int, sig: int) -> None:
+    """Signal a whole process group — the agent-daemon ``-d`` spawn is a session leader, so its
+    pid is the pgid and one signal reaps supervisor + worker + multiprocessing helpers together
+    (dev-agent-lifecycle spec §3.4). A call-time ``os`` attribute lookup (``killpg`` does not
+    exist on Windows, and module import must stay platform-safe) and the test seam — tests
+    replace this, never deliver a live group signal."""
+    os.killpg(pgid, sig)
 
-    A broker whose spawning ``ck dev run`` is still alive dies into an **unreaped zombie** (spec
-    §5.8: the parent reaps only at its own exit), and psutil's non-child ``wait`` never returns
-    for a zombie — so a post-wait timeout with ``status() == zombie`` IS the stopped state, not
-    a failure.
+
+def _signal(proc: Any, *, pid: int, label: str, grace: float, group: bool = False) -> bool:
+    """SIGTERM → *grace* → SIGKILL one scanned process — or, with ``group=True``, its whole
+    process group (the agent-daemon path: the leader's pid IS the pgid). ``True`` = stopped,
+    ``False`` = access denied; *label* names the process in the survived-SIGKILL error.
+
+    A process whose spawning parent is still alive dies into an **unreaped zombie** (the parent
+    reaps only at its own exit), and psutil's non-child ``wait`` never returns for a zombie — so
+    a post-wait timeout with ``status() == zombie`` IS the stopped state, not a failure.
     """
-    import psutil  # already importable: the scan produced the hit (mypy flags the module once, on the scan's import)
+    import signal as signal_module
+
+    import psutil  # already importable: the scan produced the process handle (mypy flags the module once, on the scan's import)
 
     def _is_gone() -> bool:
         try:
-            zombie: bool = hit.proc.status() == psutil.STATUS_ZOMBIE
+            zombie: bool = proc.status() == psutil.STATUS_ZOMBIE
         except psutil.NoSuchProcess:
             return True
         return zombie
 
     def _wait_or_gone() -> bool:
         # psutil's non-child wait polls pid_exists, which a zombie passes — it would eat the
-        # whole grace for an already-dead broker. Wait in short slices, checking the zombie
-        # status between them, so the common case (stop while `ck dev run` is alive) is instant.
+        # whole grace for an already-dead process. Wait in short slices, checking the zombie
+        # status between them, so the common case (stop while the spawner is alive) is instant.
         deadline = time.monotonic() + grace
         while True:
             remaining = deadline - time.monotonic()
             try:
-                hit.proc.wait(min(0.1, max(0.01, remaining)))
+                proc.wait(min(0.1, max(0.01, remaining)))
                 return True
             except psutil.TimeoutExpired:
                 if _is_gone():
@@ -512,17 +524,28 @@ def _signal(hit: _ScanHit, grace: float) -> bool:
                 if remaining <= 0.1:
                     return False
 
+    def _send(sig: int) -> None:
+        # The group path signals via killpg (ProcessLookupError/PermissionError are the OS-level
+        # twins of psutil's NoSuchProcess/AccessDenied, handled below); the single path keeps
+        # psutil's own calls so the scan-verified handle is what gets signalled.
+        if group:
+            _killpg(pid, sig)
+        elif sig == signal_module.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+
     try:
-        hit.proc.terminate()
+        _send(signal_module.SIGTERM)
         if _wait_or_gone():
             return True
-        hit.proc.kill()
+        _send(signal_module.SIGKILL)
         if not _wait_or_gone():
-            raise DevBrokerError(f"the dev broker at {hit.listener} (pid {hit.pid}) survived SIGKILL for {grace:.1f}s.")
-    except psutil.NoSuchProcess:
+            raise DevBrokerError(f"{label} survived SIGKILL for {grace:.1f}s.")
+    except (psutil.NoSuchProcess, ProcessLookupError):
         pass  # exited between the scan and the signal — the goal state (stopped) is reached
-    except psutil.AccessDenied:
-        return False  # someone else's broker — never signalled further; callers decide how to report
+    except (psutil.AccessDenied, PermissionError):
+        return False  # someone else's process — never signalled further; callers decide how to report
     return True
 
 
