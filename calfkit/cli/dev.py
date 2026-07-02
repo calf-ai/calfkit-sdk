@@ -18,6 +18,7 @@ the supervisor's spawn branch.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import typer
 
@@ -344,6 +345,188 @@ def _chat_targets(targets: list[str], *, host: str | None, provision: bool, env_
     try:
         chat_module.run_session_command(session)
     except _dev_agents.DevAgentError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+# --- status / stop / down: the agent-daemon management surface (agent-lifecycle spec §3.3/§3.4) --------
+
+_STATUS_HEADER = ("KIND", "NAME", "STATE", "PID", "SINCE", "TARGET", "LOGS")
+_EMPTY = "—"
+
+
+@dev_app.command(name="status")
+def dev_status(
+    host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
+    env_file: str | None = typer.Option(None, "--env-file", help="Path to a dotenv file to load. Defaults to ./.env if present."),
+) -> None:
+    """Show the broker, every online node, and the managed agent daemons — unfiltered.
+
+    Never errors on a down mesh: the broker line degrades, presence columns read
+    'unknown (mesh unreachable)', and daemon rows still render from the process scan.
+    """
+    target = _target_or_exit(host, env_file)
+    try:
+        broker_report = _dev_broker.status(target)
+        daemons = _dev_agents.find_daemons(target.key)
+    except DevBrokerError as exc:  # the scan needs the [mesh] extra — without it there is no answer
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    agents: dict[str, Any] = {}
+    tools: dict[str, Any] = {}
+    if broker_report.reachable:
+        # An unusable presence plane (open_failed on a fresh broker) reads as ZERO online rows —
+        # only an unreachable broker degrades the presence columns (spec §3.3).
+        agents, tools = asyncio.run(_read_presence_maps(target))
+    for line in _render_table(_status_rows(broker_report, daemons, agents, tools)):
+        typer.echo(line)
+
+
+async def _read_presence_maps(target: Target) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One point-in-time presence snapshot per kind via a short-lived client; an unusable view
+    (not created yet / still establishing / reader died) degrades to empty, never errors."""
+    from calfkit.client import Client
+    from calfkit.exceptions import MeshUnavailableError
+
+    client = Client.connect(_forward_host(target))
+    try:
+        try:
+            agents = dict(await client.mesh.get_agents())
+        except MeshUnavailableError:
+            agents = {}
+        try:
+            tools = dict(await client.mesh.get_tools())
+        except MeshUnavailableError:
+            tools = {}
+    finally:
+        await client.aclose()
+    return agents, tools
+
+
+def _status_rows(
+    report: _dev_broker.MeshStatus,
+    daemons: list[_dev_agents.DaemonHit],
+    agents: dict[str, Any],
+    tools: dict[str, Any],
+) -> list[tuple[str, ...]]:
+    """The §3.3 join: broker row(s), then managed-daemon rows (scan ⋈ presence by name), then
+    every remaining online node — nothing online is ever filtered out (Ryan's transparency rule)."""
+    rows: list[tuple[str, ...]] = [_STATUS_HEADER]
+    target_elements = set(report.target_key.split(","))
+    managed_brokers = [broker for broker in report.brokers if broker.listener in target_elements]
+    for broker in managed_brokers:
+        rows.append(("broker", broker.listener, "running", str(broker.pid), broker.started_at or _EMPTY, _EMPTY, _EMPTY))
+    if not managed_brokers:
+        state = "reachable, not managed by calfkit" if report.reachable else "no broker reachable"
+        rows.append(("broker", report.target_key, state, _EMPTY, _EMPTY, _EMPTY, _EMPTY))
+    for hit in daemons:
+        for name in hit.names:
+            if name in agents:
+                kind, state = "agent", f"online (last seen {_format_age(_age_of(agents[name]))} ago)"
+            elif name in tools:
+                kind, state = "tool", f"online (last seen {_format_age(_age_of(tools[name]))} ago)"
+            elif not report.reachable:
+                kind, state = "unknown", "unknown (mesh unreachable)"
+            else:
+                # Daemon process alive, no presence record: crashed on a broken edit, mid-restart,
+                # or still booting — statelessly indistinguishable, so honestly unknown (Ryan,
+                # 2026-07-02), pointing at the LOGS column.
+                kind, state = "unknown", "unknown (see logs)"
+            rows.append((kind, name, state, str(hit.pid), hit.started_at, ",".join(hit.targets) or _EMPTY, hit.log_path))
+    managed_names = {name for hit in daemons for name in hit.names}
+    annotation = "not a ck dev daemon (stop it where it runs)"
+    for name, info in sorted(agents.items()):
+        if name not in managed_names:
+            rows.append(("agent", name, f"online (last seen {_format_age(_age_of(info))} ago) — {annotation}", _EMPTY, _EMPTY, _EMPTY, _EMPTY))
+    for name, info in sorted(tools.items()):
+        if name not in managed_names:
+            rows.append(("tool", name, f"online (last seen {_format_age(_age_of(info))} ago) — {annotation}", _EMPTY, _EMPTY, _EMPTY, _EMPTY))
+    return rows
+
+
+def _age_of(info: Any) -> float:
+    from datetime import datetime, timezone
+
+    age: float = (datetime.now(tz=timezone.utc) - info.last_seen).total_seconds()
+    return age
+
+
+def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
+    return ["  ".join(cell.ljust(widths[column]) for column, cell in enumerate(row)).rstrip() for row in rows]
+
+
+@dev_app.command(name="stop")
+def dev_stop(
+    names: list[str] | None = typer.Argument(None, help="Agent/tool name(s) whose daemon to stop (whole-daemon: co-hosted names stop together)."),
+    stop_all: bool = typer.Option(False, "--all", help="Stop every ck dev agent daemon on every address (ignores --host)."),
+    host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
+    env_file: str | None = typer.Option(None, "--env-file", help="Path to a dotenv file to load. Defaults to ./.env if present."),
+) -> None:
+    """Stop agent daemon(s) by name; the broker stays up."""
+    try:
+        if stop_all:
+            _stop_daemon_sweep(_dev_agents.find_daemons(None))
+            return
+        if not names:
+            typer.echo("Error: pass agent name(s) to stop, or --all ('ck dev status' lists what is running).", err=True)
+            raise typer.Exit(2)
+        target = _target_or_exit(host, env_file)
+        daemons = _dev_agents.find_daemons(target.key)
+        # The online set feeds only the not-a-daemon explanation; read it just when a name
+        # is not covered by any daemon (and degrade to empty if the mesh is unusable).
+        online: set[str] = set()
+        if any(name not in {n for hit in daemons for n in hit.names} for name in names):
+            online = asyncio.run(_online_name_set(target))
+        for hit in _dev_agents.resolve_stop(names, daemons, host_key=target.key, online=online):
+            if not _dev_agents.stop_daemon(hit):
+                raise _dev_agents.DevAgentError(f"cannot stop the agent daemon (pid {hit.pid}) — it is owned by another user.")
+            _echo_stopped(hit)
+    except (_dev_agents.DevAgentError, DevBrokerError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+async def _online_name_set(target: Target) -> set[str]:
+    agents, tools = await _read_presence_maps(target)
+    return set(agents) | set(tools)
+
+
+def _echo_stopped(hit: _dev_agents.DaemonHit) -> None:
+    typer.echo(f"stopped daemon pid {hit.pid} (agents: {', '.join(hit.names)})")
+
+
+def _stop_daemon_sweep(daemons: list[_dev_agents.DaemonHit]) -> None:
+    """Stop every given daemon, narrated; a denied one warns and never aborts the sweep (the
+    broker stop_all discipline)."""
+    if not daemons:
+        typer.echo("no agent daemons to stop")
+        return
+    for hit in daemons:
+        if _dev_agents.stop_daemon(hit):
+            _echo_stopped(hit)
+        else:
+            typer.echo(f"warning: cannot stop the agent daemon (pid {hit.pid}) — it is owned by another user.", err=True)
+
+
+@dev_app.command(name="down")
+def dev_down(
+    host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
+    env_file: str | None = typer.Option(None, "--env-file", help="Path to a dotenv file to load. Defaults to ./.env if present."),
+) -> None:
+    """Stop every agent daemon, then the broker at the resolved address.
+
+    Foreground and chat-session workers survive by design (they carry no marker) and will error
+    against the stopped broker — stop them where they run.
+    """
+    target = _target_or_exit(host, env_file)
+    try:
+        _stop_daemon_sweep(_dev_agents.find_daemons(None))
+        if _dev_broker.stop(target):
+            typer.echo(f"stopped {target.key}")
+        else:
+            typer.echo(f"no managed broker at {target.key} (no memory-engine tansu is bound there)")
+    except (_dev_agents.DevAgentError, DevBrokerError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
 

@@ -660,6 +660,223 @@ def test_dev_chat_target_session_supervisor_error_exits_2(detach_seams: dict[str
     assert "no agents among" in _plain(result.stderr)
 
 
+# --- dev status: the unfiltered join (agent-lifecycle spec §3.3) ---------------------------------------
+
+
+def _daemon_hit(pid: int, names: tuple[str, ...], *, host_key: str = _KEY, targets: tuple[str, ...] = ("app:agent",)) -> Any:
+    return dev_agents.DaemonHit(
+        proc=None,
+        pid=pid,
+        names=names,
+        host_key=host_key,
+        targets=targets,
+        log_path=f"/tmp/agents-{pid}.log",
+        started_at="2026-07-02T14:02:40+00:00",
+    )
+
+
+def _mesh_info(name: str, *, age: float = 3.0) -> Any:
+    from datetime import datetime, timedelta, timezone
+
+    from calfkit.client.mesh import AgentInfo
+
+    return AgentInfo(name=name, description=None, last_seen=datetime.now(tz=timezone.utc) - timedelta(seconds=age))
+
+
+@pytest.fixture
+def status_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seams: dict[str, Any] = {
+        "broker": MeshStatus(target_key=_KEY, reachable=True, brokers=(_info(pid=4021),)),
+        "daemons": [],
+        "presence": ({}, {}),
+    }
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: seams["broker"])
+    monkeypatch.setattr(dev_agents, "find_daemons", lambda host_key: list(seams["daemons"]))
+
+    async def fake_presence(target: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        if seams.get("presence_forbidden"):
+            raise AssertionError("presence must not be read when the broker is unreachable")
+        result: tuple[dict[str, Any], dict[str, Any]] = seams["presence"]
+        return result
+
+    monkeypatch.setattr(dev_cli, "_read_presence_maps", fake_presence)
+    return seams
+
+
+def test_dev_status_renders_all_four_row_kinds(status_seams: dict[str, Any]) -> None:
+    """R5: broker + online managed + offline managed + unmanaged rows, unfiltered (Ryan's
+    transparency rule), heartbeat ages always shown."""
+    status_seams["daemons"] = [
+        _daemon_hit(4055, ("general",), targets=("general_help:general",)),
+        _daemon_hit(4102, ("finance",), targets=("finance_help:finance",)),
+    ]
+    status_seams["presence"] = (
+        {"general": _mesh_info("general"), "support": _mesh_info("support")},
+        {"get_weather": _mesh_info("get_weather", age=4.0)},
+    )
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    out = _plain(result.stdout)
+    for column in ("KIND", "NAME", "STATE", "PID", "SINCE", "TARGET", "LOGS"):
+        assert column in out
+    lines = {line.split()[1]: line for line in out.splitlines() if line and not line.startswith("KIND")}
+    assert lines[_KEY].startswith("broker")
+    assert "running" in lines[_KEY] and "4021" in lines[_KEY]
+    assert lines["general"].startswith("agent")
+    assert "online (last seen 3s ago)" in lines["general"]
+    assert "4055" in lines["general"] and "general_help:general" in lines["general"] and "/tmp/agents-4055.log" in lines["general"]
+    # The Ryan rulings (2026-07-02): a daemon-owned name with no presence record is honestly
+    # UNKNOWN — not 'offline', not mislabeled 'agent'.
+    assert lines["finance"].startswith("unknown")
+    assert "unknown (see logs)" in lines["finance"]
+    assert "4102" in lines["finance"]
+    assert "not a ck dev daemon (stop it where it runs)" in lines["support"]
+    assert lines["support"].startswith("agent")
+    assert lines["get_weather"].startswith("tool")
+    assert "not a ck dev daemon" in lines["get_weather"]
+
+
+def test_dev_status_broker_down_degrades_and_exits_0(status_seams: dict[str, Any]) -> None:
+    """§3.3: status never errors — the broker line reads no-broker, presence columns degrade,
+    daemon rows still render from the scan."""
+    status_seams["broker"] = MeshStatus(target_key=_KEY, reachable=False, brokers=())
+    status_seams["presence_forbidden"] = True
+    status_seams["daemons"] = [_daemon_hit(4055, ("general",))]
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    out = _plain(result.stdout)
+    assert "no broker reachable" in out
+    assert "unknown (mesh unreachable)" in out
+    assert "4055" in out
+
+
+def test_dev_status_reachable_but_empty_presence_shows_zero_online_rows(status_seams: dict[str, Any]) -> None:
+    """A reachable broker whose presence plane doesn't exist yet (open_failed) renders zero
+    online rows — only an unreachable broker degrades to 'unknown (mesh unreachable)'."""
+    status_seams["daemons"] = [_daemon_hit(4055, ("general",))]
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    out = _plain(result.stdout)
+    assert "online" not in out
+    assert "unknown (see logs)" in out
+    assert "mesh unreachable" not in out
+
+
+def test_dev_status_borrowed_broker_renders_the_shipped_shape(status_seams: dict[str, Any]) -> None:
+    status_seams["broker"] = MeshStatus(target_key=_KEY, reachable=True, brokers=())
+    result = _invoke(["dev", "status"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "reachable, not managed by calfkit" in _plain(result.stdout)
+
+
+# --- dev stop / dev down (agent-lifecycle spec §3.4) ----------------------------------------------------
+
+
+@pytest.fixture
+def stop_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seams: dict[str, Any] = {"daemons": [], "online": set(), "stopped": [], "stop_result": True}
+    monkeypatch.setattr(dev_agents, "find_daemons", lambda host_key: [h for h in seams["daemons"] if host_key is None or h.host_key == host_key])
+
+    def fake_stop(hit: Any, *, grace: float = dev_agents.DAEMON_GRACE) -> bool:
+        seams["stopped"].append((hit.pid, grace))
+        result: bool = seams["stop_result"]
+        return result
+
+    monkeypatch.setattr(dev_agents, "stop_daemon", fake_stop)
+
+    async def fake_online(target: Any) -> set[str]:
+        online: set[str] = seams["online"]
+        return online
+
+    monkeypatch.setattr(dev_cli, "_online_name_set", fake_online)
+    return seams
+
+
+def test_dev_stop_narrates_the_whole_daemon(stop_seams: dict[str, Any]) -> None:
+    """Ryan's ruling: a co-hosted daemon is one process tree — naive whole-daemon stop, every
+    co-hosted name always printed."""
+    stop_seams["daemons"] = [_daemon_hit(4055, ("general", "finance"))]
+    result = _invoke(["dev", "stop", "general"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "stopped daemon pid 4055 (agents: general, finance)" in _plain(result.stdout)
+    assert stop_seams["stopped"] == [(4055, dev_agents.DAEMON_GRACE)]
+
+
+def test_dev_stop_two_names_one_daemon_stops_once(stop_seams: dict[str, Any]) -> None:
+    stop_seams["daemons"] = [_daemon_hit(4055, ("general", "finance"))]
+    result = _invoke(["dev", "stop", "general", "finance"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert len(stop_seams["stopped"]) == 1
+
+
+def test_dev_stop_without_names_points_at_status(stop_seams: dict[str, Any]) -> None:
+    result = _invoke(["dev", "stop"])
+    assert result.exit_code == 2
+    assert "ck dev status" in _plain(result.stderr)
+
+
+def test_dev_stop_unknown_name_exits_2_with_the_address_scope(stop_seams: dict[str, Any]) -> None:
+    stop_seams["daemons"] = [_daemon_hit(4055, ("general",))]
+    result = _invoke(["dev", "stop", "nope"])
+    assert result.exit_code == 2
+    err = _plain(result.stderr)
+    assert "running at 127.0.0.1:9092: general" in err
+    assert "--host" in err
+
+
+def test_dev_stop_online_unmanaged_name_explains_itself(stop_seams: dict[str, Any]) -> None:
+    stop_seams["online"] = {"support"}
+    result = _invoke(["dev", "stop", "support"])
+    assert result.exit_code == 2
+    assert "not a ck dev daemon — stop it where it runs" in _plain(result.stderr)
+
+
+def test_dev_stop_denied_daemon_exits_2(stop_seams: dict[str, Any]) -> None:
+    stop_seams["daemons"] = [_daemon_hit(4055, ("general",))]
+    stop_seams["stop_result"] = False
+    result = _invoke(["dev", "stop", "general"])
+    assert result.exit_code == 2
+    assert "owned by another user" in _plain(result.stderr)
+
+
+def test_dev_stop_all_sweeps_every_address(stop_seams: dict[str, Any]) -> None:
+    stop_seams["daemons"] = [
+        _daemon_hit(4055, ("general",)),
+        _daemon_hit(4102, ("finance",), host_key="127.0.0.1:19092"),
+    ]
+    result = _invoke(["dev", "stop", "--all"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert [pid for pid, _ in stop_seams["stopped"]] == [4055, 4102]
+
+
+def test_dev_stop_all_with_nothing_is_a_messaged_noop(stop_seams: dict[str, Any]) -> None:
+    result = _invoke(["dev", "stop", "--all"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "no agent daemons" in _plain(result.stdout)
+
+
+def test_dev_down_sweeps_daemons_then_stops_the_broker(stop_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    stop_seams["daemons"] = [_daemon_hit(4055, ("general",))]
+    broker_stops: list[str] = []
+    monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: broker_stops.append(target.key) or True)
+    result = _invoke(["dev", "down"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    out = _plain(result.stdout)
+    assert "stopped daemon pid 4055" in out
+    assert f"stopped {_KEY}" in out
+    assert out.index("stopped daemon") < out.index(f"stopped {_KEY}")  # daemons first, then the broker
+    assert broker_stops == [_KEY]
+
+
+def test_dev_down_with_nothing_is_a_messaged_noop(stop_seams: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: False)
+    result = _invoke(["dev", "down"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    out = _plain(result.stdout)
+    assert "no agent daemons" in out
+    assert "no managed broker" in out
+
+
 def test_dev_run_forwards_the_hidden_internals_explicitly(ensure_calls: list[dict[str, Any]], run_calls: list[dict[str, Any]]) -> None:
     """The parity-guard contract (impl plan CG-B): `dev run` forwards the hidden internals with
     their preset values — the 5s dev heartbeat (spec §5.6 covers foreground dev runs too) and no
