@@ -370,6 +370,20 @@ def test_spawn_that_exits_during_startup_fails_fast_with_the_log_tail(monkeypatc
         ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), timeout=30.0)
 
 
+def test_spawn_killed_by_a_signal_hints_at_a_concurrent_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A lock-free `ck dev broker stop/restart` can race an in-flight readiness wait (spec §5.3);
+    # the negative returncode gets a hint instead of a bare "exit code -15".
+    def factory(cmd: list[str], **kwargs: object) -> FakePopen:
+        proc = FakePopen(cmd, **kwargs)
+        proc.returncode = -15
+        return proc
+
+    monkeypatch.setattr(dev_broker, "Popen", factory)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="killed by a signal"):
+        ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
+
+
 def test_wrong_arch_binary_surfaces_a_distinct_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
         raise OSError(8, "Exec format error")
@@ -450,6 +464,36 @@ def test_contended_spawn_lock_announces_itself(monkeypatch: pytest.MonkeyPatch, 
     with dev_broker._spawn_lock():
         pass
     assert "waiting for the dev broker to start" in capsys.readouterr().err
+
+
+def test_flock_failure_is_a_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An flock that fails outright (e.g. ENOLCK on an NFS home) is exit-2 material, not a crash.
+    import errno
+    import types
+
+    real_fcntl = __import__("fcntl")
+    fake = types.ModuleType("fcntl")
+    fake.LOCK_EX = real_fcntl.LOCK_EX  # type: ignore[attr-defined]
+    fake.LOCK_NB = real_fcntl.LOCK_NB  # type: ignore[attr-defined]
+    fake.LOCK_UN = real_fcntl.LOCK_UN  # type: ignore[attr-defined]
+
+    def flock(fd: int, flags: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    fake.flock = flock  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    with pytest.raises(DevBrokerError, match="cannot lock"), dev_broker._spawn_lock():
+        pass  # pragma: no cover — the lock acquire raises before the body runs
+
+
+def test_missing_locator_symbol_is_the_same_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Version skew: a calfkit_mesh module without resolve_broker_bin raises a bare ImportError.
+    def resolve_bin() -> str:
+        raise ImportError("cannot import name 'resolve_broker_bin' from 'calfkit_mesh'")
+
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match=r"calfkit\[mesh\]"):
+        ensure_broker(normalize(["localhost"]), resolve_bin=resolve_bin)
 
 
 def test_restart_without_the_mesh_extra_reuses_a_borrowed_broker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -666,6 +710,15 @@ def test_stop_all_skips_a_denied_broker_and_continues(monkeypatch: pytest.Monkey
     install_fake_psutil(monkeypatch, [denied, ours])
     assert dev_broker.stop_all() == ["127.0.0.1:19092"]
     assert ours.events == ["terminate", "wait"], "one denied broker must not abort the sweep"
+
+
+def test_stop_all_warns_and_continues_past_a_sigkill_survivor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    unkillable = FakeProc(4242, _broker_argv(), survives_sigterm=True, survives_sigkill=True)
+    ours = FakeProc(4343, _broker_argv(listener="127.0.0.1:19092"))
+    install_fake_psutil(monkeypatch, [unkillable, ours])
+    assert dev_broker.stop_all(grace=0.01) == ["127.0.0.1:19092"]
+    assert ours.events == ["terminate", "wait"], "one unkillable broker must not abort the sweep"
+    assert "survived SIGKILL" in capsys.readouterr().err
 
 
 def test_stop_multi_address_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:

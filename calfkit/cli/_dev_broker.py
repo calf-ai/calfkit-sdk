@@ -29,7 +29,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -298,9 +298,12 @@ def _spawn_lock() -> Iterator[None]:
         except BlockingIOError:
             print("waiting for the dev broker to start…", file=sys.stderr)
             fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:  # e.g. ENOLCK on an NFS home — exit-2 material, not a crash
+            raise DevBrokerError(f"cannot lock the calfkit state dir {root}: {exc}") from exc
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        with suppress(OSError):  # belt-and-braces: closing the fd releases the flock anyway
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -351,7 +354,9 @@ def ensure_broker(
 def _resolve_binary(resolve_bin: Callable[[], str]) -> str:
     try:
         return resolve_bin()
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
+        # ModuleNotFoundError = the [mesh] extra is absent; a bare ImportError = version skew
+        # (a calfkit_mesh without resolve_broker_bin). Same remedy either way.
         raise DevBrokerError(
             "the bundled dev broker is not installed. Install it with `pip install 'calfkit[mesh]'` "
             "(or `uv add 'calfkit[mesh]'`), or point CALF_TANSU_BIN at a tansu binary."
@@ -403,9 +408,12 @@ def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
     deadline = time.monotonic() + timeout
     while True:
         if proc.poll() is not None:
-            raise DevBrokerError(
-                f"the dev broker exited during startup (exit code {proc.returncode}); log tail from {log_path}:\n{_log_tail(log_path)}"
-            )
+            code = proc.returncode
+            if code is not None and code < 0:
+                cause = f"killed by a signal ({code}) — a concurrent `ck dev broker stop/restart`?"
+            else:
+                cause = f"exit code {code}"
+            raise DevBrokerError(f"the dev broker exited during startup ({cause}); log tail from {log_path}:\n{_log_tail(log_path)}")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             proc.kill()
@@ -452,10 +460,18 @@ def stop(target: Target, *, grace: float = DEFAULT_GRACE) -> bool:
 def stop_all(*, grace: float = DEFAULT_GRACE) -> list[str]:
     """Stop every running local dev broker; return the listeners that were actually stopped.
 
-    A broker owned by another user is skipped (it is simply absent from the returned list) so
-    one denied process never aborts the sweep.
+    A broker that cannot be stopped — owned by another user, or surviving SIGKILL — is skipped
+    with a warning (it is absent from the returned list) so one bad process never aborts the
+    sweep.
     """
-    return [hit.listener for hit in _scan_dev_brokers() if _signal(hit, grace)]
+    stopped: list[str] = []
+    for hit in _scan_dev_brokers():
+        try:
+            if _signal(hit, grace):
+                stopped.append(hit.listener)
+        except DevBrokerError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+    return stopped
 
 
 def _signal(hit: _ScanHit, grace: float) -> bool:

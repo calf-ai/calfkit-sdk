@@ -474,3 +474,43 @@ def test_broker_commands_load_dotenv_before_resolving(monkeypatch: pytest.Monkey
     _invoke(["dev", "broker", "status"])
     _invoke(["dev", "broker", "stop"])
     assert loaded == [None, None]
+
+
+def test_broker_commands_forward_an_explicit_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    loaded: list[str | None] = []
+    monkeypatch.setattr(dev_cli, "_load_env", lambda env_file: loaded.append(env_file))
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: MeshStatus(target.key, False, ()))
+    result = _invoke(["dev", "broker", "status", "--env-file", "custom.env"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert loaded == ["custom.env"]
+
+
+def test_broker_status_multi_target_with_all_elements_managed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A multi-address target whose every element hosts a dev broker must not also print the
+    # contradictory "reachable, not managed" line for the joined key.
+    report = MeshStatus(
+        target_key="127.0.0.1:9092,127.0.0.1:19092",
+        reachable=True,
+        brokers=(_info(), _info(listener="127.0.0.1:19092", pid=4343)),
+    )
+    monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
+    out = _plain(_invoke(["dev", "broker", "status", "--host", "127.0.0.1:9092,127.0.0.1:19092"]).stdout)
+    assert "not managed" not in out
+    assert "pid 4242" in out
+    assert "pid 4343" in out
+
+
+def test_missing_env_file_warns_only_once_per_process(tmp_path: Path) -> None:
+    # dev run loads the env in the wrapper AND in the delegated command; a typo'd --env-file
+    # must not print the same warning twice.
+    import contextlib
+    import io
+
+    from calfkit.cli._common import _load_env
+
+    missing = str(tmp_path / "definitely-missing.env")
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        _load_env(missing)
+        _load_env(missing)
+    assert stderr.getvalue().count("not found") == 1

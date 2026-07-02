@@ -192,18 +192,24 @@ def dev_chat(
     )
 
 
-def _target_or_exit(host: str | None) -> Target:
-    # Load ./.env first, exactly like `dev run`/`dev chat`: a .env-set CALFKIT_MESH_URL must
+_ENV_FILE_HELP = "Path to a dotenv file to load. Defaults to ./.env if present."
+
+
+def _target_or_exit(host: str | None, env_file: str | None = None) -> Target:
+    # Load the env first, exactly like `dev run`/`dev chat`: an env-set CALFKIT_MESH_URL must
     # target the SAME address across every `ck dev` command, or `broker stop` would miss the
     # broker `dev run` spawned.
-    _load_env(None)
+    _load_env(env_file)
     return _normalize_or_exit(resolve_mesh_url(_parse_host(host)))
 
 
 @broker_app.command(name="start")
-def broker_start(host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP)) -> None:
+def broker_start(
+    host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
+    env_file: str | None = typer.Option(None, "--env-file", help=_ENV_FILE_HELP),
+) -> None:
     """Connect-or-spawn the dev broker and return (the daemon keeps running). Idempotent."""
-    _ensure_or_exit(_target_or_exit(host))
+    _ensure_or_exit(_target_or_exit(host, env_file))
 
 
 @broker_app.command(name="stop")
@@ -214,6 +220,7 @@ def broker_stop(
         "--all",
         help="Stop every running dev broker (ignores --host).",
     ),
+    env_file: str | None = typer.Option(None, "--env-file", help=_ENV_FILE_HELP),
 ) -> None:
     """Stop the dev broker at the target address — the memory-engine tansu the §5.4 scan finds.
 
@@ -228,7 +235,7 @@ def broker_stop(
             else:
                 typer.echo("no managed brokers to stop")
             return
-        target = _target_or_exit(host)
+        target = _target_or_exit(host, env_file)
         if _dev_broker.stop(target):
             typer.echo(f"stopped {target.key}")
         else:
@@ -239,9 +246,12 @@ def broker_stop(
 
 
 @broker_app.command(name="status")
-def broker_status(host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP)) -> None:
+def broker_status(
+    host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
+    env_file: str | None = typer.Option(None, "--env-file", help=_ENV_FILE_HELP),
+) -> None:
     """Report the running dev broker(s) and probe the target address."""
-    target = _target_or_exit(host)
+    target = _target_or_exit(host, env_file)
     try:
         report = _dev_broker.status(target)
     except DevBrokerError as exc:
@@ -250,7 +260,9 @@ def broker_status(host: str | None = typer.Option(None, "--host", "-H", help=_HO
     for broker in report.brokers:
         typer.echo(f"{broker.listener}: pid {broker.pid}, running, started {broker.started_at}")
     managed_listeners = {broker.listener for broker in report.brokers}
-    if report.target_key not in managed_listeners:
+    # The canonical key is the comma-join of the normalized per-element addresses, so a
+    # multi-address target counts as managed only when EVERY element has a dev broker.
+    if not set(report.target_key.split(",")) <= managed_listeners:
         if report.reachable:
             typer.echo(f"{report.target_key}: reachable, not managed by calfkit")
         else:
@@ -258,9 +270,12 @@ def broker_status(host: str | None = typer.Option(None, "--host", "-H", help=_HO
 
 
 @broker_app.command(name="restart")
-def broker_restart(host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP)) -> None:
+def broker_restart(
+    host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
+    env_file: str | None = typer.Option(None, "--env-file", help=_ENV_FILE_HELP),
+) -> None:
     """Stop then start the target's managed broker — the clean slate (the memory engine is ephemeral)."""
-    target = _target_or_exit(host)
+    target = _target_or_exit(host, env_file)
     try:
         broker = _dev_broker.restart(target, resolve_bin=_resolve_bin, timeout=_dev_broker.DEFAULT_TIMEOUT)
     except DevBrokerError as exc:
