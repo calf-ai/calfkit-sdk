@@ -101,6 +101,18 @@ def _forward_host(target: Target) -> str:
     return target.listener if target.is_single else target.bootstrap
 
 
+def _session_servers(target: Target) -> str | list[str]:
+    """The bootstrap value for a client/session opened DIRECTLY by this module (review round 2,
+    R2-M1): ``resolve_mesh_url`` never comma-splits a bare string, so a multi-address borrow must
+    hand over the user's elements as a list (``target.servers`` — the same value the reachability
+    probe uses); handing it the comma-joined ``bootstrap`` would dial one malformed element. The
+    single-address case stays the normalized listener string, byte-identical to before.
+
+    Distinct from :func:`_forward_host`, which feeds delegated COMMANDS (``ck run``'s ``--host``
+    string / the daemon argv) whose own ``_parse_host`` does the splitting."""
+    return target.listener if target.is_single else list(target.servers)
+
+
 @dev_app.command(name="run")
 def dev_run(
     targets: list[str] = typer.Argument(
@@ -240,7 +252,7 @@ async def _ensure_agents_with_client(
     snapshot source; closed on every path so the CLI never leaks a consumer."""
     from calfkit.client import Client
 
-    client = Client.connect(_forward_host(target))
+    client = Client.connect(_session_servers(target))
     try:
         return await _dev_agents.ensure_agents(plan, target, client.mesh, run_args=run_args)
     finally:
@@ -334,7 +346,7 @@ def _chat_attach(name: str | None, target: Target, *, provision: bool, timeout: 
 
     session = run_chat_session(
         name,
-        _forward_host(target),
+        _session_servers(target),
         timeout,
         provision,
         offline_daemon_hint=_offline_daemon_hint(target.key),
@@ -375,7 +387,7 @@ def _chat_targets(targets: list[str], *, host: str | None, provision: bool, env_
     from calfkit.cli import chat as chat_module
     from calfkit.cli._chat import run_chat_session
 
-    session = run_chat_session(None, _forward_host(target), timeout, provision, session_plan=plan, session_host_key=target.key)
+    session = run_chat_session(None, _session_servers(target), timeout, provision, session_plan=plan, session_host_key=target.key)
     try:
         chat_module.run_session_command(session)
     except (_dev_agents.DevAgentError, DevBrokerError) as exc:
@@ -435,7 +447,7 @@ async def _read_presence_maps(target: Target) -> tuple[dict[str, Any], dict[str,
         if exc.reason != "open_failed":
             typer.echo(f"warning: presence unreadable ({kind} view, {exc.reason}): {exc}", err=True)
 
-    client = Client.connect(_forward_host(target))
+    client = Client.connect(_session_servers(target))
     try:
         try:
             agents = dict(await client.mesh.get_agents())

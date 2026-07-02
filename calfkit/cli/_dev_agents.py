@@ -47,9 +47,11 @@ from calfkit.models.agents import AGENTS_TOPIC
 from calfkit.models.capability import CAPABILITY_TOPIC
 
 MARKER_FLAG = "--dev-daemon"
-"""The argv ownership marker (spec §5.4): an *agent daemon* is any live process whose cmdline
-carries this flag. Internal — humans launch daemons via ``ck dev run -d``, never by hand-setting
-the marker (a hand-set marker IS managed, though: "whoever started it", the broker rule)."""
+"""The argv ownership marker (spec §5.4): an *agent daemon* is a live process whose cmdline
+carries this flag in its emitted ``--dev-daemon=<names>`` form alongside a ``run`` token (the
+two anchors — see :func:`_daemon_marker_names`). Internal — humans launch daemons via
+``ck dev run -d``, never by hand-setting the marker (a hand-set marker on a real ``run`` command
+line IS managed, though: "whoever started it", the broker rule)."""
 
 READY_TIMEOUT = 15.0
 """The readiness gate's deadline (spec §5.2, Ryan-confirmed): how long a launch waits for every
@@ -207,7 +209,8 @@ def _daemon_marker_names(cmd: list[str]) -> tuple[str, ...]:
     a ``--dev-daemon=<names>`` token on a command line that also carries a ``run`` token — the
     two anchors every real spawn (and hand-run ``ck run``) has. A bare ``--dev-daemon`` token or
     the ``=``-form appearing as *data* in some other process's argv (``rg -- --dev-daemon …``)
-    must never match: a false hit here is what ``stop``/``down`` group-kill."""
+    does not match — both anchors are required (a false hit here is what ``stop``/``down``
+    group-kill; an argv carrying BOTH anchors as data remains a theoretical residual)."""
     if "run" not in cmd:
         return ()
     prefix = f"{MARKER_FLAG}="
@@ -367,9 +370,12 @@ async def wait_agents_ready(
             if proc is not None:
                 _kill_spawn_group(proc)
             if last_read_failure is not None:
+                # Claim only what is known — the LAST read (the view may have been readable for
+                # most of the wait before a late failure; round-2 wording fix).
                 raise DevAgentError(
-                    f"the presence view never became readable within {timeout:.1f}s "
-                    f"({last_read_failure.reason}: {last_read_failure}){_tail_suffix(log_path)}"
+                    f"the launched agents did not come online within {timeout:.1f}s and the last "
+                    f"presence read failed ({last_read_failure.reason}: {last_read_failure})"
+                    f"{_tail_suffix(log_path)}"
                 ) from last_read_failure
             raise DevAgentError(f"the launched agents did not come online within {timeout:.1f}s{_tail_suffix(log_path)}")
         await asyncio.sleep(poll_interval)

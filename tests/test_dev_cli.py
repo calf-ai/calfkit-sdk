@@ -635,7 +635,88 @@ def test_dev_chat_targets_dispatch_to_the_session_launcher_not_the_attach_path(
     assert attach_calls == []
 
 
+# --- multi-address borrow: sessions/clients get the SPLIT server list (review round 2, R2-M1) ----------
+
+
+_MULTI = "kafka-a:9092,kafka-b:9092"
+
+
+@pytest.fixture
+def reachable_multi(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reachable multi-address mesh: pure borrow (never a spawn target)."""
+    monkeypatch.setattr(dev_broker, "is_reachable", lambda servers, *, timeout: True)
+
+
+def test_dev_chat_attach_splits_a_multi_address_host(reachable_multi: None, attach_calls: list[dict[str, Any]]) -> None:
+    """R2-M1: resolve_mesh_url never comma-splits a bare string — the session must receive the
+    user's elements as a LIST, exactly as the old chat() delegation produced via _parse_host."""
+    result = _invoke(["dev", "chat", "--host", _MULTI])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert attach_calls[0]["server_urls"] == ["kafka-a:9092", "kafka-b:9092"]
+
+
+def test_dev_chat_attach_single_address_stays_the_normalized_listener(ensure_calls: list[dict[str, Any]], attach_calls: list[dict[str, Any]]) -> None:
+    result = _invoke(["dev", "chat"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert attach_calls[0]["server_urls"] == _KEY  # unchanged: the single normalized listener string
+
+
+def test_dev_chat_targets_split_a_multi_address_host(
+    reachable_multi: None, attach_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dev_agents, "preflight", lambda targets, *, app_dir=None: _plan())
+    result = _invoke(["dev", "chat", "app:agent", "--host", _MULTI])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert attach_calls[0]["server_urls"] == ["kafka-a:9092", "kafka-b:9092"]
+
+
+def test_dev_run_detach_readiness_client_splits_a_multi_address_host(reachable_multi: None, detach_seams: dict[str, Any]) -> None:
+    result = _invoke(["dev", "run", "-d", "app:agent", "--host", _MULTI])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    (client,) = _FakeDetachClient.instances
+    assert client.server_urls_arg == ["kafka-a:9092", "kafka-b:9092"]  # type: ignore[attr-defined]
+
+
+def test_dev_status_presence_client_splits_a_multi_address_host(real_presence_seams: dict[str, Any], reachable_multi: None) -> None:
+    real_presence_seams["broker"] = MeshStatus(target_key="kafka-a:9092,kafka-b:9092", reachable=True, brokers=())
+    result = _invoke(["dev", "status", "--host", _MULTI])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    (client,) = _FakeDetachClient.instances
+    assert client.server_urls_arg == ["kafka-a:9092", "kafka-b:9092"]  # type: ignore[attr-defined]
+
+
 # --- the §7 offline-daemon hint on `dev chat NAME` (review round 1, Ryan-approved) ---------------------
+
+
+def test_dev_chat_offline_name_hint_fires_on_an_empty_roster(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    """R2-M2, minimal shape (Ryan-approved): the PRIMARY §7 moment is a single crashed daemon —
+    the mesh roster is then EMPTY, and the shipped 'No agents are online' exit-0 notice must
+    still carry the daemon hint when a name was asked for."""
+    from calfkit.client.mesh import Mesh
+
+    async def no_agents(_self: Mesh) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(Mesh, "get_agents", no_agents)
+    monkeypatch.setattr(dev_agents, "find_daemons", lambda host_key: [_daemon_hit(4055, ("general",))])
+    result = _invoke(["dev", "chat", "general"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)  # the shipped empty-roster contract
+    out = _plain(result.stdout)
+    assert "No agents are online on the mesh." in out
+    assert "a managed daemon for 'general' exists but its agents are offline — logs: /tmp/agents-4055.log (ck dev status)" in out
+
+
+def test_dev_chat_empty_roster_without_a_name_gets_no_hint(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    from calfkit.client.mesh import Mesh
+
+    async def no_agents(_self: Mesh) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(Mesh, "get_agents", no_agents)
+    monkeypatch.setattr(dev_agents, "find_daemons", lambda host_key: [_daemon_hit(4055, ("general",))])
+    result = _invoke(["dev", "chat"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert "managed daemon" not in _plain(result.stdout)
 
 
 def test_dev_chat_offline_name_hint_names_the_daemon_and_logs(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:

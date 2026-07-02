@@ -109,6 +109,12 @@ async def _attach(
     agents = await client.mesh.get_agents()
     if not agents:  # ready, but zero live agents
         print("No agents are online on the mesh.")
+        # The PRIMARY §7 moment (round 2, Ryan-approved minimal shape): a single crashed daemon
+        # leaves the roster EMPTY — a named lookup still gets the daemon diagnosis, same exit.
+        if name is not None and offline_hint is not None:
+            hint = offline_hint(name)
+            if hint:
+                print(hint)
         return
     picked = await _resolve_target(name, agents, read_line, offline_hint=offline_hint)
     if picked is None:  # user quit at the picker

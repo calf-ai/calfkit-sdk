@@ -110,9 +110,9 @@ no orchestrator, no restarts.
 
 ```console
 $ ck dev status
-KIND    NAME             STATE                          PID    SINCE                      TARGET           LOGS
-broker  127.0.0.1:9092   running                        51234  2026-07-02T14:00:12+00:00  —                     —
-agent   general          online (last seen 3s ago)      51288  2026-07-02T14:02:40+00:00  general:general  /Users/you/.calfkit/logs/agents-….log
+KIND    NAME            STATE                      PID    SINCE                      TARGET           LOGS
+broker  127.0.0.1:9092  running                    51234  2026-07-02T14:00:12+00:00  —                —
+agent   general         online (last seen 3s ago)  51288  2026-07-02T14:02:40+00:00  general:general  /Users/you/.calfkit/logs/agents-….log
 ```
 
 `ck dev status` shows everything, unfiltered: the broker, every managed

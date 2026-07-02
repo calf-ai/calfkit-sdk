@@ -406,13 +406,26 @@ async def test_wait_ready_reader_dead_still_tears_down_the_spawn(monkeypatch: py
 
 
 async def test_wait_ready_deadline_names_the_unreadable_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A deadline that never saw a readable view must say so — 'did not come online' would point
-    the user at their agent when the presence read itself was the problem."""
+    """A deadline whose LAST read failed must say so — 'did not come online' would point the user
+    at their agent when the presence read itself was the problem. Round-2 minor 2: the message
+    claims only what is known (the last read), never 'never became readable' — the view may have
+    been readable for most of the wait before a late failure."""
     _record_killpg(monkeypatch)
     establishing = MeshUnavailableError("catching up", reason="establishing")
     mesh = FakeMesh(agents_frames=[establishing])
-    with pytest.raises(DevAgentError, match=r"(?s)never became readable.*establishing"):
+    with pytest.raises(DevAgentError, match=r"(?s)did not come online.*last presence read failed.*establishing"):
         await _dev_agents.wait_agents_ready(None, ("general",), (), mesh, log_path=None, **_fast_wait())
+
+
+async def test_wait_ready_deadline_after_a_late_read_failure_stays_accurate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Readable for most of the wait (names just offline), then the broker dies at the end: the
+    message must not claim the view was 'never readable'."""
+    _record_killpg(monkeypatch)
+    frames: list[Any] = [{}, {}, {}, MeshUnavailableError("gone", reason="open_failed")]
+    mesh = FakeMesh(agents_frames=frames)
+    with pytest.raises(DevAgentError, match=r"(?s)did not come online.*last presence read failed \(open_failed") as exc:
+        await _dev_agents.wait_agents_ready(None, ("general",), (), mesh, log_path=None, **_fast_wait())
+    assert "never" not in str(exc.value)
 
 
 # --- connect-or-spawn evaluation (spec §5.5) ----------------------------------------------------------
@@ -762,6 +775,43 @@ def test_stop_daemon_zombie_leader_counts_as_stopped(monkeypatch: pytest.MonkeyP
     # The zombie leader is the stopped state; the final group sweep still fires (a zombie-only
     # group absorbs it harmlessly, a straggler member gets reaped).
     assert calls == [(4055, signal_module.SIGTERM), (4055, signal_module.SIGKILL)]
+
+
+def test_stop_daemon_sweeps_when_the_leader_dies_mid_escalation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2 minor 1: leader survives TERM through the grace, then dies just before the KILL
+    send — the identity gate raises NoSuchProcess, but a group signal WAS already delivered this
+    call, so descendants may remain: the final sweep must still fire (the pgid stays reserved by
+    any survivor, so it is safe)."""
+    import signal as signal_module
+
+    install_fake_psutil(monkeypatch, [])
+
+    class _DiesBeforeKill(FakeProc):
+        def __init__(self, pid: int) -> None:
+            super().__init__(pid, survives_sigterm=True)
+            self._running_answers = [True, False]  # TERM gate: alive; KILL gate: just died
+
+        def is_running(self) -> bool:
+            return self._running_answers.pop(0) if self._running_answers else False
+
+    proc = _DiesBeforeKill(4055)
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(dev_broker_module, "_killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+    assert calls == [(4055, signal_module.SIGTERM), (4055, signal_module.SIGKILL)]
+
+
+def test_stop_daemon_no_sweep_when_no_signal_was_ever_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The counter-case pinning the guard: the identity gate refusing the FIRST send (recycled
+    pid) must not be followed by a sweep — no signal was delivered, and killpg could hit an
+    innocent recycled group. (Same assertion as the recycled-pid test, restated against the
+    sweep specifically.)"""
+    install_fake_psutil(monkeypatch, [])
+    proc = FakeProc(4055)
+    proc.alive = False
+    calls = _group_killer(monkeypatch, [proc])
+    assert _dev_agents.stop_daemon(_hit(proc), grace=0.3) is True
+    assert calls == []
 
 
 def test_daemon_grace_is_at_least_eight_seconds() -> None:

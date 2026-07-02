@@ -524,6 +524,8 @@ def _signal(proc: Any, *, pid: int, label: str, grace: float, group: bool = Fals
                 if remaining <= 0.1:
                     return False
 
+    group_signal_delivered = False
+
     def _send(sig: int) -> None:
         # The group path signals via killpg (ProcessLookupError/PermissionError are the OS-level
         # twins of psutil's NoSuchProcess/AccessDenied, handled below); the single path keeps
@@ -531,10 +533,12 @@ def _signal(proc: Any, *, pid: int, label: str, grace: float, group: bool = Fals
         # killpg, the identity-checked handle must still be running (live or unreaped-zombie —
         # either way the pgid cannot have been recycled): a daemon that exited between scan and
         # signal may have had its pid reused by an innocent process GROUP (review round 1).
+        nonlocal group_signal_delivered
         if group:
             if not proc.is_running():
                 raise psutil.NoSuchProcess(pid)
             _killpg(pid, sig)
+            group_signal_delivered = True
         elif sig == signal_module.SIGTERM:
             proc.terminate()
         else:
@@ -558,7 +562,13 @@ def _signal(proc: Any, *, pid: int, label: str, grace: float, group: bool = Fals
         if not _wait_or_gone():
             raise DevBrokerError(f"{label} survived SIGKILL for {grace:.1f}s.")
     except (psutil.NoSuchProcess, ProcessLookupError):
-        pass  # exited between the scan and the signal — the goal state (stopped) is reached
+        # Exited between the scan and the signal — the goal state (stopped) is reached. Group
+        # mode, round 2: if a group signal WAS already delivered this call (the leader died
+        # mid-ladder), descendants may remain and any survivor keeps the pgid reserved — sweep.
+        # If nothing was ever delivered (the identity gate refused the first send), the pid may
+        # belong to a recycled, innocent group: never sweep.
+        if group and group_signal_delivered:
+            _final_group_sweep()
     except (psutil.AccessDenied, PermissionError):
         return False  # someone else's process — never signalled further; callers decide how to report
     return True
