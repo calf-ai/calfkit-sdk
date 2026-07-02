@@ -1,8 +1,9 @@
 """``ck`` top-level CLI entry point.
 
 Mounts subcommands as typer sub-apps: ``topics`` (with ``topics
-provision``), plus the top-level ``run`` command. Future subcommands land
-alongside via the same mounting pattern.
+provision``) and ``dev`` (the local dev mesh), plus the top-level ``run``
+and ``chat`` commands. Future subcommands land alongside via the same
+mounting pattern.
 
 Invoked via the ``ck`` console script registered in pyproject.toml's
 ``[project.scripts]``.
@@ -22,11 +23,13 @@ def _build_app() -> Any:
     import typer
 
     from calfkit.cli.chat import chat as chat_command
+    from calfkit.cli.dev import dev_app
     from calfkit.cli.run import run as run_command
     from calfkit.cli.topics import app as topics_app
 
     app = typer.Typer(name="ck", help="Calfkit SDK command-line tools.", no_args_is_help=True)
     app.add_typer(topics_app, name="topics")
+    app.add_typer(dev_app, name="dev")
     app.command(name="run")(run_command)
     app.command(name="chat")(chat_command)
     return app

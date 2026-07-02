@@ -8,6 +8,7 @@ Commands:
 | --- | --- |
 | [`ck run`](#ck-run) | Run node(s) as a worker for local development (no `Worker` boilerplate). |
 | [`ck chat`](#ck-chat) | Chat with an online agent from an interactive terminal REPL. |
+| [`ck dev`](#ck-dev) | Run against a zero-setup local mesh: connect to (or spawn) a managed dev broker. |
 | [`ck topics`](#ck-topics) | Best-effort create the Kafka topics a set of nodes reference. |
 
 ---
@@ -238,6 +239,90 @@ mid-turn. Any other input is sent to the agent verbatim.
 > line. It's a conversational tool for trying agents out and watching their work —
 > for typed structured output, call the agent from a client (see
 > [How to call nodes from a client](client-features.md)).
+
+---
+
+## `ck dev`
+
+Run a calfkit project against a **local mesh** with zero broker setup. Before
+delegating to the equivalent top-level command, every `ck dev` command
+**ensures a broker** at the target address: if one is reachable it is reused;
+otherwise a bundled [Tansu](https://tansu.io) broker (in-memory, Kafka-compatible)
+is spawned as a detached background daemon that persists until an explicit
+`ck dev broker stop`/`restart` or a reboot.
+
+```text
+ck dev run TARGET [TARGET ...] [OPTIONS]
+ck dev chat [NAME] [OPTIONS]
+ck dev broker (start | stop | status | restart) [OPTIONS]
+```
+
+The bundled broker requires the **`[mesh]` extra** (`pip install 'calfkit[mesh]'`),
+which ships the binary (Linux x86_64/aarch64 glibc+musl, macOS arm64/x86_64 — no
+Windows; the broker is Unix-only) and `psutil` (the ownership scan).
+`CALF_TANSU_BIN` overrides the bundled binary with your own, with or without the
+extra installed (resolution order: `CALF_TANSU_BIN` → bundled → `tansu` on
+`PATH`). Without the extra, `ck dev run`/`ck dev chat` still work as pure
+clients against an already-reachable broker; the `ck dev broker` management
+commands need the extra's process scan. See
+[How to run a local mesh with `ck dev`](local-dev-mesh.md).
+
+### Spawn rules
+
+- The address resolves with the usual precedence (`--host` > `$CALFKIT_MESH_URL`
+  > `localhost`) and is normalized: `localhost` → `127.0.0.1`, missing port →
+  `9092`. The delegated worker connects to the normalized address.
+- A broker is spawned **only** for a single **loopback** address
+  (`127.0.0.0/8` / `::1`) with nothing reachable there. `0.0.0.0`, hostnames,
+  non-local IPs, and multi-address lists are connect-only: reachable → reused,
+  unreachable → exit `2` (never a spawn).
+- The spawned broker's data is **in-memory only** — a stop, restart, or reboot
+  clears every topic and message.
+- Spawn logs: `~/.calfkit/logs/tansu-<address>.log`, overwritten on each spawn.
+
+### `ck dev run` and `ck dev chat`
+
+Identical to [`ck run`](#ck-run) / [`ck chat`](#ck-chat) — same targets,
+arguments, and exit codes — plus the broker-ensure above and a **local-dev
+preset**:
+
+| Preset | `ck dev run` | `ck dev chat` | Why |
+| --- | --- | --- | --- |
+| Provisioning | **on** (`--no-provision` to disable) | **on** (`--no-provision` to disable) | The in-memory broker starts empty and does not auto-create topics. |
+| Reload | **on** (`--no-reload` to disable) | — | The inner-loop default. |
+| Idempotence | off (`--enable-idempotence` to enable) | — | The bundled broker has no producer-id support. |
+
+The broker is ensured once, in the parent — under `--reload` the restarted
+workers only reconnect — and each command first prints whether the broker is
+**managed** (`ck dev: managed broker at 127.0.0.1:9092 (pid 51234)`) or
+**reused** (`… — not managed by calfkit`).
+
+### `ck dev broker`
+
+Direct control of the dev broker daemon, decoupled from any app run. Every
+subcommand takes `--host`/`-H` (same precedence as above; default
+`127.0.0.1:9092`) and loads `./.env` first, like `ck dev run`/`ck dev chat` —
+so a `.env`-set `CALFKIT_MESH_URL` targets the same address across every
+`ck dev` command.
+
+| Command | Behavior |
+| --- | --- |
+| `start` | Connect-or-spawn and return (the daemon keeps running). Idempotent. |
+| `stop` | Stop the dev broker at the target address. `--all` stops every running dev broker (ignores `--host`). A no-op with a message when none matches. |
+| `status` | List the running dev broker(s) (address, pid, start time) and probe the target address — a reachable broker that isn't a dev broker reports as *reachable, not managed by calfkit*. |
+| `restart` | `stop` then `start` — the clean slate (all in-memory data is lost). |
+
+`ck dev` manages **dev brokers only**: a process is recognized by its command
+line (an in-memory-engine `tansu` bound to the target address), whoever started
+it. A durable Tansu, your own Kafka/Redpanda, or any other process on the port
+is never touched; no state is persisted anywhere to track this.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Clean exit (including a `stop`/`status` that found nothing to act on). |
+| `2` | Configuration or broker-ensure error — invalid address, unreachable non-loopback address, missing binary/`[mesh]` extra, spawn or readiness failure — plus everything that exits `2` in the delegated command. |
 
 ---
 

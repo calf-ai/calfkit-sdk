@@ -27,11 +27,19 @@ def _load_env(env_file: str | None) -> None:
 
     if env_file:
         if not os.path.exists(env_file):
-            typer.echo(f"Warning: --env-file {env_file!r} not found; continuing without it.", err=True)
+            # Warn once per process: the `ck dev` wrappers load the env before delegating to a
+            # command that loads it again (harmlessly — override=False), and a typo'd path
+            # should not print the same warning twice.
+            if env_file not in _warned_missing_env_files:
+                _warned_missing_env_files.add(env_file)
+                typer.echo(f"Warning: --env-file {env_file!r} not found; continuing without it.", err=True)
             return
         load_dotenv(env_file)
     elif os.path.exists(".env"):
         load_dotenv(".env")
+
+
+_warned_missing_env_files: set[str] = set()
 
 
 def _parse_host(host: str | None) -> str | list[str] | None:

@@ -500,6 +500,20 @@ A frozen, identity-only handle to peer agents, with the same construction rules 
 
 See also: [How to let agents find and reach each other at runtime](agent-peers.md).
 
+## Installation extras
+
+`pip install calfkit` is pure-Python. One extra exists:
+
+| Extra | Contents | Purpose |
+| --- | --- | --- |
+| `calfkit[mesh]` | `calfkit-mesh` (the bundled [Tansu](https://tansu.io) dev-broker binary + its locator) and `psutil` | The zero-setup local mesh behind [`ck dev`](cli.md#ck-dev). Dev-only — never needed by a production install, and `ck dev` against an already-reachable broker works without it. |
+
+The env var `CALF_TANSU_BIN` points `ck dev` at your own broker binary instead
+of the bundled one, with or without the extra installed (resolution order:
+`CALF_TANSU_BIN` → bundled → `tansu` on `PATH`) — the escape hatch for a Unix
+platform without a bundled wheel, or a pinned custom build. Native Windows is
+unsupported (the broker is Unix-only); use WSL2.
+
 ## Other public modules
 
 The top-level package re-exports the symbols above. A few public capabilities live in submodules:
@@ -522,7 +536,8 @@ The top-level package re-exports the symbols above. A few public capabilities li
 - **[How to let agents discover and use tools at runtime](tool-discovery.md)** — referencing deployed function tool nodes by name (or every live one with `discover=True`) with `Tools`.
 - **[How to let agents find and reach each other at runtime](agent-peers.md)** — agent-to-agent messaging and handoff with `Messaging` / `Handoff`.
 - **[Worker lifecycle & embedding](worker-lifecycle.md)** — `Worker`, the lifecycle contexts, and `@resource`.
-- **[CLI reference](cli.md)** — the `ck run` and `ck topics` commands.
+- **[How to run a local mesh with `ck dev`](local-dev-mesh.md)** — the zero-setup dev broker behind the `[mesh]` extra.
+- **[CLI reference](cli.md)** — the `ck run`, `ck chat`, `ck dev`, and `ck topics` commands.
 - **[Topic provisioning](topic-provisioning.md)** — `ProvisioningConfig` and the opt-in topic-creation helper.
 
 Full signatures and behavior live in the source docstrings.
