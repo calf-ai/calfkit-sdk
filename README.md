@@ -21,7 +21,7 @@ Calfkit agents find each other and choreograph work over a **mesh** — a highly
 
 - **Dynamic agent-to-agent discovery and collaboration.** Agents find each other at runtime and work together — messaging each other and handing off tasks — so you build multi-agent systems without complex wiring or orchestration, and extend team capabilities at any time.
 - **Scalable by default.** Every agent runs and scales as an independent microservice, so your agent teams are resilient and scalable from day one.
-- **Agentic action on realtime data streams.** Agents are event-driven, so they react to realtime data streams — live market feeds, log streams, support-ticket queues — and send results wherever they're needed. Build agents that work like continuously streaming workflows, not one-off requests.
+- **React to realtime data streams.** Agents are event-driven, so they react to realtime data streams — live market feeds, log streams, support-ticket queues — and send results wherever they're needed. Build agents that work like continuously streaming workflows, not one-off requests.
 
 ## Installation
 
