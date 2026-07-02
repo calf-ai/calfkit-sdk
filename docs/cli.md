@@ -269,7 +269,9 @@ extra installed (resolution order: `CALF_TANSU_BIN` → bundled → `tansu` on
 attach forms still work as pure clients against an already-reachable broker —
 but everything that manages agent daemons needs the extra's process scan.
 `ck dev status`, `ck dev stop`, `ck dev down`, `ck dev broker stop`, and
-`ck dev broker status` exit `2` with the install hint without it;
+`ck dev broker status` exit `2` with the install hint without it (one edge:
+`ck dev broker stop` against a *multi-address* target is a messaged no-op —
+multi-address is never a spawn target, so there is nothing to scan);
 `ck dev run -d` and `ck dev chat TARGET…` need it to launch (they still
 succeed on a core install when every target is already online — pure reuse
 never scans); `ck dev broker start`/`restart` degrade gracefully (reuse/borrow

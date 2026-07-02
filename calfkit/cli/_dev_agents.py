@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from subprocess import Popen
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from calfkit.cli._dev_broker import (
     _MESH_EXTRA_HINT,
@@ -45,6 +45,9 @@ from calfkit.cli._loader import load_nodes
 from calfkit.exceptions import MeshUnavailableError
 from calfkit.models.agents import AGENTS_TOPIC
 from calfkit.models.capability import CAPABILITY_TOPIC
+
+if TYPE_CHECKING:
+    from calfkit.client.mesh import AgentInfo, ToolInfo
 
 MARKER_FLAG = "--dev-daemon"
 """The argv ownership marker (spec §5.4): an *agent daemon* is a live process whose cmdline
@@ -67,9 +70,9 @@ _DEFAULT_HOST_KEY = _format_address("127.0.0.1", DEFAULT_PORT)
 class PresenceReader(Protocol):
     """The slice of ``client.mesh`` the supervisor reads: fresh name-keyed snapshots per kind."""
 
-    async def get_agents(self) -> Mapping[str, Any]: ...
+    async def get_agents(self) -> Mapping[str, AgentInfo]: ...
 
-    async def get_tools(self) -> Mapping[str, Any]: ...
+    async def get_tools(self) -> Mapping[str, ToolInfo]: ...
 
 
 @contextmanager
@@ -77,7 +80,14 @@ def agents_lock() -> Iterator[None]:
     """The agent-layer flock (spec §5.1): ``run -d`` holds it across check→spawn→readiness and
     ``chat TARGET`` across evaluate→start→readiness (released before the REPL opens) — without
     it, two concurrent launches of one target both see "none online" and double-spawn (the exact
-    hazard the broker lock exists for; agents have no port-bind exclusivity to save them)."""
+    hazard the broker lock exists for; agents have no port-bind exclusivity to save them).
+
+    Acquisition is a BLOCKING ``fcntl.flock`` on the calling thread. Both acquisition sites sit
+    inside async functions, which is safe TODAY only because nothing async is live before the
+    lock is taken (the clients are lazy; no mesh view or broker connection is open yet), so a
+    contended wait cannot stall an event loop with running consumers. Keep it that way: never
+    open a connection, start the broker, or read the mesh before taking this lock.
+    """
     with _spawn_lock(filename="dev-agents.lock", waiting_message="waiting for another ck dev agent launch to finish…"):
         yield
 
@@ -295,8 +305,8 @@ class _Presence:
     """One captured point-in-time snapshot, kinds kept apart (a name is checked against its own
     kind's view, never a cross-kind union)."""
 
-    agents: Mapping[str, Any]
-    tools: Mapping[str, Any]
+    agents: Mapping[str, AgentInfo]
+    tools: Mapping[str, ToolInfo]
 
 
 async def _read_presence(mesh: PresenceReader, *, want_agents: bool, want_tools: bool) -> _Presence | MeshUnavailableError:
@@ -588,7 +598,7 @@ async def ensure_agents(
         return EnsureReport(outcomes=outcomes, pid=proc.pid, log_path=str(log_path))
 
 
-def _spawn_daemon(to_launch: Sequence[TargetNodes], target: Target, log_path: Path, options: RunOptions) -> Any:
+def _spawn_daemon(to_launch: Sequence[TargetNodes], target: Target, log_path: Path, options: RunOptions) -> Popen[bytes]:
     """Spawn the daemon tree — the broker's shipped ``Popen`` pattern verbatim (detached session
     leader, real log-file fd, ``DEVNULL`` stdin) around the §5.1 argv: the child re-invokes the
     CLI (``-m calfkit.cli run``) with the normalized host, the caller's options, the ownership
@@ -621,6 +631,7 @@ def _spawn_daemon(to_launch: Sequence[TargetNodes], target: Target, log_path: Pa
         raise DevAgentError(f"cannot write the agent daemon log at {log_path}: {exc}") from exc
     with log_file:
         try:
-            return Popen(cmd, stdin=subprocess.DEVNULL, stdout=log_file, stderr=log_file, **_detach_kwargs())  # type: ignore[call-overload]
+            proc: Popen[bytes] = Popen(cmd, stdin=subprocess.DEVNULL, stdout=log_file, stderr=log_file, **_detach_kwargs())  # type: ignore[call-overload]
+            return proc
         except OSError as exc:
             raise DevAgentError(f"failed to launch the agent daemon: {exc}") from exc

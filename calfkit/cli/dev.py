@@ -23,7 +23,7 @@ the supervisor's spawn branch.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -32,6 +32,9 @@ from calfkit.cli._common import _load_env, _parse_host
 from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, Target, normalize
 from calfkit.cli.run import run as _run_command
 from calfkit.client._mesh_url import resolve_mesh_url
+
+if TYPE_CHECKING:
+    from calfkit.client.mesh import AgentInfo, ToolInfo
 
 dev_app = typer.Typer(
     name="dev",
@@ -62,7 +65,7 @@ def _resolve_bin() -> str:
         if not (os.path.isfile(override) and os.access(override, os.X_OK)):
             raise DevBrokerError(f"CALF_TANSU_BIN={override!r} does not point at an executable file.")
         return override
-    from calfkit_mesh import resolve_broker_bin  # type: ignore[import-not-found]
+    from calfkit_mesh import resolve_broker_bin
 
     path: str = resolve_broker_bin()
     return path
@@ -431,7 +434,7 @@ def dev_status(
         typer.echo(line)
 
 
-async def _read_presence_maps(target: Target) -> tuple[dict[str, Any], dict[str, Any]]:
+async def _read_presence_maps(target: Target) -> tuple[dict[str, AgentInfo], dict[str, ToolInfo]]:
     """One point-in-time presence snapshot per kind via a short-lived client; an unusable view
     degrades to empty, never errors.
 
@@ -467,8 +470,8 @@ async def _read_presence_maps(target: Target) -> tuple[dict[str, Any], dict[str,
 def _status_rows(
     report: _dev_broker.MeshStatus,
     daemons: list[_dev_agents.DaemonHit],
-    agents: dict[str, Any],
-    tools: dict[str, Any],
+    agents: dict[str, AgentInfo],
+    tools: dict[str, ToolInfo],
 ) -> list[tuple[str, ...]]:
     """The §3.3 join: broker row(s), then managed-daemon rows (scan ⋈ presence by name), then
     every remaining online node — nothing online is ever filtered out (Ryan's transparency rule)."""
@@ -496,16 +499,16 @@ def _status_rows(
             rows.append((kind, name, state, str(hit.pid), hit.started_at, ",".join(hit.targets) or _EMPTY, hit.log_path))
     managed_names = {name for hit in daemons for name in hit.names}
     annotation = "not a ck dev daemon (stop it where it runs)"
-    for name, info in sorted(agents.items()):
+    for name, agent_info in sorted(agents.items()):
         if name not in managed_names:
-            rows.append(("agent", name, f"online (last seen {_format_age(_age_of(info))} ago) — {annotation}", _EMPTY, _EMPTY, _EMPTY, _EMPTY))
-    for name, info in sorted(tools.items()):
+            rows.append(("agent", name, f"online (last seen {_format_age(_age_of(agent_info))} ago) — {annotation}", _EMPTY, _EMPTY, _EMPTY, _EMPTY))
+    for name, tool_info in sorted(tools.items()):
         if name not in managed_names:
-            rows.append(("tool", name, f"online (last seen {_format_age(_age_of(info))} ago) — {annotation}", _EMPTY, _EMPTY, _EMPTY, _EMPTY))
+            rows.append(("tool", name, f"online (last seen {_format_age(_age_of(tool_info))} ago) — {annotation}", _EMPTY, _EMPTY, _EMPTY, _EMPTY))
     return rows
 
 
-def _age_of(info: Any) -> float:
+def _age_of(info: AgentInfo | ToolInfo) -> float:
     from datetime import datetime, timezone
 
     age: float = (datetime.now(tz=timezone.utc) - info.last_seen).total_seconds()
