@@ -1,6 +1,6 @@
 [project]
 name = "calfkit"
-version = "0.12.4"
+version = "0.12.5"
 description = "A framework to build powerful AI agent teams."
 readme = "README.md"
 license = "Apache-2.0"

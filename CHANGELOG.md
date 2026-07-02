@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.12.5](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.4...v0.12.5) (2026-07-02)
+
+
+### Features
+
+* `ck dev`: zero-setup local mesh via a bundled Tansu broker ([#320](https://github.com/calf-ai/calfkit-sdk/issues/320)) ([4da4c57](https://github.com/calf-ai/calfkit-sdk/commit/4da4c57fd437a28d8005a388ef1be4d6aa661f13))
+* follow handoffs across turns in `ck chat` ([#317](https://github.com/calf-ai/calfkit-sdk/issues/317)) ([29a4035](https://github.com/calf-ai/calfkit-sdk/commit/29a40356c78a57fa28ce9cfe41ea3cad34df23e1))
+* inject agent name into instructions ([#319](https://github.com/calf-ai/calfkit-sdk/issues/319)) ([761c45d](https://github.com/calf-ai/calfkit-sdk/commit/761c45de1d2007ab73d8139c8561f898b664fd39))
+
 ## [0.12.4](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.3...v0.12.4) (2026-07-01)
 
 
