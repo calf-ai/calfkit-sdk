@@ -277,26 +277,31 @@ def _calfkit_dir() -> Path:
 
 
 @contextmanager
-def _spawn_lock() -> Iterator[None]:
-    """Hold a blocking, exclusive advisory lock over the spawn critical section.
+def _spawn_lock(
+    filename: str = "dev-mesh.lock",
+    waiting_message: str = "waiting for the dev broker to start…",
+) -> Iterator[None]:
+    """Hold a blocking, exclusive advisory lock over a spawn critical section.
 
     Exists ONLY for the double-spawn race (spec §5.3); ``stop``/``status`` never take it. Released
     by the OS if the holder dies, so a crashed process never deadlocks the file. A contended lock
-    announces itself ("waiting for the dev broker to start…") before blocking.
+    announces itself (*waiting_message*) before blocking. The defaults are the broker's; the
+    agent-daemon layer reuses the pattern verbatim with its own lock file (dev-agent-lifecycle
+    spec §5.1).
     """
     import fcntl
 
     root = _calfkit_dir()
     try:
         root.mkdir(parents=True, exist_ok=True)
-        fd = os.open(root / "dev-mesh.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        fd = os.open(root / filename, os.O_CREAT | os.O_RDWR, 0o644)
     except OSError as exc:
         raise DevBrokerError(f"cannot access the calfkit state dir {root}: {exc}") from exc
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print("waiting for the dev broker to start…", file=sys.stderr)
+            print(waiting_message, file=sys.stderr)
             fcntl.flock(fd, fcntl.LOCK_EX)
         except OSError as exc:  # e.g. ENOLCK on an NFS home — exit-2 material, not a crash
             raise DevBrokerError(f"cannot lock the calfkit state dir {root}: {exc}") from exc

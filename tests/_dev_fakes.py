@@ -168,6 +168,35 @@ class CountingResolveBin:
         return self.path
 
 
+class FakeMesh:
+    """A drivable stand-in for ``client.mesh``: per-kind scripted frames, one consumed per read.
+
+    Each frame is a ``dict`` (the read's result, e.g. real ``AgentInfo``/``ToolNodeInfo`` DTOs)
+    or an ``Exception`` (raised — e.g. ``MeshUnavailableError``). The last frame repeats, so a
+    readiness loop can poll it forever (the ``scripted_probe`` convention).
+    """
+
+    def __init__(self, agents_frames: list[Any] | None = None, tools_frames: list[Any] | None = None) -> None:
+        self.agents_frames = agents_frames if agents_frames is not None else [{}]
+        self.tools_frames = tools_frames if tools_frames is not None else [{}]
+        self.reads: list[str] = []
+
+    @staticmethod
+    def _next(frames: list[Any]) -> Any:
+        frame = frames.pop(0) if len(frames) > 1 else frames[0]
+        if isinstance(frame, Exception):
+            raise frame
+        return frame
+
+    async def get_agents(self) -> Any:
+        self.reads.append("agents")
+        return self._next(self.agents_frames)
+
+    async def get_tools(self) -> Any:
+        self.reads.append("tools")
+        return self._next(self.tools_frames)
+
+
 def scripted_probe(*values: bool) -> Any:
     """A fake ``is_reachable``: yields *values* in order, repeating the last one; records calls."""
 
