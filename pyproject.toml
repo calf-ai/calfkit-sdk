@@ -91,6 +91,13 @@ warn_return_any = true
 warn_unused_ignores = true
 exclude = ["calfkit/_vendor"]
 
+# calfkit_mesh ships no py.typed: absent (core install / CI) it is import-not-found, installed
+# (local kafka-lane runs) it is import-untyped — an inline ignore can only ever match one of the
+# two under warn_unused_ignores, so the suppression lives here, env-independent.
+[[tool.mypy.overrides]]
+module = "calfkit_mesh"
+ignore_missing_imports = true
+
 [tool.coverage.run]
 omit = ["calfkit/_vendor/*"]
 

@@ -81,6 +81,21 @@ def run(
         "--env-file",
         help="Path to a dotenv file to load. Defaults to ./.env if present.",
     ),
+    dev_daemon: str | None = typer.Option(
+        None,
+        "--dev-daemon",
+        hidden=True,
+        help="Internal (`ck dev run -d` plumbing): the argv ownership marker naming the daemon's "
+        "advertised nodes. Accepted so it lands in the process cmdline for the stateless "
+        "management scan (dev-agent-lifecycle spec §5.4); it changes no behavior here.",
+    ),
+    heartbeat_interval: float | None = typer.Option(
+        None,
+        "--heartbeat-interval",
+        hidden=True,
+        help="Internal (`ck dev` plumbing): control-plane heartbeat cadence override in seconds "
+        "(the dev 5s preset, dev-agent-lifecycle spec §5.6). Unset, the worker default applies.",
+    ),
 ) -> None:
     """Run node(s) as a worker until stopped (Ctrl-C)."""
     abs_app_dir = os.path.abspath(app_dir)
@@ -103,12 +118,12 @@ def run(
         run_process(
             *dirs,
             target=serve,
-            args=(list(targets), host, provision, group_id, env_file, abs_app_dir, enable_idempotence),
+            args=(list(targets), host, provision, group_id, env_file, abs_app_dir, enable_idempotence, heartbeat_interval),
             watch_filter=PythonFilter(),
         )
     else:
         try:
-            serve(list(targets), host, provision, group_id, env_file, abs_app_dir, enable_idempotence)
+            serve(list(targets), host, provision, group_id, env_file, abs_app_dir, enable_idempotence, heartbeat_interval)
         except KeyboardInterrupt:
             # Ctrl-C in a window where FastStream's own SIGINT handler isn't
             # active yet (startup/teardown), or on a platform whose event loop

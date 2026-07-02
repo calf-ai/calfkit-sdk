@@ -277,26 +277,31 @@ def _calfkit_dir() -> Path:
 
 
 @contextmanager
-def _spawn_lock() -> Iterator[None]:
-    """Hold a blocking, exclusive advisory lock over the spawn critical section.
+def _spawn_lock(
+    filename: str = "dev-mesh.lock",
+    waiting_message: str = "waiting for the dev broker to start…",
+) -> Iterator[None]:
+    """Hold a blocking, exclusive advisory lock over a spawn critical section.
 
     Exists ONLY for the double-spawn race (spec §5.3); ``stop``/``status`` never take it. Released
     by the OS if the holder dies, so a crashed process never deadlocks the file. A contended lock
-    announces itself ("waiting for the dev broker to start…") before blocking.
+    announces itself (*waiting_message*) before blocking. The defaults are the broker's; the
+    agent-daemon layer reuses the pattern verbatim with its own lock file (dev-agent-lifecycle
+    spec §5.1).
     """
     import fcntl
 
     root = _calfkit_dir()
     try:
         root.mkdir(parents=True, exist_ok=True)
-        fd = os.open(root / "dev-mesh.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        fd = os.open(root / filename, os.O_CREAT | os.O_RDWR, 0o644)
     except OSError as exc:
         raise DevBrokerError(f"cannot access the calfkit state dir {root}: {exc}") from exc
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print("waiting for the dev broker to start…", file=sys.stderr)
+            print(waiting_message, file=sys.stderr)
             fcntl.flock(fd, fcntl.LOCK_EX)
         except OSError as exc:  # e.g. ENOLCK on an NFS home — exit-2 material, not a crash
             raise DevBrokerError(f"cannot lock the calfkit state dir {root}: {exc}") from exc
@@ -452,7 +457,7 @@ def stop(target: Target, *, grace: float = DEFAULT_GRACE) -> bool:
     hit = _find_dev_broker(target.listener)
     if hit is None:
         return False
-    if not _signal(hit, grace):
+    if not _signal(hit.proc, pid=hit.pid, label=f"the dev broker at {hit.listener} (pid {hit.pid})", grace=grace):
         raise DevBrokerError(f"cannot stop the dev broker at {hit.listener} (pid {hit.pid}) — it is owned by another user.")
     return True
 
@@ -467,39 +472,51 @@ def stop_all(*, grace: float = DEFAULT_GRACE) -> list[str]:
     stopped: list[str] = []
     for hit in _scan_dev_brokers():
         try:
-            if _signal(hit, grace):
+            if _signal(hit.proc, pid=hit.pid, label=f"the dev broker at {hit.listener} (pid {hit.pid})", grace=grace):
                 stopped.append(hit.listener)
         except DevBrokerError as exc:
             print(f"warning: {exc}", file=sys.stderr)
     return stopped
 
 
-def _signal(hit: _ScanHit, grace: float) -> bool:
-    """SIGTERM → *grace* → SIGKILL one scan hit. ``True`` = stopped, ``False`` = access denied.
+def _killpg(pgid: int, sig: int) -> None:
+    """Signal a whole process group — the agent-daemon ``-d`` spawn is a session leader, so its
+    pid is the pgid and one signal reaps supervisor + worker + multiprocessing helpers together
+    (dev-agent-lifecycle spec §3.4). A call-time ``os`` attribute lookup (``killpg`` does not
+    exist on Windows, and module import must stay platform-safe) and the test seam — tests
+    replace this, never deliver a live group signal."""
+    os.killpg(pgid, sig)
 
-    A broker whose spawning ``ck dev run`` is still alive dies into an **unreaped zombie** (spec
-    §5.8: the parent reaps only at its own exit), and psutil's non-child ``wait`` never returns
-    for a zombie — so a post-wait timeout with ``status() == zombie`` IS the stopped state, not
-    a failure.
+
+def _signal(proc: Any, *, pid: int, label: str, grace: float, group: bool = False) -> bool:
+    """SIGTERM → *grace* → SIGKILL one scanned process — or, with ``group=True``, its whole
+    process group (the agent-daemon path: the leader's pid IS the pgid). ``True`` = stopped,
+    ``False`` = access denied; *label* names the process in the survived-SIGKILL error.
+
+    A process whose spawning parent is still alive dies into an **unreaped zombie** (the parent
+    reaps only at its own exit), and psutil's non-child ``wait`` never returns for a zombie — so
+    a post-wait timeout with ``status() == zombie`` IS the stopped state, not a failure.
     """
-    import psutil  # already importable: the scan produced the hit (mypy flags the module once, on the scan's import)
+    import signal as signal_module
+
+    import psutil  # already importable: the scan produced the process handle (mypy flags the module once, on the scan's import)
 
     def _is_gone() -> bool:
         try:
-            zombie: bool = hit.proc.status() == psutil.STATUS_ZOMBIE
+            zombie: bool = proc.status() == psutil.STATUS_ZOMBIE
         except psutil.NoSuchProcess:
             return True
         return zombie
 
     def _wait_or_gone() -> bool:
         # psutil's non-child wait polls pid_exists, which a zombie passes — it would eat the
-        # whole grace for an already-dead broker. Wait in short slices, checking the zombie
-        # status between them, so the common case (stop while `ck dev run` is alive) is instant.
+        # whole grace for an already-dead process. Wait in short slices, checking the zombie
+        # status between them, so the common case (stop while the spawner is alive) is instant.
         deadline = time.monotonic() + grace
         while True:
             remaining = deadline - time.monotonic()
             try:
-                hit.proc.wait(min(0.1, max(0.01, remaining)))
+                proc.wait(min(0.1, max(0.01, remaining)))
                 return True
             except psutil.TimeoutExpired:
                 if _is_gone():
@@ -507,17 +524,53 @@ def _signal(hit: _ScanHit, grace: float) -> bool:
                 if remaining <= 0.1:
                     return False
 
+    group_signal_delivered = False
+
+    def _send(sig: int) -> None:
+        # The group path signals via killpg (ProcessLookupError/PermissionError are the OS-level
+        # twins of psutil's NoSuchProcess/AccessDenied, handled below); the single path keeps
+        # psutil's own calls so the scan-verified handle is what gets signalled. Before a raw
+        # killpg, the identity-checked handle must still be running (live or unreaped-zombie —
+        # either way the pgid cannot have been recycled): a daemon that exited between scan and
+        # signal may have had its pid reused by an innocent process GROUP (review round 1).
+        nonlocal group_signal_delivered
+        if group:
+            if not proc.is_running():
+                raise psutil.NoSuchProcess(pid)
+            _killpg(pid, sig)
+            group_signal_delivered = True
+        elif sig == signal_module.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+
+    def _final_group_sweep() -> None:
+        # Leader death says nothing about the rest of the group: a SIGTERM-surviving descendant
+        # (a node's own subprocess) would otherwise outlive the 'stopped' report — markerless,
+        # so unmanageable forever (review round 1). One unconditional SIGKILL sweeps the
+        # now-headless tree; an already-empty or zombie-only group absorbs it as a no-op.
+        with suppress(ProcessLookupError, PermissionError):
+            _killpg(pid, signal_module.SIGKILL)
+
     try:
-        hit.proc.terminate()
+        _send(signal_module.SIGTERM)
         if _wait_or_gone():
+            if group:
+                _final_group_sweep()
             return True
-        hit.proc.kill()
+        _send(signal_module.SIGKILL)  # group mode: this already swept the whole group
         if not _wait_or_gone():
-            raise DevBrokerError(f"the dev broker at {hit.listener} (pid {hit.pid}) survived SIGKILL for {grace:.1f}s.")
-    except psutil.NoSuchProcess:
-        pass  # exited between the scan and the signal — the goal state (stopped) is reached
-    except psutil.AccessDenied:
-        return False  # someone else's broker — never signalled further; callers decide how to report
+            raise DevBrokerError(f"{label} survived SIGKILL for {grace:.1f}s.")
+    except (psutil.NoSuchProcess, ProcessLookupError):
+        # Exited between the scan and the signal — the goal state (stopped) is reached. Group
+        # mode, round 2: if a group signal WAS already delivered this call (the leader died
+        # mid-ladder), descendants may remain and any survivor keeps the pgid reserved — sweep.
+        # If nothing was ever delivered (the identity gate refused the first send), the pid may
+        # belong to a recycled, innocent group: never sweep.
+        if group and group_signal_delivered:
+            _final_group_sweep()
+    except (psutil.AccessDenied, PermissionError):
+        return False  # someone else's process — never signalled further; callers decide how to report
     return True
 
 

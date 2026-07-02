@@ -38,6 +38,27 @@ The broker is a background daemon that **outlives the command** — Ctrl-C stops
 your worker, not the broker, so restarts reconnect instantly and other commands
 share the same mesh.
 
+## Launch agents in the background with `--detach`
+
+```console
+$ ck dev run -d general:general
+ck dev: managed broker at 127.0.0.1:9092 (pid 51234)
+ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: /Users/you/.calfkit/logs/agents-127.0.0.1_9092-general_general.log
+```
+
+`--detach/-d` (the `docker compose up -d` gesture) runs the same reload
+supervisor as a **managed background daemon** and returns only once the agent
+is **online on the mesh** — so `ck dev run -d … && ck dev chat` always lands
+on a mesh where the agent already exists. The daemon keeps reloading on your
+edits until an explicit `ck dev stop <name>` (or `ck dev down`, or a reboot).
+
+Launching the same target again while it is online **reuses** it instead
+(`ck dev: reusing agent 'general' (online, last seen 3s ago)`) — reuse matches
+the **name on the mesh**, so check `ck dev status` if you're unsure what is
+actually running. If a daemon for the name exists but its agents are offline
+(usually a broken edit), a relaunch errors and points at the logs and the
+`stop` command instead of stacking a second daemon.
+
 ## Chat with them from a second terminal
 
 ```console
@@ -49,6 +70,76 @@ and provisions its own reply inbox. This two-terminal loop — `ck dev run` in
 one, `ck dev chat` in the other — is the working local setup; see
 [How to chat with an agent from the terminal](chat-with-agents.md) for the chat
 session itself.
+
+`ck dev chat` can also **launch agents for the session**: give it
+`module:attr` target(s) instead of a name and it runs them *inside the chat
+process itself*, then opens the picker:
+
+```console
+$ ck dev chat general:general
+```
+
+A session worker lives and dies with the chat — close the session (`/exit`,
+Ctrl-D, Ctrl-C, or even killing the terminal) and it is gone with it, by
+construction. Because it runs in-process there is **no reload** in a chat
+session: the edit loop is save → `/exit` → rerun (the broker and any daemons
+persist, so this is seconds). Use `ck dev run -d … && ck dev chat` when you
+want live reload while chatting. On exit the session narrates what it owned:
+
+```text
+✦ stopped 'general' (ran in this session)
+✦ still running: finance — 'ck dev chat' to rejoin, 'ck dev down' to stop everything
+```
+
+## The team loop: watch two agents find each other
+
+The core lesson of the mesh — *agents are independent processes that discover
+each other at runtime* — is something you can watch happen:
+
+1. Terminal 1: `ck dev run -d general:general && ck dev chat` — launch
+   the generalist, start chatting.
+2. Terminal 2: `ck dev run -d finance:finance` — add a specialist to the
+   **live** team. The first agent's process is untouched.
+3. Back in the chat, ask a finance question — `general` discovers `finance`
+   over the mesh and hands off to it, mid-conversation.
+
+Separate commands, separate processes, discovery over the mesh — no wiring,
+no orchestrator, no restarts.
+
+## See and stop what you launched
+
+```console
+$ ck dev status
+KIND    NAME            STATE                      PID    SINCE                      TARGET           LOGS
+broker  127.0.0.1:9092  running                    51234  2026-07-02T14:00:12+00:00  —                —
+agent   general         online (last seen 3s ago)  51288  2026-07-02T14:02:40+00:00  general:general  /Users/you/.calfkit/logs/agents-….log
+```
+
+`ck dev status` shows everything, unfiltered: the broker, every managed
+daemon, and **every other node online on the mesh** (a chat-session worker, a
+foreground run, a teammate's worker) annotated
+`not a ck dev daemon (stop it where it runs)`. A daemon whose names have no
+live mesh record shows `unknown (see logs)` — usually a broken edit mid-reload;
+its log path is right there in the row. When the broker itself is down, the
+presence columns degrade to `unknown (mesh unreachable)` and the daemon rows
+still render. Heartbeat ages are always shown: "online" can lag a crash — by
+up to ~15s for `ck dev`-launched workers (they heartbeat every 5s), and up to
+~90s for a plain `ck run` worker on the 30s production default — and the age
+is the honesty device.
+
+- `ck dev stop NAME…` — stop the daemon(s) owning those names. A stop is
+  **whole-daemon**: co-hosted agents launched by one command go down together,
+  and every name is narrated (`stopped daemon pid 51288 (agents: general)`).
+  Stopping resolves names **at the target address** (`--host` for other
+  meshes); `--all` sweeps every daemon on every address.
+- `ck dev down` — stop **all** agent daemons, then the broker at the target
+  address. Foreground runs and chat-session workers survive `down` by design
+  (they are not daemons) — they will error against the stopped broker; stop
+  them where they run.
+
+Daemon logs live at `~/.calfkit/logs/agents-<address>-<targets>.log`,
+overwritten on each launch — consult them *before* relaunching over a broken
+daemon.
 
 ## Control the broker directly
 

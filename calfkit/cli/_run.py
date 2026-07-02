@@ -50,6 +50,7 @@ def serve(
     env_file: str | None,
     app_dir: str,
     enable_idempotence: bool = False,
+    heartbeat_interval: float | None = None,
 ) -> None:
     """Resolve targets and run them in a single Worker until stopped.
 
@@ -65,6 +66,11 @@ def serve(
             support; when set it flows to ``Client.connect`` as the single knob that
             hardens every producer (broker + control-plane + fan-out writers). Absent,
             calfkit sets nothing (``enable_idempotence=None``).
+        heartbeat_interval: Control-plane heartbeat cadence override in seconds (the
+            hidden ``--heartbeat-interval`` — ``ck dev``'s 5s preset, dev-agent-lifecycle
+            spec §5.6). ``None`` (default) passes no ``ControlPlaneConfig`` so the
+            worker's production default applies. A plain float so the reload
+            supervisor's picklable-args contract holds.
 
     Raises:
         typer.Exit: (code 2) on a bad spec, import failure, non-node object, or
@@ -76,15 +82,17 @@ def serve(
     # Import the broker-facing modules only after the targets validate, so a
     # bad spec fails fast without paying these imports.
     from calfkit.client import Client
+    from calfkit.controlplane import ControlPlaneConfig
     from calfkit.provisioning import ProvisioningConfig
     from calfkit.worker import Worker
 
     server_urls = _parse_host(host)
     provisioning = ProvisioningConfig(enabled=True) if provision else None
+    control_plane = ControlPlaneConfig(heartbeat_interval=heartbeat_interval) if heartbeat_interval is not None else None
     # The CLI flag is opt-in only: absent -> None so calfkit imposes nothing (library defaults);
     # --enable-idempotence -> True threads idempotence to every producer via the client.
     client = Client.connect(server_urls, provisioning=provisioning, enable_idempotence=True if enable_idempotence else None)
-    worker = Worker(client, nodes=nodes, group_id=group_id)
+    worker = Worker(client, nodes=nodes, group_id=group_id, control_plane=control_plane)
 
     _print_banner(nodes, server_urls, provision, enable_idempotence)
     asyncio.run(worker.run())

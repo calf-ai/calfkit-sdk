@@ -50,6 +50,7 @@ def test_run_no_reload_calls_serve(monkeypatch: pytest.MonkeyPatch) -> None:
         env_file: str | None,
         app_dir: str,
         enable_idempotence: bool = False,
+        heartbeat_interval: float | None = None,
     ) -> None:
         cap.update(targets=targets, host=host, provision=provision, group_id=group_id, env_file=env_file, app_dir=app_dir)
 
@@ -79,6 +80,7 @@ def test_run_forwards_flags_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
         env_file: str | None,
         app_dir: str,
         enable_idempotence: bool = False,
+        heartbeat_interval: float | None = None,
     ) -> None:
         cap.update(host=host, provision=provision, group_id=group_id)
 
@@ -174,6 +176,7 @@ def test_run_multiple_targets_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch
         env_file: str | None,
         app_dir: str,
         enable_idempotence: bool = False,
+        heartbeat_interval: float | None = None,
     ) -> None:
         cap["targets"] = targets
 
@@ -199,6 +202,7 @@ def test_run_custom_app_dir_forwarded_to_serve(monkeypatch: pytest.MonkeyPatch, 
         env_file: str | None,
         app_dir: str,
         enable_idempotence: bool = False,
+        heartbeat_interval: float | None = None,
     ) -> None:
         cap["app_dir"] = app_dir
 
@@ -225,6 +229,7 @@ def test_run_enable_idempotence_flag_forwarded_to_serve(monkeypatch: pytest.Monk
         env_file: str | None,
         app_dir: str,
         enable_idempotence: bool = False,
+        heartbeat_interval: float | None = None,
     ) -> None:
         cap["enable_idempotence"] = enable_idempotence
 
@@ -237,6 +242,77 @@ def test_run_enable_idempotence_flag_forwarded_to_serve(monkeypatch: pytest.Monk
     result_off = CliRunner().invoke(_build_app(), ["run", "mymod:agent"])
     assert result_off.exit_code == 0, result_off.stdout + result_off.stderr
     assert cap["enable_idempotence"] is False
+
+
+def test_run_hidden_internal_flags_are_help_invisible() -> None:
+    """R1 guard: --dev-daemon / --heartbeat-interval are `ck dev` plumbing (internal), hidden
+    from humans — they must never surface in ck run --help."""
+    from calfkit.cli import _build_app
+
+    out = _plain(CliRunner().invoke(_build_app(), ["run", "--help"]).stdout)
+    assert "--dev-daemon" not in out
+    assert "--heartbeat-interval" not in out
+
+
+def test_run_accepts_hidden_heartbeat_interval_and_forwards_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hidden --heartbeat-interval is accepted and reaches serve() (the ck dev 5s preset)."""
+    import calfkit.cli.run as run_mod
+    from calfkit.cli import _build_app
+
+    cap: dict = {}
+
+    def fake_serve(*args: object, **kwargs: object) -> None:
+        cap["args"] = args
+
+    monkeypatch.setattr(run_mod, "serve", fake_serve)
+
+    result = CliRunner().invoke(_build_app(), ["run", "mymod:agent", "--heartbeat-interval", "5.0"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert 5.0 in cap["args"]
+
+
+def test_run_accepts_hidden_dev_daemon_marker_as_inert_bookkeeping(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--dev-daemon=<names> is the argv ownership marker (dev-agent-lifecycle spec §5.4): it is
+    accepted so it lands in the process cmdline, and ignored beyond that — serve() never sees it
+    and behavior is unchanged."""
+    import calfkit.cli.run as run_mod
+    from calfkit.cli import _build_app
+
+    cap: dict = {}
+
+    def fake_serve(*args: object, **kwargs: object) -> None:
+        cap["args"] = args
+        cap["kwargs"] = kwargs
+
+    monkeypatch.setattr(run_mod, "serve", fake_serve)
+
+    result = CliRunner().invoke(_build_app(), ["run", "mymod:agent", "--dev-daemon=general,get_weather"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    flat = list(cap["args"]) + list(cap["kwargs"].values())
+    assert "general,get_weather" not in flat  # the marker's value goes nowhere
+    assert cap["args"][0] == ["mymod:agent"]
+
+
+def test_run_reload_forwards_heartbeat_in_supervisor_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under --reload the heartbeat preset must ride the picklable run_process args tuple, so the
+    respawned child worker keeps the dev cadence across every restart."""
+    import watchfiles
+
+    from calfkit.cli import _build_app
+
+    cap: dict = {}
+
+    def fake_run_process(*paths: str, target: object = None, args: object = None, **kwargs: object) -> None:
+        cap["args"] = args
+
+    monkeypatch.setattr(watchfiles, "run_process", fake_run_process)
+
+    result = CliRunner().invoke(
+        _build_app(),
+        ["run", "tests.provisioning_cli_nodes:single", "--reload", "--heartbeat-interval", "5.0"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert 5.0 in cap["args"]
 
 
 def test_run_bad_spec_exits_2() -> None:
