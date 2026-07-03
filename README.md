@@ -1,7 +1,7 @@
 <h1 align="center">🐮 Calfkit</h1>
 
 <h3 align="center">
-  Build decentralized multi-agent systems. Agents discover each other at runtime, choreograph work, and scale as independent, event-driven services on Kafka.
+  Build decentralized multi-agent systems. Agents discover each other at runtime, choreograph work, and scale as independent, event-driven services.
 </h3>
 
 <p align="center">
@@ -22,6 +22,7 @@ Calfkit agents find each other and choreograph work over a **mesh** — a highly
 - **Dynamic agent-to-agent discovery and collaboration.** Agents find each other at runtime and work together — messaging each other and handing off tasks — so you build multi-agent systems without complex wiring or orchestration, and extend team capabilities at any time.
 - **Scalable by default.** Every agent runs and scales as an independent microservice, so your agent teams are resilient and scalable from day one.
 - **React to realtime data streams.** Agents are event-driven, so they react to realtime data streams — live market feeds, log streams, support-ticket queues — and send results wherever they're needed. Build agents that work like continuously streaming workflows, not one-off requests.
+- **Scale on production-ready infrastructure.** The agent mesh is Kafka-compatible so you can run + scale your agents on production-ready streaming infrastructure straight out of the box.
 
 ## Installation
 
@@ -91,7 +92,7 @@ Calfkit agents discover and communicate over a mesh.
 
 **For local dev**, the bundled in-memory broker (via `[mesh]` extra) is zero-setup — see [How to run a local mesh with `ck dev`](docs/local-dev-mesh.md).
 
-**In production**, any Kafka-API-compatible mesh can be used so you can drop your agent swarms into streaming infrastructure you already use.
+**In production**, the mesh is Kafka-compatible so you can drop your agent swarms into production-ready Kafka streaming infrastructure you already use.
 
 Want a fully-managed mesh your agents can join from anywhere? [Join the beta](https://forms.gle/Rk61GmHyJzequEPm8)
 
