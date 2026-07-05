@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.12.6](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.5...v0.12.6) (2026-07-05)
+
+
+### Features
+
+* `ck dev` agent lifecycle — detached daemons, session workers, status/stop/down ([#323](https://github.com/calf-ai/calfkit-sdk/issues/323)) ([88d81b1](https://github.com/calf-ai/calfkit-sdk/commit/88d81b101204a84c48b7c56c237ca5ab842162cd))
+
+
+### Bug Fixes
+
+* loosen mesh extra packaging test ([#331](https://github.com/calf-ai/calfkit-sdk/issues/331)) ([f69eb45](https://github.com/calf-ai/calfkit-sdk/commit/f69eb45a0d15aa7922b968b05f592881848700d9))
+
+
+### Documentation
+
+* update README.md ([#321](https://github.com/calf-ai/calfkit-sdk/issues/321)) ([91596cc](https://github.com/calf-ai/calfkit-sdk/commit/91596cc7120367e3ad4c5ca6b78bdbee1fb399c5))
+* update README.md ([#326](https://github.com/calf-ai/calfkit-sdk/issues/326)) ([d51d783](https://github.com/calf-ai/calfkit-sdk/commit/d51d78306b1babe554f2fda4397bcd03c8bfcb12))
+
 ## [0.12.5](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.4...v0.12.5) (2026-07-02)
 
 
