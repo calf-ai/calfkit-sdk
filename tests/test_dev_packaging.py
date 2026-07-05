@@ -12,17 +12,34 @@ Protects two contracts from the dev-mesh-broker plan:
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib
+
 _PYPROJECT = Path(__file__).parents[1] / "pyproject.toml"
+_REQ_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+")
+
+
+def _dependency_name(requirement: str) -> str:
+    match = _REQ_NAME_RE.match(requirement)
+    assert match is not None, f"invalid dependency requirement: {requirement!r}"
+    return match.group(0)
 
 
 def test_mesh_extra_replaces_dead_dev_extra() -> None:
     text = _PYPROJECT.read_text()
-    assert "dev = []" not in text, "the dead empty `dev` extra must be removed"
-    assert 'mesh = ["calfkit-mesh>=0.1", "psutil>=5.9"]' in text
+    project = tomllib.loads(text)["project"]
+    extras = project.get("optional-dependencies", {})
+    mesh_dep_names = {_dependency_name(dep) for dep in extras["mesh"]}
+
+    assert "dev" not in extras, "the dead empty `dev` extra must be removed"
+    assert {"calfkit-mesh", "psutil"} <= mesh_dep_names
 
 
 def test_python_dash_m_calfkit_cli_runs_the_ck_app() -> None:
