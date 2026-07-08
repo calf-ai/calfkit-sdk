@@ -34,7 +34,12 @@ class _FakeAIOKafkaClient:
         if _BEHAVIOR == "log_and_refuse":
             import logging
 
-            logging.getLogger("aiokafka.client").error('Unable connect to "%s:%s": refused', "127.0.0.1", 9092)
+            logging.getLogger("aiokafka").error('Unable connect to "%s:%s": refused', "127.0.0.1", 9092)
+            raise OSError("connection refused")
+        if _BEHAVIOR == "log_other_and_refuse":
+            import logging
+
+            logging.getLogger("aiokafka").error("SASL authentication failed")  # a real, non-noise diagnostic
             raise OSError("connection refused")
         if _BEHAVIOR == "hang":
             await asyncio.sleep(10)
@@ -89,26 +94,34 @@ def test_is_reachable_sync_wrapper() -> None:
 
 
 async def test_broker_reachable_suppresses_the_aiokafka_unable_connect_error(caplog: pytest.LogCaptureFixture) -> None:
-    """The probe raises the aiokafka.client log threshold so the expected per-attempt 'Unable
-    connect' ERROR does not leak while a broker is coming up (spec §4.5)."""
+    """The probe installs a filter that drops aiokafka's expected per-attempt 'Unable connect' ERROR
+    so it does not leak while a broker is coming up (spec §4.5)."""
     import logging
 
     _set("log_and_refuse")
-    caplog.set_level(logging.DEBUG, logger="aiokafka.client")
+    caplog.set_level(logging.DEBUG, logger="aiokafka")
     assert await probe.broker_reachable("127.0.0.1:9092", timeout=0.5) is False
     assert not any("Unable connect" in r.getMessage() for r in caplog.records)
 
 
-async def test_broker_reachable_restores_the_aiokafka_log_level() -> None:
-    """The quieting is scoped: the aiokafka.client level is restored after the probe, never left
-    permanently suppressed."""
+async def test_broker_reachable_lets_other_aiokafka_errors_through(caplog: pytest.LogCaptureFixture) -> None:
+    """Visibility on failure: the filter drops ONLY the 'Unable connect' noise — a genuinely
+    different aiokafka error during the probe (auth/TLS/protocol) still surfaces."""
     import logging
 
-    logger = logging.getLogger("aiokafka.client")
-    logger.setLevel(logging.INFO)
-    try:
-        _set("refused")
-        await probe.broker_reachable("127.0.0.1:9092", timeout=0.5)
-        assert logger.level == logging.INFO
-    finally:
-        logger.setLevel(logging.NOTSET)
+    _set("log_other_and_refuse")
+    caplog.set_level(logging.DEBUG, logger="aiokafka")
+    assert await probe.broker_reachable("127.0.0.1:9092", timeout=0.5) is False
+    assert any("SASL authentication failed" in r.getMessage() for r in caplog.records)
+
+
+async def test_broker_reachable_removes_its_noise_filter_after_the_probe() -> None:
+    """The suppression is scoped: the noise filter is removed after the probe, so aiokafka logging
+    (including a real 'Unable connect' during actual operation) is untouched afterward."""
+    import logging
+
+    logger = logging.getLogger("aiokafka")
+    before = list(logger.filters)
+    _set("refused")
+    await probe.broker_reachable("127.0.0.1:9092", timeout=0.5)
+    assert list(logger.filters) == before  # no filter leaked

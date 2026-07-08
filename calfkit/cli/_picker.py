@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING
 
 from rich.console import Console, Group, RenderableType
@@ -25,25 +25,28 @@ if TYPE_CHECKING:
 
 class PickerModel:
     """The picker's pure selection state: the display *order* (arrival order — existing rows stay
-    put, new agents append) and the *highlighted* agent tracked by name, not index. Reconciled
-    against the live online set by :meth:`sync`."""
+    put, new agents append), the *highlighted* agent tracked by name (not index), and each agent's
+    advertised *description*. Reconciled against the live online roster by :meth:`sync`."""
 
     def __init__(self) -> None:
         self._order: list[str] = []
         self._highlight: str | None = None
+        self._descriptions: dict[str, str | None] = {}
 
-    def sync(self, online: Collection[str]) -> None:
-        """Reconcile with the current online set: drop agents that went offline (keeping the rest
-        in place), append new arrivals (sorted within the batch), and keep the highlight on its
-        agent — moving it to the nearest surviving row if that agent went offline."""
-        online_set = set(online)
+    def sync(self, agents: Mapping[str, str | None]) -> None:
+        """Reconcile with the current online roster (name → description): drop agents that went
+        offline (keeping the rest in place), append new arrivals (sorted within the batch), refresh
+        descriptions, and keep the highlight on its agent — moving it to the nearest surviving row
+        if that agent went offline."""
+        online = set(agents)
         old_index = self._order.index(self._highlight) if self._highlight in self._order else 0
-        self._order = [name for name in self._order if name in online_set]
-        for name in sorted(online_set):
+        self._order = [name for name in self._order if name in online]
+        for name in sorted(online):
             if name not in self._order:
                 self._order.append(name)
         if self._highlight not in self._order:
             self._highlight = self._order[min(old_index, len(self._order) - 1)] if self._order else None
+        self._descriptions = dict(agents)
 
     def move(self, delta: int) -> None:
         """Shift the highlight by *delta* rows, clamped to the list ends."""
@@ -61,20 +64,30 @@ class PickerModel:
     def highlighted(self) -> str | None:
         return self._highlight
 
+    def description(self, name: str) -> str | None:
+        return self._descriptions.get(name)
+
 
 def render_menu(model: PickerModel) -> RenderableType:
-    """Render the picker: a header, then one row per online agent with the highlighted row marked
-    (``❯``). An empty roster shows a waiting hint (agents may still be coming online)."""
+    """Render the picker: a header, then one row per online agent — ``❯`` marks the highlighted row,
+    and each agent's description follows its (padded) name. An empty roster shows a waiting hint
+    (agents may still be coming online)."""
     header = Text("Select an agent  (↑/↓ move · Enter pick · q quit)")
     if not model.names:
         return Group(header, Text("  (no agents online yet — waiting… press q to quit)"))
-    rows = [Text(f"{'❯ ' if name == model.highlighted else '  '}{name}") for name in model.names]
+    name_width = max(len(name) for name in model.names)
+    rows: list[RenderableType] = []
+    for name in model.names:
+        marker = "❯ " if name == model.highlighted else "  "
+        description = model.description(name)
+        row = f"{marker}{name.ljust(name_width)}" + (f"  {description}" if description else "")
+        rows.append(Text(row))
     return Group(header, *rows)
 
 
 async def _run_picker(
     read_key: Callable[[], Awaitable[str]],
-    poll_agents: Callable[[], Awaitable[Collection[str]]],
+    poll_agents: Callable[[], Awaitable[Mapping[str, str | None]]],
     render: Callable[[PickerModel], None],
     *,
     cadence: float,
@@ -96,8 +109,10 @@ async def _run_picker(
                 key = key_task.result()
                 if key == "quit":
                     return None
-                if key == "enter":
+                if key == "enter" and model.highlighted is not None:
                     return model.highlighted
+                # Enter on an empty roster is ignored (falls through) — not a selection, and never a
+                # silent cancel — so the picker stays open until an agent arrives or the user quits.
                 if key == "up":
                     model.move(-1)
                 elif key == "down":
@@ -134,8 +149,9 @@ async def live_pick(client: Client, *, cadence: float = 1.0) -> str | None:
     console = Console()
     read_key = make_key_reader(loop, fd)
 
-    async def poll_agents() -> list[str]:
-        return list(await client.mesh.get_agents())
+    async def poll_agents() -> dict[str, str | None]:
+        agents = await client.mesh.get_agents()
+        return {name: info.description for name, info in agents.items()}
 
     old_attrs = termios.tcgetattr(fd)
     tty.setcbreak(fd)

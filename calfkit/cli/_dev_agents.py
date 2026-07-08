@@ -18,7 +18,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,7 +42,7 @@ from calfkit.cli._dev_broker import (
     normalize,
 )
 from calfkit.cli._loader import load_nodes
-from calfkit.cli._wait import NULL_REPORTER, WaitReporter
+from calfkit.cli._wait import NULL_REPORTER, ReporterFactory, WaitReporter
 from calfkit.exceptions import MeshUnavailableError
 from calfkit.models.agents import AGENTS_TOPIC
 from calfkit.models.capability import CAPABILITY_TOPIC
@@ -408,7 +408,7 @@ async def gate_launched_ready(
     mesh: PresenceReader,
     *,
     reused_names: Sequence[str],
-    make_reporter: Callable[[list[str], list[str]], WaitReporter] = _null_reporter_factory,
+    make_reporter: ReporterFactory = _null_reporter_factory,
     log_path: str | None,
     timeout: float = READY_TIMEOUT,
     poll_interval: float = _POLL_INTERVAL,
@@ -420,7 +420,7 @@ async def gate_launched_ready(
     ``None`` for the chat variant's in-process worker."""
     launched_agents = [name for target in to_launch for name in target.agent_names]
     launched_tools = [name for target in to_launch for name in target.tool_names]
-    reporter = make_reporter(launched_agents + launched_tools, list(reused_names))
+    reporter = make_reporter(waiting=launched_agents + launched_tools, pre_done=list(reused_names))
     with reporter:
         await wait_agents_ready(
             proc,
@@ -615,7 +615,7 @@ async def ensure_agents(
     mesh: PresenceReader,
     *,
     run_args: RunOptions,
-    make_reporter: Callable[[list[str], list[str]], WaitReporter] = _null_reporter_factory,
+    make_reporter: ReporterFactory = _null_reporter_factory,
     timeout: float = READY_TIMEOUT,
     poll_interval: float = _POLL_INTERVAL,
 ) -> EnsureReport:

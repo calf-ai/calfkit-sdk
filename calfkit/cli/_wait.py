@@ -9,6 +9,7 @@ not opt in (unit tests, the detached daemon child) are unaffected.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Collection, Sequence
 from types import TracebackType
 from typing import Protocol
@@ -36,6 +37,15 @@ class WaitReporter(Protocol):
     def update(self, done: Collection[str]) -> None: ...
 
 
+class ReporterFactory(Protocol):
+    """Builds a reporter once the launched (``waiting``) / reused (``pre_done``) split is known —
+    deferred because that partition is computed inside ``gate_launched_ready``, not at the call site.
+    Named (rather than a bare ``Callable[[list[str], list[str]], WaitReporter]``) so call sites pass
+    by keyword and cannot transpose the two same-typed lists."""
+
+    def __call__(self, waiting: list[str], pre_done: list[str]) -> WaitReporter: ...
+
+
 class ConsoleWaitReporter:
     """Renders a wait's progress toward a known set of named targets via Rich.
 
@@ -52,11 +62,13 @@ class ConsoleWaitReporter:
         waiting: Sequence[str],
         *,
         pre_done: Sequence[str] = (),
+        success_label: str | None = None,
         console: Console | None = None,
     ) -> None:
         self._title = title
         self._waiting = list(waiting)
         self._pre_done = list(pre_done)
+        self._success_label = success_label
         self._console = console if console is not None else Console()
         self._done: set[str] = set(self._pre_done)
         self._total = len(self._waiting) + len(self._pre_done)
@@ -79,15 +91,20 @@ class ConsoleWaitReporter:
         pending = [name for name in self._waiting if name not in self._done]
         if self._console.is_terminal:
             if self._live is not None:
-                self._live.stop()
+                # A teardown-render glitch must never mask the wait's own in-flight exception.
+                with contextlib.suppress(Exception):
+                    self._live.stop()
                 self._live = None
             if exc_type is not None:
                 self._console.print(f"✘ still pending: {', '.join(pending)}", markup=False, highlight=False)
             else:
-                self._console.print(f"✔ all {self._total} done", markup=False, highlight=False)
+                self._console.print(f"✔ {self._success_line()}", markup=False, highlight=False)
         elif exc_type is not None and pending:
             self._console.print(f"still pending: {', '.join(pending)}", markup=False, highlight=False)
         return None
+
+    def _success_line(self) -> str:
+        return self._success_label if self._success_label is not None else f"all {self._total} done"
 
     def update(self, done: Collection[str]) -> None:
         newly = [name for name in self._waiting if name in done and name not in self._done]
@@ -96,7 +113,10 @@ class ConsoleWaitReporter:
             if not self._console.is_terminal:
                 self._console.print(f"{name} ({len(self._done)}/{self._total})", markup=False, highlight=False)
         if self._console.is_terminal and self._live is not None:
-            self._live.update(self._render())
+            # A cosmetic side-channel must not fail the operation it decorates: a render glitch
+            # degrades to silent rather than aborting the wait.
+            with contextlib.suppress(Exception):
+                self._live.update(self._render())
 
     def _display_order(self) -> list[str]:
         # pre_done (reused context) first, then the targets being waited on.
@@ -137,14 +157,22 @@ NULL_REPORTER: WaitReporter = _NullWaitReporter()
 def make_reporter_factory(
     title: Callable[[int], str],
     *,
+    success: Callable[[int], str] | None = None,
     console: Console | None = None,
-) -> Callable[[list[str], list[str]], WaitReporter]:
+) -> ReporterFactory:
     """Build a ``gate_launched_ready`` reporter factory: given the launched (``waiting``) and reused
-    (``pre_done``) name lists, construct a :class:`ConsoleWaitReporter` whose title is
-    ``title(len(waiting))``. The command layer supplies the title wording, so this module stays
-    domain-neutral."""
+    (``pre_done``) name lists, construct a :class:`ConsoleWaitReporter` titled ``title(len(waiting))``
+    with a success finalize of ``success(len(waiting))`` (generic ``all N done`` when *success* is
+    absent). The command layer supplies the wording, so this module stays domain-neutral."""
 
     def _factory(waiting: list[str], pre_done: list[str]) -> WaitReporter:
-        return ConsoleWaitReporter(title(len(waiting)), waiting, pre_done=pre_done, console=console)
+        n = len(waiting)
+        return ConsoleWaitReporter(
+            title(n),
+            waiting,
+            pre_done=pre_done,
+            success_label=success(n) if success is not None else None,
+            console=console,
+        )
 
     return _factory

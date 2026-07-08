@@ -129,6 +129,17 @@ def test_single_item_spinner_mode_resolves_and_finalizes() -> None:
     assert "dev broker (1/1)" in out
 
 
+def test_pre_done_targets_render_as_already_done_and_count_toward_total() -> None:
+    # Reused agents (pre_done) show done from the start and are counted in the total, while only the
+    # waited set drives completion (spec §4.5) — so a mixed launch reads e.g. "1/2" immediately.
+    console, _ = _tty_console()
+    reporter = ConsoleWaitReporter("Starting", ["triage"], pre_done=["backend"], console=console)
+    text = _render_text(reporter)
+    assert "✔ backend" in text  # reused agent shown done immediately
+    assert "triage" in text  # still-waiting agent shown
+    assert "1/2" in text  # pre_done counts toward the total from the start
+
+
 def test_make_reporter_factory_builds_a_console_reporter_titled_by_launched_count() -> None:
     # The command-layer helper: a gate_launched_ready factory that titles the reporter by the
     # launched count and carries the reused set as pre_done.
@@ -137,3 +148,29 @@ def test_make_reporter_factory_builds_a_console_reporter_titled_by_launched_coun
     with factory(["a", "b"], ["old"]):
         pass
     assert "Starting 2 node(s)" in buf.getvalue()
+
+
+def test_tty_success_finalize_uses_the_success_label() -> None:
+    # The finalize is titled (context), not a bare "all N done" (review round 1).
+    console, buf = _tty_console()
+    with ConsoleWaitReporter("Starting dev broker", ["dev broker"], success_label="dev broker ready", console=console):
+        pass
+    assert "✔ dev broker ready" in _ANSI.sub("", buf.getvalue())
+
+
+def test_reporter_isolates_live_faults_from_the_wait() -> None:
+    # A rich render/teardown glitch in the live view must never abort or mask the wait it decorates.
+    console, _ = _tty_console()
+
+    class _BoomLive:
+        def update(self, *a: object, **k: object) -> None:
+            raise RuntimeError("render boom")
+
+        def stop(self) -> None:
+            raise RuntimeError("stop boom")
+
+    reporter = ConsoleWaitReporter("t", ["a"], console=console)
+    with reporter:
+        reporter._live = _BoomLive()  # type: ignore[assignment]
+        reporter.update({"a"})  # guarded: must not raise
+    # leaving the `with` (which calls _live.stop) must not raise either

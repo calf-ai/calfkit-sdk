@@ -183,7 +183,10 @@ async def _target_session(
                     to_launch,
                     client.mesh,
                     reused_names=[name for outcome in reused for name in outcome.target.names],
-                    make_reporter=make_reporter_factory(lambda n: f"Starting {n} node(s) on {host_key}"),
+                    make_reporter=make_reporter_factory(
+                        lambda n: f"Starting {n} node(s) on {host_key}",
+                        success=lambda n: f"all {n} node(s) online",
+                    ),
                     log_path=None,
                 )
         repl_entered = True

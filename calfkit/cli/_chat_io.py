@@ -27,6 +27,7 @@ import io
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 _READ_SIZE = 4096
 
@@ -102,29 +103,49 @@ def make_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> Calla
     return read_line
 
 
-def _decode_key(chunk: bytes) -> str:
-    """Map one raw keypress to a picker token."""
-    if chunk == b"\x1b[A":
-        return "up"
-    if chunk == b"\x1b[B":
-        return "down"
-    if chunk in (b"\r", b"\n"):
-        return "enter"
-    if chunk in (b"\x03", b"\x04", b"\x1b", b"q", b"Q"):  # Ctrl-C / Ctrl-D / Esc / q
-        return "quit"
-    return "other"
+Key = Literal["up", "down", "enter", "quit", "other"]
 
 
-def make_key_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> Callable[[], Awaitable[str]]:
-    """Build a single-keypress reader for the live picker. The terminal is expected to already be in
-    raw mode (the caller sets and restores it), so each keypress arrives as one ``os.read`` and
-    decodes to a token (``up`` / ``down`` / ``enter`` / ``quit`` / ``other``). Same ``add_reader``
+def _decode_keys(chunk: bytes) -> list[Key]:
+    """Split one raw read into picker key tokens. A single ``os.read`` is not a single key: an arrow
+    is a 3-byte escape sequence, and fast typing / a paste can deliver several keys at once."""
+    keys: list[Key] = []
+    i, n = 0, len(chunk)
+    while i < n:
+        if chunk[i] == 0x1B and chunk[i + 1 : i + 3] == b"[A":
+            keys.append("up")
+            i += 3
+        elif chunk[i] == 0x1B and chunk[i + 1 : i + 3] == b"[B":
+            keys.append("down")
+            i += 3
+        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] == b"[":
+            keys.append("other")  # an unhandled CSI (←/→, Home, …): consumed and ignored
+            i += 3
+        elif chunk[i] in (0x1B, 0x03, 0x04) or chunk[i : i + 1] in (b"q", b"Q"):
+            keys.append("quit")  # Esc / Ctrl-C(byte) / Ctrl-D(byte) / q
+            i += 1
+        elif chunk[i : i + 1] in (b"\r", b"\n"):
+            keys.append("enter")
+            i += 1
+        else:
+            keys.append("other")  # any unmapped key: ignored by the picker, not an error
+            i += 1
+    return keys
+
+
+def make_key_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> Callable[[], Awaitable[Key]]:
+    """Build a single-key reader for the live picker. The terminal is expected to be in **cbreak**
+    mode (the caller sets and restores it — not raw, which would fight ``rich.Live``). One ``os.read``
+    may carry several keys, so decoded keys are buffered and returned one per call. Same ``add_reader``
     mechanics as :func:`make_reader` — cancellable, no executor thread; tests inject an ``os.pipe()``
-    read-end."""
+    read-end. An empty read (EOF) yields ``quit``."""
     resolved_fd = fd
+    pending: list[Key] = []
 
-    async def read_key() -> str:
+    async def read_key() -> Key:
         nonlocal resolved_fd
+        if pending:
+            return pending.pop(0)
         if resolved_fd is None:
             resolved_fd = _resolve_stdin_fd()
         read_fd = resolved_fd
@@ -134,7 +155,7 @@ def make_key_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> C
             if future.done():  # pragma: no cover - cancel/resolve race
                 return
             try:
-                chunk = os.read(read_fd, 8)
+                chunk = os.read(read_fd, 16)
             except OSError as exc:
                 future.set_exception(exc)
                 return
@@ -145,6 +166,10 @@ def make_key_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> C
             chunk = await future
         finally:
             loop.remove_reader(read_fd)
-        return _decode_key(chunk)
+        keys = _decode_keys(chunk)
+        if not keys:  # empty read == EOF; treat as cancel
+            return "quit"
+        pending.extend(keys[1:])
+        return keys[0]
 
     return read_key

@@ -220,3 +220,31 @@ async def test_key_reader_decodes_arrows_enter_and_quit() -> None:
     finally:
         os.close(r)
         os.close(w)
+
+
+async def test_key_reader_splits_a_merged_read_into_separate_keys() -> None:
+    """A fast/pasted arrow-then-Enter arriving in one os.read is split into both keys, not dropped."""
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x1b[B\r")  # down + enter in one write
+        assert await _drain(read_key()) == "down"
+        assert await _drain(read_key()) == "enter"  # from the buffer, no further write
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+async def test_key_reader_decodes_ctrl_d_uppercase_q_and_unmapped_keys() -> None:
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x04")
+        assert await _drain(read_key()) == "quit"  # Ctrl-D byte
+        os.write(w, b"Q")
+        assert await _drain(read_key()) == "quit"
+        os.write(w, b"x")
+        assert await _drain(read_key()) == "other"  # unmapped: ignored, not an error
+    finally:
+        os.close(r)
+        os.close(w)

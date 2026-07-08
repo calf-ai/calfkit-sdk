@@ -93,7 +93,7 @@ def _ensure_or_exit(target: Target) -> BrokerInfo:
             target,
             resolve_bin=_resolve_bin,
             timeout=_dev_broker.DEFAULT_TIMEOUT,
-            reporter=ConsoleWaitReporter(f"Starting dev broker at {target.bootstrap}", ["dev broker"]),
+            reporter=ConsoleWaitReporter(f"Starting dev broker at {target.bootstrap}", ["dev broker"], success_label="dev broker ready"),
         )
     except DevBrokerError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -268,7 +268,10 @@ async def _ensure_agents_with_client(
             target,
             client.mesh,
             run_args=run_args,
-            make_reporter=make_reporter_factory(lambda n: f"Starting {n} node(s) on {target.bootstrap}"),
+            make_reporter=make_reporter_factory(
+                lambda n: f"Starting {n} node(s) on {target.bootstrap}",
+                success=lambda n: f"all {n} node(s) online",
+            ),
         )
     finally:
         await client.aclose()

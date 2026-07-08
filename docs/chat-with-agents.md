@@ -27,12 +27,12 @@ the highlight with ↑/↓, press Enter to pick, and `q` / `Esc` / Ctrl-C to qui
 ```console
 $ ck chat
 Select an agent  (↑/↓ move · Enter pick · q quit)
-  ❯ researcher
-    support-bot
+  researcher   Deep web research with citations
+❯ support-bot  Handles customer support tickets and refunds
 ```
 
 When the output isn't a terminal (piped or redirected), `ck chat` falls back to a
-static numbered menu — which also shows each agent's description:
+static numbered menu:
 
 ```console
 Discovering agents...

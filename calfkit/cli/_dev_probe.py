@@ -14,8 +14,18 @@ cheap and pulls no aiokafka at load time.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Sequence
+
+
+class _DropConnectRetryNoise(logging.Filter):
+    """Drops aiokafka's expected per-attempt ``Unable connect …`` retry logs while a broker is still
+    coming up; every other aiokafka record passes through, so a genuinely different error
+    (auth/TLS/protocol) stays visible."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith("Unable connect")
 
 
 async def broker_reachable(bootstrap: str | Sequence[str], *, timeout: float) -> bool:
@@ -29,19 +39,24 @@ async def broker_reachable(bootstrap: str | Sequence[str], *, timeout: float) ->
 
     servers = bootstrap if isinstance(bootstrap, str) else list(bootstrap)
     client = AIOKafkaClient(bootstrap_servers=servers)
-    # aiokafka logs 'Unable connect …' at ERROR on every failed bootstrap attempt; while a broker is
-    # still coming up those are expected noise, so raise its threshold for the probe and restore it.
-    aiokafka_log = logging.getLogger("aiokafka.client")
-    previous_level = aiokafka_log.level
-    aiokafka_log.setLevel(logging.CRITICAL)
+    # aiokafka logs 'Unable connect …' at ERROR on the "aiokafka" logger (client.py binds
+    # logging.getLogger("aiokafka")) on every failed bootstrap attempt; while a broker is still
+    # coming up those are expected retry noise. Drop ONLY those records for the probe with a
+    # message-scoped filter, removed afterward — so a genuinely different aiokafka error still
+    # surfaces (visibility into a real failure) and logging during real operation is untouched.
+    aiokafka_log = logging.getLogger("aiokafka")
+    noise_filter = _DropConnectRetryNoise()
+    aiokafka_log.addFilter(noise_filter)
     try:
         await asyncio.wait_for(client.bootstrap(), timeout)
         return True
     except (KafkaError, asyncio.TimeoutError, OSError):
         return False
     finally:
-        aiokafka_log.setLevel(previous_level)
-        await client.close()
+        aiokafka_log.removeFilter(noise_filter)
+        # Best-effort cleanup — the probe result is the signal, a close failure must not surface as a throw.
+        with contextlib.suppress(Exception):
+            await client.close()
 
 
 def is_reachable(bootstrap: str | Sequence[str], *, timeout: float) -> bool:

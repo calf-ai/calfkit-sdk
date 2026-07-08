@@ -42,8 +42,9 @@ share the same mesh.
 
 ```console
 $ ck dev run -d general:general
+✔ dev broker ready
 ck dev: managed broker at 127.0.0.1:9092 (pid 51234)
-✔ all 1 done
+✔ all 1 node(s) online
 ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: /Users/you/.calfkit/logs/agents-127.0.0.1_9092-general_general.log
 ```
 

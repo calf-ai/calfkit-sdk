@@ -732,3 +732,20 @@ async def test_attach_uses_the_live_picker_on_an_interactive_terminal(monkeypatc
     await run_chat_session(None, "localhost:9092", None)
     assert "client" in called  # the live picker was used
     assert "Discovering agents" not in capsys.readouterr().out  # the static path was skipped
+
+
+async def test_attach_falls_back_to_the_static_picker_when_not_interactive(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Off a TTY (piped/redirected/CI), the live picker is bypassed for the static discover+numbered
+    menu — so the raw-mode selector never runs where it cannot render."""
+
+    async def boom_live_pick(client: object, **_: object) -> None:
+        raise AssertionError("live_pick must not run when the terminal is not interactive")
+
+    monkeypatch.setattr("calfkit.cli._chat.is_interactive", lambda: False)
+    monkeypatch.setattr("calfkit.cli._chat.live_pick", boom_live_pick)
+    monkeypatch.setattr("calfkit.cli._chat.make_reader", lambda _loop: _scripted(["q"]))
+    _patch_get_agents(monkeypatch, result={"alpha": _agent("alpha", "x")})
+    await run_chat_session(None, "localhost:9092", None)
+    assert "Discovering agents" in capsys.readouterr().out  # the static path was taken
