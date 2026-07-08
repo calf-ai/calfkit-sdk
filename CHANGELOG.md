@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.7](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.6...v0.12.7) (2026-07-08)
+
+
+### Features
+
+* agent tool-error reception via on_tool_error ([#334](https://github.com/calf-ai/calfkit-sdk/issues/334)) ([509b946](https://github.com/calf-ai/calfkit-sdk/commit/509b94624c2755bd39cf1c718a177b40231300fa))
+
 ## [0.12.6](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.5...v0.12.6) (2026-07-05)
 
 
