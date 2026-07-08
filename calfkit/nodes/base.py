@@ -55,7 +55,17 @@ from calfkit.nodes._fanout_store import (
     close_batch,
     record_outcome,
 )
-from calfkit.nodes._seams import AFTER_NODE, BEFORE_NODE, ON_CALLEE_ERROR, ON_NODE_ERROR, SEAM_NAMES, _Minted, run_chain, run_chain_guarded
+from calfkit.nodes._seams import (
+    AFTER_NODE,
+    BEFORE_NODE,
+    ON_CALLEE_ERROR,
+    ON_NODE_ERROR,
+    SEAM_NAMES,
+    _Minted,
+    run_chain,
+    run_chain_guarded,
+    validate_positional_arity,
+)
 from calfkit.worker.lifecycle import LifecycleHookMixin
 
 if TYPE_CHECKING:
@@ -362,13 +372,10 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         if not callable(fn):
             raise RegistryConfigError(f"node={self.node_id}: {seam} handler must be callable, got {type(fn).__name__}")
         arity = _SEAM_ARITY[seam]
-        try:
-            inspect.signature(fn).bind(*([None] * arity))
-        except TypeError as exc:
-            extra = ", fault/output" if arity == 2 else ""
-            raise RegistryConfigError(
-                f"node={self.node_id}: {seam} handler {getattr(fn, '__name__', fn)!r} must accept {arity} positional arg(s) (ctx{extra}); {exc}"
-            ) from exc
+        # follow_wrapped=False (D6a): validate the WRAPPER's own arity, not a functools.wraps'd inner —
+        # call time never unwraps. Shared with the agent's on_tool_error arity-3 check (validate_positional_arity).
+        extra = ", fault/output" if arity == 2 else ""
+        validate_positional_arity(fn, arity, node_id=self.node_id, kind=seam, param_desc=f"ctx{extra}")
         self._chains[seam].append(fn)
 
     def before_node(self, fn: _SeamFn) -> _SeamFn:
@@ -1051,6 +1058,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         kind: MessageKind,
         reply: ReturnMessage | FaultMessage,
         target_topic: str | None,
+        tool_name: str | None = None,  # TODO(echo-rail): interim tool-identity carriage (message_agent arm only)
     ) -> _SlotResolved | _SlotFailed:
         """Stage 1 (fault-rail §6.8/§6.9): resolve ONE callee slot — UNIFORM for a return AND a fault,
         single-call AND fan-out. A return resolves directly (``on_callee_error`` runs only for faults).
@@ -1069,7 +1077,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             return _SlotResolved(frame_id=frame_id, tag=tag, target_topic=target_topic, parts=reply.parts, handled=False)
         assert isinstance(reply, FaultMessage)  # stray-check guarantees fault ⇔ FaultMessage
         report = reply.error
-        seam_ctx.failing_call = CalleeResult(frame_id=frame_id, tag=tag, target_topic=target_topic, fault=report)
+        # TODO(echo-rail): carry tool_name onto the failing_call so resolve_failing_tool_call can read it
+        seam_ctx.failing_call = CalleeResult(frame_id=frame_id, tag=tag, target_topic=target_topic, tool_name=tool_name, fault=report)
         try:
             handled = await run_chain(self._chains[ON_CALLEE_ERROR], seam_ctx, report, seam_name=ON_CALLEE_ERROR)
         except NodeFaultError as nfe:
@@ -1206,7 +1215,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             reg = FanoutOpen(
                 fanout_id=fanout_id,
                 node_id=self.node_id,
-                expected=[SlotRef(frame_id=fid, tag=call.tag, target_topic=call.target_topic) for fid, call in zip(slot_ids, calls)],
+                # TODO(echo-rail): carry Call.tool_name onto the SlotRef at OPEN (interim tool-identity carriage)
+                expected=[
+                    SlotRef(frame_id=fid, tag=call.tag, target_topic=call.target_topic, tool_name=call.tool_name)
+                    for fid, call in zip(slot_ids, calls)
+                ],
             )
             snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
             await store.open(fanout_id, reg, snapshot)
@@ -1277,7 +1290,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 # fault runs on_callee_error). Unhandled ⇒ escalate; handled ⇒ materialize + run body.
                 reply = envelope.reply
                 assert reply is not None  # kind in (return, fault) ⇒ a reply slot (stray-checked)
-                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=None)
+                # TODO(echo-rail): a non-fan-out single Call has no SlotRef → no carried tool_name (its
+                # identity resolves via state.tool_calls); pass None explicitly to keep the arm visible.
+                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=None, tool_name=None)
                 if isinstance(outcome, _SlotFailed):
                     return _BatchFaulted(outcome.report)  # escalate, unwrapped; the body never runs
                 self._resolve_slot(seam_ctx, outcome)  # materialize into the agent's private bookkeeping (I4)
@@ -1317,7 +1332,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 return _BatchFaulted(self._fanout_abort_report(reason))
             case SiblingPending(slot_ref=slot_ref):
                 # Stage 1 runs ONLY on a live pending slot (the stray check above precedes the seams).
-                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=slot_ref.target_topic)
+                # TODO(echo-rail): source the carried tool_name from the matched SlotRef (like target_topic)
+                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=slot_ref.target_topic, tool_name=slot_ref.tool_name)
                 return await self._record_and_maybe_close(store, fanout_id, self._slot_to_fanout_outcome(outcome), envelope, correlation_id, broker)
 
     async def _record_and_maybe_close(

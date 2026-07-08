@@ -15,13 +15,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Generic
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from calfkit._protocol import MessageKind
 from calfkit._types import StateT
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.node_result import extract_lenient
 from calfkit.models.payload import ContentPart
+
+# The shared policy-seam return contract (spec §6.9): a substitute value the base coerces to reply
+# ``parts`` (``_coerce_to_parts``), or ``None`` to decline. Its canonical home is the seam layer; the
+# ``on_tool_error`` surface (``calfkit.nodes._tool_error``) imports it. ``None`` is formally in
+# ``JsonValue`` but is always the decline gesture, never a substitute.
+SeamReturn = ContentPart | list[ContentPart] | JsonValue | None
 
 
 class CalleeResult(BaseModel):
@@ -41,6 +47,12 @@ class CalleeResult(BaseModel):
     target_topic: str | None = None
     """The callee's topic — sourced from the matched ``SlotRef`` for a fan-out sibling; ``None`` for a
     single (non-fan-out) call, where there is no slot registration to source it from (decision 5)."""
+    tool_name: str | None = None
+    """TODO(echo-rail): interim tool-identity carriage — the failing tool's name, set ONLY on a
+    ``message_agent``/``isolate_state`` slot (threaded from ``SlotRef.tool_name`` through
+    ``_resolve_callee``). ``None`` for a normal tool, whose identity ``resolve_failing_tool_call`` reads
+    from ``state.tool_calls`` instead. Reworked wholesale by the echo marker rail
+    (docs/issues/echo-marker-rail.md)."""
     parts: list[ContentPart] | None = None
     """Raw reply content (a return, or a handled substitute); ``None`` on a fault."""
     fault: ErrorReport | None = None

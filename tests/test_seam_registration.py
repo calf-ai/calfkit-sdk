@@ -8,6 +8,9 @@ See notes/pr6-fault-rail-implementation-plan.md §3 step 1e.
 
 from __future__ import annotations
 
+import functools
+import inspect
+
 import pytest
 
 from calfkit.exceptions import RegistryConfigError
@@ -106,6 +109,63 @@ class TestRegistrationValidation:
             @node.after_node
             def only_ctx(ctx: object) -> None:
                 return None
+
+
+class TestWrappedHandlerArity:
+    """D6a — the base arity check must use the WRAPPER's OWN signature (``follow_wrapped=False``), so a
+    ``functools.wraps``'d handler is validated at the arity it will be CALLED with, not the inner's.
+    This is what lets the ``on_tool_error`` adapter wrap a 3-param handler into a 2-param
+    ``on_callee_error`` chain entry; without it the check follows ``__wrapped__`` and is wrong in both
+    directions (spurious reject of a valid adapter, and a wrong-pass that ``TypeError``s mid-flight)."""
+
+    def test_wraps_arity2_wrapper_over_arity3_inner_registers(self) -> None:
+        # The adapter's exact shape: an arity-2 (ctx, report) wrapper over an arity-3
+        # (tool_call, ctx, report) inner, carrying functools.wraps. The check must accept it at the
+        # WRAPPER's real arity (2). Pre-fix it followed __wrapped__ to the arity-3 inner and rejected.
+        def inner(tool_call: object, ctx: object, report: object) -> None:
+            return None
+
+        @functools.wraps(inner)
+        def wrapper(ctx: object, report: object) -> None:
+            return inner(None, ctx, report)
+
+        node = _node()
+        node.on_callee_error(wrapper)  # must NOT raise
+        assert wrapper in node._chains[ON_CALLEE_ERROR]
+
+    def test_wraps_wrong_arity3_wrapper_over_arity2_inner_is_rejected(self) -> None:
+        # The wrong-pass direction: an arity-3 wrapper (that will TypeError when the seam calls it with
+        # (ctx, report)) carrying functools.wraps over an arity-2 inner. Pre-fix the check followed
+        # __wrapped__ to the arity-2 inner and WRONGLY PASSED, deferring the failure to first fire. It
+        # must reject at registration.
+        def inner(ctx: object, report: object) -> None:
+            return None
+
+        @functools.wraps(inner)
+        def wrapper(a: object, b: object, c: object) -> None:  # arity 3 — cannot be called as (ctx, report)
+            return inner(a, b)
+
+        node = _node()
+        with pytest.raises(RegistryConfigError):
+            node.on_callee_error(wrapper)
+
+    def test_wraps_updated_empty_does_not_leak_inner_signature(self) -> None:
+        # __signature__-copy edge: an inner bearing an explicit __signature__ (arity 3). The adapter
+        # wraps with functools.wraps(fn, updated=()) so fn.__dict__ (where __signature__ lives) is NOT
+        # copied onto the wrapper — otherwise the leaked inner signature would defeat follow_wrapped=False
+        # and wrongly reject the arity-2 wrapper.
+        def inner(tool_call: object, ctx: object, report: object) -> None:
+            return None
+
+        inner.__signature__ = inspect.signature(inner)  # type: ignore[attr-defined]  # explicit sig in inner.__dict__
+
+        @functools.wraps(inner, updated=())
+        def wrapper(ctx: object, report: object) -> None:
+            return inner(None, ctx, report)
+
+        node = _node()
+        node.on_callee_error(wrapper)  # must NOT raise — the wrapper's real arity (2) is used
+        assert wrapper in node._chains[ON_CALLEE_ERROR]
 
 
 class TestNoSeamsOnObservers:

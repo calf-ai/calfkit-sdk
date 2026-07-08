@@ -60,6 +60,19 @@ Each is a **frozen** model discriminated on its `kind` literal, and also carries
 | `Tools` | Identity-only handle that references deployed tool nodes — by name, or every live one with `discover=True`; pass in `Agent(tools=[...])` to discover their schemas at runtime. |
 | `consumer` | Decorator that turns a function into a deployable consumer node (a terminal sink on a topic). |
 
+### Agent tool-error reception
+
+The agent-only `on_tool_error` surface for converting a faulting tool result into an in-band, model-visible error (see [Policy seams](#policy-seams) and [How to handle errors and faults](error-handling.md)).
+
+| Symbol | Purpose |
+| --- | --- |
+| `surface_to_model` | Zero-argument prebuilt `on_tool_error` handler: converts *every* tool failure into a model-visible error result (level-A text). Pass as `Agent(on_tool_error=[surface_to_model()])`. |
+| `ToolCall` | calfkit's name for the vendored model-request tool-call type (`.tool_name` / `.args`) an `on_tool_error` handler receives — distinct from the wire `ToolCallPart` (`.kwargs`). |
+| `render_fault_for_model` | `render_fault_for_model(report) -> str` — the level-A renderer: the top exception line (`exception.type: message`, or `message` alone for a framework fault). |
+| `retry_text_part` | Build a `calf.retry`-marked text part; return it from a seam handler to show the model an error (`is_error=True`). |
+| `AgentSeamContext` | The agent-enriched [`SeamContext`](#seamcontext) (adds a lazy `ctx.tool_call`); the `ctx` an `on_tool_error` handler receives. |
+| `ToolErrorHandler` | Type alias for an `on_tool_error` handler — `Callable[[ToolCall, AgentSeamContext, ErrorReport], …]`. |
+
 ### Agent-to-agent (peers)
 
 | Symbol | Purpose |
@@ -261,7 +274,7 @@ Hosts the given `nodes` against the broker. Drive it with `await worker.run()` (
 
 ## Policy seams
 
-Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Each is registered as a constructor argument (`Agent`/`NodeDef`; a single callable or a list) or as a repeatable instance decorator (any node — and the only form for tool nodes); constructor entries precede decorator entries. A chain runs in registration order, resolving on the **first non-`None` return** (sync or async handlers). Observer nodes (`@consumer`) have no seams.
+Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Each is registered as a constructor argument (`Agent`/`NodeDef`; a single callable or a list) or as a repeatable instance decorator (any node — and the only form for tool nodes); constructor entries precede decorator entries. A chain runs in registration order, resolving on the **first non-`None` return** (sync or async handlers). Observer nodes (`@consumer`) have no seams. Agents additionally expose **`on_tool_error`**, a promoted surface over `on_callee_error` with the failing tool first-class (below the table).
 
 | Seam | Handler signature | A `None` return… | A non-`None` return… |
 | --- | --- | --- | --- |
@@ -269,8 +282,11 @@ Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams
 | `after_node` | `(ctx, output)` | keeps the produced output | replaces the output (output values only) |
 | `on_node_error` | `(ctx, fault)` | escalates the original fault | recovers — the value becomes the node's output |
 | `on_callee_error` | `(ctx, fault)` | the failed call escalates | substitutes a result for that call |
+| `on_tool_error` *(agents)* | `(tool_call, ctx, report)` | the tool failure escalates | substitutes a result for that tool call |
 
 `ctx` is a [`SeamContext`](#seamcontext); for the error seams, `fault` is an [`ErrorReport`](#errors--faults). (Returning a node *action* — a `Call`/`ReturnCall`/…, the kind a node body returns to dispatch work — is accepted from `before_node` but raises `SeamContractError` from `after_node`.)
+
+**`on_tool_error`** (agents only) is sugar over `on_callee_error`: it hoists the failing tool to a flat `tool_call: ToolCall` param (`.tool_name` / `.args`; `.args` is `None` for a `message_agent` peer fault) so a handler branches on `tool_call.tool_name`. Its `ctx` is an `AgentSeamContext` (a [`SeamContext`](#seamcontext) with a lazy `ctx.tool_call`). Return a value to substitute a successful result (`is_error=False`) or `retry_text_part(msg)` to show the model an error (`is_error=True`); registered `on_tool_error` handlers run before any raw `on_callee_error` on the same chain. The zero-argument prebuilt **`surface_to_model()`** converts *every* tool failure into a model-visible error — the top exception line, via `render_fault_for_model(report)`. Recipes: [How to handle errors and faults](error-handling.md).
 
 **Minting:** `raise NodeFaultError(error_type, ...)` from any seam (or the node body) converts to a fault verbatim and **bypasses `on_node_error`** (the mint rule). Inside `on_node_error` / `on_callee_error`, raising `NodeFaultError` mints; raising any *other* exception is treated as that handler declining.
 
@@ -387,11 +403,13 @@ The context handed to a `@consumer` function, once per inbound envelope. It, its
 
 ### `SeamContext`
 
-The context handed to every [policy seam](#policy-seams), received as `ctx` — it is **not** importable; annotate as needed or leave it untyped. Mutable on `state` only; the per-stage fields are set by the framework.
+The context handed to every [policy seam](#policy-seams), received as `ctx` — the base `SeamContext` is **not** importable (annotate as needed or leave it untyped). Mutable on `state` only; the per-stage fields are set by the framework. For an **agent**, the error seams receive an **`AgentSeamContext`** — a `SeamContext` with one added attribute, a lazy **`ctx.tool_call`** (`ToolCall | None`) that resolves the failing tool (the same value `on_tool_error` hoists to its flat `tool_call` param) — which **is** importable (`from calfkit import AgentSeamContext`) for annotating `on_tool_error` handlers.
+
+> Note on the `state` mutation channel: a `state` mutation from an error seam handling a **fan-out sibling** lands on a throwaway copy and is discarded when the batch closes (the closure restores the pre-fan-out snapshot). It persists for a single (non-fan-out) call. Return a substitute value rather than relying on a fold-time `state` mutation surviving a fan-out.
 
 | Attribute | Type | Description |
 | --- | --- | --- |
-| `state` | `StateT` | App state — **mutable**; the official input-transform channel (mutate in place, return `None`). |
+| `state` | `StateT` | App state — **mutable**; the official input-transform channel (mutate in place, return `None`). See the fan-out caveat above. |
 | `deps` | `Mapping[str, Any]` | Producer-supplied dependencies (read-only). |
 | `resources` | `Mapping[str, Any]` | The node's lifecycle-managed resources (read-only). |
 | `payload` | `Any \| None` | The inbound frame payload (a tool sees its `ToolCallRef`). |

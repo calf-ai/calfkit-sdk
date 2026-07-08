@@ -35,6 +35,12 @@ class SlotRef(BaseModel):
     """The sibling callee's topic, captured at OPEN from ``Call.target_topic``. Sourced onto the
     matched outcome's :attr:`FanoutOutcome.target_topic` at fold so the fault group's per-slot
     topology has it without the reply carrying it (the reply echoes only ``in_reply_to``/``tag``)."""
+    tool_name: str | None = None
+    """TODO(echo-rail): interim tool-identity carriage — captured at OPEN from ``Call.tool_name``, set
+    ONLY for a ``message_agent``/``isolate_state`` slot (whose foreign reply state can't resolve the
+    caller's tool). Threaded through ``_resolve_callee`` onto ``CalleeResult.tool_name`` at fold; ``None``
+    for a normal tool sibling. Defaulted (drain-tolerant) so an in-flight batch decodes across deploy.
+    Reworked wholesale by the echo marker rail (docs/issues/echo-marker-rail.md)."""
 
 
 class FanoutOpen(BaseModel):

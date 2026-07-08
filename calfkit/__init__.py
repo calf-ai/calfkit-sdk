@@ -25,7 +25,23 @@ from calfkit.client import (
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, ControlPlaneStamp, ControlPlaneView, advertises
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, MeshUnavailableError, NodeFaultError
 from calfkit.models import ErrorReport, ExceptionInfo, FaultTypes, ToolContext
-from calfkit.nodes import Agent, BaseNodeDef, ConsumerFn, ConsumerNode, NodeDef, ToolNodeDef, Tools, agent_tool, consumer
+from calfkit.models.payload import retry_text_part
+from calfkit.nodes import (
+    Agent,
+    AgentSeamContext,
+    BaseNodeDef,
+    ConsumerFn,
+    ConsumerNode,
+    NodeDef,
+    ToolCall,
+    ToolErrorHandler,
+    ToolNodeDef,
+    Tools,
+    agent_tool,
+    consumer,
+    render_fault_for_model,
+    surface_to_model,
+)
 from calfkit.peers import Handoff, Messaging
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
@@ -73,6 +89,15 @@ __all__ = [
     "Tools",
     "agent_tool",
     "consumer",
+    # agent tool-error reception (on_tool_error surface). ``ToolCall`` is calfkit's public name for
+    # the vendored model-request tool-call type (``.tool_name``/``.args``) an on_tool_error handler
+    # receives — DISTINCT from the wire ``calfkit.models.ToolCallPart`` (``.kwargs``).
+    "AgentSeamContext",
+    "ToolCall",
+    "ToolErrorHandler",
+    "render_fault_for_model",
+    "surface_to_model",
+    "retry_text_part",
     # peers (agent-to-agent)
     "Handoff",
     "Messaging",

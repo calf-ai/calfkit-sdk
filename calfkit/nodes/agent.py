@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Generic, cast
 import pydantic_core
 from pydantic import ValidationError
 
-from calfkit._protocol import NodeKind
+from calfkit._protocol import MessageKind, NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
@@ -20,6 +20,7 @@ from calfkit.models import Call, CallFrame, DataPart, NodeResult, ReturnCall, St
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard, derive_input_topic
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
+from calfkit.models.envelope import Envelope
 from calfkit.models.node_result import _extract_text, extract_lenient
 from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry, render_parts_as_text
 from calfkit.models.seam_context import SeamContext
@@ -28,6 +29,8 @@ from calfkit.models.step import AgentMessageStep, HandoffStep, StepEvent, ToolCa
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, step_preamble, structured_output_preamble
+from calfkit.nodes._seams import ON_CALLEE_ERROR, validate_positional_arity
+from calfkit.nodes._tool_error import AgentSeamContext, ToolErrorHandler, _adapt_tool_error, _as_list, resolve_tool_call
 from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
 from calfkit.nodes.tool import BaseToolNodeDef, Tools
 from calfkit.peers import Handoff, Messaging
@@ -83,6 +86,7 @@ class BaseAgentNodeDef(
         after_node: _SeamArg = None,
         on_node_error: _SeamArg = None,
         on_callee_error: _SeamArg = None,
+        on_tool_error: ToolErrorHandler | list[ToolErrorHandler] | None = None,
         tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
@@ -145,6 +149,14 @@ class BaseAgentNodeDef(
         elif not isinstance(subscribe_topics, (list, tuple)):
             subscribe_topics = [subscribe_topics]
 
+        # on_tool_error (D5/D6) is SUGAR over on_callee_error: validate the developer's arity-3 handlers
+        # HERE (the base only ever sees the arity-2 adapter wrapper — D6d), wrap each into a chain entry,
+        # and merge them FIRST so the promoted surface wins the first-non-None chain (D6e); the inherited
+        # on_callee_error is preserved, not clobbered.
+        for fn in _as_list(on_tool_error):
+            validate_positional_arity(fn, 3, node_id=name, kind="on_tool_error", param_desc="tool_call, ctx, report")
+        merged_on_callee_error = [*(_adapt_tool_error(fn) for fn in _as_list(on_tool_error)), *_as_list(on_callee_error)]
+
         super().__init__(
             node_id=name,
             subscribe_topics=subscribe_topics,
@@ -152,7 +164,7 @@ class BaseAgentNodeDef(
             before_node=before_node,
             after_node=after_node,
             on_node_error=on_node_error,
-            on_callee_error=on_callee_error,
+            on_callee_error=merged_on_callee_error,
         )
 
         self._agent_loop: InternalAgentLoop[dict[str, Any], AgentOutputT | DeferredToolRequests] = InternalAgentLoop(
@@ -249,6 +261,27 @@ class BaseAgentNodeDef(
         schematize degrades to a lenient skip (in the base ``_coerce_output``/``_output_view``)."""
         return self.final_output_type
 
+    def on_tool_error(self, fn: ToolErrorHandler) -> ToolErrorHandler:
+        """Register an ``on_tool_error`` handler (spec D5) — the promoted agent surface that converts a
+        faulting tool result into an in-band, model-visible error. Usable as an instance decorator;
+        repeatable. Validates the developer's arity (3 — ``tool_call, ctx, report``), wraps it into an
+        ``on_callee_error`` chain entry (a thin ``ctx.tool_call`` hoist), and returns ``fn`` unchanged so
+        it stays directly unit-testable. A decorator entry appends AFTER any constructor entries (base
+        §6.1 chain-order) — so to keep a specific handler ahead of a catch-all ``surface_to_model()``,
+        register the prebuilt via the constructor and the specific one by decorator."""
+        validate_positional_arity(fn, 3, node_id=self.node_id, kind="on_tool_error", param_desc="tool_call, ctx, report")
+        self._register_seam(ON_CALLEE_ERROR, _adapt_tool_error(fn))
+        return fn
+
+    def _build_seam_context(self, run_ctx: SessionRunContext, envelope: Envelope, headers: dict[str, Any], kind: MessageKind) -> AgentSeamContext:
+        """Covariant override (spec D3): the agent's seams receive an :class:`AgentSeamContext` carrying
+        ``ctx.tool_call``. Reuses the base's field-gathering — ``AgentSeamContext`` adds no dataclass
+        field (only the computed property), so re-wrapping ``super()``'s fields reconstructs it faithfully
+        with no duplicated construction. ``on_tool_error`` is agent-only, so a handler never receives a
+        bare base ``SeamContext``."""
+        base = super()._build_seam_context(run_ctx, envelope, headers, kind)
+        return AgentSeamContext(**vars(base))
+
     def _resolve_slot(self, ctx: SeamContext[State], outcome: _SlotResolved | _SlotFailed) -> None:
         """The agent's slot materialization (spec §6.9) — the SDK's single per-type codec. After the
         base records the ``CalleeResult``, a RESOLVED slot is materialized into the agent's private
@@ -280,7 +313,7 @@ class BaseAgentNodeDef(
             )
             return
         if is_retry(outcome.parts):
-            call = ctx.state.tool_calls.get(tag)
+            call = resolve_tool_call(ctx.state, tag, carried_tool_name=None)  # at close the (restored) caller state resolves it
             retry = RetryPromptPart(
                 content=self._retry_content(outcome.parts), tool_name=call.tool_name if call is not None else None, tool_call_id=tag
             )
@@ -290,7 +323,7 @@ class BaseAgentNodeDef(
         # multi-part sub-conversation answer, and the generic single-part extract_lenient would drop a
         # text preamble before its structured data (§5.2). Discriminated by the registered tool call's
         # name (None-guarded — a tag without a registered call falls back to the generic codec).
-        call = ctx.state.tool_calls.get(tag)
+        call = resolve_tool_call(ctx.state, tag, carried_tool_name=None)  # shared tag → ToolCall lookup (spec D3)
         if call is not None and call.tool_name == _MESSAGE_AGENT_TOOL:
             tool_return = ToolReturn(return_value=_serialize_message_reply(outcome.parts), metadata={"tool_call_id": tag})
         else:
@@ -467,7 +500,10 @@ class BaseAgentNodeDef(
         args = tool_call.args_as_dict()
         seed = State()
         seed.stage_message(ModelRequest.user_text_prompt(args["message"]))
-        return Call[State](derive_input_topic(args["name"]), seed, tag=tool_call.tool_call_id, isolate_state=True)
+        # TODO(echo-rail): the ONLY setter of the interim tool-identity carriage. A peer call runs on a
+        # fresh seed State, so its fault folds with the PEER's foreign state (the caller's tag absent) —
+        # ``resolve_failing_tool_call`` reads this carried name instead of ``state.tool_calls`` (spec D3).
+        return Call[State](derive_input_topic(args["name"]), seed, tag=tool_call.tool_call_id, isolate_state=True, tool_name=_MESSAGE_AGENT_TOOL)
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool

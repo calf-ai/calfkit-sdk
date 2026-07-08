@@ -168,6 +168,20 @@ class TestCoerceToParts:
         for part in (TextPart(text="hi"), DataPart(data={"k": "v"})):
             assert _coerce_to_parts(part) == _coerce_to_parts([part])
 
+    def test_mixed_list_of_part_and_str_still_buries_the_marker(self) -> None:
+        # Gate 0/C (agent-tool-error-reception): the precursor (#333) fixed the BARE-part
+        # burial but deliberately did NOT fix a MIXED list — the all-parts check requires
+        # EVERY element to be a part, so ``[marked_part, "str"]`` falls to the DataPart arm and
+        # the ``calf.retry`` marker is buried out of ``is_retry``'s per-part scanning range. Pinned
+        # so a handler returning a mixed list is a KNOWN, documented trap (issue §6.3-C4), not a
+        # silent regression: an ``on_tool_error`` handler must return a bare part or a list of ONLY
+        # parts. The precursor does not fix mixed lists — the reception feature documents it, not
+        # relies on it.
+        marked = retry_text_part("boom: rate limited")
+        result = _coerce_to_parts([marked, "postscript"])
+        assert result == [DataPart(data=[marked, "postscript"])]  # one DataPart; both elements buried
+        assert not is_retry(result)  # marker out of scanning range → would render is_error=False
+
 
 class TestProtocolKind:
     def test_hdr_kind_header_name(self) -> None:

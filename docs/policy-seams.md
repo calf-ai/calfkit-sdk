@@ -116,5 +116,5 @@ general ones.
 
 See also: the [Policy seams reference](api.md#policy-seams) for the full
 signature and return-value table, and [How to handle errors and
-faults](error-handling.md) for the error seams (`on_node_error` /
-`on_callee_error`) and minting faults.
+faults](error-handling.md) for the error seams (an agent's `on_tool_error`, the
+general `on_callee_error`, and `on_node_error`) and minting faults.

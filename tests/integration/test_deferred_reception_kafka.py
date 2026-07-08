@@ -39,12 +39,13 @@ async def test_consumer_tap_sees_typed_fault() -> None:
     surface cannot see the fault yet."""
 
 
-@pytest.mark.skip(reason="#251 self-healing budgets: surface_to_model prebuilt does not exist")
+@pytest.mark.skip(reason="#251 self-healing budgets: State.seam_budgets / max_failures do not exist yet")
 async def test_surface_to_model_bounds_then_escalates() -> None:
-    """When #251 lands: the ``surface_to_model(max_failures=...)`` prebuilt resolves
-    failing slots as model-visible results until the per-tool budget exhausts, then
-    declines → escalates. Today the only failure-surfacing seam is a user-authored
-    ``on_callee_error`` (see Suite X's X-3), with no budget."""
+    """When #251 lands: ``surface_to_model(max_failures=...)`` resolves failing slots as
+    model-visible results until the per-tool budget exhausts, then declines → escalates. Today
+    the budget-free ``surface_to_model()`` prebuilt EXISTS (the agent tool-error reception feature)
+    and converts every matching fault, bounded only by the agent's turn limit — this stub tracks the
+    remaining ``State.seam_budgets`` bound, not the prebuilt's existence."""
 
 
 @pytest.mark.skip(reason="#251 self-healing budgets: self_retry_budget / seam_budgets do not exist")

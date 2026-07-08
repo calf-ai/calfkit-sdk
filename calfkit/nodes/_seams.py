@@ -14,10 +14,29 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from calfkit.exceptions import NodeFaultError, safe_exc_message
+from calfkit.exceptions import NodeFaultError, RegistryConfigError, safe_exc_message
 from calfkit.models.error_report import ErrorReport, FaultTypes
 
 logger = logging.getLogger(__name__)
+
+
+def validate_positional_arity(fn: Callable[..., Any], arity: int, *, node_id: str, kind: str, param_desc: str) -> None:
+    """Registration-time positional-arity check (spec §6.8): ``fn`` must bind ``arity`` positional args.
+
+    ``follow_wrapped=False`` (D6a) validates the WRAPPER's OWN arity — call time never unwraps a
+    ``functools.wraps``'d handler — so the check is correct for any wrapped seam handler. Shared by the
+    base seam registration (``_register_seam``, arity 2/1) and the agent's ``on_tool_error`` surface
+    (arity 3): the base only ever sees the arity-2 adapter wrapper, so the agent validates the
+    developer's arity-3 handler through this same helper (D6d). ``kind``/``param_desc`` shape the
+    teaching error (e.g. ``on_callee_error`` / ``ctx, fault/output``; ``on_tool_error`` / ``tool_call,
+    ctx, report``)."""
+    try:
+        inspect.signature(fn, follow_wrapped=False).bind(*([None] * arity))
+    except TypeError as exc:
+        raise RegistryConfigError(
+            f"node={node_id}: {kind} handler {getattr(fn, '__name__', fn)!r} must accept {arity} positional arg(s) ({param_desc}); {exc}"
+        ) from exc
+
 
 _MAX_SEAM_ERROR_CHARS = 2000
 

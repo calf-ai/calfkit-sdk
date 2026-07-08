@@ -1,7 +1,7 @@
 # How to handle errors and faults
 
 This guide shows you how to recover from failures and signal your own, using the
-two error seams and the `NodeFaultError` / `ErrorReport` types. It assumes a
+error seams and the `NodeFaultError` / `ErrorReport` types. It assumes a
 caller-capable node (an `Agent`, a tool node, or a `NodeDef` subclass). For
 guarding input and reshaping output, see [How to guard and transform node
 invocations](policy-seams.md).
@@ -9,9 +9,11 @@ invocations](policy-seams.md).
 **How failures work here, briefly.** calfkit has no dead-letter queue. A failure
 — your node's, or a node it called — becomes a typed [`ErrorReport`](api.md#errorreport)
 that travels the result rail and **escalates up the call chain until a node
-handles it**. You intercept a fault in one of two seams — `on_callee_error` (a node
-you called failed) or `on_node_error` (your own body failed) — or you observe it by
-tapping a `publish_topic` with a [consumer](consumer-nodes.md).
+handles it**. You intercept a fault in an error seam — an agent's `on_tool_error`
+(a tool it called failed — the promoted surface, with the failing tool first-class),
+the general `on_callee_error` (any callee failed), or `on_node_error` (your own body
+failed) — or you observe it by tapping a `publish_topic` with a
+[consumer](consumer-nodes.md).
 
 Two things to know up front: a report's `retryable` flag is **advisory** (the
 framework never retries for you), and a fault surfaces in **two** places — in-node
@@ -25,23 +27,66 @@ the failure continue (escalate), **return a value** to recover, or **raise** to
 replace one fault with another. Register them like any other seam (see [Register a
 handler](policy-seams.md#register-a-handler)).
 
-## Recover when a tool (or callee) fails
+## Recover when a tool an agent called fails
 
-When a node your node called fails — most often a tool an agent invoked —
-`on_callee_error` fires once per failed call, before the failure escalates. It
-receives `(ctx, fault)`: `fault` is the callee's `ErrorReport`, and
-`ctx.failing_call` is the failed call. Return a value to **substitute a result**
-for that call (the agent continues as if the call had returned it); return `None`
-to let it escalate.
+When a tool an agent invoked fails, register **`on_tool_error`** — the promoted
+agent surface, with the failing tool first-class. It fires once per failed call,
+before the failure escalates, and receives `(tool_call, ctx, report)`: `tool_call`
+is the failing [`ToolCall`](api.md#toolcall) (`.tool_name` / `.args`), `report` is
+the tool's `ErrorReport`, and `ctx` is the seam context. Branch on
+`tool_call.tool_name`; return a value to **substitute a successful result**, return
+`retry_text_part(msg)` to **show the model an error** it can react to, or return
+`None` to let the failure escalate.
+
+```python
+from calfkit import retry_text_part
+
+@agent.on_tool_error
+def handle_tool_failure(tool_call, ctx, report):
+    if tool_call.tool_name == "get_price":
+        return last_known_price(ctx)                                 # substitute a fallback → is_error=False
+    if tool_call.tool_name == "web_search":
+        return retry_text_part(f"search failed: {report.message}")   # is_error=True — the model can retry
+    return None                                                      # any other tool failure escalates
+```
+
+Pass a single handler or a list to the `on_tool_error=` constructor argument, or
+use the `@agent.on_tool_error` decorator (repeatable). Self-healing is opt-in and
+visible: with no `on_tool_error` handler, a tool failure escalates and the model
+sees nothing (the default).
+
+### Show the model every tool failure
+
+For the common case — "let the model see and react to whatever broke" — register
+the zero-argument **`surface_to_model()`** prebuilt. It converts *every* tool
+failure into a model-visible error result (the top exception line, e.g.
+`RateLimitError: rate limit exceeded`), so the model can retry or adapt:
+
+```python
+from calfkit import surface_to_model
+
+agent = Agent(..., on_tool_error=[surface_to_model()])
+```
+
+`surface_to_model()` is unbounded — it converts every matching fault, so the loop
+is bounded only by the agent's turn limit (a per-tool budget is a future addition).
+For per-tool policy, write your own handler and branch on `tool_call.tool_name`.
+
+### The general mechanism: `on_callee_error`
+
+`on_tool_error` is sugar over **`on_callee_error`**, the general seam every
+caller-capable node has (not just agents). Use `on_callee_error(ctx, fault)`
+directly when the caller is not an agent, or when you don't need the failing tool's
+identity — `ctx.failing_call` still identifies the failed call:
 
 ```python
 from calfkit import FaultTypes
 
-@agent.on_callee_error
+@node.on_callee_error
 def fall_back_on_weather(ctx, fault):
     if fault.find("weather.upstream_timeout"):
-        return {"summary": "weather unavailable", "temp_c": None}  # substitute the tool result
-    return None  # any other tool failure escalates
+        return {"summary": "weather unavailable", "temp_c": None}  # substitute the callee result
+    return None  # any other callee failure escalates
 ```
 
 ## Recover from your node's own failure
