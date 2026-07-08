@@ -166,10 +166,12 @@ calls and results, and any handoffs — live, followed by its answer.
 ck chat [NAME] [OPTIONS]
 ```
 
-With no `NAME`, `ck chat` lists the agents online and prompts you to choose;
-`ck chat researcher` skips the picker and connects to that agent directly (and
-exits `2` if it isn't online). There is no "back" — leave and rerun to switch
-agents.
+With no `NAME`, `ck chat` lists the agents online and prompts you to choose — on an
+interactive terminal a **live menu** (↑/↓ to move, Enter to pick, `q`/`Esc`/Ctrl-C
+to quit) that refreshes as agents come and go; when the output isn't a terminal, a
+static numbered menu with descriptions. `ck chat researcher` skips the picker and
+connects to that agent directly (and exits `2` if it isn't online). There is no
+"back" — leave and rerun to switch agents.
 
 ### A session
 
@@ -306,15 +308,18 @@ preset**:
 The broker is ensured once, in the parent — under `--reload` the restarted
 workers only reconnect — and each command first prints whether the broker is
 **managed** (`ck dev: managed broker at 127.0.0.1:9092 (pid 51234)`) or
-**reused** (`… — not managed by calfkit`).
+**reused** (`… — not managed by calfkit`). When a broker has to be spawned, a
+short `Starting dev broker …` progress line shows while it comes up.
 
 ### `ck dev run --detach/-d`
 
 Everything `ck dev run` is, with the attachment cut (the `docker compose up
 -d` gesture): the worker tree — the reload supervisor plus the worker it
 restarts on edits — is spawned as a **detached daemon** and the command
-returns only when its agents/tools are **online on the mesh** (bounded at
-15 s; a failure reports the daemon's log tail). Lifetime: until
+returns only when its agents/tools are **online on the mesh** — a live
+**readiness roster** shows each name as it comes up (plain milestone lines when
+the output isn't a terminal), bounded at 15 s; a failure names which agents never
+came online and reports the daemon's log tail. Lifetime: until
 `ck dev stop <name>`, `ck dev down`, or a reboot.
 
 - Per launched name it prints the **supervisor pid** (the process `stop`
@@ -352,7 +357,8 @@ An argument containing `:` is a `module:attr` **target**; a bare word is an
 agent **name** (mixing them, passing two names, or duplicate node names across
 targets: exit `2`). With targets, the chat runs them **inside its own
 process** — a *session worker* on the chat's own client — waits for them to be
-online, then opens the normal picker:
+online (the same **readiness roster** as `-d`, with any already-online targets
+shown as reused), then opens the normal picker:
 
 - The session worker dies **with the chat process**, on any exit — there is no
   child process to orphan. Its logs share the chat terminal.

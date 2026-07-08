@@ -707,3 +707,28 @@ async def test_session_failed_launch_prints_no_narration(
 async def test_session_plan_without_host_key_is_a_programming_error(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="session_host_key"):
         await run_chat_session(None, "localhost:9092", None, session_plan=[])
+
+
+async def test_session_shows_the_readiness_roster(session_seams: dict, capsys: pytest.CaptureFixture[str]) -> None:
+    """PR2 adoption: the chat-TARGET launch shows a readiness roster titled by launched count + host."""
+    plan = [_target_nodes()]
+    session_seams["evaluate"] = ([], plan)
+    await run_chat_session(None, "localhost:9092", None, session_plan=plan, session_host_key="127.0.0.1:9092")
+    assert "Starting 1 node(s) on 127.0.0.1:9092" in capsys.readouterr().out
+
+
+async def test_attach_uses_the_live_picker_on_an_interactive_terminal(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """On a TTY with no named agent, the live picker (which polls the mesh itself) replaces the
+    static discover+pick; a quit returns without entering the REPL."""
+    called: dict[str, object] = {}
+
+    async def fake_live_pick(client: object, **_: object) -> None:
+        called["client"] = client
+        return None
+
+    monkeypatch.setattr("calfkit.cli._chat.is_interactive", lambda: True)
+    monkeypatch.setattr("calfkit.cli._chat.live_pick", fake_live_pick)
+    _patch_get_agents(monkeypatch, result={"a": _agent("a", None)})
+    await run_chat_session(None, "localhost:9092", None)
+    assert "client" in called  # the live picker was used
+    assert "Discovering agents" not in capsys.readouterr().out  # the static path was skipped

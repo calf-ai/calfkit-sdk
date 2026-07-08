@@ -100,3 +100,51 @@ def make_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> Calla
         return line
 
     return read_line
+
+
+def _decode_key(chunk: bytes) -> str:
+    """Map one raw keypress to a picker token."""
+    if chunk == b"\x1b[A":
+        return "up"
+    if chunk == b"\x1b[B":
+        return "down"
+    if chunk in (b"\r", b"\n"):
+        return "enter"
+    if chunk in (b"\x03", b"\x04", b"\x1b", b"q", b"Q"):  # Ctrl-C / Ctrl-D / Esc / q
+        return "quit"
+    return "other"
+
+
+def make_key_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> Callable[[], Awaitable[str]]:
+    """Build a single-keypress reader for the live picker. The terminal is expected to already be in
+    raw mode (the caller sets and restores it), so each keypress arrives as one ``os.read`` and
+    decodes to a token (``up`` / ``down`` / ``enter`` / ``quit`` / ``other``). Same ``add_reader``
+    mechanics as :func:`make_reader` — cancellable, no executor thread; tests inject an ``os.pipe()``
+    read-end."""
+    resolved_fd = fd
+
+    async def read_key() -> str:
+        nonlocal resolved_fd
+        if resolved_fd is None:
+            resolved_fd = _resolve_stdin_fd()
+        read_fd = resolved_fd
+        future: asyncio.Future[bytes] = loop.create_future()
+
+        def _on_readable() -> None:
+            if future.done():  # pragma: no cover - cancel/resolve race
+                return
+            try:
+                chunk = os.read(read_fd, 8)
+            except OSError as exc:
+                future.set_exception(exc)
+                return
+            future.set_result(chunk)
+
+        loop.add_reader(read_fd, _on_readable)
+        try:
+            chunk = await future
+        finally:
+            loop.remove_reader(read_fd)
+        return _decode_key(chunk)
+
+    return read_key

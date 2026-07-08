@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from calfkit.cli._chat_io import _resolve_stdin_fd, make_reader
+from calfkit.cli._chat_io import _resolve_stdin_fd, make_key_reader, make_reader
 
 
 async def _drain(coro: Awaitable[str], timeout: float = 1.0) -> str:
@@ -194,6 +194,29 @@ async def test_cancel_in_flight_read_line_removes_reader_no_leak() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert loop.remove_reader(r) is False  # the read's finally already removed it — no leak
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+async def test_key_reader_decodes_arrows_enter_and_quit() -> None:
+    """The raw-mode single-key reader (picker input): arrow escape sequences, Enter, and the
+    quit keys (q / Ctrl-C / Ctrl-D / Esc) each decode to a token."""
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x1b[A")
+        assert await _drain(read_key()) == "up"
+        os.write(w, b"\x1b[B")
+        assert await _drain(read_key()) == "down"
+        os.write(w, b"\r")
+        assert await _drain(read_key()) == "enter"
+        os.write(w, b"q")
+        assert await _drain(read_key()) == "quit"
+        os.write(w, b"\x03")  # Ctrl-C
+        assert await _drain(read_key()) == "quit"
+        os.write(w, b"\x1b")  # lone Esc
+        assert await _drain(read_key()) == "quit"
     finally:
         os.close(r)
         os.close(w)

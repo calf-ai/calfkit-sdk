@@ -805,3 +805,26 @@ def test_restart_of_a_borrowed_broker_just_reuses_it(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
     out = dev_broker.restart(normalize(["localhost"]), resolve_bin=MustNotCall())
     assert out.managed is False
+
+
+def test_ensure_broker_spawn_wraps_the_readiness_wait_in_the_reporter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BR2 adoption (spec §4.5): a broker spawn runs its readiness wait inside the reporter."""
+    _capture_popen(monkeypatch)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False, True))
+    events: list[str] = []
+
+    class _Rec:
+        def __enter__(self) -> _Rec:
+            events.append("enter")
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            events.append("exit")
+            return None
+
+        def update(self, done: object) -> None:
+            events.append("update")
+
+    ensure_broker(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), reporter=_Rec())
+    assert events[0] == "enter"
+    assert events[-1] == "exit"

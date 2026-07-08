@@ -30,6 +30,7 @@ import typer
 from calfkit.cli import _dev_agents, _dev_broker
 from calfkit.cli._common import _load_env, _parse_host
 from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, Target, normalize
+from calfkit.cli._wait import ConsoleWaitReporter, make_reporter_factory
 from calfkit.cli.run import run as _run_command
 from calfkit.client._mesh_url import resolve_mesh_url
 
@@ -88,7 +89,12 @@ def _echo_broker_line(broker: BrokerInfo) -> None:
 
 def _ensure_or_exit(target: Target) -> BrokerInfo:
     try:
-        broker = _dev_broker.ensure_broker(target, resolve_bin=_resolve_bin, timeout=_dev_broker.DEFAULT_TIMEOUT)
+        broker = _dev_broker.ensure_broker(
+            target,
+            resolve_bin=_resolve_bin,
+            timeout=_dev_broker.DEFAULT_TIMEOUT,
+            reporter=ConsoleWaitReporter(f"Starting dev broker at {target.bootstrap}", ["dev broker"]),
+        )
     except DevBrokerError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
@@ -257,7 +263,13 @@ async def _ensure_agents_with_client(
 
     client = Client.connect(_session_servers(target))
     try:
-        return await _dev_agents.ensure_agents(plan, target, client.mesh, run_args=run_args)
+        return await _dev_agents.ensure_agents(
+            plan,
+            target,
+            client.mesh,
+            run_args=run_args,
+            make_reporter=make_reporter_factory(lambda n: f"Starting {n} node(s) on {target.bootstrap}"),
+        )
     finally:
         await client.aclose()
 

@@ -918,3 +918,67 @@ async def test_ensure_holds_the_agents_flock_across_its_critical_section(monkeyp
     with (tmp_path / ".calfkit" / "dev-agents.lock").open("rb") as fd:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+async def test_wait_ready_pushes_resolved_targets_to_the_reporter() -> None:
+    """PR2 adoption (spec §4.5): the wait pushes each poll's resolved set to the reporter."""
+    updates: list[set[str]] = []
+
+    class _Recorder:
+        def __enter__(self) -> _Recorder:
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            return None
+
+        def update(self, done: Any) -> None:
+            updates.append(set(done))
+
+    mesh = FakeMesh(agents_frames=[{}, {"general": _agent_info("general")}])
+    await _dev_agents.wait_agents_ready(None, ("general",), (), mesh, log_path=None, reporter=_Recorder(), **_fast_wait())
+    assert {"general"} in updates
+
+
+async def test_wait_ready_deadline_error_names_the_pending_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Attribution (spec §4.4): the deadline error names the targets that never came online."""
+    _record_killpg(monkeypatch)
+    mesh = FakeMesh(agents_frames=[{"a": _agent_info("a")}])  # 'a' online, 'b' never
+    with pytest.raises(DevAgentError, match=r"(?s)did not come online.*still waiting on: b") as exc:
+        await _dev_agents.wait_agents_ready(None, ("a", "b"), (), mesh, log_path=None, **_fast_wait())
+    assert "still waiting on: b" in str(exc.value)
+
+
+async def test_gate_launched_ready_gates_on_the_launched_names() -> None:
+    """The shared gate extracts the launched name lists and blocks until they are online."""
+    mesh = FakeMesh(agents_frames=[{}, {"general": _agent_info("general")}])
+    plan = _dev_agents.preflight([f"{_NODES}:general"])
+    await _dev_agents.gate_launched_ready(None, plan, mesh, reused_names=(), log_path=None, **_fast_wait())
+
+
+async def test_gate_launched_ready_builds_and_wraps_a_reporter_from_the_factory() -> None:
+    """The single reporter-injection point: the factory is called with (launched, reused) and the
+    reporter is used as a context manager around the gate."""
+    events: list[str] = []
+
+    class _Rec:
+        def __enter__(self) -> _Rec:
+            events.append("enter")
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            events.append("exit")
+            return None
+
+        def update(self, done: Any) -> None:
+            events.append("update")
+
+    def _make(waiting: list[str], pre_done: list[str]) -> _Rec:
+        events.append(f"make {waiting} {pre_done}")
+        return _Rec()
+
+    mesh = FakeMesh(agents_frames=[{"general": _agent_info("general")}])
+    plan = _dev_agents.preflight([f"{_NODES}:general"])
+    await _dev_agents.gate_launched_ready(None, plan, mesh, reused_names=("old",), make_reporter=_make, log_path=None, **_fast_wait())
+    assert events[0] == "make ['general'] ['old']"
+    assert events[1] == "enter"
+    assert events[-1] == "exit"

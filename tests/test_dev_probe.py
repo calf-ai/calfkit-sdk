@@ -31,6 +31,11 @@ class _FakeAIOKafkaClient:
             raise KafkaConnectionError("no broker there")
         if _BEHAVIOR == "oserror":
             raise OSError("socket-level failure surfaced unwrapped (e.g. DNS)")
+        if _BEHAVIOR == "log_and_refuse":
+            import logging
+
+            logging.getLogger("aiokafka.client").error('Unable connect to "%s:%s": refused', "127.0.0.1", 9092)
+            raise OSError("connection refused")
         if _BEHAVIOR == "hang":
             await asyncio.sleep(10)
         # "ok": return immediately
@@ -81,3 +86,29 @@ async def test_reachable_false_on_timeout() -> None:
 def test_is_reachable_sync_wrapper() -> None:
     _set("ok")
     assert probe.is_reachable("127.0.0.1:9092", timeout=1.0) is True
+
+
+async def test_broker_reachable_suppresses_the_aiokafka_unable_connect_error(caplog: pytest.LogCaptureFixture) -> None:
+    """The probe raises the aiokafka.client log threshold so the expected per-attempt 'Unable
+    connect' ERROR does not leak while a broker is coming up (spec §4.5)."""
+    import logging
+
+    _set("log_and_refuse")
+    caplog.set_level(logging.DEBUG, logger="aiokafka.client")
+    assert await probe.broker_reachable("127.0.0.1:9092", timeout=0.5) is False
+    assert not any("Unable connect" in r.getMessage() for r in caplog.records)
+
+
+async def test_broker_reachable_restores_the_aiokafka_log_level() -> None:
+    """The quieting is scoped: the aiokafka.client level is restored after the probe, never left
+    permanently suppressed."""
+    import logging
+
+    logger = logging.getLogger("aiokafka.client")
+    logger.setLevel(logging.INFO)
+    try:
+        _set("refused")
+        await probe.broker_reachable("127.0.0.1:9092", timeout=0.5)
+        assert logger.level == logging.INFO
+    finally:
+        logger.setLevel(logging.NOTSET)

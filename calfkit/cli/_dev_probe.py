@@ -14,6 +14,7 @@ cheap and pulls no aiokafka at load time.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 
 
@@ -28,12 +29,18 @@ async def broker_reachable(bootstrap: str | Sequence[str], *, timeout: float) ->
 
     servers = bootstrap if isinstance(bootstrap, str) else list(bootstrap)
     client = AIOKafkaClient(bootstrap_servers=servers)
+    # aiokafka logs 'Unable connect …' at ERROR on every failed bootstrap attempt; while a broker is
+    # still coming up those are expected noise, so raise its threshold for the probe and restore it.
+    aiokafka_log = logging.getLogger("aiokafka.client")
+    previous_level = aiokafka_log.level
+    aiokafka_log.setLevel(logging.CRITICAL)
     try:
         await asyncio.wait_for(client.bootstrap(), timeout)
         return True
     except (KafkaError, asyncio.TimeoutError, OSError):
         return False
     finally:
+        aiokafka_log.setLevel(previous_level)
         await client.close()
 
 
