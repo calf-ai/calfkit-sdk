@@ -200,8 +200,8 @@ async def test_cancel_in_flight_read_line_removes_reader_no_leak() -> None:
 
 
 async def test_key_reader_decodes_arrows_enter_and_quit() -> None:
-    """The raw-mode single-key reader (picker input): arrow escape sequences, Enter, and the
-    quit keys (q / Ctrl-C / Ctrl-D / Esc) each decode to a token."""
+    """The cbreak-mode single-key reader (picker input): arrow escape sequences, Enter, and the
+    quit keys (q / Esc / a raw Ctrl-C/Ctrl-D byte) each decode to a token."""
     r, w = os.pipe()
     try:
         read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
@@ -245,6 +245,26 @@ async def test_key_reader_decodes_ctrl_d_uppercase_q_and_unmapped_keys() -> None
         assert await _drain(read_key()) == "quit"
         os.write(w, b"x")
         assert await _drain(read_key()) == "other"  # unmapped: ignored, not an error
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+async def test_key_reader_ignores_unrecognized_escape_sequences_instead_of_quitting() -> None:
+    """An ESC that begins an escape sequence we don't map (SS3 arrows in application-cursor mode,
+    Meta/Alt combos, function keys) must decode to a harmless ``other`` — NOT ``quit``, which would
+    cancel the picker out from under the user. Only a lone/terminal ESC (the Escape key) is quit."""
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x1bOA")  # SS3 up-arrow (application-cursor mode) — must be ignored, not quit
+        assert await _drain(read_key()) == "other"
+        os.write(w, b"\x1bOP")  # SS3 F1
+        assert await _drain(read_key()) == "other"
+        os.write(w, b"\x1ba")  # Meta/Alt-a
+        assert await _drain(read_key()) == "other"
+        os.write(w, b"\x1b")  # a lone Esc IS the Escape key → quit
+        assert await _drain(read_key()) == "quit"
     finally:
         os.close(r)
         os.close(w)

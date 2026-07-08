@@ -17,10 +17,17 @@ from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.text import Text
 
-from calfkit.cli._chat_io import make_key_reader
+from calfkit.cli._chat_io import Key, make_key_reader
 
 if TYPE_CHECKING:
     from calfkit.client import Client
+    from calfkit.client.mesh import AgentInfo
+
+
+def _roster_descriptions(agents: Mapping[str, AgentInfo]) -> dict[str, str | None]:
+    """Project the mesh's agent directory down to the picker's ``name → description`` roster — the
+    only fields the live menu needs, keeping :class:`PickerModel` decoupled from the mesh DTO."""
+    return {name: info.description for name, info in agents.items()}
 
 
 class PickerModel:
@@ -86,7 +93,7 @@ def render_menu(model: PickerModel) -> RenderableType:
 
 
 async def _run_picker(
-    read_key: Callable[[], Awaitable[str]],
+    read_key: Callable[[], Awaitable[Key]],
     poll_agents: Callable[[], Awaitable[Mapping[str, str | None]]],
     render: Callable[[PickerModel], None],
     *,
@@ -150,8 +157,7 @@ async def live_pick(client: Client, *, cadence: float = 1.0) -> str | None:
     read_key = make_key_reader(loop, fd)
 
     async def poll_agents() -> dict[str, str | None]:
-        agents = await client.mesh.get_agents()
-        return {name: info.description for name, info in agents.items()}
+        return _roster_descriptions(await client.mesh.get_agents())
 
     old_attrs = termios.tcgetattr(fd)
     tty.setcbreak(fd)

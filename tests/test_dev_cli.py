@@ -1319,7 +1319,7 @@ def test_dev_run_detach_wires_a_console_reporter(detach_seams: dict[str, Any]) -
     result = _invoke(["dev", "run", "-d", "app:agent"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     make_reporter = detach_seams["ensure"]["make_reporter"]
-    assert isinstance(make_reporter(["general"], []), ConsoleWaitReporter)
+    assert isinstance(make_reporter(waiting=["general"], pre_done=[]), ConsoleWaitReporter)
 
 
 def test_ensure_or_exit_gives_ensure_broker_a_console_reporter(monkeypatch: pytest.MonkeyPatch) -> None:

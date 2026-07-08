@@ -145,7 +145,7 @@ def test_make_reporter_factory_builds_a_console_reporter_titled_by_launched_coun
     # launched count and carries the reused set as pre_done.
     console, buf = _non_tty_console()
     factory = make_reporter_factory(lambda n: f"Starting {n} node(s)", console=console)
-    with factory(["a", "b"], ["old"]):
+    with factory(waiting=["a", "b"], pre_done=["old"]):
         pass
     assert "Starting 2 node(s)" in buf.getvalue()
 
@@ -174,3 +174,33 @@ def test_reporter_isolates_live_faults_from_the_wait() -> None:
         reporter._live = _BoomLive()  # type: ignore[assignment]
         reporter.update({"a"})  # guarded: must not raise
     # leaving the `with` (which calls _live.stop) must not raise either
+
+
+def test_reporter_live_teardown_glitch_does_not_mask_the_waits_exception() -> None:
+    # The load-bearing property (_wait.py __exit__): when the wait itself raises AND the live teardown
+    # also glitches, the wait's OWN exception must propagate — the cosmetic stop() fault must not mask it.
+    console, _ = _tty_console()
+
+    class _BoomStopLive:
+        def update(self, *a: object, **k: object) -> None: ...
+
+        def stop(self) -> None:
+            raise RuntimeError("stop boom")
+
+    class DomainError(Exception):
+        pass
+
+    with pytest.raises(DomainError):  # the wait's DomainError, not the teardown's RuntimeError
+        with ConsoleWaitReporter("t", ["a"], console=console) as reporter:
+            reporter._live = _BoomStopLive()  # type: ignore[assignment]
+            raise DomainError("the real failure")
+
+
+def test_make_reporter_factory_threads_the_success_label_into_the_finalize() -> None:
+    # The `success=` callable must reach the reporter's success finalize, titled by the launched count
+    # (n = len(waiting)) — the wiring both production call sites depend on (dev.py / _chat.py).
+    console, buf = _tty_console()
+    factory = make_reporter_factory(lambda n: f"Starting {n}", success=lambda n: f"all {n} node(s) online", console=console)
+    with factory(waiting=["a", "b"], pre_done=[]):
+        pass  # clean exit -> success finalize
+    assert "✔ all 2 node(s) online" in _ANSI.sub("", buf.getvalue())

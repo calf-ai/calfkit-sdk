@@ -398,7 +398,7 @@ async def wait_agents_ready(
         await asyncio.sleep(poll_interval)
 
 
-def _null_reporter_factory(waiting: list[str], pre_done: list[str]) -> WaitReporter:
+def _null_reporter_factory(*, waiting: list[str], pre_done: list[str]) -> WaitReporter:
     return NULL_REPORTER
 
 

@@ -20,12 +20,17 @@ from collections.abc import Sequence
 
 
 class _DropConnectRetryNoise(logging.Filter):
-    """Drops aiokafka's expected per-attempt ``Unable connect …`` retry logs while a broker is still
-    coming up; every other aiokafka record passes through, so a genuinely different error
-    (auth/TLS/protocol) stays visible."""
+    """Drops aiokafka's expected per-attempt bootstrap retry log while a broker is still coming up.
+
+    aiokafka has TWO ``Unable connect …`` ERROR sites on the ``aiokafka`` logger: the bootstrap-attempt
+    retry ``Unable connect to "<host>:<port>": …`` (client.py, the noise we want gone) and a genuine
+    ``Unable connect to node with id <n>: …`` diagnostic for a discovered node dropping. We anchor on
+    the ``to "`` quote so ONLY the bootstrap noise is dropped and the node-failure diagnostic — like
+    every other aiokafka error (auth/TLS/protocol) — stays visible. (String-coupled to a pinned
+    aiokafka message; it fails *open* — noise reappears — if that wording ever changes.)"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return not record.getMessage().startswith("Unable connect")
+        return not record.getMessage().startswith('Unable connect to "')
 
 
 async def broker_reachable(bootstrap: str | Sequence[str], *, timeout: float) -> bool:

@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Iterator
 from io import StringIO
 from typing import Any
 
 from rich.console import Console
 
+from calfkit.cli._chat_io import Key
 from calfkit.cli._picker import PickerModel, _run_picker, render_menu
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -83,6 +85,22 @@ def test_render_menu_marks_the_highlighted_row() -> None:
     assert "  backend" in text  # non-highlighted row is indented, no marker
 
 
+def test_roster_descriptions_projects_name_and_description() -> None:
+    # The adapter live_pick uses to feed the model: mesh AgentInfo -> {name: description}, the seam
+    # that surfaces descriptions in the live menu.
+    from datetime import datetime, timezone
+
+    from calfkit.cli._picker import _roster_descriptions
+    from calfkit.client.mesh import AgentInfo
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    agents = {
+        "researcher": AgentInfo(name="researcher", description="Deep research", last_seen=now),
+        "bot": AgentInfo(name="bot", description=None, last_seen=now),  # no advertised description
+    }
+    assert _roster_descriptions(agents) == {"researcher": "Deep research", "bot": None}
+
+
 def test_render_menu_shows_each_agent_description() -> None:
     model = PickerModel()
     model.sync({"researcher": "Deep web research", "support-bot": "Handles support tickets"})
@@ -106,9 +124,9 @@ def test_render_menu_shows_an_empty_hint_when_no_agents() -> None:
 
 
 async def test_run_picker_moves_and_selects() -> None:
-    keys = iter(["down", "enter"])
+    keys: Iterator[Key] = iter(["down", "enter"])
 
-    async def read_key() -> str:
+    async def read_key() -> Key:
         return next(keys)
 
     async def poll() -> dict[str, str | None]:
@@ -119,9 +137,9 @@ async def test_run_picker_moves_and_selects() -> None:
 
 
 async def test_run_picker_up_moves_the_highlight() -> None:
-    keys = iter(["down", "down", "up", "enter"])
+    keys: Iterator[Key] = iter(["down", "down", "up", "enter"])
 
-    async def read_key() -> str:
+    async def read_key() -> Key:
         return next(keys)
 
     async def poll() -> dict[str, str | None]:
@@ -132,7 +150,7 @@ async def test_run_picker_up_moves_the_highlight() -> None:
 
 
 async def test_run_picker_quit_returns_none() -> None:
-    async def read_key() -> str:
+    async def read_key() -> Key:
         return "quit"
 
     async def poll() -> dict[str, str | None]:
@@ -145,9 +163,9 @@ async def test_run_picker_enter_on_empty_roster_does_not_select() -> None:
     # An empty roster + Enter must NOT return (returning None would read as a cancel and drop the
     # user out of the picker); it stays open until an agent arrives or the user quits.
     consumed: list[str] = []
-    keys = iter(["enter", "quit"])
+    keys: Iterator[Key] = iter(["enter", "quit"])
 
-    async def read_key() -> str:
+    async def read_key() -> Key:
         key = next(keys)
         consumed.append(key)
         return key
@@ -166,9 +184,9 @@ async def test_run_picker_resyncs_the_roster_on_a_poll_tick() -> None:
     async def poll() -> dict[str, str | None]:
         return next(rosters, _roster("a", "z"))
 
-    keys: asyncio.Queue[str] = asyncio.Queue()
+    keys: asyncio.Queue[Key] = asyncio.Queue()
 
-    async def read_key() -> str:
+    async def read_key() -> Key:
         return await keys.get()
 
     seen: list[list[str]] = []

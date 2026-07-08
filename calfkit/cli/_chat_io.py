@@ -118,11 +118,16 @@ def _decode_keys(chunk: bytes) -> list[Key]:
         elif chunk[i] == 0x1B and chunk[i + 1 : i + 3] == b"[B":
             keys.append("down")
             i += 3
-        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] == b"[":
-            keys.append("other")  # an unhandled CSI (←/→, Home, …): consumed and ignored
+        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] in (b"[", b"O"):
+            keys.append("other")  # an unhandled CSI/SS3 (←/→, Home, F-keys, …): consumed and ignored
             i += 3
+        elif chunk[i] == 0x1B and i + 1 < n:
+            keys.append("other")  # ESC + a byte = a Meta/Alt combo (or other esc): ignored, never a cancel
+            i += 2
         elif chunk[i] in (0x1B, 0x03, 0x04) or chunk[i : i + 1] in (b"q", b"Q"):
-            keys.append("quit")  # Esc / Ctrl-C(byte) / Ctrl-D(byte) / q
+            # A lone/terminal ESC is the Escape key; q/Q is quit; a raw Ctrl-D byte arrives here (ICANON
+            # off). Ctrl-C is normally a SIGINT under cbreak (ISIG on) — the 0x03 arm is only defensive.
+            keys.append("quit")
             i += 1
         elif chunk[i : i + 1] in (b"\r", b"\n"):
             keys.append("enter")

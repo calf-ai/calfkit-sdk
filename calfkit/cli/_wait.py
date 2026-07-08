@@ -43,7 +43,7 @@ class ReporterFactory(Protocol):
     Named (rather than a bare ``Callable[[list[str], list[str]], WaitReporter]``) so call sites pass
     by keyword and cannot transpose the two same-typed lists."""
 
-    def __call__(self, waiting: list[str], pre_done: list[str]) -> WaitReporter: ...
+    def __call__(self, *, waiting: list[str], pre_done: list[str]) -> WaitReporter: ...
 
 
 class ConsoleWaitReporter:
@@ -165,7 +165,7 @@ def make_reporter_factory(
     with a success finalize of ``success(len(waiting))`` (generic ``all N done`` when *success* is
     absent). The command layer supplies the wording, so this module stays domain-neutral."""
 
-    def _factory(waiting: list[str], pre_done: list[str]) -> WaitReporter:
+    def _factory(*, waiting: list[str], pre_done: list[str]) -> WaitReporter:
         n = len(waiting)
         return ConsoleWaitReporter(
             title(n),

@@ -41,6 +41,13 @@ class _FakeAIOKafkaClient:
 
             logging.getLogger("aiokafka").error("SASL authentication failed")  # a real, non-noise diagnostic
             raise OSError("connection refused")
+        if _BEHAVIOR == "log_node_unreachable_and_refuse":
+            import logging
+
+            # aiokafka's SECOND "Unable connect" site (client.py:435): a discovered node dropping — a
+            # genuine diagnostic, NOT the bootstrap retry noise. Its message lacks the `to "` quote.
+            logging.getLogger("aiokafka").error("Unable connect to node with id %s: %s", 3, "refused")
+            raise OSError("connection refused")
         if _BEHAVIOR == "hang":
             await asyncio.sleep(10)
         # "ok": return immediately
@@ -113,6 +120,18 @@ async def test_broker_reachable_lets_other_aiokafka_errors_through(caplog: pytes
     caplog.set_level(logging.DEBUG, logger="aiokafka")
     assert await probe.broker_reachable("127.0.0.1:9092", timeout=0.5) is False
     assert any("SASL authentication failed" in r.getMessage() for r in caplog.records)
+
+
+async def test_broker_reachable_keeps_the_node_unreachable_diagnostic_visible(caplog: pytest.LogCaptureFixture) -> None:
+    """aiokafka has TWO 'Unable connect' log sites: the bootstrap retry noise (`...to "host:port"...`)
+    and a genuine node-dropped diagnostic (`...to node with id N...`). The filter must drop ONLY the
+    former — anchored on the `to "` quote — so the real node-failure error stays visible."""
+    import logging
+
+    _set("log_node_unreachable_and_refuse")
+    caplog.set_level(logging.DEBUG, logger="aiokafka")
+    assert await probe.broker_reachable("127.0.0.1:9092", timeout=0.5) is False
+    assert any("Unable connect to node with id" in r.getMessage() for r in caplog.records)
 
 
 async def test_broker_reachable_removes_its_noise_filter_after_the_probe() -> None:

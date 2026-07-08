@@ -738,7 +738,7 @@ async def test_attach_falls_back_to_the_static_picker_when_not_interactive(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Off a TTY (piped/redirected/CI), the live picker is bypassed for the static discover+numbered
-    menu — so the raw-mode selector never runs where it cannot render."""
+    menu — so the cbreak-mode live picker never runs where it cannot render."""
 
     async def boom_live_pick(client: object, **_: object) -> None:
         raise AssertionError("live_pick must not run when the terminal is not interactive")
