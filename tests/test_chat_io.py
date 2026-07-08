@@ -250,6 +250,32 @@ async def test_key_reader_decodes_ctrl_d_uppercase_q_and_unmapped_keys() -> None
         os.close(w)
 
 
+def test_decode_keys_consumes_a_whole_csi_without_leaking_a_quit() -> None:
+    """A CSI sequence longer than 3 bytes must decode to a SINGLE ``other`` — no interior/final byte
+    may leak out as a standalone key. In particular a modified F-key like ``ESC[1;2Q`` (Shift+F2) ends
+    in ``Q``; the trailing ``Q`` must NOT be re-scanned as ``quit`` and cancel the picker."""
+    from calfkit.cli._chat_io import _decode_keys
+
+    ignored_sequences = (
+        b"\x1b[1;2Q",  # Shift+F2  (ends in Q — the regression trigger)
+        b"\x1b[1;5Q",  # Ctrl+F2
+        b"\x1b[1;3Q",  # Alt+F2
+        b"\x1b[24;5~",  # Ctrl+F12
+        b"\x1b[1;5A",  # Ctrl+Up (modified arrow — not the bare arrow we bind)
+        b"\x1b[3~",  # Delete
+        b"\x1b[H",  # Home
+    )
+    for seq in ignored_sequences:
+        assert _decode_keys(seq) == ["other"], f"{seq!r} must be one ignored token, got {_decode_keys(seq)}"
+    # the bare arrows and a lone Esc must still decode as before
+    assert _decode_keys(b"\x1b[A") == ["up"]
+    assert _decode_keys(b"\x1b[B") == ["down"]
+    assert _decode_keys(b"\x1b") == ["quit"]  # a lone Esc IS the Escape key → quit
+    assert _decode_keys(b"\x1b[B\r") == ["down", "enter"]  # merged read still splits correctly
+    assert _decode_keys(b"\x1bOA\r") == ["other", "enter"]  # an unhandled ESC-lead seq + a key: both survive
+    assert _decode_keys(b"\x1b[") == ["other"]  # a truncated CSI (ESC+bracket, nothing after) never quits
+
+
 async def test_key_reader_ignores_unrecognized_escape_sequences_instead_of_quitting() -> None:
     """An ESC that begins an escape sequence we don't map (SS3 arrows in application-cursor mode,
     Meta/Alt combos, function keys) must decode to a harmless ``other`` — NOT ``quit``, which would

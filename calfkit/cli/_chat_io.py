@@ -108,19 +108,29 @@ Key = Literal["up", "down", "enter", "quit", "other"]
 
 def _decode_keys(chunk: bytes) -> list[Key]:
     """Split one raw read into picker key tokens. A single ``os.read`` is not a single key: an arrow
-    is a 3-byte escape sequence, and fast typing / a paste can deliver several keys at once."""
+    is a multi-byte escape sequence, fast typing / a paste can deliver several keys at once, and an
+    unhandled escape sequence must be consumed WHOLE so no interior byte leaks out as a stray key."""
     keys: list[Key] = []
     i, n = 0, len(chunk)
     while i < n:
-        if chunk[i] == 0x1B and chunk[i + 1 : i + 3] == b"[A":
+        if chunk[i : i + 3] == b"\x1b[A":
             keys.append("up")
             i += 3
-        elif chunk[i] == 0x1B and chunk[i + 1 : i + 3] == b"[B":
+        elif chunk[i : i + 3] == b"\x1b[B":
             keys.append("down")
             i += 3
-        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] in (b"[", b"O"):
-            keys.append("other")  # an unhandled CSI/SS3 (←/→, Home, F-keys, …): consumed and ignored
-            i += 3
+        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] == b"[":
+            # An unhandled CSI (modified arrows, Home/End, F-keys, …). Consume THROUGH its final byte
+            # (0x40-0x7E) — parameter/intermediate bytes are 0x20-0x3F — so a trailing byte such as the
+            # 'Q' of a modified F2 (ESC[1;2Q) is never re-scanned as a standalone quit that cancels.
+            j = i + 2
+            while j < n and 0x20 <= chunk[j] <= 0x3F:
+                j += 1
+            i = j + 1 if j < n else n  # include the final byte, or clamp if truncated across a read
+            keys.append("other")
+        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] == b"O":
+            keys.append("other")  # an SS3 sequence (introducer + one final byte): app-mode arrows / F1-F4
+            i = min(i + 3, n)
         elif chunk[i] == 0x1B and i + 1 < n:
             keys.append("other")  # ESC + a byte = a Meta/Alt combo (or other esc): ignored, never a cancel
             i += 2

@@ -972,7 +972,7 @@ async def test_gate_launched_ready_builds_and_wraps_a_reporter_from_the_factory(
         def update(self, done: Any) -> None:
             events.append("update")
 
-    def _make(waiting: list[str], pre_done: list[str]) -> _Rec:
+    def _make(*, waiting: list[str], pre_done: list[str]) -> _Rec:  # keyword-only, per ReporterFactory
         events.append(f"make {waiting} {pre_done}")
         return _Rec()
 

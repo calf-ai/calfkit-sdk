@@ -150,6 +150,14 @@ def test_make_reporter_factory_builds_a_console_reporter_titled_by_launched_coun
     assert "Starting 2 node(s)" in buf.getvalue()
 
 
+def test_reporter_factory_rejects_positional_args_to_prevent_transposition() -> None:
+    # The factory is keyword-only (ReporterFactory Protocol) so the two same-typed lists — waiting vs
+    # pre_done — can never be silently transposed: a positional call is a TypeError, not a mislabel.
+    factory = make_reporter_factory(lambda n: f"Starting {n}")
+    with pytest.raises(TypeError):
+        factory(["a"], [])  # type: ignore[call-arg]
+
+
 def test_tty_success_finalize_uses_the_success_label() -> None:
     # The finalize is titled (context), not a bare "all N done" (review round 1).
     console, buf = _tty_console()
