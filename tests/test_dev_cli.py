@@ -23,6 +23,7 @@ import calfkit.cli._dev_broker as dev_broker
 import calfkit.cli.dev as dev_cli
 from calfkit.cli._dev_agents import DevAgentError, EnsureReport, TargetNodes, TargetOutcome
 from calfkit.cli._dev_broker import BrokerInfo, DevBrokerError, MeshStatus
+from calfkit.cli._wait import ConsoleWaitReporter
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _KEY = "127.0.0.1:9092"
@@ -61,8 +62,8 @@ def ensure_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Monkeypatch ``ensure_broker`` at the supervisor seam, recording each call."""
     calls: list[dict[str, Any]] = []
 
-    def fake_ensure(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
-        calls.append({"target": target, "resolve_bin": resolve_bin, "timeout": timeout})
+    def fake_ensure(target: Any, *, resolve_bin: Any, timeout: float, reporter: Any = None) -> BrokerInfo:
+        calls.append({"target": target, "resolve_bin": resolve_bin, "timeout": timeout, "reporter": reporter})
         return _info(listener=target.key)
 
     monkeypatch.setattr(dev_broker, "ensure_broker", fake_ensure)
@@ -210,7 +211,7 @@ def test_dev_run_unreachable_remote_exits_2_without_spawning(monkeypatch: pytest
 
 
 def test_dev_run_broker_ensure_failure_exits_2(monkeypatch: pytest.MonkeyPatch, run_calls: list[dict[str, Any]]) -> None:
-    def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float, reporter: Any = None) -> BrokerInfo:
         raise DevBrokerError("did not become ready")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
@@ -251,7 +252,7 @@ def test_dev_chat_forwards_name_timeout_and_no_provision(ensure_calls: list[dict
 
 
 def test_dev_chat_broker_ensure_failure_exits_2(monkeypatch: pytest.MonkeyPatch, attach_calls: list[dict[str, Any]]) -> None:
-    def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float, reporter: Any = None) -> BrokerInfo:
         raise DevBrokerError("nope")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
@@ -271,7 +272,7 @@ def test_broker_start_ensures_and_reports(ensure_calls: list[dict[str, Any]]) ->
 
 
 def test_broker_start_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float, reporter: Any = None) -> BrokerInfo:
         raise DevBrokerError("no binary")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
@@ -481,7 +482,7 @@ def detach_seams(monkeypatch: pytest.MonkeyPatch, ensure_calls: list[dict[str, A
 
     async def fake_ensure(plan: list[TargetNodes], target: Any, mesh: Any, *, run_args: Any, **kwargs: Any) -> EnsureReport:
         seams["order"].append("ensure_agents")
-        seams["ensure"] = {"plan": plan, "target": target, "mesh": mesh, "run_args": run_args}
+        seams["ensure"] = {"plan": plan, "target": target, "mesh": mesh, "run_args": run_args, **kwargs}
         report: EnsureReport = seams.get("report") or EnsureReport(
             outcomes=tuple(TargetOutcome(target=t, reused=False) for t in plan),
             pid=4055,
@@ -1311,3 +1312,25 @@ def test_dev_down_broker_stop_failure_exits_2(stop_seams: dict[str, Any], monkey
     result = _invoke(["dev", "down"])
     assert result.exit_code == 2
     assert "survived SIGKILL" in _plain(result.stderr)
+
+
+def test_dev_run_detach_wires_a_console_reporter(detach_seams: dict[str, Any]) -> None:
+    """PR2 adoption: the -d path hands ensure_agents a factory that builds a ConsoleWaitReporter."""
+    result = _invoke(["dev", "run", "-d", "app:agent"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    make_reporter = detach_seams["ensure"]["make_reporter"]
+    assert isinstance(make_reporter(waiting=["general"], pre_done=[]), ConsoleWaitReporter)
+
+
+def test_ensure_or_exit_gives_ensure_broker_a_console_reporter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BR2 adoption: the broker-ensure command layer hands ensure_broker a ConsoleWaitReporter."""
+    captured: dict[str, Any] = {}
+
+    def fake_ensure_broker(target: Any, *, resolve_bin: Any, timeout: Any, reporter: Any = None) -> BrokerInfo:
+        captured["reporter"] = reporter
+        return BrokerInfo(listener="127.0.0.1:9092", pid=1, managed=True)
+
+    monkeypatch.setattr(dev_broker, "ensure_broker", fake_ensure_broker)
+    result = _invoke(["dev", "broker", "start"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert isinstance(captured["reporter"], ConsoleWaitReporter)

@@ -21,6 +21,8 @@ import typer
 from calfkit.cli import _dev_agents
 from calfkit.cli._chat_io import make_reader
 from calfkit.cli._chat_render import _error_line, _render_answer, _render_fault, _render_step, format_picker
+from calfkit.cli._picker import is_interactive, live_pick
+from calfkit.cli._wait import make_reporter_factory
 from calfkit.client import Client, RunCompleted, RunFailed
 from calfkit.exceptions import NodeFaultError
 from calfkit.provisioning import ProvisioningConfig
@@ -104,7 +106,14 @@ async def _attach(
     *,
     offline_hint: Callable[[str], str | None] | None = None,
 ) -> None:
-    """Today's attach flow: discover -> pick (or resolve the name) -> REPL."""
+    """Discover -> pick (or resolve the name) -> REPL. On an interactive terminal with no named
+    agent, the live picker (which polls the mesh itself) replaces the static discover+pick; a named
+    lookup or a non-tty stream keeps the one-shot read + static numbered picker."""
+    if name is None and is_interactive():
+        picked = await live_pick(client)
+        if picked is not None:
+            await _chat_loop(client, picked, timeout, read_line)
+        return
     print("Discovering agents...")
     agents = await client.mesh.get_agents()
     if not agents:  # ready, but zero live agents
@@ -169,11 +178,15 @@ async def _target_session(
                     traceback.print_exc()  # §7: surface directly — it IS this process
                     raise _dev_agents.DevAgentError(f"the session worker failed to start: {exc}") from exc
                 launched = list(to_launch)
-                await _dev_agents.wait_agents_ready(
+                await _dev_agents.gate_launched_ready(
                     None,  # the chat variant: no process arm — a failed start already raised above
-                    [n for t in to_launch for n in t.agent_names],
-                    [n for t in to_launch for n in t.tool_names],
+                    to_launch,
                     client.mesh,
+                    reused_names=[name for outcome in reused for name in outcome.target.names],
+                    make_reporter=make_reporter_factory(
+                        lambda n: f"Starting {n} node(s) on {host_key}",
+                        success=lambda n: f"all {n} node(s) online",
+                    ),
                     log_path=None,
                 )
         repl_entered = True

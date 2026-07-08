@@ -42,14 +42,19 @@ share the same mesh.
 
 ```console
 $ ck dev run -d general:general
+✔ dev broker ready
 ck dev: managed broker at 127.0.0.1:9092 (pid 51234)
+✔ all 1 node(s) online
 ck dev: launched agent 'general' (pid 51288) — runs until 'ck dev stop general' — logs: /Users/you/.calfkit/logs/agents-127.0.0.1_9092-general_general.log
 ```
 
 `--detach/-d` (the `docker compose up -d` gesture) runs the same reload
 supervisor as a **managed background daemon** and returns only once the agent
 is **online on the mesh** — so `ck dev run -d … && ck dev chat` always lands
-on a mesh where the agent already exists. The daemon keeps reloading on your
+on a mesh where the agent already exists. While it waits, a live **readiness
+roster** shows each launched agent and tool as it comes online (a plain list of
+milestone lines when the output is piped); if one never comes up, the error names
+exactly which. The daemon keeps reloading on your
 edits until an explicit `ck dev stop <name>` (or `ck dev down`, or a reboot).
 
 Launching the same target again while it is online **reuses** it instead
@@ -73,7 +78,8 @@ session itself.
 
 `ck dev chat` can also **launch agents for the session**: give it
 `module:attr` target(s) instead of a name and it runs them *inside the chat
-process itself*, then opens the picker:
+process itself* — showing the same **readiness roster** while they come online
+(any already-online target appears as reused) — then opens the picker:
 
 ```console
 $ ck dev chat general:general

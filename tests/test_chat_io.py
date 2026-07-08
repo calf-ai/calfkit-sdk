@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from calfkit.cli._chat_io import _resolve_stdin_fd, make_reader
+from calfkit.cli._chat_io import _resolve_stdin_fd, make_key_reader, make_reader
 
 
 async def _drain(coro: Awaitable[str], timeout: float = 1.0) -> str:
@@ -194,6 +194,136 @@ async def test_cancel_in_flight_read_line_removes_reader_no_leak() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert loop.remove_reader(r) is False  # the read's finally already removed it — no leak
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+async def test_key_reader_decodes_arrows_enter_and_quit() -> None:
+    """The cbreak-mode single-key reader (picker input): arrow escape sequences, Enter, and the
+    quit keys (q / Esc / a raw Ctrl-C/Ctrl-D byte) each decode to a token."""
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x1b[A")
+        assert await _drain(read_key()) == "up"
+        os.write(w, b"\x1b[B")
+        assert await _drain(read_key()) == "down"
+        os.write(w, b"\r")
+        assert await _drain(read_key()) == "enter"
+        os.write(w, b"q")
+        assert await _drain(read_key()) == "quit"
+        os.write(w, b"\x03")  # Ctrl-C
+        assert await _drain(read_key()) == "quit"
+        os.write(w, b"\x1b")  # lone Esc
+        assert await _drain(read_key()) == "quit"
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+async def test_key_reader_splits_a_merged_read_into_separate_keys() -> None:
+    """A fast/pasted arrow-then-Enter arriving in one os.read is split into both keys, not dropped."""
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x1b[B\r")  # down + enter in one write
+        assert await _drain(read_key()) == "down"
+        assert await _drain(read_key()) == "enter"  # from the buffer, no further write
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+async def test_key_reader_decodes_ctrl_d_uppercase_q_and_unmapped_keys() -> None:
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x04")
+        assert await _drain(read_key()) == "quit"  # Ctrl-D byte
+        os.write(w, b"Q")
+        assert await _drain(read_key()) == "quit"
+        os.write(w, b"x")
+        assert await _drain(read_key()) == "other"  # unmapped: ignored, not an error
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+def test_decode_keys_consumes_a_whole_csi_without_leaking_a_quit() -> None:
+    """A CSI sequence longer than 3 bytes must decode to a SINGLE ``other`` — no interior/final byte
+    may leak out as a standalone key. In particular a modified F-key like ``ESC[1;2Q`` (Shift+F2) ends
+    in ``Q``; the trailing ``Q`` must NOT be re-scanned as ``quit`` and cancel the picker."""
+    from calfkit.cli._chat_io import _decode_keys
+
+    ignored_sequences = (
+        b"\x1b[1;2Q",  # Shift+F2  (ends in Q — the regression trigger)
+        b"\x1b[1;5Q",  # Ctrl+F2
+        b"\x1b[1;3Q",  # Alt+F2
+        b"\x1b[24;5~",  # Ctrl+F12
+        b"\x1b[1;5A",  # Ctrl+Up (modified arrow — not the bare arrow we bind)
+        b"\x1b[3~",  # Delete
+        b"\x1b[H",  # Home
+    )
+    for seq in ignored_sequences:
+        assert _decode_keys(seq) == ["other"], f"{seq!r} must be one ignored token, got {_decode_keys(seq)}"
+    # the bare arrows and a lone Esc must still decode as before
+    assert _decode_keys(b"\x1b[A") == ["up"]
+    assert _decode_keys(b"\x1b[B") == ["down"]
+    assert _decode_keys(b"\x1b") == ["quit"]  # a lone Esc IS the Escape key → quit
+    assert _decode_keys(b"\x1b[B\r") == ["down", "enter"]  # merged read still splits correctly
+    assert _decode_keys(b"\x1bOA\r") == ["other", "enter"]  # an unhandled ESC-lead seq + a key: both survive
+    assert _decode_keys(b"\x1b[") == ["other"]  # a truncated CSI (ESC+bracket, nothing after) never quits
+
+
+def test_decode_keys_when_an_esc_aborts_a_partial_csi_the_next_key_survives() -> None:
+    """A partial CSI (no final byte yet) immediately followed by another sequence/key in the SAME read
+    must not swallow that following key: the aborting byte is not a valid CSI final (0x40-0x7E), so the
+    partial CSI ends and the next key is re-parsed. Guards a dropped-arrow / swallowed-Enter edge."""
+    from calfkit.cli._chat_io import _decode_keys
+
+    assert _decode_keys(b"\x1b[1\x1b[A") == ["other", "up"]  # partial CSI then a real Up arrow — arrow survives
+    assert _decode_keys(b"\x1b[1\x1b[B") == ["other", "down"]  # partial CSI then Down
+    assert _decode_keys(b"\x1b[\r") == ["other", "enter"]  # ESC[ then Enter — Enter survives
+    assert _decode_keys(b"\x1b[1;2\r") == ["other", "enter"]  # longer partial CSI then Enter
+    # a q/Q that is a genuine CSI FINAL byte (e.g. DECSCUSR ESC[0q) is part of the sequence, not a quit
+    assert _decode_keys(b"\x1b[0q") == ["other"]
+
+
+def test_decode_keys_never_leaks_quit_from_any_escape_sequence() -> None:
+    """Property guard against the recurring bug class: NO escape-introduced sequence (CSI / SS3 / Meta),
+    over every final byte, may emit ``quit`` — only a lone/terminal Esc or a raw q/Q/Ctrl-C/Ctrl-D byte
+    is a quit. Enumerated rather than hand-picked so it keeps pace with future decoder edits."""
+    from calfkit.cli._chat_io import _decode_keys
+
+    param_sets = [b"", b"1", b"1;2", b"1;5", b"1;3", b"24", b"24;5", b"?25", b";", b"0", b">", b"="]
+    for final in range(0x40, 0x7F):  # every valid CSI/SS3 final byte
+        for params in param_sets:
+            csi = b"\x1b[" + params + bytes([final])
+            assert "quit" not in _decode_keys(csi), f"CSI {csi!r} leaked quit"
+        ss3 = b"\x1bO" + bytes([final])
+        assert "quit" not in _decode_keys(ss3), f"SS3 {ss3!r} leaked quit"
+    for byte in range(0x20, 0x7F):  # Meta/Alt: ESC + a byte (excludes the lone-ESC quit case)
+        assert "quit" not in _decode_keys(b"\x1b" + bytes([byte])), f"Meta ESC+{byte:#x} leaked quit"
+    for truncated in (b"\x1b[", b"\x1bO", b"\x1b[1", b"\x1b[1;5", b"\x1b[?", b"\x1b[1;"):
+        assert "quit" not in _decode_keys(truncated), f"truncated {truncated!r} leaked quit"
+
+
+async def test_key_reader_ignores_unrecognized_escape_sequences_instead_of_quitting() -> None:
+    """An ESC that begins an escape sequence we don't map (SS3 arrows in application-cursor mode,
+    Meta/Alt combos, function keys) must decode to a harmless ``other`` — NOT ``quit``, which would
+    cancel the picker out from under the user. Only a lone/terminal ESC (the Escape key) is quit."""
+    r, w = os.pipe()
+    try:
+        read_key = make_key_reader(asyncio.get_running_loop(), fd=r)
+        os.write(w, b"\x1bOA")  # SS3 up-arrow (application-cursor mode) — must be ignored, not quit
+        assert await _drain(read_key()) == "other"
+        os.write(w, b"\x1bOP")  # SS3 F1
+        assert await _drain(read_key()) == "other"
+        os.write(w, b"\x1ba")  # Meta/Alt-a
+        assert await _drain(read_key()) == "other"
+        os.write(w, b"\x1b")  # a lone Esc IS the Escape key → quit
+        assert await _drain(read_key()) == "quit"
     finally:
         os.close(r)
         os.close(w)

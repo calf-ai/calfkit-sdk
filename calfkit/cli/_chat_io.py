@@ -27,6 +27,7 @@ import io
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 _READ_SIZE = 4096
 
@@ -100,3 +101,95 @@ def make_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> Calla
         return line
 
     return read_line
+
+
+Key = Literal["up", "down", "enter", "quit", "other"]
+
+
+def _decode_keys(chunk: bytes) -> list[Key]:
+    """Split one raw read into picker key tokens. A single ``os.read`` is not a single key: an arrow
+    is a multi-byte escape sequence, fast typing / a paste can deliver several keys at once, and an
+    unhandled escape sequence must be consumed WHOLE so no interior byte leaks out as a stray key."""
+    keys: list[Key] = []
+    i, n = 0, len(chunk)
+    while i < n:
+        if chunk[i : i + 3] == b"\x1b[A":
+            keys.append("up")
+            i += 3
+        elif chunk[i : i + 3] == b"\x1b[B":
+            keys.append("down")
+            i += 3
+        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] == b"[":
+            # An unhandled CSI (modified arrows, Home/End, F-keys, …). Consume THROUGH its final byte
+            # (0x40-0x7E) — parameter/intermediate bytes are 0x20-0x3F — so a trailing byte such as the
+            # 'Q' of a modified F2 (ESC[1;2Q) is never re-scanned as a standalone quit that cancels.
+            j = i + 2
+            while j < n and 0x20 <= chunk[j] <= 0x3F:
+                j += 1
+            if j < n and 0x40 <= chunk[j] <= 0x7E:
+                i = j + 1  # consumed a valid final byte
+            else:
+                # Truncated across a read, OR an ESC/control byte aborted the CSI: stop AT that byte so
+                # the next iteration re-parses it as a fresh key (e.g. an ESC[ that precedes a real arrow).
+                i = max(j, i + 1)
+            keys.append("other")
+        elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] == b"O":
+            keys.append("other")  # an SS3 sequence (introducer + one final byte): app-mode arrows / F1-F4
+            i = min(i + 3, n)
+        elif chunk[i] == 0x1B and i + 1 < n:
+            keys.append("other")  # ESC + a byte = a Meta/Alt combo (or other esc): ignored, never a cancel
+            i += 2
+        elif chunk[i] in (0x1B, 0x03, 0x04) or chunk[i : i + 1] in (b"q", b"Q"):
+            # A lone/terminal ESC is the Escape key; q/Q is quit; a raw Ctrl-D byte arrives here (ICANON
+            # off). Ctrl-C is normally a SIGINT under cbreak (ISIG on) — the 0x03 arm is only defensive.
+            keys.append("quit")
+            i += 1
+        elif chunk[i : i + 1] in (b"\r", b"\n"):
+            keys.append("enter")
+            i += 1
+        else:
+            keys.append("other")  # any unmapped key: ignored by the picker, not an error
+            i += 1
+    return keys
+
+
+def make_key_reader(loop: asyncio.AbstractEventLoop, fd: int | None = None) -> Callable[[], Awaitable[Key]]:
+    """Build a single-key reader for the live picker. The terminal is expected to be in **cbreak**
+    mode (the caller sets and restores it — not raw, which would fight ``rich.Live``). One ``os.read``
+    may carry several keys, so decoded keys are buffered and returned one per call. Same ``add_reader``
+    mechanics as :func:`make_reader` — cancellable, no executor thread; tests inject an ``os.pipe()``
+    read-end. An empty read (EOF) yields ``quit``."""
+    resolved_fd = fd
+    pending: list[Key] = []
+
+    async def read_key() -> Key:
+        nonlocal resolved_fd
+        if pending:
+            return pending.pop(0)
+        if resolved_fd is None:
+            resolved_fd = _resolve_stdin_fd()
+        read_fd = resolved_fd
+        future: asyncio.Future[bytes] = loop.create_future()
+
+        def _on_readable() -> None:
+            if future.done():  # pragma: no cover - cancel/resolve race
+                return
+            try:
+                chunk = os.read(read_fd, 16)
+            except OSError as exc:
+                future.set_exception(exc)
+                return
+            future.set_result(chunk)
+
+        loop.add_reader(read_fd, _on_readable)
+        try:
+            chunk = await future
+        finally:
+            loop.remove_reader(read_fd)
+        keys = _decode_keys(chunk)
+        if not keys:  # empty read == EOF; treat as cancel
+            return "quit"
+        pending.extend(keys[1:])
+        return keys[0]
+
+    return read_key

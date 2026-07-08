@@ -42,6 +42,7 @@ from calfkit.cli._dev_broker import (
     normalize,
 )
 from calfkit.cli._loader import load_nodes
+from calfkit.cli._wait import NULL_REPORTER, ReporterFactory, WaitReporter
 from calfkit.exceptions import MeshUnavailableError
 from calfkit.models.agents import AGENTS_TOPIC
 from calfkit.models.capability import CAPABILITY_TOPIC
@@ -340,6 +341,7 @@ async def wait_agents_ready(
     log_path: str | None,
     timeout: float = READY_TIMEOUT,
     poll_interval: float = _POLL_INTERVAL,
+    reporter: WaitReporter = NULL_REPORTER,
 ) -> None:
     """Wait until every name is online, bounded (spec §5.2) — the broker readiness loop's shape.
 
@@ -355,6 +357,7 @@ async def wait_agents_ready(
     """
     deadline = time.monotonic() + timeout
     last_read_failure: MeshUnavailableError | None = None
+    last_missing: list[str] = [*agent_names, *tool_names]
     while True:
         if proc is not None and proc.poll() is not None:
             code = proc.returncode
@@ -374,7 +377,9 @@ async def wait_agents_ready(
             last_read_failure = result  # open_failed / establishing: not ready yet, keep polling
         else:
             last_read_failure = None
-            if not _missing_names(agent_names, tool_names, result):
+            last_missing = _missing_names(agent_names, tool_names, result)
+            reporter.update(done=[name for name in (*agent_names, *tool_names) if name not in last_missing])
+            if not last_missing:
                 return
         if time.monotonic() >= deadline:
             if proc is not None:
@@ -387,8 +392,46 @@ async def wait_agents_ready(
                     f"presence read failed ({last_read_failure.reason}: {last_read_failure})"
                     f"{_tail_suffix(log_path)}"
                 ) from last_read_failure
-            raise DevAgentError(f"the launched agents did not come online within {timeout:.1f}s{_tail_suffix(log_path)}")
+            raise DevAgentError(
+                f"the launched agents did not come online within {timeout:.1f}s (still waiting on: {', '.join(last_missing)}){_tail_suffix(log_path)}"
+            )
         await asyncio.sleep(poll_interval)
+
+
+def _null_reporter_factory(*, waiting: list[str], pre_done: list[str]) -> WaitReporter:
+    return NULL_REPORTER
+
+
+async def gate_launched_ready(
+    proc: Any | None,
+    to_launch: Sequence[TargetNodes],
+    mesh: PresenceReader,
+    *,
+    reused_names: Sequence[str],
+    make_reporter: ReporterFactory = _null_reporter_factory,
+    log_path: str | None,
+    timeout: float = READY_TIMEOUT,
+    poll_interval: float = _POLL_INTERVAL,
+) -> None:
+    """The single readiness-gate seam shared by ``ck dev run -d`` and ``ck dev chat TARGET``
+    (spec §4.5): build the launched name lists, construct the reporter from the factory (given the
+    launched-vs-reused split), and wait for the launched names to come online with the reporter
+    wrapped around the gate. *proc* is the ``-d`` daemon handle (its death aborts the wait) or
+    ``None`` for the chat variant's in-process worker."""
+    launched_agents = [name for target in to_launch for name in target.agent_names]
+    launched_tools = [name for target in to_launch for name in target.tool_names]
+    reporter = make_reporter(waiting=launched_agents + launched_tools, pre_done=list(reused_names))
+    with reporter:
+        await wait_agents_ready(
+            proc,
+            launched_agents,
+            launched_tools,
+            mesh,
+            log_path=log_path,
+            reporter=reporter,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
 
 
 def _tail_suffix(log_path: str | None) -> str:
@@ -572,6 +615,7 @@ async def ensure_agents(
     mesh: PresenceReader,
     *,
     run_args: RunOptions,
+    make_reporter: ReporterFactory = _null_reporter_factory,
     timeout: float = READY_TIMEOUT,
     poll_interval: float = _POLL_INTERVAL,
 ) -> EnsureReport:
@@ -584,11 +628,12 @@ async def ensure_agents(
             return EnsureReport(outcomes=tuple(reused), pid=None, log_path=None)
         log_path = daemon_log_path(target.key, tuple(t.spec for t in to_launch))
         proc = _spawn_daemon(to_launch, target, log_path, run_args)
-        await wait_agents_ready(
+        await gate_launched_ready(
             proc,
-            [n for t in to_launch for n in t.agent_names],
-            [n for t in to_launch for n in t.tool_names],
+            to_launch,
             mesh,
+            reused_names=[name for outcome in reused for name in outcome.target.names],
+            make_reporter=make_reporter,
             log_path=str(log_path),
             timeout=timeout,
             poll_interval=poll_interval,
