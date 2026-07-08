@@ -11,7 +11,7 @@ Four surfaces (agent-lifecycle spec §3): foreground ``dev run`` delegates to th
 ``run()`` command function forwarding every argument explicitly; ``dev run -d`` connect-or-spawns
 a detached agent daemon via :mod:`calfkit.cli._dev_agents`; ``dev chat`` attaches (or, given
 targets, runs an in-process session worker) through ``run_chat_session`` directly; and
-``status``/``stop``/``down`` manage the daemons the argv-marker scan owns. ``ck dev broker``
+``status``/``stop``/``down`` manage the daemons the argv-marker scan owns. ``ck dev mesh``
 controls the broker daemon directly.
 
 Import hygiene (load-bearing): ``_build_app()`` imports this module on **every** ``ck``
@@ -23,6 +23,7 @@ the supervisor's spawn branch.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import typer
@@ -41,12 +42,12 @@ dev_app = typer.Typer(
     help="Run against a zero-setup local mesh: connect to (or spawn) a managed dev broker.",
     no_args_is_help=True,
 )
-broker_app = typer.Typer(
-    name="broker",
-    help="Control the managed dev broker daemon directly.",
+mesh_app = typer.Typer(
+    name="mesh",
+    help="Control the local dev mesh — the broker your agents run on.",
     no_args_is_help=True,
 )
-dev_app.add_typer(broker_app, name="broker")
+dev_app.add_typer(mesh_app, name="mesh")
 
 _HOST_HELP = "Kafka bootstrap server(s), comma-separated. Precedence: this flag > $CALFKIT_MESH_URL > localhost."
 
@@ -612,17 +613,53 @@ def _target_or_exit(host: str | None, env_file: str | None = None) -> Target:
     return _normalize_or_exit(resolve_mesh_url(_parse_host(host)))
 
 
-@broker_app.command(name="start")
-def broker_start(
+def _run_broker_foreground(target: Target) -> None:
+    """Spawn an attached broker and block on it until it exits or Ctrl-C stops it (spec §5.2)."""
+    try:
+        proc = _dev_broker.spawn_foreground(target, resolve_bin=_resolve_bin, timeout=_dev_broker.DEFAULT_TIMEOUT)
+    except DevBrokerError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"ck dev: broker listening at {target.listener} (pid {proc.pid}) — Ctrl-C to stop")
+    try:
+        returncode = proc.wait()
+    except KeyboardInterrupt:
+        # Ctrl-C reached Tansu too (shared session); reap its clean shutdown and exit success.
+        with suppress(KeyboardInterrupt):
+            proc.wait()
+        typer.echo("ck dev: broker stopped")
+        return
+    if returncode:
+        typer.echo(f"ck dev: broker exited with code {returncode}", err=True)
+        raise typer.Exit(returncode if returncode > 0 else 1)
+
+
+@mesh_app.command(name="start")
+def mesh_start(
     host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
+    detach: bool = typer.Option(
+        False,
+        "--detach",
+        "-d",
+        help="Run the broker as a detached background daemon and return, instead of in the foreground.",
+    ),
     env_file: str | None = typer.Option(None, "--env-file", help=_ENV_FILE_HELP),
 ) -> None:
-    """Connect-or-spawn the dev broker and return (the daemon keeps running). Idempotent."""
-    _ensure_or_exit(_target_or_exit(host, env_file))
+    """Run the dev broker in the foreground (Ctrl-C stops it); -d runs it as a detached daemon.
+
+    Foreground is the default: the broker's output streams to your terminal and it stops when you
+    press Ctrl-C. With -d it connect-or-spawns a detached daemon and returns (idempotent) — the
+    shape 'ck dev run' and 'ck dev chat' share when they ensure a broker.
+    """
+    target = _target_or_exit(host, env_file)
+    if detach:
+        _ensure_or_exit(target)
+        return
+    _run_broker_foreground(target)
 
 
-@broker_app.command(name="stop")
-def broker_stop(
+@mesh_app.command(name="stop")
+def mesh_stop(
     host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
     stop_all: bool = typer.Option(
         False,
@@ -654,8 +691,8 @@ def broker_stop(
         raise typer.Exit(2) from exc
 
 
-@broker_app.command(name="status")
-def broker_status(
+@mesh_app.command(name="status")
+def mesh_status(
     host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
     env_file: str | None = typer.Option(None, "--env-file", help=_ENV_FILE_HELP),
 ) -> None:
@@ -678,8 +715,8 @@ def broker_status(
             typer.echo(f"{report.target_key}: no broker reachable")
 
 
-@broker_app.command(name="restart")
-def broker_restart(
+@mesh_app.command(name="restart")
+def mesh_restart(
     host: str | None = typer.Option(None, "--host", "-H", help=_HOST_HELP),
     env_file: str | None = typer.Option(None, "--env-file", help=_ENV_FILE_HELP),
 ) -> None:

@@ -101,12 +101,12 @@ def test_dev_help_lists_the_subcommands() -> None:
     result = _invoke(["dev", "--help"])
     assert result.exit_code == 0, result.stdout
     out = _plain(result.stdout)
-    for sub in ("run", "chat", "broker"):
+    for sub in ("run", "chat", "mesh"):
         assert sub in out
 
 
 def test_dev_broker_help_lists_lifecycle_commands() -> None:
-    result = _invoke(["dev", "broker", "--help"])
+    result = _invoke(["dev", "mesh", "--help"])
     assert result.exit_code == 0, result.stdout
     out = _plain(result.stdout)
     for sub in ("start", "stop", "status", "restart"):
@@ -260,22 +260,77 @@ def test_dev_chat_broker_ensure_failure_exits_2(monkeypatch: pytest.MonkeyPatch,
     assert attach_calls == []
 
 
-# --- dev broker start/stop/status/restart (spec §4.2) ---------------------------------------------------
+# --- dev mesh start (foreground by default; -d detaches) ------------------------------------------------
 
 
-def test_broker_start_ensures_and_reports(ensure_calls: list[dict[str, Any]]) -> None:
-    result = _invoke(["dev", "broker", "start"])
+class _RecordingPopen:
+    """A stand-in for the attached broker the foreground ``mesh start`` blocks on: records each
+    ``wait`` and can interrupt the first to model a Ctrl-C."""
+
+    def __init__(self, returncode: int = 0, wait_raises: BaseException | None = None) -> None:
+        self.pid = 5555
+        self.returncode = returncode
+        self._wait_raises = wait_raises
+        self.waits = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits += 1
+        if self._wait_raises is not None and self.waits == 1:
+            raise self._wait_raises
+        return self.returncode
+
+
+def test_mesh_start_runs_in_the_foreground_and_waits(monkeypatch: pytest.MonkeyPatch, ensure_calls: list[dict[str, Any]]) -> None:
+    proc = _RecordingPopen(returncode=0)
+    seen: dict[str, Any] = {}
+
+    def fake_foreground(target: Any, *, resolve_bin: Any, timeout: float) -> _RecordingPopen:
+        seen["target"] = target
+        return proc
+
+    monkeypatch.setattr(dev_broker, "spawn_foreground", fake_foreground)
+    result = _invoke(["dev", "mesh", "start"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert proc.waits == 1, "the command blocks on the attached broker"
+    assert ensure_calls == [], "the foreground path never goes through the detached ensure"
+    assert seen["target"].key == _KEY
+    assert "listening" in _plain(result.stdout).lower()
+
+
+def test_mesh_start_foreground_already_running_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(target: Any, *, resolve_bin: Any, timeout: float) -> Any:
+        raise DevBrokerError(
+            "a broker is already running at 127.0.0.1:9092 — stop it with `ck dev mesh stop`, or start a detached daemon with `ck dev mesh start -d`."
+        )
+
+    monkeypatch.setattr(dev_broker, "spawn_foreground", boom)
+    result = _invoke(["dev", "mesh", "start"])
+    assert result.exit_code == 2
+    assert "already running" in _plain(result.stderr)
+
+
+def test_mesh_start_foreground_ctrl_c_stops_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    proc = _RecordingPopen(returncode=0, wait_raises=KeyboardInterrupt())
+    monkeypatch.setattr(dev_broker, "spawn_foreground", lambda *a, **k: proc)
+    result = _invoke(["dev", "mesh", "start"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert proc.waits == 2, "Ctrl-C interrupts the first wait; the second reaps the clean shutdown"
+    assert "stopped" in _plain(result.stdout).lower()
+
+
+def test_mesh_start_detach_ensures_and_reports(ensure_calls: list[dict[str, Any]]) -> None:
+    result = _invoke(["dev", "mesh", "start", "-d"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert len(ensure_calls) == 1
     assert "managed broker" in _plain(result.stdout)
 
 
-def test_broker_start_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mesh_start_detach_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(target: Any, *, resolve_bin: Any, timeout: float) -> BrokerInfo:
         raise DevBrokerError("no binary")
 
     monkeypatch.setattr(dev_broker, "ensure_broker", boom)
-    assert _invoke(["dev", "broker", "start"]).exit_code == 2
+    assert _invoke(["dev", "mesh", "start", "-d"]).exit_code == 2
 
 
 def test_broker_stop_reports_a_stop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,7 +341,7 @@ def test_broker_stop_reports_a_stop(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     monkeypatch.setattr(dev_broker, "stop", fake_stop)
-    result = _invoke(["dev", "broker", "stop", "--host", "127.0.0.1:19092"])
+    result = _invoke(["dev", "mesh", "stop", "--host", "127.0.0.1:19092"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert stopped == ["127.0.0.1:19092"]
     assert "stopped" in _plain(result.stdout).lower()
@@ -294,7 +349,7 @@ def test_broker_stop_reports_a_stop(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_broker_stop_noop_reports_nothing_managed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: False)
-    result = _invoke(["dev", "broker", "stop"])
+    result = _invoke(["dev", "mesh", "stop"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert "no managed broker" in _plain(result.stdout).lower()
 
@@ -303,7 +358,7 @@ def test_broker_stop_all_stops_everything(monkeypatch: pytest.MonkeyPatch) -> No
     calls: list[str] = []
     monkeypatch.setattr(dev_broker, "stop_all", lambda *, grace=5.0: calls.append("all") or ["a:1", "b:2"])
     monkeypatch.setattr(dev_broker, "stop", lambda *a, **kw: pytest.fail("stop --all must call stop_all, not stop"))
-    result = _invoke(["dev", "broker", "stop", "--all"])
+    result = _invoke(["dev", "mesh", "stop", "--all"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert calls == ["all"]
     out = _plain(result.stdout)
@@ -313,7 +368,7 @@ def test_broker_stop_all_stops_everything(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_broker_stop_all_with_nothing_to_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dev_broker, "stop_all", lambda *, grace=5.0: [])
-    result = _invoke(["dev", "broker", "stop", "--all"])
+    result = _invoke(["dev", "mesh", "stop", "--all"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert "no managed brokers" in _plain(result.stdout).lower()
 
@@ -324,7 +379,7 @@ def test_broker_stop_without_mesh_extra_exits_2(monkeypatch: pytest.MonkeyPatch)
         raise DevBrokerError("needs the `calfkit[mesh]` extra")
 
     monkeypatch.setattr(dev_broker, "stop", boom)
-    result = _invoke(["dev", "broker", "stop"])
+    result = _invoke(["dev", "mesh", "stop"])
     assert result.exit_code == 2
     assert "calfkit[mesh]" in _plain(result.stdout) + _plain(result.output)
 
@@ -334,7 +389,7 @@ def test_broker_status_without_mesh_extra_exits_2(monkeypatch: pytest.MonkeyPatc
         raise DevBrokerError("needs the `calfkit[mesh]` extra")
 
     monkeypatch.setattr(dev_broker, "status", boom)
-    assert _invoke(["dev", "broker", "status"]).exit_code == 2
+    assert _invoke(["dev", "mesh", "status"]).exit_code == 2
 
 
 def test_broker_status_reports_managed_and_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,7 +399,7 @@ def test_broker_status_reports_managed_and_reachable(monkeypatch: pytest.MonkeyP
         brokers=(_info(),),
     )
     monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
-    out = _plain(_invoke(["dev", "broker", "status"]).stdout)
+    out = _plain(_invoke(["dev", "mesh", "status"]).stdout)
     assert _KEY in out
     assert "4242" in out
     assert "running" in out.lower()
@@ -353,7 +408,7 @@ def test_broker_status_reports_managed_and_reachable(monkeypatch: pytest.MonkeyP
 def test_broker_status_reports_reachable_not_managed(monkeypatch: pytest.MonkeyPatch) -> None:
     report = MeshStatus(target_key=_KEY, reachable=True, brokers=())
     monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
-    out = _plain(_invoke(["dev", "broker", "status"]).stdout)
+    out = _plain(_invoke(["dev", "mesh", "status"]).stdout)
     assert "reachable" in out.lower()
     assert "not managed by calfkit" in out.lower()
 
@@ -361,7 +416,7 @@ def test_broker_status_reports_reachable_not_managed(monkeypatch: pytest.MonkeyP
 def test_broker_status_reports_nothing_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
     report = MeshStatus(target_key=_KEY, reachable=False, brokers=())
     monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
-    out = _plain(_invoke(["dev", "broker", "status"]).stdout)
+    out = _plain(_invoke(["dev", "mesh", "status"]).stdout)
     assert "no broker" in out.lower()
 
 
@@ -373,7 +428,7 @@ def test_broker_restart_reports_the_new_broker(monkeypatch: pytest.MonkeyPatch) 
         return _info()
 
     monkeypatch.setattr(dev_broker, "restart", fake_restart)
-    result = _invoke(["dev", "broker", "restart"])
+    result = _invoke(["dev", "mesh", "restart"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert calls == [_KEY]
     assert "managed broker" in _plain(result.stdout)
@@ -384,7 +439,7 @@ def test_broker_restart_failure_exits_2(monkeypatch: pytest.MonkeyPatch) -> None
         raise DevBrokerError("no binary")
 
     monkeypatch.setattr(dev_broker, "restart", boom)
-    assert _invoke(["dev", "broker", "restart"]).exit_code == 2
+    assert _invoke(["dev", "mesh", "restart"]).exit_code == 2
 
 
 # --- the resolve_bin thunk ------------------------------------------------------------------------------
@@ -1256,8 +1311,8 @@ def test_broker_commands_load_dotenv_before_resolving(monkeypatch: pytest.Monkey
     monkeypatch.setattr(dev_cli, "_load_env", lambda env_file: loaded.append(env_file))
     monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: MeshStatus(target.key, False, ()))
     monkeypatch.setattr(dev_broker, "stop", lambda target, *, grace=5.0: False)
-    _invoke(["dev", "broker", "status"])
-    _invoke(["dev", "broker", "stop"])
+    _invoke(["dev", "mesh", "status"])
+    _invoke(["dev", "mesh", "stop"])
     assert loaded == [None, None]
 
 
@@ -1265,7 +1320,7 @@ def test_broker_commands_forward_an_explicit_env_file(monkeypatch: pytest.Monkey
     loaded: list[str | None] = []
     monkeypatch.setattr(dev_cli, "_load_env", lambda env_file: loaded.append(env_file))
     monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: MeshStatus(target.key, False, ()))
-    result = _invoke(["dev", "broker", "status", "--env-file", "custom.env"])
+    result = _invoke(["dev", "mesh", "status", "--env-file", "custom.env"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert loaded == ["custom.env"]
 
@@ -1279,7 +1334,7 @@ def test_broker_status_multi_target_with_all_elements_managed(monkeypatch: pytes
         brokers=(_info(), _info(listener="127.0.0.1:19092", pid=4343)),
     )
     monkeypatch.setattr(dev_broker, "status", lambda target, *, timeout=5.0: report)
-    out = _plain(_invoke(["dev", "broker", "status", "--host", "127.0.0.1:9092,127.0.0.1:19092"]).stdout)
+    out = _plain(_invoke(["dev", "mesh", "status", "--host", "127.0.0.1:9092,127.0.0.1:19092"]).stdout)
     assert "not managed" not in out
     assert "pid 4242" in out
     assert "pid 4343" in out

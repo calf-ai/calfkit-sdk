@@ -108,7 +108,7 @@ class BrokerInfo:
 
 @dataclass(frozen=True)
 class MeshStatus:
-    """What ``ck dev broker status`` reports: every running dev broker found by the scan, and
+    """What ``ck dev mesh status`` reports: every running dev broker found by the scan, and
     whether *anything* answers at the target address (reachable with no scan hit = a broker
     calfkit does not manage — spec §4.2)."""
 
@@ -347,11 +347,7 @@ def ensure_broker(
             # that is the canonical key, not any single listener.
             return BrokerInfo(listener=target.key, pid=None, managed=False)
         if not (target.is_single and target.is_loopback):
-            raise DevBrokerError(
-                f"no broker is reachable at {target.bootstrap!r} and it is not a single loopback "
-                "address, so `ck dev` will not spawn one there (connect-only; spec §5.2). Start the "
-                "broker at that address, or point --host at a loopback address to get a managed one."
-            )
+            raise _connect_only_error(target)
         binary = _resolve_binary(resolve_bin)
         return _spawn_and_wait(target, binary, timeout)
 
@@ -387,16 +383,70 @@ def _log_tail(log_path: Path) -> str:
         return f"(could not read the log: {exc})"
 
 
-def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
-    listener = target.listener
-    log_path = _calfkit_dir() / "logs" / f"tansu-{target.key}.log"
-    cmd = [
+def _broker_cmd(binary: str, listener: str) -> list[str]:
+    """The dev broker argv — the single source of truth for both the detached and the foreground
+    spawn, so the §5.4 ownership scan recognizes either by the same memory-engine + listener
+    anchors."""
+    return [
         binary,
         "broker",
         "--storage-engine=memory://tansu/",
         f"--kafka-listener-url=tcp://{listener}",
         f"--kafka-advertised-listener-url=tcp://{listener}",
     ]
+
+
+def _connect_only_error(target: Target) -> DevBrokerError:
+    """Spec §5.2's refusal to bind anywhere but a single loopback address — shared by the detached
+    :func:`ensure_broker` and the foreground :func:`spawn_foreground`."""
+    return DevBrokerError(
+        f"no broker is reachable at {target.bootstrap!r} and it is not a single loopback "
+        "address, so `ck dev` will not spawn one there (connect-only; spec §5.2). Start the "
+        "broker at that address, or point --host at a loopback address to get a managed one."
+    )
+
+
+def _startup_detail(log_path: Path | None) -> str:
+    """The tail appended to a startup-failure message: the spawn log's last bytes for a detached
+    broker (its output went to a file), or a pointer to the terminal for a foreground broker (its
+    output already streamed there)."""
+    if log_path is None:
+        return "; see its output above."
+    return f"; log tail from {log_path}:\n{_log_tail(log_path)}"
+
+
+def _await_ready(proc: Any, listener: str, timeout: float, *, log_path: Path | None) -> None:
+    """Block until *proc* answers on *listener*, or raise (spec §5.2): a startup exit fails fast, a
+    readiness timeout kills the spawn first. Shared by the detached and foreground spawns; *log_path*
+    selects where a failure points the reader — a log file, or the terminal (``None``)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if proc.poll() is not None:
+            code = proc.returncode
+            if code is not None and code < 0:
+                cause = f"killed by a signal ({code}) — a concurrent `ck dev mesh stop/restart`?"
+            else:
+                cause = f"exit code {code}"
+            raise DevBrokerError(f"the dev broker exited during startup ({cause})" + _startup_detail(log_path))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            try:
+                proc.wait(timeout=DEFAULT_GRACE)  # reap our own child — no zombie for long-lived callers
+            except subprocess.TimeoutExpired:
+                pass  # kill was delivered; the CLI exits next and init reaps
+            raise DevBrokerError(f"the dev broker did not become ready within {timeout:.1f}s" + _startup_detail(log_path))
+        # Per-attempt probe budget: capped at 1s so proc.poll() keeps getting re-checked, and
+        # bounded by the remaining deadline so the total wait never overshoots `timeout`.
+        if is_reachable(listener, timeout=min(1.0, max(0.1, remaining))):
+            break
+        time.sleep(_READINESS_POLL_INTERVAL)
+
+
+def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
+    listener = target.listener
+    log_path = _calfkit_dir() / "logs" / f"tansu-{target.key}.log"
+    cmd = _broker_cmd(binary, listener)
     # Overwritten each spawn — bounded logs, one daemon per address (spec §5.2). A real file fd,
     # never PIPE: an unread pipe would deadlock Tansu once its buffer fills.
     try:
@@ -410,28 +460,7 @@ def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
         except OSError as exc:
             # Wrong-arch / corrupt binary fails at exec time (spec §7.3) — distinct from a timeout.
             raise DevBrokerError(f"failed to launch the dev broker binary {binary!r}: {exc}") from exc
-    deadline = time.monotonic() + timeout
-    while True:
-        if proc.poll() is not None:
-            code = proc.returncode
-            if code is not None and code < 0:
-                cause = f"killed by a signal ({code}) — a concurrent `ck dev broker stop/restart`?"
-            else:
-                cause = f"exit code {code}"
-            raise DevBrokerError(f"the dev broker exited during startup ({cause}); log tail from {log_path}:\n{_log_tail(log_path)}")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            proc.kill()
-            try:
-                proc.wait(timeout=DEFAULT_GRACE)  # reap our own child — no zombie for long-lived callers
-            except subprocess.TimeoutExpired:
-                pass  # kill was delivered; the CLI exits next and init reaps
-            raise DevBrokerError(f"the dev broker did not become ready within {timeout:.1f}s; log tail from {log_path}:\n{_log_tail(log_path)}")
-        # Per-attempt probe budget: capped at 1s so proc.poll() keeps getting re-checked, and
-        # bounded by the remaining deadline so the total wait never overshoots `timeout`.
-        if is_reachable(listener, timeout=min(1.0, max(0.1, remaining))):
-            break
-        time.sleep(_READINESS_POLL_INTERVAL)
+    _await_ready(proc, listener, timeout, log_path=log_path)
     return BrokerInfo(
         listener=listener,
         pid=proc.pid,
@@ -439,6 +468,38 @@ def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
         started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         log_path=str(log_path),
     )
+
+
+def spawn_foreground(target: Target, *, resolve_bin: Callable[[], str], timeout: float = DEFAULT_TIMEOUT) -> Popen[bytes]:
+    """Spawn an **attached** dev broker and return the live process once it is ready — the foreground
+    counterpart of :func:`ensure_broker`'s detached spawn (spec §5.2).
+
+    The process stays in the caller's session (no ``start_new_session``, so Ctrl-C reaches Tansu
+    directly — the deliberate inverse of §5.8's detach) and inherits the terminal (no log redirect;
+    its output streams live). The caller blocks on the returned process. Raises
+    :class:`DevBrokerError` when a broker is already reachable (foreground cannot attach to a
+    detached daemon — stop it, or use ``-d``), when the address is not a single loopback
+    (connect-only), or when the spawn fails or never becomes ready.
+    """
+    with _spawn_lock():
+        if is_reachable(list(target.servers), timeout=timeout):
+            raise DevBrokerError(
+                f"a broker is already running at {target.key} — stop it with `ck dev mesh stop`, "
+                "or start a detached daemon with `ck dev mesh start -d`."
+            )
+        if not (target.is_single and target.is_loopback):
+            raise _connect_only_error(target)
+        binary = _resolve_binary(resolve_bin)
+        listener = target.listener
+        try:
+            # Attached: inherit stdout/stderr (the terminal) and stay in our session so Ctrl-C
+            # reaches Tansu directly. stdin is DEVNULL — Tansu never reads it.
+            proc: Popen[bytes] = Popen(_broker_cmd(binary, listener), stdin=subprocess.DEVNULL)
+        except OSError as exc:
+            # Wrong-arch / corrupt binary fails at exec time (spec §7.3) — distinct from a timeout.
+            raise DevBrokerError(f"failed to launch the dev broker binary {binary!r}: {exc}") from exc
+        _await_ready(proc, listener, timeout, log_path=None)
+        return proc
 
 
 # --- stop / status / restart (spec §4.2, §5.6) ------------------------------------------------------
