@@ -15,6 +15,10 @@ def _coerce_to_parts(value: Any) -> list[ContentPart]:
 
     * ``None`` → ``[]`` (no output);
     * ``str`` → one ``TextPart``;
+    * a bare ``ContentPart`` → ``[part]`` — the vocabulary's own values are fixed
+      points of the coercion (``coerce(part) == coerce([part])``), so per-part
+      ``metadata`` (e.g. the ``calf.retry`` marker) survives instead of being buried
+      inside a ``DataPart`` (docs/issues/coerce-to-parts-drops-bare-content-part-metadata.md);
     * a ``list[ContentPart]`` passes through unchanged (the agent's preamble case —
       an empty list is vacuously such a list and yields ``[]``);
     * anything else JSON-serializable → one ``DataPart``, eagerly wire-checked via
@@ -25,6 +29,8 @@ def _coerce_to_parts(value: Any) -> list[ContentPart]:
         return []
     if isinstance(value, str):
         return [TextPart(text=value)]
+    if isinstance(value, _CONTENT_PART_TYPES):
+        return [value]
     if isinstance(value, list) and all(isinstance(p, _CONTENT_PART_TYPES) for p in value):
         return cast("list[ContentPart]", value)
     part = DataPart(data=value)

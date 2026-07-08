@@ -29,7 +29,7 @@ from calfkit.models import (
 from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.node_result import InvocationResult
-from calfkit.models.payload import FilePart
+from calfkit.models.payload import FilePart, ToolCallPart, is_retry, retry_text_part
 from calfkit.models.reply import FaultMessage, ReturnMessage, _ReplyBase
 from calfkit.models.state import State
 
@@ -142,6 +142,31 @@ class TestCoerceToParts:
     def test_non_serializable_value_raises(self) -> None:
         with pytest.raises(pydantic_core.PydanticSerializationError):
             _coerce_to_parts(object())
+
+    def test_bare_content_part_wraps_to_singleton_list(self) -> None:
+        # A bare part is a fixed point of the coercion into its own vocabulary — never
+        # buried as opaque data inside a DataPart (docs/issues/coerce-to-parts-drops-
+        # bare-content-part-metadata.md).
+        for part in (
+            TextPart(text="hi"),
+            FilePart(media_type="image/png"),
+            DataPart(data={"k": "v"}),
+            ToolCallPart(tool_call_id="c1", kwargs={}, tool_name="t"),
+        ):
+            assert _coerce_to_parts(part) == [part]
+
+    def test_bare_retry_part_keeps_the_marker(self) -> None:
+        # The calf.retry marker must survive coercion of a BARE marked part, or a tool
+        # error renders to the model as a success (is_error fidelity lost downstream).
+        part = retry_text_part("boom: rate limited")
+        result = _coerce_to_parts(part)
+        assert result == [part]
+        assert is_retry(result)
+
+    def test_bare_part_coerces_same_as_wrapped_part(self) -> None:
+        # The faithful-embedding property: coerce(part) == coerce([part]).
+        for part in (TextPart(text="hi"), DataPart(data={"k": "v"})):
+            assert _coerce_to_parts(part) == _coerce_to_parts([part])
 
 
 class TestProtocolKind:
