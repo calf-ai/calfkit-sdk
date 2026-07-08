@@ -126,7 +126,12 @@ def _decode_keys(chunk: bytes) -> list[Key]:
             j = i + 2
             while j < n and 0x20 <= chunk[j] <= 0x3F:
                 j += 1
-            i = j + 1 if j < n else n  # include the final byte, or clamp if truncated across a read
+            if j < n and 0x40 <= chunk[j] <= 0x7E:
+                i = j + 1  # consumed a valid final byte
+            else:
+                # Truncated across a read, OR an ESC/control byte aborted the CSI: stop AT that byte so
+                # the next iteration re-parses it as a fresh key (e.g. an ESC[ that precedes a real arrow).
+                i = max(j, i + 1)
             keys.append("other")
         elif chunk[i] == 0x1B and chunk[i + 1 : i + 2] == b"O":
             keys.append("other")  # an SS3 sequence (introducer + one final byte): app-mode arrows / F1-F4

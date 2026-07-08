@@ -276,6 +276,39 @@ def test_decode_keys_consumes_a_whole_csi_without_leaking_a_quit() -> None:
     assert _decode_keys(b"\x1b[") == ["other"]  # a truncated CSI (ESC+bracket, nothing after) never quits
 
 
+def test_decode_keys_when_an_esc_aborts_a_partial_csi_the_next_key_survives() -> None:
+    """A partial CSI (no final byte yet) immediately followed by another sequence/key in the SAME read
+    must not swallow that following key: the aborting byte is not a valid CSI final (0x40-0x7E), so the
+    partial CSI ends and the next key is re-parsed. Guards a dropped-arrow / swallowed-Enter edge."""
+    from calfkit.cli._chat_io import _decode_keys
+
+    assert _decode_keys(b"\x1b[1\x1b[A") == ["other", "up"]  # partial CSI then a real Up arrow — arrow survives
+    assert _decode_keys(b"\x1b[1\x1b[B") == ["other", "down"]  # partial CSI then Down
+    assert _decode_keys(b"\x1b[\r") == ["other", "enter"]  # ESC[ then Enter — Enter survives
+    assert _decode_keys(b"\x1b[1;2\r") == ["other", "enter"]  # longer partial CSI then Enter
+    # a q/Q that is a genuine CSI FINAL byte (e.g. DECSCUSR ESC[0q) is part of the sequence, not a quit
+    assert _decode_keys(b"\x1b[0q") == ["other"]
+
+
+def test_decode_keys_never_leaks_quit_from_any_escape_sequence() -> None:
+    """Property guard against the recurring bug class: NO escape-introduced sequence (CSI / SS3 / Meta),
+    over every final byte, may emit ``quit`` — only a lone/terminal Esc or a raw q/Q/Ctrl-C/Ctrl-D byte
+    is a quit. Enumerated rather than hand-picked so it keeps pace with future decoder edits."""
+    from calfkit.cli._chat_io import _decode_keys
+
+    param_sets = [b"", b"1", b"1;2", b"1;5", b"1;3", b"24", b"24;5", b"?25", b";", b"0", b">", b"="]
+    for final in range(0x40, 0x7F):  # every valid CSI/SS3 final byte
+        for params in param_sets:
+            csi = b"\x1b[" + params + bytes([final])
+            assert "quit" not in _decode_keys(csi), f"CSI {csi!r} leaked quit"
+        ss3 = b"\x1bO" + bytes([final])
+        assert "quit" not in _decode_keys(ss3), f"SS3 {ss3!r} leaked quit"
+    for byte in range(0x20, 0x7F):  # Meta/Alt: ESC + a byte (excludes the lone-ESC quit case)
+        assert "quit" not in _decode_keys(b"\x1b" + bytes([byte])), f"Meta ESC+{byte:#x} leaked quit"
+    for truncated in (b"\x1b[", b"\x1bO", b"\x1b[1", b"\x1b[1;5", b"\x1b[?", b"\x1b[1;"):
+        assert "quit" not in _decode_keys(truncated), f"truncated {truncated!r} leaked quit"
+
+
 async def test_key_reader_ignores_unrecognized_escape_sequences_instead_of_quitting() -> None:
     """An ESC that begins an escape sequence we don't map (SS3 arrows in application-cursor mode,
     Meta/Alt combos, function keys) must decode to a harmless ``other`` — NOT ``quit``, which would
