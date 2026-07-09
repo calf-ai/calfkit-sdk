@@ -9,7 +9,14 @@ from calfkit._protocol import MessageKind, NodeKind
 from calfkit._types import AgentOutputT
 from calfkit._vendor.pydantic_ai import Agent as InternalAgentLoop
 from calfkit._vendor.pydantic_ai import DeferredToolRequests
-from calfkit._vendor.pydantic_ai.messages import ModelRequest, RetryPromptPart, ToolCallPart, ToolReturn, UserPromptPart
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelRequest,
+    ModelRequestPart,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturn,
+    ToolReturnPart,
+)
 from calfkit._vendor.pydantic_ai.output import OutputSpec
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit._vendor.pydantic_ai.tools import DeferredToolResults, ToolDefinition
@@ -37,10 +44,12 @@ from calfkit.nodes.tool import BaseToolNodeDef, Tools
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import render_peer_directory, resolve_live_peers
 from calfkit.peers.handoff import (
-    _HANDOFF_NO_PEERS_NOTE,
+    _STUB_HANDOFF_NOT_EXECUTED,
+    _STUB_TOOL_NOT_EXECUTED,
+    _STUB_TRANSFERRED,
     HANDOFF_TOOL,
-    HandoffRequest,
-    _build_handoff_request,
+    HandoffDisposition,
+    arbitrate_handoff,
     handoff_tool_def,
 )
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -66,6 +75,15 @@ def _serialize_message_reply(parts: list[ContentPart] | None) -> str:
         return pydantic_core.to_json(p).decode()
 
     return render_parts_as_text(parts, render_other=_render_other, empty="(no content)")
+
+
+def _step_tool_call(tool_call: ToolCallPart) -> ToolCallStep:
+    """The ``ToolCallStep`` for a raw model emission (spec §3.2). The raw ``args`` can be an off-spec
+    scalar (pydantic-ai's ``ToolCallPart`` is a non-validating dataclass), so any non-(str/dict/None)
+    value is coerced to its string form, keeping ``ToolCallStep.args`` within ``str | dict | None``."""
+    raw = tool_call.args
+    args = raw if (raw is None or isinstance(raw, (str, dict))) else str(raw)
+    return ToolCallStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, args=args)
 
 
 class BaseAgentNodeDef(
@@ -418,60 +436,59 @@ class BaseAgentNodeDef(
         view = ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY)
         return handoff_tool_def(resolve_live_peers(view, handles, self_name=self.name))
 
-    def _handoff_output_override(self, ctx: SessionRunContext) -> tuple[OutputSpec[Any] | None, str | None]:
-        """The per-run handoff ``output_type`` override + the empty-set ephemeral instruction (§5.3), or
-        ``(None, None)`` when the agent carries no ``Handoff`` handle (the run is left unchanged).
+    def _execute_winning_handoff(self, disposition: HandoffDisposition, ctx: SessionRunContext, step_draft: list[StepEvent]) -> TailCall[State]:
+        """Execute a winning-handoff turn (handoff spec §3/§3.1/§4/§7): author the sibling and
+        rejected step pairs + the ``HandoffStep`` (the winner gets NO call/result pair — today's
+        exact stream shape), close EVERY call of the response in ONE ``ModelRequest`` of
+        ``ToolReturnPart``s appended to ``message_history`` (provider-validity: no dangling calls;
+        the request also terminates ``latest_tool_calls``' reverse walk so the peer re-enters
+        clean), leave ``state.tool_calls``/``tool_results`` UNTOUCHED (§4 — registrations without
+        resolutions would ride dangling to the peer; results would feed its run a foreign
+        ``DeferredToolResults`` set), and relinquish via :meth:`_dispatch_handoff`."""
+        winner = disposition.winner
+        assert winner is not None  # caller-gated (arbitration found a winner)
+        args = winner.args_as_dict()  # always parseable: arbitration validated the winner
+        target, message = args["name"], args["message"]
 
-        With >=1 live in-scope peer: ``([final_output_type, <HandoffRequest subclass>, DeferredToolRequests],
-        None)`` — the override REPLACES the construction-time type, so it carries the FULL list (dropping
-        ``DeferredToolRequests`` would break tool dispatch). With a ``Handoff`` handle but NO live peer:
-        ``(None, <no-peers note>)`` — the member is OMITTED (an empty ``Literal`` is unbuildable) and the note
-        conveys the dormant capability via the request-level ``instructions`` (self-heals when a peer comes
-        online). The live directory is the SAME ``resolve_live_peers`` render messaging uses, Handoff-scoped."""
-        handles = self._handoff_handles
-        if not handles:
-            return None, None
-        live = tuple(resolve_live_peers(ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY), handles, self_name=self.name))
-        if not live:
-            return None, _HANDOFF_NO_PEERS_NOTE
-        return [self.final_output_type, _build_handoff_request(live), DeferredToolRequests], None
+        closing: list[ModelRequestPart] = [
+            ToolReturnPart(tool_name=winner.tool_name, content=_STUB_TRANSFERRED.format(name=target), tool_call_id=winner.tool_call_id)
+        ]
+        # Rejected-before-winner handoffs (§3.1): a RetryPromptPart would address A's next model call,
+        # and A has none — the transcript gets the generic stub; the PRECISE reason rides the step pair.
+        for call, reason in disposition.rejected:
+            step_draft.append(_step_tool_call(call))
+            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=reason)], is_error=True))
+            closing.append(ToolReturnPart(tool_name=call.tool_name, content=_STUB_HANDOFF_NOT_EXECUTED, tool_call_id=call.tool_call_id))
+        for call in disposition.stubbed:
+            stub = _STUB_HANDOFF_NOT_EXECUTED if call.tool_name == HANDOFF_TOOL else _STUB_TOOL_NOT_EXECUTED
+            step_draft.append(_step_tool_call(call))
+            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=stub)], is_error=False))
+            closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub, tool_call_id=call.tool_call_id))
+        if disposition.stubbed or disposition.rejected:
+            logger.debug(
+                "[%s] handoff won the turn; stubbed %d sibling call(s) node=%s",
+                ctx.correlation_id[:8],
+                len(disposition.stubbed) + len(disposition.rejected),
+                self.name,
+            )
 
-    def _dispatch_handoff(self, handoff: HandoffRequest, ctx: SessionRunContext) -> TailCall[State]:
-        """Route a model-produced ``HandoffRequest`` (§5.3/§5.4) — A's output is ALREADY persisted (the
-        final-output branch ran ``extend_with_responses``); this only routes, thin + drop-in.
+        step_draft.append(HandoffStep(target=target, reason=message))
+        ctx._step_draft = step_draft
+        ctx.state.message_history.append(ModelRequest(parts=closing))
+        return self._dispatch_handoff(target, ctx)
 
-        The target is re-checked LIVE (the render->dispatch staleness race is the only case calfkit handles):
-        - **live** -> null ``state.overrides`` (C2: the agent reads the state channel) + ``TailCall`` to the
-          peer's input topic with ``clear_overrides=True`` (nulls the frame channel — ``prepare_context``
-          re-applies ``frame.overrides`` onto ``state.overrides`` at B's start, so BOTH must be nulled). The
-          frame retargets preserving frame_id/tag/callback_topic + caller_node_id, so B inherits A's ORIGINAL
-          caller + full conversation and A drops out; B uses its own tools/model.
-        - **stale** (gone between render and dispatch) -> do NOT relinquish: append a FEEDBACK TURN (a
-          user-role ``ModelRequest``) so the history tail is a ``ModelRequest`` and the re-entered model is
-          forced to re-decide against a fresh ``Literal``, then ``TailCall`` to SELF (no ``clear_overrides`` —
-          keep A's surface). Without the feedback turn a ``ModelResponse``-tail history + empty instructions
-          hits pydantic-ai's ``UserPromptNode`` no-model-call shortcut and the stale handoff output would be
-          returned as A's answer in native/prompted mode. Mirrors the all-invalid self-retry *pattern* (a
-          different branch); unbounded in v1 (#251)."""
-        reachable = {n for n, _ in resolve_live_peers(ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY), self._handoff_handles, self_name=self.name)}
-        if handoff.name in reachable:
-            logger.debug("[%s] handoff: relinquishing control to %r node=%s", ctx.correlation_id[:8], handoff.name, self.name)
-            ctx.state.overrides = None
-            return TailCall[State](target_topic=derive_input_topic(handoff.name), state=ctx.state, clear_overrides=True)
-        # The stale self-retry is the entry to an unbounded loop (#251); WARN so an operator can see a
-        # stale-handoff ring (the only signal until #251 lands a bound).
-        logger.warning(
-            "[%s] handoff target %r went offline between render and dispatch; self-retrying (unbounded in v1, #251) node=%s",
-            ctx.correlation_id[:8],
-            handoff.name,
-            self.name,
-        )
-        feedback = (
-            f"The agent {handoff.name!r} you tried to hand off to is no longer available. "
-            "Choose another agent that is online, or answer the user directly."
-        )
-        ctx.state.message_history.append(ModelRequest(parts=[UserPromptPart(content=feedback)]))
-        return TailCall[State](target_topic=self._return_topic, state=ctx.state)
+    def _dispatch_handoff(self, name: str, ctx: SessionRunContext) -> TailCall[State]:
+        """Relinquish control to the ALREADY-validated live peer (handoff spec §5) — a pure TailCall
+        builder: arbitration owns the single liveness check (a stale target is a standard §9
+        rejection, never seen here). Both override channels are nulled HERE (single home): the agent
+        reads ``state.overrides``, and ``clear_overrides=True`` nulls the frame copy that
+        ``prepare_context`` re-applies at the peer's start — so the peer, a DIFFERENT agent, uses its
+        own tools/model (C2). The frame retargets preserving frame_id/tag/callback_topic +
+        caller_node_id (and any caller-stamped CallMarker, untouched — spec §5), so the peer
+        inherits A's ORIGINAL caller + full conversation and A drops out."""
+        logger.debug("[%s] handoff: relinquishing control to %r node=%s", ctx.correlation_id[:8], name, self.name)
+        ctx.state.overrides = None
+        return TailCall[State](target_topic=derive_input_topic(name), state=ctx.state, clear_overrides=True)
 
     def _message_agent_target_error(self, name: str, ctx: SessionRunContext) -> str | None:
         """The model-visible reason a ``message_agent`` target is invalid, or ``None`` when it is OK to
@@ -647,6 +664,16 @@ class BaseAgentNodeDef(
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
                 if self.sequential_only_mode:
                     target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
+                    # Defensive fork (handoff spec §3.0-gated, plan S2b): a handoff call is finalized in the
+                    # delivery that produced it (winner → closing request; rejection → tool_results), so a
+                    # PENDING one arriving from outside the function means corrupt/replayed state — raise
+                    # loudly rather than skip (or mis-dispatch it to the registry lookup below).
+                    if self._handoff_handles and target_tool_call.tool_name == HANDOFF_TOOL:
+                        raise RuntimeError(
+                            f"[{ctx.correlation_id[:8]}] pending handoff call reached the sequential re-entry arm — "
+                            f"impossible by construction; state is corrupt. node={self.name} "
+                            f"tool_call_id={target_tool_call.tool_call_id}"
+                        )
                     logger.debug(
                         "[%s] routing pending tool call=%s tool=%s node=%s",
                         ctx.correlation_id[:8],
@@ -696,24 +723,9 @@ class BaseAgentNodeDef(
         handoff_def = self._handoff_tool_def(ctx)
         if handoff_def is not None:
             external_defs.append(handoff_def)
-        # Handoff (§5.3): override the per-run output_type to add the HandoffRequest union member built over
-        # the live in-scope directory (so the model MAY transfer control); an empty live set omits the member
-        # and instead injects an ephemeral "no agents online" note into the request-level instructions
-        # (a None-FILTERED list — a bare [None, note] raises TypeError). `(None, None)` for a non-handoff
-        # agent leaves both output_type (construction-time default) and instructions unchanged.
-        handoff_output_type, handoff_note = self._handoff_output_override(ctx)
-        instructions: str | list[str] | None
-        if handoff_note is None:
-            instructions = ctx.state.temp_instructions
-        else:
-            instructions = [s for s in (ctx.state.temp_instructions, handoff_note) if s]
         result = await self._agent_loop.run(
             message_history=project(ctx.state.message_history, viewer=self.name),
-            instructions=instructions,
-            # `run`'s overloads accept either a strict `None` or a non-`None` OutputSpec; a `None`-able value
-            # matches neither, but the impl signature accepts `None` (-> construction-time default, no
-            # rebuild). Cast to bridge the overload — `None` here is the no-override / member-omitted path.
-            output_type=cast("OutputSpec[Any]", handoff_output_type),
+            instructions=ctx.state.temp_instructions,
             toolsets=[ExternalToolset(external_defs)],
             deps=ctx.deps,
             deferred_tool_results=tool_results,
@@ -747,14 +759,37 @@ class BaseAgentNodeDef(
             if _preamble:
                 step_draft.append(AgentMessageStep(parts=[TextPart(text=_preamble)]))
 
+            # Handoff arbitration (spec §3, §3.0-gated): decide the WHOLE response before the per-call
+            # loop — early semantics is a whole-response decision. A winning handoff ends the turn: the
+            # winner path below authors the sibling step pairs + the closing ModelRequest and relinquishes;
+            # NOTHING in this branch dispatches. `disposition` stays None for a handle-less agent, whose
+            # user tool named `handoff_to_agent` is never intercepted (spec §3.0).
+            disposition: HandoffDisposition | None = None
+            if self._handoff_handles:
+                view = ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY)
+                live_names = {n for n, _ in resolve_live_peers(view, self._handoff_handles, self_name=self.name)}
+                disposition = arbitrate_handoff(result.output.calls, live_names, self.name)
+                if disposition.winner is not None:
+                    return self._execute_winning_handoff(disposition, ctx, step_draft)
+
             for tool_call in result.output.calls:
                 ctx.state.add_tool_call(tool_call)
-                # The raw emission can be an off-spec scalar (e.g. a bare int) — pydantic-ai's
-                # ToolCallPart is a non-validating dataclass — so coerce any non-(str/dict/None) value
-                # to its string form, keeping ToolCallStep.args within str|dict|None (spec §3.2).
-                _raw_args = tool_call.args
-                _step_args = _raw_args if (_raw_args is None or isinstance(_raw_args, (str, dict))) else str(_raw_args)
-                step_draft.append(ToolCallStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, args=_step_args))
+                step_draft.append(_step_tool_call(tool_call))
+
+                # handoff_to_agent forks BEFORE the tools_registry lookup (handoff spec §3) — reachable
+                # only on a NO-winner turn (a winner returned above), where arbitration rejected EVERY
+                # handoff call; land the precise §9 reason as a standard pre-dispatch rejection. Gated:
+                # `disposition` is None for a handle-less agent (spec §3.0).
+                if disposition is not None and tool_call.tool_name == HANDOFF_TOOL:
+                    reason = next(r for c, r in disposition.rejected if c is tool_call)
+                    logger.warning(
+                        "[%s] handoff rejected pre-dispatch (%s); the rejection self-retry is unbounded in v1 (#251) node=%s",
+                        ctx.correlation_id[:8],
+                        reason,
+                        self.name,
+                    )
+                    self._reject_invalid_call(tool_call, ctx, step_draft, reason)
+                    continue
 
                 # message_agent forks BEFORE the tools_registry lookup (it is never a registry binding):
                 # validate the target (RetryPromptPart on self/cycle/offline/malformed), else leave it
@@ -896,22 +931,6 @@ class BaseAgentNodeDef(
             new_messages = result.new_messages()
             # stamp author identity onto the agent's own responses (§4, §6.1)
             ctx.state.extend_with_responses(new_messages, self.name)
-            # Handoff (§5.3/§5.4): A produced a HandoffRequest as its turn output (already persisted above —
-            # do NOT extend again). Transfer control to the live peer via a TailCall, or self-retry on the
-            # render->dispatch staleness race. Invalid/self/hallucinated names never reach here (the per-turn
-            # Literal + pydantic-ai auto-retry handle them). Discriminated by isinstance (mode-agnostic).
-            # `_dispatch_handoff` logs its own disposition; this branch's log below is the ReturnCall path only.
-            if isinstance(result.output, HandoffRequest):
-                # Author the handoff hop's step draft (spec §3.2): preamble + a Handoff event, emitted
-                # for an online OR offline target (both flow through _dispatch_handoff). The chokepoint
-                # reads it via project_steps when _dispatch_handoff returns its TailCall.
-                handoff_draft: list[StepEvent] = []
-                _ho_preamble = step_preamble(new_messages)
-                if _ho_preamble:
-                    handoff_draft.append(AgentMessageStep(parts=[TextPart(text=_ho_preamble)]))
-                handoff_draft.append(HandoffStep(target=result.output.name, reason=result.output.message))
-                ctx._step_draft = handoff_draft
-                return self._dispatch_handoff(result.output, ctx)
             logger.debug("[%s] final output reached, ReturnCall node=%s", ctx.correlation_id[:8], self.name)
             if isinstance(result.output, str):
                 parts: list[ContentPart] = [TextPart(text=result.output)]
