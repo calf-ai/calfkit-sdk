@@ -36,7 +36,13 @@ from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
 from calfkit.nodes.tool import BaseToolNodeDef, Tools
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import render_peer_directory, resolve_live_peers
-from calfkit.peers.handoff import _HANDOFF_NO_PEERS_NOTE, HandoffRequest, _build_handoff_request
+from calfkit.peers.handoff import (
+    _HANDOFF_NO_PEERS_NOTE,
+    HANDOFF_TOOL,
+    HandoffRequest,
+    _build_handoff_request,
+    handoff_tool_def,
+)
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
 
@@ -128,19 +134,26 @@ class BaseAgentNodeDef(
         if any(h.discover for h in handoff) and len(handoff) > 1:
             raise ValueError("Handoff(discover=True) is the exclusive author of the handoff scope — no other Handoff handle may accompany it")
         self._peers: tuple[Messaging | Handoff, ...] = peer_handles
-        # Reserve the built-in tool name against the construction-time tool surface (§5.2) — MESSAGING-only:
-        # the built-in is injected into the ExternalToolset OUTSIDE tools_registry, so the intra-registry
-        # collision guard would not see it. Only a `Messaging` handle injects `message_agent`, so a
-        # Handoff-only agent reserves nothing. Checked against eager/static tools (self.tools, set by
-        # _add_tools above) and named `Tools` selectors (self._tool_selectors). (A discover-resolved tool
-        # node of this name is a deferred follow-up, not reserved here.)
-        if self._messaging_handles:
-            reserved = _MESSAGE_AGENT_TOOL in {b.name for b in self.tools} or any(
-                isinstance(sel, Tools) and _MESSAGE_AGENT_TOOL in sel.names for sel in self._tool_selectors
+        # Reserve the built-in tool names against the construction-time tool surface (§5.2, handoff spec
+        # §2/§3.0) — PER-HANDLE-KIND: each built-in is injected into the ExternalToolset OUTSIDE
+        # tools_registry, so the intra-registry collision guard would not see it. A `Messaging` handle
+        # injects `message_agent`; a `Handoff` handle injects `handoff_to_agent` (whose dispatch fork and
+        # arbitration are gated on the same condition — a handle-less agent's user tool of that name is
+        # never intercepted, spec §3.0). Checked against eager/static tools (self.tools, set by _add_tools
+        # above) and named `Tools` selectors (self._tool_selectors). (A discover-resolved tool node of
+        # these names is a deferred follow-up, not reserved here.)
+        for kind_handles, reserved_name, handle_kind in (
+            (self._messaging_handles, _MESSAGE_AGENT_TOOL, "Messaging"),
+            (self._handoff_handles, HANDOFF_TOOL, "Handoff"),
+        ):
+            if not kind_handles:
+                continue
+            reserved = reserved_name in {b.name for b in self.tools} or any(
+                isinstance(sel, Tools) and reserved_name in sel.names for sel in self._tool_selectors
             )
             if reserved:
                 raise ValueError(
-                    f"tool name {_MESSAGE_AGENT_TOOL!r} is reserved for the built-in messaging tool (a Messaging handle is set); rename the user tool"
+                    f"tool name {reserved_name!r} is reserved for a built-in peer tool (a {handle_kind} handle is set); rename the user tool"
                 )
 
         # Omitted/None → no public inbox (reachable via the private name-derived
@@ -392,6 +405,18 @@ class BaseAgentNodeDef(
                 "additionalProperties": False,
             },
         )
+
+    def _handoff_tool_def(self, ctx: SessionRunContext) -> ToolDefinition | None:
+        """The runtime-rendered ``handoff_to_agent`` external tool def (handoff spec §2), or ``None`` when
+        the agent carries no ``Handoff`` handle. Always injected when the handle is present — an empty live
+        directory renders the "(no peer agents are currently reachable)" sentinel body (messaging parity),
+        so the model keeps the capability and a stale-memory call gets a clean §9 rejection instead of the
+        vendor's confusing unknown-tool retry."""
+        handles = self._handoff_handles
+        if not handles:
+            return None
+        view = ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY)
+        return handoff_tool_def(resolve_live_peers(view, handles, self_name=self.name))
 
     def _handoff_output_override(self, ctx: SessionRunContext) -> tuple[OutputSpec[Any] | None, str | None]:
         """The per-run handoff ``output_type`` override + the empty-set ephemeral instruction (§5.3), or
@@ -666,6 +691,11 @@ class BaseAgentNodeDef(
         message_agent_def = self._message_agent_tool_def(ctx)
         if message_agent_def is not None:
             external_defs.append(message_agent_def)
+        # Handoff (spec §2): the reserved `handoff_to_agent` def rides every turn a Handoff handle is
+        # present — same ExternalToolset injection as message_agent, outside tools_registry.
+        handoff_def = self._handoff_tool_def(ctx)
+        if handoff_def is not None:
+            external_defs.append(handoff_def)
         # Handoff (§5.3): override the per-run output_type to add the HandoffRequest union member built over
         # the live in-scope directory (so the model MAY transfer control); an empty live set omits the member
         # and instead injects an ephemeral "no agents online" note into the request-level instructions
