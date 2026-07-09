@@ -318,7 +318,39 @@ def test_mesh_start_foreground_ctrl_c_stops_cleanly(monkeypatch: pytest.MonkeyPa
     assert "stopped" in _plain(result.stdout).lower()
 
 
-def test_mesh_start_detach_ensures_and_reports(ensure_calls: list[dict[str, Any]]) -> None:
+def test_mesh_start_foreground_reports_a_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    proc = _RecordingPopen(returncode=1)
+    monkeypatch.setattr(dev_broker, "spawn_foreground", lambda *a, **k: proc)
+    result = _invoke(["dev", "mesh", "start"])
+    assert result.exit_code == 1
+    assert "exited with code 1" in _plain(result.stderr)
+
+
+def test_mesh_start_foreground_signal_death_maps_to_exit_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A broker killed by a signal reports returncode -N; typer.Exit needs a valid 0-255 code, so the
+    # negative is mapped to 1 while the signal number stays visible in the message.
+    proc = _RecordingPopen(returncode=-9)
+    monkeypatch.setattr(dev_broker, "spawn_foreground", lambda *a, **k: proc)
+    result = _invoke(["dev", "mesh", "start"])
+    assert result.exit_code == 1
+    assert "exited with code -9" in _plain(result.stderr)
+
+
+def test_mesh_start_foreground_forwards_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_foreground(target: Any, *, resolve_bin: Any, timeout: float) -> _RecordingPopen:
+        seen["target"] = target
+        return _RecordingPopen(returncode=0)
+
+    monkeypatch.setattr(dev_broker, "spawn_foreground", fake_foreground)
+    result = _invoke(["dev", "mesh", "start", "--host", "127.0.0.1:19092"])
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    assert seen["target"].key == "127.0.0.1:19092"
+
+
+def test_mesh_start_detach_ensures_and_reports(ensure_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dev_broker, "spawn_foreground", lambda *a, **k: pytest.fail("-d must not take the foreground path"))
     result = _invoke(["dev", "mesh", "start", "-d"])
     assert result.exit_code == 0, result.stdout + str(result.exception)
     assert len(ensure_calls) == 1

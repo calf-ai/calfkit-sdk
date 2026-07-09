@@ -371,7 +371,7 @@ def test_spawn_that_exits_during_startup_fails_fast_with_the_log_tail(monkeypatc
 
 
 def test_spawn_killed_by_a_signal_hints_at_a_concurrent_stop(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A lock-free `ck dev broker stop/restart` can race an in-flight readiness wait (spec §5.3);
+    # A lock-free `ck dev mesh stop/restart` can race an in-flight readiness wait (spec §5.3);
     # the negative returncode gets a hint instead of a bare "exit code -15".
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
         proc = FakePopen(cmd, **kwargs)
@@ -571,6 +571,17 @@ def test_foreground_spawn_that_exits_during_startup_fails_fast(monkeypatch: pyte
     monkeypatch.setattr(dev_broker, "Popen", factory)
     monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
     with pytest.raises(DevBrokerError, match="exited during startup"):
+        dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
+
+
+def test_foreground_wrong_arch_binary_surfaces_a_distinct_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The exec-time failure twin of test_wrong_arch_binary_surfaces_a_distinct_error (detached path).
+    def factory(cmd: list[str], **kwargs: object) -> FakePopen:
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(dev_broker, "Popen", factory)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="failed to launch"):
         dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
 
 

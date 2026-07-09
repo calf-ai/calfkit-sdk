@@ -274,8 +274,10 @@ but everything that manages agent daemons needs the extra's process scan.
 multi-address is never a spawn target, so there is nothing to scan);
 `ck dev run -d` and `ck dev chat TARGET…` need it to launch (they still
 succeed on a core install when every target is already online — pure reuse
-never scans); `ck dev mesh start`/`restart` degrade gracefully (reuse/borrow
-still works; only the managed-vs-reused classification is lost). See
+never scans); `ck dev mesh start -d`/`restart` degrade gracefully (reuse/borrow
+still works; only the managed-vs-reused classification is lost). Bare foreground
+`ck dev mesh start` never reuses — it errors if a broker is already reachable —
+so it only needs the binary, not the scan. See
 [How to run a local mesh with `ck dev`](local-dev-mesh.md).
 
 ### Spawn rules

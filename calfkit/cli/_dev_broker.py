@@ -477,8 +477,8 @@ def spawn_foreground(target: Target, *, resolve_bin: Callable[[], str], timeout:
     The process stays in the caller's session (no ``start_new_session``, so Ctrl-C reaches Tansu
     directly — the deliberate inverse of §5.8's detach) and inherits the terminal (no log redirect;
     its output streams live). The caller blocks on the returned process. Raises
-    :class:`DevBrokerError` when a broker is already reachable (foreground cannot attach to a
-    detached daemon — stop it, or use ``-d``), when the address is not a single loopback
+    :class:`DevBrokerError` when a broker is already reachable (foreground cannot attach to an
+    already-running broker — stop it, or use ``-d``), when the address is not a single loopback
     (connect-only), or when the spawn fails or never becomes ready.
     """
     with _spawn_lock():
