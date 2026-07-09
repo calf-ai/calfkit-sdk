@@ -169,16 +169,23 @@ def arbitrate_handoff(calls: Sequence[ToolCallPart], live_names: Collection[str]
     winner: ToolCallPart | None = None
     rejected: list[tuple[ToolCallPart, str]] = []
     for call in calls:
-        if call.tool_name != HANDOFF_TOOL or winner is not None:
+        if call.tool_name != HANDOFF_TOOL:
             continue
         reason = _validate_handoff_args(call, live_names, self_name)
         if reason is None:
             winner = call
-        else:
-            rejected.append((call, reason))
+            break  # first valid wins — later calls are classified by the post-pass below
+        rejected.append((call, reason))
     if winner is None:
         return HandoffDisposition(winner=None, rejected=rejected)
     # Identity-based exclusion (not equality): two byte-identical calls are still two calls.
     rejected_ids = {id(call) for call, _ in rejected}
     stubbed = [call for call in calls if call is not winner and id(call) not in rejected_ids]
     return HandoffDisposition(winner=winner, rejected=rejected, stubbed=stubbed)
+
+
+def stub_text(call: ToolCallPart) -> str:
+    """The §4 closing-request stub for a non-winner call on a winning turn — the one
+    disposition rule that picks between the pinned texts, kept beside them (a stubbed
+    sibling handoff reads as a handoff-not-executed; everything else as tool-not-executed)."""
+    return _STUB_HANDOFF_NOT_EXECUTED if call.tool_name == HANDOFF_TOOL else _STUB_TOOL_NOT_EXECUTED

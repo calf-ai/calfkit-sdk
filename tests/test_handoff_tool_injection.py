@@ -9,7 +9,6 @@ nothing (spec §3.0 gating — its user tool of that name is never intercepted).
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,32 +17,14 @@ from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
-from calfkit._vendor.pydantic_ai.tools import ToolDefinition
-from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY
-from calfkit.models.state import State
-from calfkit.models.tool_dispatch import ToolBinding
-from calfkit.nodes import Agent
 from calfkit.nodes.tool import Tools
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import _NONE_REACHABLE
 from calfkit.peers.handoff import _HANDOFF_TOOL_PREAMBLE, HANDOFF_TOOL
-from tests.test_tool_errors import _make_ctx
-
-
-def _view(cards: dict[str, str | None]) -> object:
-    snap = {name: SimpleNamespace(description=desc) for name, desc in cards.items()}
-    return SimpleNamespace(snapshot=lambda: snap)
-
-
-def _ctx_with_view(view: object) -> Any:
-    ctx = _make_ctx(State())
-    ctx._resources = {AGENTS_VIEW_RESOURCE_KEY: view}
-    ctx._ancestor_callers = frozenset()
-    return ctx
-
-
-def _agent(model: Any, **kw: Any) -> Agent[str]:
-    return Agent("triage", subscribe_topics="triage.in", model_client=model, **kw)
+from tests._peer_fakes import agents_view as _view
+from tests._peer_fakes import ctx_with_view as _ctx_with_view
+from tests._peer_fakes import triage_agent as _agent
+from tests._peer_fakes import user_tool as _user_tool
 
 
 def _capturing_model(captured: dict[str, Any]) -> FunctionModel:
@@ -52,13 +33,6 @@ def _capturing_model(captured: dict[str, Any]) -> FunctionModel:
         return ModelResponse(parts=[ModelTextPart("ok")])
 
     return FunctionModel(_fn)
-
-
-def _user_tool(name: str) -> ToolBinding:
-    return ToolBinding(
-        dispatch_topic="t.in",
-        tool_def=ToolDefinition(name=name, description="x", parameters_json_schema={"type": "object", "properties": {}}),
-    )
 
 
 # --------------------------------------------------------------------------- #

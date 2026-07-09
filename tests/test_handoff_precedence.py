@@ -10,7 +10,6 @@ re-implementation of the same rule).
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 from pydantic import BaseModel
@@ -20,33 +19,21 @@ from calfkit._vendor.pydantic_ai.messages import ModelResponse, ToolCallPart, To
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.models.actions import ReturnCall, TailCall
-from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY, derive_input_topic
+from calfkit.models.agents import derive_input_topic
 from calfkit.models.payload import DataPart
-from calfkit.models.state import State
 from calfkit.nodes import Agent
 from calfkit.peers import Handoff
-from calfkit.peers.handoff import HANDOFF_TOOL
-from tests.test_tool_errors import _make_ctx
+from tests._peer_fakes import agents_view as _view
+from tests._peer_fakes import ctx_with_view as _ctx_with_view
+from tests._peer_fakes import handoff_part
 
 
 class _Answer(BaseModel):
     text: str
 
 
-def _view(cards: dict[str, str | None]) -> object:
-    snap = {name: SimpleNamespace(description=desc) for name, desc in cards.items()}
-    return SimpleNamespace(snapshot=lambda: snap)
-
-
-def _ctx_with_view(view: object) -> Any:
-    ctx = _make_ctx(State())
-    ctx._resources = {AGENTS_VIEW_RESOURCE_KEY: view}
-    ctx._ancestor_callers = frozenset()
-    return ctx
-
-
 def _handoff_part(call_id: str = "h1") -> ToolCallPart:
-    return ToolCallPart(tool_name=HANDOFF_TOOL, args={"name": "billing", "message": "take over"}, tool_call_id=call_id)
+    return handoff_part("billing", "take over", call_id=call_id)
 
 
 async def test_rank1_structured_answer_beats_handoff_in_tool_mode() -> None:

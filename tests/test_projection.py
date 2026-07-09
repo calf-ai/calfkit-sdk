@@ -8,6 +8,7 @@ message. These tests use the REAL vendored pydantic-ai types.
 from __future__ import annotations
 
 import copy
+import logging
 
 from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
@@ -811,8 +812,6 @@ def test_handoff_tool_call_unparseable_args_logged_and_skipped(caplog):
         ),
         _response(TextPart(content="hello"), name="refunds"),
     ]
-
-    import logging
 
     with caplog.at_level(logging.WARNING, logger="calfkit.nodes._projection"):
         out = project(history, viewer="refunds")

@@ -12,7 +12,6 @@ rejections (``RetryPromptPart`` + error step pair) — a stale target no longer 
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,13 +26,11 @@ from calfkit._vendor.pydantic_ai.messages import (
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
-from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.models.actions import Call, ReturnCall, TailCall
-from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY, derive_input_topic
+from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.state import OverridesState, State
 from calfkit.models.step import AgentMessageStep, HandoffStep, ToolCallStep, ToolResultStep
-from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.handoff import (
@@ -43,40 +40,11 @@ from calfkit.peers.handoff import (
     _STUB_TOOL_NOT_EXECUTED,
     HANDOFF_TOOL,
 )
-from tests.test_tool_errors import _make_ctx
-
-
-class _MutableView:
-    """A duck-typed agents view whose snapshot can change between reads — simulates peers
-    joining/leaving (incl. the render→arbitration staleness race)."""
-
-    def __init__(self, cards: dict[str, str | None]) -> None:
-        self._cards = cards
-
-    def snapshot(self) -> dict[str, Any]:
-        return {n: SimpleNamespace(description=d) for n, d in self._cards.items()}
-
-    def set(self, cards: dict[str, str | None]) -> None:
-        self._cards = cards
-
-
-def _view(cards: dict[str, str | None]) -> _MutableView:
-    return _MutableView(cards)
-
-
-def _ctx_with_view(view: object, state: State | None = None) -> Any:
-    ctx = _make_ctx(state if state is not None else State())
-    ctx._resources = {AGENTS_VIEW_RESOURCE_KEY: view}
-    ctx._ancestor_callers = frozenset()
-    return ctx
-
-
-def _agent(model: Any, **kw: Any) -> Agent[Any]:
-    return Agent("triage", subscribe_topics="triage.in", model_client=model, **kw)
-
-
-def _handoff_part(name: str, message: str, call_id: str = "h1") -> ToolCallPart:
-    return ToolCallPart(tool_name=HANDOFF_TOOL, args={"name": name, "message": message}, tool_call_id=call_id)
+from tests._peer_fakes import agents_view as _view
+from tests._peer_fakes import ctx_with_view as _ctx_with_view
+from tests._peer_fakes import handoff_part as _handoff_part
+from tests._peer_fakes import triage_agent as _agent
+from tests._peer_fakes import user_tool as _user_tool
 
 
 def _emit_once_then_text(*parts: Any) -> FunctionModel:
@@ -92,13 +60,6 @@ def _emit_once_then_text(*parts: Any) -> FunctionModel:
     model = FunctionModel(_fn)
     model._test_calls = calls  # type: ignore[attr-defined]
     return model
-
-
-def _user_tool(name: str) -> ToolBinding:
-    return ToolBinding(
-        dispatch_topic=f"{name}.in",
-        tool_def=ToolDefinition(name=name, description="x", parameters_json_schema={"type": "object", "properties": {}}),
-    )
 
 
 def _closing_request(state: State) -> ModelRequest:

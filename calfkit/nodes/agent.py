@@ -44,13 +44,12 @@ from calfkit.nodes.tool import BaseToolNodeDef, Tools
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import render_peer_directory, resolve_live_peers
 from calfkit.peers.handoff import (
-    _STUB_HANDOFF_NOT_EXECUTED,
-    _STUB_TOOL_NOT_EXECUTED,
     _STUB_TRANSFERRED,
     HANDOFF_TOOL,
     HandoffDisposition,
     arbitrate_handoff,
     handoff_tool_def,
+    stub_text,
 )
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker.lifecycle import ResourceSetupContext
@@ -424,6 +423,12 @@ class BaseAgentNodeDef(
             },
         )
 
+    def _live_peer_names(self, ctx: SessionRunContext, handles: Sequence[Messaging] | Sequence[Handoff]) -> set[str]:
+        """The live, in-scope, self-excluded peer NAMES for ``handles`` — a fresh view read
+        every call (the freshness contract both peer capabilities' checks rely on)."""
+        view = ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY)
+        return {n for n, _ in resolve_live_peers(view, handles, self_name=self.name)}
+
     def _handoff_tool_def(self, ctx: SessionRunContext) -> ToolDefinition | None:
         """The runtime-rendered ``handoff_to_agent`` external tool def (handoff spec §2), or ``None`` when
         the agent carries no ``Handoff`` handle. Always injected when the handle is present — an empty live
@@ -467,9 +472,9 @@ class BaseAgentNodeDef(
             )
             step_draft.append(_step_tool_call(call))
             step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=reason)], is_error=True))
-            closing.append(ToolReturnPart(tool_name=call.tool_name, content=_STUB_HANDOFF_NOT_EXECUTED, tool_call_id=call.tool_call_id))
+            closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub_text(call), tool_call_id=call.tool_call_id))
         for call in disposition.stubbed:
-            stub = _STUB_HANDOFF_NOT_EXECUTED if call.tool_name == HANDOFF_TOOL else _STUB_TOOL_NOT_EXECUTED
+            stub = stub_text(call)
             step_draft.append(_step_tool_call(call))
             step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=stub)], is_error=False))
             closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub, tool_call_id=call.tool_call_id))
@@ -508,7 +513,7 @@ class BaseAgentNodeDef(
             return f"You cannot message yourself ({name!r})."
         if (name, self._node_kind) in ctx.ancestor_callers:
             return f"Cannot message {name!r}: it is already awaiting your reply (this would create a messaging cycle)."
-        reachable = {n for n, _ in resolve_live_peers(ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY), self._messaging_handles, self_name=self.name)}
+        reachable = self._live_peer_names(ctx, self._messaging_handles)
         if name not in reachable:
             return f"Agent {name!r} is not currently reachable — it is offline or not in your messaging scope. Choose from the agents listed in the tool description."  # noqa: E501
         return None
@@ -518,8 +523,10 @@ class BaseAgentNodeDef(
     ) -> None:
         """A calfkit-caught invalid call — an unknown tool, malformed/invalid args, a failed validator, or
         a bad ``message_agent`` target — lands a model-visible ``RetryPromptPart`` AND authors the paired
-        ``is_error`` ``ToolResultStep`` step. This is the SINGLE seam for both, so a pre-dispatch rejection
-        can never surface a model retry without its observation step (spec §3.2 lists pre-dispatch rejection
+        ``is_error`` ``ToolResultStep`` step. This is the single seam for both ON CONTINUING TURNS, so a
+        pre-dispatch rejection can never surface a model retry without its observation step (the one
+        exception: a §3.1 rejected-before-winner handoff deliberately bypasses it — A relinquishes, so
+        no retry is landed; ``_execute_winning_handoff`` authors its error pair + closing stub) (spec §3.2 lists pre-dispatch rejection
         as a ``ToolResultStep`` producer; the missing message_agent pairing was round-1 review MAJOR-1).
         ``content`` is the ``RetryPromptPart`` content — a ``str`` for most arms, or the schema arm's
         ``e.errors()`` ``list[dict]``; the step renders non-``str`` content to JSON text."""
@@ -774,12 +781,11 @@ class BaseAgentNodeDef(
             # NOTHING in this branch dispatches. `disposition` stays None for a handle-less agent, whose
             # user tool named `handoff_to_agent` is never intercepted (spec §3.0).
             disposition: HandoffDisposition | None = None
-            if self._handoff_handles:
-                view = ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY)
-                live_names = {n for n, _ in resolve_live_peers(view, self._handoff_handles, self_name=self.name)}
-                disposition = arbitrate_handoff(result.output.calls, live_names, self.name)
+            if self._handoff_handles and any(c.tool_name == HANDOFF_TOOL for c in result.output.calls):
+                disposition = arbitrate_handoff(result.output.calls, self._live_peer_names(ctx, self._handoff_handles), self.name)
                 if disposition.winner is not None:
                     return self._execute_winning_handoff(disposition, ctx, step_draft)
+            rejected_reasons = {id(c): r for c, r in disposition.rejected} if disposition is not None else {}
 
             for tool_call in result.output.calls:
                 ctx.state.add_tool_call(tool_call)
@@ -791,10 +797,9 @@ class BaseAgentNodeDef(
                 # `disposition` is None for a handle-less agent (spec §3.0).
                 if disposition is not None and tool_call.tool_name == HANDOFF_TOOL:
                     # Total by the arbitration invariant (documented on HandoffDisposition): no winner
-                    # ⇒ EVERY handoff call is in `rejected` (identity-matched). If the invariant ever
-                    # broke, the StopIteration surfaces as `RuntimeError("coroutine raised
-                    # StopIteration")` at the fault boundary — loud, never a hang.
-                    reason = next(r for c, r in disposition.rejected if c is tool_call)
+                    # ⇒ EVERY handoff call is in `rejected` (identity-matched); a violation is an
+                    # ordinary KeyError, landing loudly on the fault rail.
+                    reason = rejected_reasons[id(tool_call)]
                     logger.warning(
                         "[%s] handoff rejected pre-dispatch (%s); the rejection self-retry is unbounded in v1 (#251) node=%s",
                         ctx.correlation_id[:8],
