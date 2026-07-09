@@ -133,7 +133,7 @@ def test_messaging_is_exported_first_class() -> None:
 
 
 # ── Handoff handle (PR-C/ADR-0019): byte-for-byte mirror of Messaging — same curated-XOR-discover
-# validation, varargs __init__, frozen value semantics, no tool protocols. Feeds HandoffRequest. ──
+# validation, varargs __init__, frozen value semantics, no tool protocols. Gates the handoff tool. ──
 
 
 def test_handoff_curated_names() -> None:
@@ -254,7 +254,7 @@ def test_same_name_in_messaging_and_handoff_is_allowed_and_partitioned() -> None
 
 def test_sequential_handoff_only_agent_registers_no_fanout_store() -> None:
     # decision 1(b), NARROWED for PR-C: `_needs_durable_batch` keys on MESSAGING handles, not any peer. A
-    # Handoff-only agent never dispatches an isolate_state Call (a HandoffRequest is the turn's OUTPUT, not
+    # Handoff-only agent never dispatches an isolate_state Call (a winning handoff is a TailCall, not
     # a Call), so a SEQUENTIAL Handoff-only agent (not fanout-capable) provisions NO durable store — unlike
     # a sequential MESSAGING agent (test_sequential_messaging_agent_registers_fanout_store).
     from calfkit.nodes._fanout_store import FANOUT_STORE_KEY

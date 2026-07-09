@@ -1,13 +1,16 @@
-"""The :class:`Handoff` peer-handoff capability handle (ADR-0019)."""
+"""The :class:`Handoff` capability handle + the reserved handoff tool's pure kernel.
+
+The handle declares WHO an agent may hand off to (ADR-0019's surface, unchanged); the
+transport is the reserved ``handoff_to_agent`` external tool with calfkit-owned turn
+arbitration (handoff-tool-transport-spec, ADR-0035): :func:`handoff_tool_def` renders the
+per-turn tool def, and :func:`arbitrate_handoff` decides a whole response's disposition.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
-from typing import TYPE_CHECKING, Literal
-
-from pydantic import BaseModel, Field, create_model, field_validator
+from typing import TYPE_CHECKING
 
 from calfkit._handle_names import normalize_handle_names
 from calfkit._safe import safe_exc_message
@@ -25,8 +28,8 @@ class Handoff:
     """Identity-only handle declaring which peer agents this agent may **hand off** to (a Handoff —
     transfer of conversation control: the handing agent relinquishes and does **not** regain it; the peer
     continues the full conversation and returns to the original caller). Passed in
-    ``Agent(peers=[Handoff(...)])``; gates and feeds the runtime-built ``HandoffRequest`` structured-output
-    option. Two modes, mutually exclusive on one handle:
+    ``Agent(peers=[Handoff(...)])``; gates the reserved ``handoff_to_agent`` tool — its injection,
+    name reservation, and arbitration (spec §2/§3.0). Two modes, mutually exclusive on one handle:
 
     - **curated** — ``Handoff("refunds", "billing")`` / ``Handoff(names=[...])``: the named peers are the
       only handoff targets (the v1 caller-side trust boundary, §7).
@@ -51,82 +54,6 @@ class Handoff:
     def __init__(self, *positional: str, names: Sequence[str] | None = None, discover: bool = False) -> None:
         object.__setattr__(self, "names", normalize_handle_names("Handoff", "agent", positional=positional, names=names, discover=discover))
         object.__setattr__(self, "discover", discover)
-
-
-class HandoffRequest(BaseModel):
-    """The model produces this as its turn's **output** to transfer control to a peer (§5.3, L4) — a BARE
-    structured-output union member, NOT a tool. ``output_type = [final_output_type, HandoffRequest,
-    DeferredToolRequests]`` keeps ``allow_text_output=True`` on every provider (a ``ToolOutput`` wrapper
-    would force ``tool_choice=required``, which Anthropic rejects under extended thinking); calfkit
-    discriminates by ``isinstance(result.output, HandoffRequest)`` for dispatch.
-
-    This is the **stable base**. The per-turn subclass (:func:`_build_handoff_request`) narrows ``name`` to
-    a ``Literal`` over the live directory and carries the directory as its ``__doc__``; ``__base__`` keeps
-    ``isinstance`` valid across rebuilds.
-
-    - ``name`` — the peer to hand off to (validated against the live ``Literal`` in the per-turn subclass).
-    - ``message`` — the handing agent's summary/context for the peer, required non-empty (``min_length=1``),
-      so an empty value is auto-retried by pydantic-ai like an out-of-``Literal`` ``name`` (L5/C2).
-
-    Both fields carry a model-facing ``Field(description=...)`` that pydantic-ai forwards inside the schema's
-    ``properties`` (the per-turn subclass inherits ``message``'s and re-declares ``name``'s alongside the
-    ``Literal``); this is the structured-output analog of the ``message_agent`` tool's per-param descriptions.
-    """
-
-    name: str
-    message: str = Field(min_length=1, description="Your summary or context for the peer, so it can continue the conversation.")
-
-    @field_validator("message")
-    @classmethod
-    def _message_not_blank(cls, v: str) -> str:
-        # Parity with `message_agent` (which rejects via `not message.strip()`): a whitespace-only message
-        # is blank, not content. `Field(min_length=1)` stays as the model-visible JSON-schema hint; this
-        # enforces the strip semantics so an auto-retry fires just like an out-of-`Literal` `name`.
-        if not v.strip():
-            raise ValueError("message must not be blank (whitespace-only)")
-        return v
-
-
-# The per-field "how to fill this" guidance lives in the field descriptions (`name`/`message` below), which
-# pydantic-ai forwards inside the schema's `properties` — mirroring how the `message_agent` tool splits its
-# top-level description from its per-param descriptions. The preamble keeps only the handoff *semantics* + the
-# directory it points at, so the two are documented once each, not duplicated.
-_HANDOFF_PREAMBLE = (
-    "Use HandoffRequest to hand the whole conversation to a better-suited agent — when the request belongs to "
-    "another agent's domain and should be handled by them, not just consulted. You relinquish control and will "
-    "NOT regain it: the chosen agent continues with full context of the conversation and answers the original "
-    "caller in your place.\n\n"
-    "Agents (name — description):\n"
-)
-
-# Injected into the per-run instructions (NOT a persisted message part) when a Handoff handle is present but
-# no in-scope peer is live, so the dormant capability stays legible while the member is omitted (§5.3).
-# Self-heals: the moment a peer comes online the Literal member returns and this note disappears.
-_HANDOFF_NO_PEERS_NOTE = "You cannot currently hand off this conversation or task to another agent, as no other agents are online."
-
-
-@lru_cache(maxsize=128)
-def _build_handoff_request(live: tuple[tuple[str, str | None], ...]) -> type[HandoffRequest]:
-    """The per-turn :class:`HandoffRequest` subclass for a given live, sorted directory — built once per
-    distinct live set (``@lru_cache``; an explicit bound, not the silent default-128 that reads as
-    "unbounded"). Callers pass :func:`~calfkit.peers.directory.resolve_live_peers`' sorted-by-name output,
-    so identical directories reuse one model **and** its compiled schema. ``description`` is part of the key
-    (the ``__doc__`` depends on it). ``__base__=HandoffRequest`` keeps ``isinstance`` discrimination valid;
-    ``name`` is a ``Literal`` over the live names (pydantic-ai natively rejects + auto-retries an
-    out-of-directory value, no calfkit code); ``__doc__`` is the handoff directory (the structured-output
-    analog of a tool docstring). **Requires a non-empty live set** — an empty ``Literal`` is unbuildable
-    (raises at pydantic schema-build), so the dispatch path omits the member instead (§5.3)."""
-    if not live:
-        raise ValueError("_build_handoff_request requires a non-empty live directory — an empty Literal is unbuildable; omit the member instead")
-    names = tuple(name for name, _ in live)
-    return create_model(
-        "HandoffRequest",
-        __base__=HandoffRequest,
-        __doc__=_HANDOFF_PREAMBLE + render_peer_directory(live),
-        # The Literal carries the allowed values; the description is re-declared here (the base's `name` has
-        # none, and this override would discard it anyway) so it rides into the schema's `properties`.
-        name=(Literal[names], Field(description="The peer to hand off to (a name from the list of available agents).")),
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -155,8 +82,8 @@ _REJECT_UNREACHABLE = (
 )
 _REJECT_NONE_ONLINE = "You cannot currently hand off this conversation or task to another agent, as no other agents are online."
 
-# §2 pinned preamble — the old `_HANDOFF_PREAMBLE` with its `HandoffRequest` lead-in
-# reworded (that name is no longer model-visible under the tool transport).
+# §2 pinned preamble (CONFIRMED 2026-07-09) — the top of the tool description; the live
+# directory renders beneath it.
 _HANDOFF_TOOL_PREAMBLE = (
     "Hand the whole conversation to a better-suited agent — when the request belongs to "
     "another agent's domain and should be handled by them, not just consulted. You "

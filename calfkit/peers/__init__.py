@@ -9,8 +9,8 @@ dedupe, no merge) and deliberately do **not** implement the tool protocols, so t
 handle can't see its enclosing agent's name, M2).
 
 Two capabilities ship: :class:`Messaging` (PR-B) feeds the runtime-rendered ``message_agent`` tool (a Peer
-message — consult and keep control); :class:`Handoff` (PR-C, ADR-0019) feeds the per-turn ``HandoffRequest``
-structured-output option (transfer of conversation control — the handing agent relinquishes).
+message — consult and keep control); :class:`Handoff` (ADR-0019/0035) gates the reserved ``handoff_to_agent``
+tool (transfer of conversation control — the handing agent relinquishes).
 """
 
 from calfkit.peers.handoff import Handoff

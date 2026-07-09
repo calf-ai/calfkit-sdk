@@ -271,12 +271,12 @@ def test_structured_output_preamble_no_response_returns_empty():
     assert structured_output_preamble([_user("hello")]) == ""
 
 
-def test_handoff_shaped_union_member_is_surfaced():
-    """The agent-mesh case: a final_result_HandoffRequest union member surfaces cross-agent.
-
-    A handoff models control transfer as a structured-output union member; in tool mode it is a
-    renamed output tool whose args carry the member's fields directly. The handing agent's
-    structured handoff output must reach the receiving agent.
+def test_legacy_structured_output_handoff_history_still_surfaces():
+    """Spec §11 regression pin: OLD persisted histories from the retired structured-output
+    handoff transport (a ``final_result_HandoffRequest`` output-tool call) must still
+    deserialize and surface cross-agent via the ``_is_output_tool`` prefix rule — free
+    behavior, not a compat feature; a future ``_is_output_tool`` refactor must not silently
+    break legacy-history briefings.
     """
     history: list[ModelMessage] = [
         _response(
@@ -292,35 +292,6 @@ def test_handoff_shaped_union_member_is_surfaced():
     out = project(history, viewer="refunds")
 
     assert '<triage>\n{"message":"escalating","name":"refunds"}' in _user_prompt_texts(out)
-
-
-def test_str_agent_handoff_surfaces_to_peer():
-    """The str-output agent handoff (complements the structured case above): its union has a single
-    structured member, so the output tool is named exactly ``final_result`` (not renamed). Its handoff args
-    must still surface cross-agent, attributed to the handing agent — both JSON shapes are legible to B."""
-    history: list[ModelMessage] = [
-        _response(
-            ToolCallPart(tool_name="final_result", args={"name": "refunds", "message": "escalating"}, tool_call_id="h1"),
-            name="triage",
-        ),
-    ]
-
-    out = project(history, viewer="refunds")
-
-    assert '<triage>\n{"message":"escalating","name":"refunds"}' in _user_prompt_texts(out)
-
-
-def test_native_prompted_handoff_surfaces_to_peer():
-    """The native/prompted handoff (the Anthropic+thinking path): A's HandoffRequest is JSON *text*,
-    surfaced verbatim by the text rule, attributed to the handing agent (the JSON is union-wrapped in this
-    mode, but the projection renders whatever A produced — truthful, never fabricated)."""
-    history: list[ModelMessage] = [
-        _response(TextPart(content='{"result":{"kind":"HandoffRequest","data":{"name":"refunds","message":"escalating"}}}'), name="triage"),
-    ]
-
-    out = project(history, viewer="refunds")
-
-    assert '<triage>\n{"result":{"kind":"HandoffRequest","data":{"name":"refunds","message":"escalating"}}}' in _user_prompt_texts(out)
 
 
 def test_ordinary_function_tool_call_is_not_surfaced():
