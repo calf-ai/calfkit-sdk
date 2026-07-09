@@ -725,7 +725,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         envelope for the broadcast mirror (spec §4.2/§6.8/§13).
 
         Mirrors the ``ReturnCall`` arm against the PRE-MUTATION ``snapshot``: pop the answered
-        frame, mint ``FaultMessage(in_reply_to=popped.frame_id, tag=popped.tag, error=report)``,
+        frame, mint ``FaultMessage(in_reply_to=popped.frame_id, tag=popped.tag, marker=popped.marker, error=report)``,
         carry the inbound ``context`` UNCHANGED (handler mutations die with the faulted turn,
         §4.2), and publish to the popped ``callback_topic`` with ``x-calf-kind=fault`` +
         ``x-calf-error-type``. A frameless / fire-and-forget terminal (no callback) is floored

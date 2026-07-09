@@ -72,8 +72,8 @@ class AgentSeamContext(SeamContext[State]):
     def tool_call(self) -> ToolCall | None:
         """The failing tool's :class:`ToolCall`, or ``None`` when the fault is not tool-attributable
         (off the ``on_callee_error`` stage, or a genuinely un-attributable fault). Lazy — resolved per
-        access from ``failing_call`` (D3), so it stays correct if the framework re-points ``failing_call``
-        across the interim carriage's echo-rail rework."""
+        access from ``failing_call`` (D3): carriage-first from the echoed ``CallMarker`` on the
+        ``message_agent`` arm, else from ``state.tool_calls``."""
         return resolve_failing_tool_call(self)
 
 

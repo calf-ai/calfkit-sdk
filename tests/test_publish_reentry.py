@@ -14,6 +14,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._protocol import HDR_KIND, decode_header_str
 from calfkit.models.envelope import Envelope
+from calfkit.models.marker import ToolCallMarker
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes.base import BaseNodeDef
@@ -21,8 +22,16 @@ from calfkit.nodes.base import BaseNodeDef
 
 def _fanout_envelope() -> Envelope:
     # The state at a completing fold: the node's OWN marked fan-out frame on top
-    # (fanout_id == frame_id), with stale context that the re-entry must clear.
-    frame = CallFrame(target_topic="agent", callback_topic="caller.return", frame_id="A", fanout_id="A", tag="agentTag")
+    # (fanout_id == frame_id), with stale context that the re-entry must clear. The frame carries an
+    # echo-rail marker so the re-entry's deliberate non-mint (D3) can be pinned with teeth below.
+    frame = CallFrame(
+        target_topic="agent",
+        callback_topic="caller.return",
+        frame_id="A",
+        fanout_id="A",
+        tag="agentTag",
+        marker=ToolCallMarker(tool_name="message_agent", tool_call_id="agentTag", args={"name": "b", "message": "hi"}),
+    )
     return Envelope(
         context=SessionRunContext(state=State(metadata="stale"), deps={"k": "v"}),
         internal_workflow_state=WorkflowState(call_stack=Stack([frame])),
@@ -58,6 +67,7 @@ async def test_publish_reentry_deltas() -> None:
     assert env.reply.in_reply_to == "A"  # the fan-out frame's own id (== fanout_id)
     assert env.reply.tag == "agentTag"
     assert env.reply.parts == []  # no payload — the closure reads from the durable tables
+    assert env.reply.marker is None  # the re-entry answers no Call, so it mints NO marker (D3) — even from a marked frame
     assert env.context.state.metadata is None  # state cleared (was "stale")
     assert env.context.deps == {}  # deps cleared
     assert env.internal_workflow_state.current_frame.frame_id == "A"  # NOT popped — frame stays

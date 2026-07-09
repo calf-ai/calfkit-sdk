@@ -176,6 +176,23 @@ class TestEchoMints:
         assert isinstance(mirror.reply, FaultMessage)
         assert mirror.reply.marker is None
 
+    async def test_fault_from_an_unmarked_frame_echoes_marker_none(self) -> None:
+        # The marker-absence path (spec §7.4): an escalation hop / a fault answering an unstamped call —
+        # the frame EXISTS but carries no marker (distinct from the frameless branch above) → echoes None.
+        broker = KafkaBroker("localhost")
+
+        @broker.subscriber("caller.return", group_id="e5fu")
+        async def _cap(body: Envelope) -> None:
+            return None
+
+        node = BaseNodeDef(node_id="n", subscribe_topics=["n.in"])
+        inbound = _framed_env(marker=None)  # a present-but-unstamped frame (the escalation-hop shape)
+        snapshot = node._stack_snapshot(inbound)
+        async with TestKafkaBroker(broker):
+            mirror, _ = await node._publish_fault(ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", broker)
+        assert isinstance(mirror.reply, FaultMessage)
+        assert mirror.reply.marker is None
+
     async def test_reentry_mints_no_marker_even_from_a_marked_frame(self) -> None:
         # D3: the fan-out re-entry answers no Call, so it mints NO marker — even though the frame carries one.
         broker = KafkaBroker("localhost")

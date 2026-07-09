@@ -34,7 +34,8 @@ class SlotRef(BaseModel):
     target_topic: str
     """The sibling callee's topic, captured at OPEN from ``Call.target_topic``. Sourced onto the
     matched outcome's :attr:`FanoutOutcome.target_topic` at fold so the fault group's per-slot
-    topology has it without the reply carrying it (the reply echoes only ``in_reply_to``/``tag``)."""
+    topology has it without the reply needing to carry it (the reply echoes ``in_reply_to``/``tag``/
+    ``marker``, none of which is the callee topic)."""
 
 
 class FanoutOpen(BaseModel):
