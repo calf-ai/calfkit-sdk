@@ -144,6 +144,8 @@ def test_unparseable_args_are_malformed():
     ((call, reason),) = d.rejected
     assert call is h
     assert reason.startswith("Malformed handoff_to_agent arguments: ")
+    assert "{etype}" not in reason  # formatted, not the raw template (review round 1)
+    assert "ValueError" in reason  # the concrete parse-failure type reaches the model
 
 
 def test_json_list_args_are_malformed():

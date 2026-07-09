@@ -100,6 +100,12 @@ async def test_rank2_handoff_beats_prompted_mode_json_text_answer() -> None:
 
     assert isinstance(result, TailCall)  # the HANDOFF wins
     assert result.target_topic == derive_input_topic("billing")
+    # The losing JSON-text answer surfaces as the hop's PREAMBLE step (the step_preamble
+    # docstring's deliberate §8 corner — review round 1): text lost the turn, so "the text
+    # this hop emitted" is exactly what the step carries.
+    draft = ctx._step_draft or []
+    assert [type(e).__name__ for e in draft] == ["AgentMessageStep", "HandoffStep"]
+    assert draft[0].parts[0].text == '{"text": "the answer"}'
 
 
 async def test_rank2_handoff_beats_str_agent_text_answer() -> None:

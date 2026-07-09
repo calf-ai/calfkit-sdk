@@ -23,6 +23,7 @@ from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY
 from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent
+from calfkit.nodes.tool import Tools
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import _NONE_REACHABLE
 from calfkit.peers.handoff import _HANDOFF_TOOL_PREAMBLE, HANDOFF_TOOL
@@ -142,3 +143,13 @@ def test_handoff_name_unreserved_without_a_handoff_handle() -> None:
     agent may own a user tool named ``handoff_to_agent`` and it stays an ordinary tool."""
     agent = _agent(TestModel(), tools=[_user_tool(HANDOFF_TOOL)])
     assert HANDOFF_TOOL in {b.name for b in agent.tools}
+
+
+def test_reserved_names_also_guard_the_tools_selector_arm() -> None:
+    """The reservation gate's SECOND arm (review round 1): named `Tools` selectors are
+    checked too — a discover-resolved tool node of a reserved name must not construct,
+    for either built-in, or the §3.0 fork would hijack it at runtime."""
+    with pytest.raises(ValueError, match="reserved"):
+        _agent(TestModel(), tools=[Tools(HANDOFF_TOOL)], peers=[Handoff("billing")])
+    with pytest.raises(ValueError, match="reserved"):
+        _agent(TestModel(), tools=[Tools("message_agent")], peers=[Messaging("billing")])

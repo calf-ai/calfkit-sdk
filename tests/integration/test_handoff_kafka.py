@@ -35,6 +35,7 @@ from calfkit.models.agents import AGENTS_TOPIC, AgentCard
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef, agent_tool
 from calfkit.peers import Handoff, Messaging
+from calfkit.peers.directory import _NONE_REACHABLE
 from calfkit.peers.handoff import _STUB_TOOL_NOT_EXECUTED, HANDOFF_TOOL
 from calfkit.worker import Worker
 from tests.integration._kafka_helpers import fast_control_plane
@@ -211,7 +212,14 @@ async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstra
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=final_model("I'll handle it myself"), peers=[Handoff(ghost)])
+    def _answers_directly(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        # The tool RIDES the toolset with the sentinel directory (spec §2) — asserted in-model
+        # so the over-the-wire claim in this docstring is actually checked (review round 1).
+        tool = next(t for t in info.function_tools if t.name == HANDOFF_TOOL)
+        assert tool.description.endswith(_NONE_REACHABLE)
+        return ModelResponse(parts=[TextPart("I'll handle it myself")])
+
+    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=FunctionModel(_answers_directly), peers=[Handoff(ghost)])
 
     driver = Client.connect(kafka_bootstrap)
     a_worker = _worker(kafka_bootstrap, nodes=[agent_a], control_plane=control_plane)
@@ -219,7 +227,7 @@ async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstra
     async with a_worker:
         result = await driver.agent(topic=a_in).execute("can you help", timeout=120)
 
-    assert result.output is not None and "handle it myself" in result.output  # answered directly; no handoff member offered
+    assert result.output is not None and "handle it myself" in result.output  # answered directly; sentinel tool was offered
 
     await driver.aclose()
     await a_worker._client.aclose()

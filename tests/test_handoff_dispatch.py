@@ -400,3 +400,24 @@ async def test_pending_handoff_in_reentry_arm_raises_loudly() -> None:
     ctx.state.add_tool_call(part)  # registered but unresolved — the impossible state
     with pytest.raises(RuntimeError, match="handoff"):
         await agent.run(ctx)
+
+
+async def test_returning_handoff_a_to_b_to_a_re_enters_cleanly() -> None:
+    """The A-return direction of spec §4's re-entry pin (review round 1): after A→B→A, A
+    re-enters over its OWN persisted handoff turn (real call + self-owned closing request)
+    plus B's surfaced turn — one clean model call, no deferred-results mismatch."""
+    a_model = _emit_once_then_text(_handoff_part("billing", "take over"))
+    a = _agent(a_model, peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": None}))
+    assert isinstance(await a.run(ctx), TailCall)
+
+    b_model = _emit_once_then_text(_handoff_part("triage", "back to you", call_id="h2"))
+    b = Agent("billing", subscribe_topics="billing.in", model_client=b_model, peers=[Handoff("triage")])
+    b_ctx = _ctx_with_view(_view({"triage": None}), state=ctx.state)
+    assert isinstance(await b.run(b_ctx), TailCall)  # billing hands BACK to triage
+
+    a2_ctx = _ctx_with_view(_view({"billing": None}), state=b_ctx.state)
+    result = await a.run(a2_ctx)
+    assert a_model._test_calls["n"] == 2  # exactly one clean re-entry model call
+    assert isinstance(result, ReturnCall)
+    assert "FRESH" in "".join(getattr(p, "text", "") for p in result.value)

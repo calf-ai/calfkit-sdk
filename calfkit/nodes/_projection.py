@@ -74,10 +74,13 @@ def _is_handoff_tool(tool_name: str) -> bool:
     """True for the reserved handoff transport tool (handoff-tool-transport-spec §6).
 
     ``handoff_to_agent`` is calfkit-reserved at agent construction whenever a ``Handoff``
-    handle is present (the only agents that can emit a genuine handoff call), so — like the
-    ``final_result*`` namespace above — surfacing it cross-agent cannot collide with a user
-    tool on the emitting agent. Its args are the peer's ONLY briefing channel: the winning
-    call carries ``{name, message}`` and must reach the receiving agent's view.
+    handle is present, so a genuine-handoff emitter can carry no colliding user tool. Like
+    the ``final_result*`` namespace above, the match is by NAME only — a handle-less
+    agent's user tool of this name (permitted, spec §3.0) would be matched here and
+    mis-surfaced cross-agent, so keep user tool names off ``handoff_to_agent`` (the same
+    documented posture as ``final_result_*``). Its args are the peer's ONLY briefing
+    channel: the winning call carries ``{name, message}`` and must reach the receiving
+    agent's view.
     """
     return tool_name == HANDOFF_TOOL
 

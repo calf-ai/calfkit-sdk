@@ -454,8 +454,17 @@ class BaseAgentNodeDef(
             ToolReturnPart(tool_name=winner.tool_name, content=_STUB_TRANSFERRED.format(name=target), tool_call_id=winner.tool_call_id)
         ]
         # Rejected-before-winner handoffs (§3.1): a RetryPromptPart would address A's next model call,
-        # and A has none — the transcript gets the generic stub; the PRECISE reason rides the step pair.
+        # and A has none — the transcript gets the generic stub; the PRECISE reason rides the step pair
+        # AND a WARNING (§7's rejection WARNING is unscoped; the step stream is best-effort, so the
+        # reason must also land on a durable operator channel — without the #251 note, which only
+        # applies to the no-winner self-retry ring).
         for call, reason in disposition.rejected:
+            logger.warning(
+                "[%s] handoff rejected on a winning turn (%s); closed by a transcript stub node=%s",
+                ctx.correlation_id[:8],
+                reason,
+                self.name,
+            )
             step_draft.append(_step_tool_call(call))
             step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=reason)], is_error=True))
             closing.append(ToolReturnPart(tool_name=call.tool_name, content=_STUB_HANDOFF_NOT_EXECUTED, tool_call_id=call.tool_call_id))
@@ -464,11 +473,11 @@ class BaseAgentNodeDef(
             step_draft.append(_step_tool_call(call))
             step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=stub)], is_error=False))
             closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub, tool_call_id=call.tool_call_id))
-        if disposition.stubbed or disposition.rejected:
+        if disposition.stubbed:
             logger.debug(
                 "[%s] handoff won the turn; stubbed %d sibling call(s) node=%s",
                 ctx.correlation_id[:8],
-                len(disposition.stubbed) + len(disposition.rejected),
+                len(disposition.stubbed),
                 self.name,
             )
 
@@ -664,7 +673,7 @@ class BaseAgentNodeDef(
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
                 if self.sequential_only_mode:
                     target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
-                    # Defensive fork (handoff spec §3.0-gated, plan S2b): a handoff call is finalized in the
+                    # Defensive fork (handoff spec §3.0-gated, spec §10): a handoff call is finalized in the
                     # delivery that produced it (winner → closing request; rejection → tool_results), so a
                     # PENDING one arriving from outside the function means corrupt/replayed state — raise
                     # loudly rather than skip (or mis-dispatch it to the registry lookup below).
@@ -781,6 +790,10 @@ class BaseAgentNodeDef(
                 # handoff call; land the precise §9 reason as a standard pre-dispatch rejection. Gated:
                 # `disposition` is None for a handle-less agent (spec §3.0).
                 if disposition is not None and tool_call.tool_name == HANDOFF_TOOL:
+                    # Total by the arbitration invariant (documented on HandoffDisposition): no winner
+                    # ⇒ EVERY handoff call is in `rejected` (identity-matched). If the invariant ever
+                    # broke, the StopIteration surfaces as `RuntimeError("coroutine raised
+                    # StopIteration")` at the fault boundary — loud, never a hang.
                     reason = next(r for c, r in disposition.rejected if c is tool_call)
                     logger.warning(
                         "[%s] handoff rejected pre-dispatch (%s); the rejection self-retry is unbounded in v1 (#251) node=%s",

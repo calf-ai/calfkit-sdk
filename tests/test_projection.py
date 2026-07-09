@@ -819,3 +819,22 @@ def test_handoff_tool_call_unparseable_args_logged_and_skipped(caplog):
 
     assert not any("handoff_to_agent" in t or "not json" in t for t in _user_prompt_texts(out))
     assert any("omitting structured component" in r.message for r in caplog.records)
+
+
+def test_stubbed_second_handoff_args_also_surface_to_peer():
+    """Spec §6 accepted corner (review round 1): the arm matches EVERY handoff_to_agent
+    call by name, so a stubbed second-valid handoff's args also reach B — documented noise.
+    A later 'fix' in either direction must be a deliberate decision, not a drive-by."""
+    history: list[ModelMessage] = [
+        _response(
+            ToolCallPart(tool_name="handoff_to_agent", args={"name": "refunds", "message": "the winning briefing"}, tool_call_id="h1"),
+            ToolCallPart(tool_name="handoff_to_agent", args={"name": "support", "message": "the stubbed briefing"}, tool_call_id="h2"),
+            name="triage",
+        ),
+    ]
+
+    out = project(history, viewer="refunds")
+
+    texts = " ".join(_user_prompt_texts(out))
+    assert "the winning briefing" in texts
+    assert "the stubbed briefing" in texts

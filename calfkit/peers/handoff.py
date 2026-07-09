@@ -146,6 +146,9 @@ class HandoffDisposition:
     - ``rejected`` — invalid handoff calls with their §9 reasons. On a no-winner turn the
       executor lands each as a ``RetryPromptPart``; on a winning turn they are closed in
       the closing ``ModelRequest`` instead (§3.1 — A has no next model call to retry).
+      INVARIANT (consumers rely on it): ``winner is None`` ⇒ EVERY ``HANDOFF_TOOL`` call in
+      the arbitrated response is in ``rejected`` (membership by object identity, not
+      equality).
     - ``stubbed`` — every OTHER call in the response, iff a winner exists (early
       semantics: nothing is dispatched); empty when there is no winner (mixed
       disposition — remaining calls proceed through the normal loop).
@@ -159,8 +162,10 @@ class HandoffDisposition:
 def arbitrate_handoff(calls: Sequence[ToolCallPart], live_names: Collection[str], self_name: str) -> HandoffDisposition:
     """Arbitrate a model response's tool calls under the handoff-wins rule (spec §3): the
     first VALID ``handoff_to_agent`` call wins the turn; every sibling call is stubbed;
-    invalid handoff calls are rejected with precise reasons. Pure — the single
-    turn-disposition seam (and the post-#230 home of the §8 precedence policy)."""
+    invalid handoff calls are rejected with precise reasons; when NO handoff is valid,
+    every handoff call lands in ``rejected`` (the totality invariant the dispatch fork's
+    reason lookup relies on). Pure — the single turn-disposition seam (and the post-#230
+    home of the §8 precedence policy)."""
     winner: ToolCallPart | None = None
     rejected: list[tuple[ToolCallPart, str]] = []
     for call in calls:
