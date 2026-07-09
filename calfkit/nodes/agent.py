@@ -21,6 +21,7 @@ from calfkit.models._coerce import _coerce_to_parts
 from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard, derive_input_topic
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.envelope import Envelope
+from calfkit.models.marker import ToolCallMarker
 from calfkit.models.node_result import _extract_text, extract_lenient
 from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry, render_parts_as_text
 from calfkit.models.seam_context import SeamContext
@@ -313,7 +314,7 @@ class BaseAgentNodeDef(
             )
             return
         if is_retry(outcome.parts):
-            call = resolve_tool_call(ctx.state, tag, carried_tool_name=None)  # at close the (restored) caller state resolves it
+            call = resolve_tool_call(ctx.state, tag, carried_marker=None)  # at close the (restored) caller state resolves it
             retry = RetryPromptPart(
                 content=self._retry_content(outcome.parts), tool_name=call.tool_name if call is not None else None, tool_call_id=tag
             )
@@ -323,7 +324,7 @@ class BaseAgentNodeDef(
         # multi-part sub-conversation answer, and the generic single-part extract_lenient would drop a
         # text preamble before its structured data (§5.2). Discriminated by the registered tool call's
         # name (None-guarded — a tag without a registered call falls back to the generic codec).
-        call = resolve_tool_call(ctx.state, tag, carried_tool_name=None)  # shared tag → ToolCall lookup (spec D3)
+        call = resolve_tool_call(ctx.state, tag, carried_marker=None)  # shared tag → ToolCall lookup (spec D3)
         if call is not None and call.tool_name == _MESSAGE_AGENT_TOOL:
             tool_return = ToolReturn(return_value=_serialize_message_reply(outcome.parts), metadata={"tool_call_id": tag})
         else:
@@ -500,10 +501,12 @@ class BaseAgentNodeDef(
         args = tool_call.args_as_dict()
         seed = State()
         seed.stage_message(ModelRequest.user_text_prompt(args["message"]))
-        # TODO(echo-rail): the ONLY setter of the interim tool-identity carriage. A peer call runs on a
-        # fresh seed State, so its fault folds with the PEER's foreign state (the caller's tag absent) —
-        # ``resolve_failing_tool_call`` reads this carried name instead of ``state.tool_calls`` (spec D3).
-        return Call[State](derive_input_topic(args["name"]), seed, tag=tool_call.tool_call_id, isolate_state=True, tool_name=_MESSAGE_AGENT_TOOL)
+        # The sole echo-marker-rail producer in this PR (spec D4/D6): a peer call runs on a fresh seed
+        # State, so its fault folds with the PEER's foreign state (the caller's tag absent) — the marker
+        # rides the frame and echoes on the reply, and ``resolve_failing_tool_call`` reconstructs the full
+        # call from it (carriage-first) instead of consulting ``state.tool_calls`` (spec D3/D7).
+        marker = ToolCallMarker(tool_name=_MESSAGE_AGENT_TOOL, tool_call_id=tool_call.tool_call_id, args=args)
+        return Call[State](derive_input_topic(args["name"]), seed, tag=tool_call.tool_call_id, isolate_state=True, marker=marker)
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
         """Selector resolution gate: per-run overrides pin the EXACT tool

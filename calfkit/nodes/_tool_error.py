@@ -16,6 +16,7 @@ from typing import TypeVar
 
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart as ToolCall
 from calfkit.models.error_report import ErrorReport
+from calfkit.models.marker import CallMarker
 from calfkit.models.payload import retry_text_part
 from calfkit.models.seam_context import SeamContext, SeamReturn
 from calfkit.models.state import State
@@ -76,18 +77,21 @@ class AgentSeamContext(SeamContext[State]):
         return resolve_failing_tool_call(self)
 
 
-def resolve_tool_call(state: State, tag: str | None, *, carried_tool_name: str | None) -> ToolCall | None:
-    """The single ``tag → ToolCall`` resolution (spec D3), shared by :attr:`AgentSeamContext.tool_call`
+def resolve_tool_call(state: State, tag: str | None, *, carried_marker: CallMarker | None) -> ToolCall | None:
+    """The single ``tag → ToolCall`` resolution (spec D3/D7), shared by :attr:`AgentSeamContext.tool_call`
     and the agent's ``_resolve_slot`` so the lookup lives in one place.
 
-    **Carriage-first** for the ``message_agent``/``isolate_state`` arm: a ``carried_tool_name`` (present
-    ONLY for that arm) reconstructs a minimal ``ToolCall(args=None)`` WITHOUT reading the reply state —
-    that state is the *peer's* (foreign), so consulting it would only "work" by tag non-collision (the
-    Phase-0 finding). **State** otherwise (``state.tool_calls[tag]``): the full call *with args*, for a
-    normal single-call or fan-out tool whose own ``State`` rode back on the reply.
+    **Carriage-first** for the ``message_agent``/``isolate_state`` arm: a ``carried_marker`` (the echoed
+    :class:`~calfkit.models.marker.CallMarker`, present ONLY for that arm) reconstructs the **full** call
+    — name, id, AND args — from the marker ALONE, WITHOUT reading the reply state (that state is the
+    *peer's* / foreign, so consulting it would only "work" by tag non-collision — the Phase-0 finding).
+    The ``tool_call_id`` comes from ``marker.tool_call_id``, never ``tag`` (Q1: the follow-up deprecates
+    ``tag``'s echo role, so the reconstruction must not lean on it). **State** otherwise
+    (``state.tool_calls[tag]``): the full call for a normal single-call or fan-out tool whose own
+    ``State`` rode back on the reply.
     """
-    if carried_tool_name is not None:
-        return ToolCall(tool_name=carried_tool_name, tool_call_id=tag or "", args=None)
+    if carried_marker is not None:
+        return ToolCall(tool_name=carried_marker.tool_name, tool_call_id=carried_marker.tool_call_id, args=carried_marker.args)
     if not tag:
         return None
     return state.tool_calls.get(tag)
@@ -100,7 +104,7 @@ def resolve_failing_tool_call(ctx: AgentSeamContext) -> ToolCall | None:
     failing = ctx.failing_call
     if failing is None:
         return None
-    return resolve_tool_call(ctx.state, failing.tag, carried_tool_name=failing.tool_name)
+    return resolve_tool_call(ctx.state, failing.tag, carried_marker=failing.marker)
 
 
 # The agent-facing ``on_tool_error`` handler shape (spec D5): the flat, ADK-faithful three-param

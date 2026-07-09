@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from calfkit._types import DepsT, StackItemT, StateT
 from calfkit.models.actions import _Call
+from calfkit.models.marker import CallMarker
 from calfkit.models.payload import ContentPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.state import OverridesState, State
@@ -92,6 +93,16 @@ class CallFrame:
     caller_node_kind: str | None = field(default=None)
     """The kind (one of ``NodeKind``) of :attr:`caller_node_id`'s node, completing the identity
     matched against ``ctx.ancestor_callers`` (a ``(name, "agent")`` pair for an agent peer)."""
+    marker: CallMarker | None = field(default=None)
+    """The echo marker rail's carriage (echo-rail spec D2): a typed, ``kind``-discriminated
+    :class:`~calfkit.models.marker.CallMarker` stamped at the ``invoke_frame`` push and echoed
+    **verbatim** on the reply (``_ReplyBase.marker``) when this frame unwinds — the ``tag`` contract,
+    but a typed *correlation context* instead of an opaque string. Placement law: universal-to-all-calls
+    facts are frame fields (``tag``, ``caller_node_id``); per-call-*type* facts are marker *kinds*;
+    content is payload/state — never the marker. Callee-opaque: never interpreted or rewritten by the
+    callee. ``None`` on frames whose producer stamps none (the client root, escalation hops). Preserved
+    verbatim by ``replace()`` (the ``TailCall`` retarget / ``mark_fanout``) — so a handoff target answers
+    the caller's slot echoing the *original* caller's marker, with no transfer-specific code."""
 
 
 CallFrameStack = Stack[CallFrame]
@@ -134,6 +145,7 @@ class WorkflowState(BaseModel):
         *,
         frame_id: str | None = None,
         tag: str | None = None,
+        marker: CallMarker | None = None,
         caller_node_id: str | None = None,
         caller_node_kind: str | None = None,
     ) -> None:
@@ -153,6 +165,7 @@ class WorkflowState(BaseModel):
                 callback_topic=callback_topic,
                 payload=payload,
                 tag=tag,
+                marker=marker,
                 caller_node_id=caller_node_id,
                 caller_node_kind=caller_node_kind,
             )
@@ -163,6 +176,7 @@ class WorkflowState(BaseModel):
                 payload=payload,
                 frame_id=frame_id,
                 tag=tag,
+                marker=marker,
                 caller_node_id=caller_node_id,
                 caller_node_kind=caller_node_kind,
             )
