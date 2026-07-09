@@ -776,3 +776,76 @@ def test_self_response_is_new_object_via_replace():
     # Shallow ``replace`` shares the part list verbatim (parts are never mutated in
     # place, and the ids must survive for the §6.2 deferred-results re-entry).
     assert emitted[0].parts is self_resp.parts
+
+
+# --------------------------------------------------------------------------- #
+# Handoff TOOL transport surfacing (handoff-tool-transport-spec §6, S1)        #
+# --------------------------------------------------------------------------- #
+
+
+def _handoff_call_turn(*, author: str, target: str, message: str, tool_call_id: str = "h1") -> list[ModelMessage]:
+    """A's winning handoff turn under the tool transport: the ``handoff_to_agent`` call
+    plus the calfkit-authored closing ``ModelRequest`` (spec §4)."""
+    return [
+        _response(
+            ToolCallPart(tool_name="handoff_to_agent", args={"name": target, "message": message}, tool_call_id=tool_call_id),
+            name=author,
+        ),
+        _tool_return("handoff_to_agent", f"Transferred to {target}.", tool_call_id=tool_call_id),
+    ]
+
+
+def test_handoff_tool_call_surfaces_to_peer():
+    """spec §6: the reserved ``handoff_to_agent`` call's args surface cross-agent exactly
+    like output-tool args — B's only briefing channel under the tool transport."""
+    history = _handoff_call_turn(author="triage", target="refunds", message="escalating")
+
+    out = project(history, viewer="refunds")
+
+    assert '<triage>\n{"message":"escalating","name":"refunds"}' in _user_prompt_texts(out)
+
+
+def test_handoff_closing_request_stubs_dropped_for_peer():
+    """The closing request's ToolReturnParts are A-owned → dropped for viewer B (existing
+    owner-map rule, pinned here for the handoff turn shape)."""
+    history = _handoff_call_turn(author="triage", target="refunds", message="escalating")
+
+    out = project(history, viewer="refunds")
+
+    assert not any(isinstance(p, ToolReturnPart) for m in out if isinstance(m, ModelRequest) for p in m.parts)
+
+
+def test_handoff_tool_call_self_view_verbatim():
+    """Viewer A (self) keeps its own handoff turn verbatim — the real ToolCallPart and the
+    A-owned closing request survive (multi-participant history: B answered after)."""
+    history = [
+        *_handoff_call_turn(author="triage", target="refunds", message="escalating"),
+        _response(TextPart(content="refund issued"), name="refunds"),
+    ]
+
+    out = project(history, viewer="triage")
+
+    self_resp = next(m for m in out if isinstance(m, ModelResponse))
+    assert any(isinstance(p, ToolCallPart) and p.tool_name == "handoff_to_agent" for p in self_resp.parts)
+    assert any(isinstance(p, ToolReturnPart) and p.tool_call_id == "h1" for m in out if isinstance(m, ModelRequest) for p in m.parts)
+
+
+def test_handoff_tool_call_unparseable_args_logged_and_skipped(caplog):
+    """spec §6 totality pin: unparseable handoff args are WARNING-logged and skipped —
+    the turn drops like an ordinary internal call, never raising (mirrors the
+    output-tool arm's log-and-drop)."""
+    history: list[ModelMessage] = [
+        _response(
+            ToolCallPart(tool_name="handoff_to_agent", args="not json {{", tool_call_id="h1"),
+            name="triage",
+        ),
+        _response(TextPart(content="hello"), name="refunds"),
+    ]
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="calfkit.nodes._projection"):
+        out = project(history, viewer="refunds")
+
+    assert not any("handoff_to_agent" in t or "not json" in t for t in _user_prompt_texts(out))
+    assert any("omitting structured component" in r.message for r in caplog.records)

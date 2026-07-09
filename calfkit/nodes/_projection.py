@@ -37,6 +37,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
+from calfkit.peers.handoff import HANDOFF_TOOL
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,18 @@ def _is_output_tool(tool_name: str) -> bool:
     keep function-tool names out of that namespace (§16).
     """
     return tool_name == _FINAL_RESULT_TOOL_NAME or tool_name.startswith(_FINAL_RESULT_TOOL_NAME + "_")
+
+
+def _is_handoff_tool(tool_name: str) -> bool:
+    """True for the reserved handoff transport tool (handoff-tool-transport-spec §6).
+
+    ``handoff_to_agent`` is calfkit-reserved at agent construction whenever a ``Handoff``
+    handle is present (the only agents that can emit a genuine handoff call), so — like the
+    ``final_result*`` namespace above — surfacing it cross-agent cannot collide with a user
+    tool on the emitting agent. Its args are the peer's ONLY briefing channel: the winning
+    call carries ``{name, message}`` and must reach the receiving agent's view.
+    """
+    return tool_name == HANDOFF_TOOL
 
 
 def project(history: list[ModelMessage], viewer: str) -> list[ModelMessage]:
@@ -273,15 +286,16 @@ def _surface(m: ModelResponse) -> str:
     """Compute the public surface of an other-agent ``ModelResponse`` (§5.5).
 
     surface = concatenated ``TextPart`` text(s) + rendered output-tool args
-    (``final_result`` / ``final_result_<Type>``, see ``_is_output_tool``),
-    non-empty components joined with a single ``"\\n"``.
+    (``final_result`` / ``final_result_<Type>``, see ``_is_output_tool``) + rendered
+    handoff-tool args (``handoff_to_agent``, see ``_is_handoff_tool`` — the peer's
+    briefing channel), non-empty components joined with a single ``"\\n"``.
     """
     components: list[str] = []
     for p in m.parts:
         if isinstance(p, TextPart):
             if p.content:
                 components.append(p.content)
-        elif isinstance(p, ToolCallPart) and _is_output_tool(p.tool_name):
+        elif isinstance(p, ToolCallPart) and (_is_output_tool(p.tool_name) or _is_handoff_tool(p.tool_name)):
             # Branch on truthiness of args directly (NOT the rendered string, and
             # NOT has_content() which drops {"x": 0}). (§5.5)
             if p.args:
@@ -294,7 +308,7 @@ def _surface(m: ModelResponse) -> str:
                     components.append(_render_structured_args(p))
                 except Exception:
                     logger.warning(
-                        "could not render output-tool args for projection surface (tool_name=%s tool_call_id=%s); omitting structured component",
+                        "could not render surfaced tool args for projection (tool_name=%s tool_call_id=%s); omitting structured component",
                         p.tool_name,
                         p.tool_call_id,
                         exc_info=True,
