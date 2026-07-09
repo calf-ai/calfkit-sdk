@@ -5,6 +5,7 @@ from typing_extensions import TypeAliasType, TypeVar
 
 from calfkit._routing import is_concrete_route_key
 from calfkit._types import StateT
+from calfkit.models.marker import CallMarker
 
 
 @dataclass
@@ -48,11 +49,12 @@ class Call(Generic[StateT], _Call[StateT]):
     body: Any | None = None
     tag: str | None = None
     isolate_state: bool = False
-    # TODO(echo-rail): interim tool-identity carriage — a framework-reserved, keyword-only slot set ONLY
-    # by ``Agent._message_agent_call`` (the one arm whose reply state is foreign, so ``state.tool_calls``
-    # cannot resolve the caller's tool). Reworked wholesale by the echo marker rail
-    # (docs/issues/echo-marker-rail.md). ``None`` for every normal Call.
-    tool_name: str | None = None
+    marker: CallMarker | None = None
+    """The echo marker rail's carriage (spec D4) — a typed, ``kind``-discriminated
+    :class:`~calfkit.models.marker.CallMarker`, framework-reserved and keyword-only, threaded onto the
+    pushed ``CallFrame.marker`` exactly as ``tag`` is (and echoed verbatim on the reply). Set by
+    ``Agent._message_agent_call`` (the sole producer in this PR). ``None`` for a call the framework
+    stamps none on."""
 
     def __init__(
         self,
@@ -63,7 +65,7 @@ class Call(Generic[StateT], _Call[StateT]):
         body: Any | None = None,
         tag: str | None = None,
         isolate_state: bool = False,
-        tool_name: str | None = None,  # TODO(echo-rail): interim tool-identity carriage
+        marker: CallMarker | None = None,
     ) -> None:
         if route is not None and not is_concrete_route_key(route):
             raise ValueError(
@@ -78,7 +80,7 @@ class Call(Generic[StateT], _Call[StateT]):
         self.body = body
         self.tag = tag
         self.isolate_state = isolate_state
-        self.tool_name = tool_name  # TODO(echo-rail): interim tool-identity carriage
+        self.marker = marker
 
 
 @dataclass(init=False)

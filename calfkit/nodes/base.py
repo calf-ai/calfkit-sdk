@@ -540,7 +540,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             for call in output:
                 wf_copy = envelope.internal_workflow_state.model_copy(deep=True)
                 wf_copy.invoke_frame(
-                    call, self._return_topic, payload=call.body, tag=call.tag, caller_node_id=self.node_id, caller_node_kind=self._node_kind
+                    call,
+                    self._return_topic,
+                    payload=call.body,
+                    tag=call.tag,
+                    marker=call.marker,
+                    caller_node_id=self.node_id,
+                    caller_node_kind=self._node_kind,
                 )
                 publish_envelope = Envelope(
                     context=SessionRunContext(state=call.state, deps=envelope.context.deps),
@@ -562,7 +568,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         elif isinstance(output, Call):
             # push to callstack and call the target topic
             envelope.internal_workflow_state.invoke_frame(
-                output, self._return_topic, payload=output.body, tag=output.tag, caller_node_id=self.node_id, caller_node_kind=self._node_kind
+                output,
+                self._return_topic,
+                payload=output.body,
+                tag=output.tag,
+                marker=output.marker,
+                caller_node_id=self.node_id,
+                caller_node_kind=self._node_kind,
             )
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
@@ -580,7 +592,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         elif isinstance(output, ReturnCall):
             # unwind current frame and return to previous topic, carrying the reply slot
             frame = envelope.internal_workflow_state.unwind_frame()
-            reply = ReturnMessage(in_reply_to=frame.frame_id, tag=frame.tag, parts=_coerce_to_parts(output.value))
+            reply = ReturnMessage(in_reply_to=frame.frame_id, tag=frame.tag, marker=frame.marker, parts=_coerce_to_parts(output.value))
             publish_envelope = Envelope(
                 context=SessionRunContext(state=output.state, deps=envelope.context.deps),
                 internal_workflow_state=envelope.internal_workflow_state,
@@ -713,7 +725,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         envelope for the broadcast mirror (spec §4.2/§6.8/§13).
 
         Mirrors the ``ReturnCall`` arm against the PRE-MUTATION ``snapshot``: pop the answered
-        frame, mint ``FaultMessage(in_reply_to=popped.frame_id, tag=popped.tag, error=report)``,
+        frame, mint ``FaultMessage(in_reply_to=popped.frame_id, tag=popped.tag, marker=popped.marker, error=report)``,
         carry the inbound ``context`` UNCHANGED (handler mutations die with the faulted turn,
         §4.2), and publish to the popped ``callback_topic`` with ``x-calf-kind=fault`` +
         ``x-calf-error-type``. A frameless / fire-and-forget terminal (no callback) is floored
@@ -726,12 +738,17 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         callback_topic = frame.callback_topic if frame is not None else None
         in_reply_to = frame.frame_id if frame is not None else None
         tag = frame.tag if frame is not None else None
+        marker = frame.marker if frame is not None else None  # echo the answered frame's marker (captured pre-pop, like tag)
         if frame is not None:
             snapshot.unwind_frame()  # pop the answered frame; the remaining stack travels for the next hop
 
         def _mirror(r: ErrorReport) -> Envelope:
             # The inbound context is carried UNCHANGED (handler mutations die with the faulted turn, §4.2).
-            return Envelope(context=inbound.context, internal_workflow_state=snapshot, reply=FaultMessage(in_reply_to=in_reply_to, tag=tag, error=r))
+            return Envelope(
+                context=inbound.context,
+                internal_workflow_state=snapshot,
+                reply=FaultMessage(in_reply_to=in_reply_to, tag=tag, marker=marker, error=r),
+            )
 
         mirror = _mirror(report)
         if callback_topic is None:
@@ -1058,7 +1075,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         kind: MessageKind,
         reply: ReturnMessage | FaultMessage,
         target_topic: str | None,
-        tool_name: str | None = None,  # TODO(echo-rail): interim tool-identity carriage (message_agent arm only)
     ) -> _SlotResolved | _SlotFailed:
         """Stage 1 (fault-rail §6.8/§6.9): resolve ONE callee slot — UNIFORM for a return AND a fault,
         single-call AND fan-out. A return resolves directly (``on_callee_error`` runs only for faults).
@@ -1077,8 +1093,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             return _SlotResolved(frame_id=frame_id, tag=tag, target_topic=target_topic, parts=reply.parts, handled=False)
         assert isinstance(reply, FaultMessage)  # stray-check guarantees fault ⇔ FaultMessage
         report = reply.error
-        # TODO(echo-rail): carry tool_name onto the failing_call so resolve_failing_tool_call can read it
-        seam_ctx.failing_call = CalleeResult(frame_id=frame_id, tag=tag, target_topic=target_topic, tool_name=tool_name, fault=report)
+        seam_ctx.failing_call = CalleeResult(frame_id=frame_id, tag=tag, target_topic=target_topic, marker=reply.marker, fault=report)
         try:
             handled = await run_chain(self._chains[ON_CALLEE_ERROR], seam_ctx, report, seam_name=ON_CALLEE_ERROR)
         except NodeFaultError as nfe:
@@ -1215,11 +1230,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             reg = FanoutOpen(
                 fanout_id=fanout_id,
                 node_id=self.node_id,
-                # TODO(echo-rail): carry Call.tool_name onto the SlotRef at OPEN (interim tool-identity carriage)
-                expected=[
-                    SlotRef(frame_id=fid, tag=call.tag, target_topic=call.target_topic, tool_name=call.tool_name)
-                    for fid, call in zip(slot_ids, calls)
-                ],
+                expected=[SlotRef(frame_id=fid, tag=call.tag, target_topic=call.target_topic) for fid, call in zip(slot_ids, calls)],
             )
             snapshot = EnvelopeSnapshot(state=ctx.state, stack=envelope.internal_workflow_state, deps=dict(ctx.deps))
             await store.open(fanout_id, reg, snapshot)
@@ -1232,6 +1243,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                     payload=call.body,
                     frame_id=slot_id,
                     tag=call.tag,
+                    marker=call.marker,
                     caller_node_id=self.node_id,
                     caller_node_kind=self._node_kind,
                 )
@@ -1290,9 +1302,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 # fault runs on_callee_error). Unhandled ⇒ escalate; handled ⇒ materialize + run body.
                 reply = envelope.reply
                 assert reply is not None  # kind in (return, fault) ⇒ a reply slot (stray-checked)
-                # TODO(echo-rail): a non-fan-out single Call has no SlotRef → no carried tool_name (its
-                # identity resolves via state.tool_calls); pass None explicitly to keep the arm visible.
-                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=None, tool_name=None)
+                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=None)
                 if isinstance(outcome, _SlotFailed):
                     return _BatchFaulted(outcome.report)  # escalate, unwrapped; the body never runs
                 self._resolve_slot(seam_ctx, outcome)  # materialize into the agent's private bookkeeping (I4)
@@ -1331,9 +1341,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 logger.error("[%s] fan-out classify abort (%s) batch=%s node=%s; escalating", correlation_id[:8], reason, fanout_id, self.node_id)
                 return _BatchFaulted(self._fanout_abort_report(reason))
             case SiblingPending(slot_ref=slot_ref):
-                # Stage 1 runs ONLY on a live pending slot (the stray check above precedes the seams).
-                # TODO(echo-rail): source the carried tool_name from the matched SlotRef (like target_topic)
-                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=slot_ref.target_topic, tool_name=slot_ref.tool_name)
+                # Stage 1 runs ONLY on a live pending slot (the stray check above precedes the seams). The
+                # failing tool's identity now rides the echoed ``reply.marker``, read inside ``_resolve_callee``.
+                outcome = await self._resolve_callee(seam_ctx, kind, reply, target_topic=slot_ref.target_topic)
                 return await self._record_and_maybe_close(store, fanout_id, self._slot_to_fanout_outcome(outcome), envelope, correlation_id, broker)
 
     async def _record_and_maybe_close(

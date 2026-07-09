@@ -17,9 +17,10 @@ state-first provenance assumptions (spec D3), but against a LIVE broker so the c
   ``test_message_agent_kafka.py::test_peer_fault_runs_callers_on_callee_error``. See
   ``notes/2026-07-07-agent-tool-error-reception-phase0-findings.md``.
 
-Once the interim ``SlotRef`` carriage lands (Phase 3b), the same folds also confirm it end-to-end
-through the real store: ``failing_call.tool_name`` is ``None`` for a normal tool and ``"message_agent"``
-for a peer fold (the identity the resolver reads when the peer's foreign state can't provide it).
+The same folds also confirm the **echo marker rail** end-to-end over the wire: ``failing_call.marker``
+is ``None`` for a normal tool and a ``ToolCallMarker(tool_name="message_agent", …)`` for a peer fold, so
+``ctx.tool_call`` reconstructs the full call — including the **real args** — from the marker when the
+peer's foreign state can't provide it (the identity carriage the resolver reads carriage-first).
 
 The probe (:class:`_ToolCallProbe`) captures the seam's view of the failing call, then **declines**
 so the fault still escalates (capture-in-callback, assert-in-test-body). Opt-in (``-m kafka``); skips
@@ -44,8 +45,8 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
 from calfkit.models.error_report import ErrorReport
-from calfkit.models.seam_context import SeamContext
 from calfkit.nodes import Agent
+from calfkit.nodes._tool_error import AgentSeamContext
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
 from tests.integration._fault_kafka import fault_worker
@@ -69,18 +70,22 @@ class _ToolCallProbe:
 
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def __call__(self, ctx: SeamContext[Any], fault: ErrorReport) -> None:
+    def __call__(self, ctx: AgentSeamContext, fault: ErrorReport) -> None:
         failing = ctx.failing_call
         tag = failing.tag if failing is not None else None
         tool_calls = ctx.state.tool_calls
         resolved = tool_calls.get(tag) if tag is not None else None
+        tool_call = ctx.tool_call  # the echo-rail resolution: carriage-first via the marker, else state
         self.calls.append(
             {
                 "delivery_kind": ctx.delivery_kind,
                 "error_type": fault.error_type,
                 "tag": tag,
                 "target_topic": failing.target_topic if failing is not None else None,
-                "failing_tool_name": failing.tool_name if failing is not None else None,  # the interim carriage (Phase 3b)
+                # The echoed marker carries the caller's tool identity for the message_agent arm (None for a
+                # normal tool, which stamps no marker); ``ctx.tool_call`` reconstructs the full call from it.
+                "failing_marker_tool_name": failing.marker.tool_name if (failing is not None and failing.marker is not None) else None,
+                "tool_call_args": tool_call.args if tool_call is not None else None,
                 "state_tool_call_tags": sorted(tool_calls.keys()),
                 "resolved_present": resolved is not None,
                 "resolved_has_args": resolved is not None and getattr(resolved, "args", None) is not None,
@@ -121,7 +126,7 @@ async def test_gate_a_single_tool_fault_resolves_via_state_over_the_wire(kafka_b
     assert call["resolved_present"] is True  # state carried back across the wire → state-first hits
     assert call["resolved_has_args"] is True  # full ToolCallPart with .args (grounds D3 over the wire)
     assert call["resolved_tool_name"] == "boom"
-    assert call["failing_tool_name"] is None  # a normal tool carries NO interim carriage (Phase 3b)
+    assert call["failing_marker_tool_name"] is None  # a normal tool stamps NO marker (message_agent-only in PR 1)
 
 
 async def test_gate_b1_fanout_sibling_resolves_via_real_ktables_store(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -161,7 +166,7 @@ async def test_gate_b1_fanout_sibling_resolves_via_real_ktables_store(kafka_boot
     assert call["resolved_present"] is True  # sibling state mirrored back through the real store
     assert call["resolved_has_args"] is True  # .args intact for the parallel tool (grounds D3 state-first)
     assert call["resolved_tool_name"] == "boom"
-    assert call["failing_tool_name"] is None  # a normal fan-out tool carries NO interim carriage (Phase 3b)
+    assert call["failing_marker_tool_name"] is None  # a normal fan-out tool stamps NO marker
 
 
 def _worker(bootstrap: str, *, nodes: list, control_plane: ControlPlaneConfig) -> Worker:
@@ -243,7 +248,8 @@ async def test_gate_b2_message_agent_fault_folds_empty_state_but_has_target_topi
     assert "m1" not in call["state_tool_call_tags"]  # the caller's tag is absent from the peer's folded state
     assert call["resolved_present"] is False  # state-first lookup MISSES → the SlotRef carriage is needed
     assert call["target_topic"] == f"agent.{b_name}.private.input"  # THE CHANNEL: SlotRef→CalleeResult populated
-    assert call["failing_tool_name"] == "message_agent"  # THE CARRIAGE (Phase 3b): the identity reached the fold
+    assert call["failing_marker_tool_name"] == "message_agent"  # THE MARKER: the caller's tool identity reached the fold
+    assert call["tool_call_args"] == {"name": b_name, "message": "do it"}  # gate 3: ctx.tool_call resolves REAL args via the marker
 
 
 async def test_gate_b2_mixed_batch_amplification(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -294,7 +300,7 @@ async def test_gate_b2_mixed_batch_amplification(kafka_bootstrap: str, topic_nam
     # The tool sibling: state-first resolves with args, and carries NO interim carriage.
     assert tool_firings[0]["resolved_present"] is True
     assert tool_firings[0]["resolved_has_args"] is True
-    assert tool_firings[0]["failing_tool_name"] is None
+    assert tool_firings[0]["failing_marker_tool_name"] is None  # the normal tool stamps no marker
     # The message_agent sibling: its tag is absent from the (peer's) folded state → state-first misses,
     # the channel (target_topic) is populated, and the carriage delivered the identity. (The folded state
     # carries the peer's own tool_calls, not an empty seed — the Phase-0 finding for the lone case above
@@ -302,4 +308,5 @@ async def test_gate_b2_mixed_batch_amplification(kafka_bootstrap: str, topic_nam
     assert "m1" not in peer_firings[0]["state_tool_call_tags"]
     assert peer_firings[0]["resolved_present"] is False
     assert peer_firings[0]["target_topic"] == f"agent.{b_name}.private.input"
-    assert peer_firings[0]["failing_tool_name"] == "message_agent"  # THE CARRIAGE (Phase 3b)
+    assert peer_firings[0]["failing_marker_tool_name"] == "message_agent"  # THE MARKER: the identity reached the fold
+    assert peer_firings[0]["tool_call_args"] == {"name": b_name, "message": "do it"}  # gate 3: REAL args via the marker

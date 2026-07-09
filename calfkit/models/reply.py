@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from calfkit.models.error_report import ErrorReport
+from calfkit.models.marker import CallMarker
 from calfkit.models.payload import ContentPart
 
 
@@ -28,6 +29,13 @@ class _ReplyBase(BaseModel):
     tag: str | None
     """Echo of ``CallFrame.tag`` — the caller's opaque correlation token (the agent
     sets ``tool_call_id``). Transport metadata, never interpreted as content."""
+
+    marker: CallMarker | None = None
+    """Verbatim echo of the answered ``CallFrame.marker`` (echo-rail spec D3), minted from the
+    frame at the two mints that answer a Call-pushed frame (the ``ReturnCall`` arm and the fault
+    arm). Callee-opaque, like ``tag`` — never interpreted or rewritten by the callee. ``None`` on a
+    reply answering an unstamped frame, and on the fan-out re-entry (a control signal that answers no
+    Call, so it mints none). Decode-tolerant default (``None``) — old→new safe (D10)."""
 
 
 class ReturnMessage(_ReplyBase):

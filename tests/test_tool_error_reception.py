@@ -16,6 +16,7 @@ from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.exceptions import RegistryConfigError
 from calfkit.models.error_report import ErrorReport, ExceptionInfo, FrameRef
+from calfkit.models.marker import ToolCallMarker
 from calfkit.models.payload import TextPart, is_retry, retry_text_part
 from calfkit.models.seam_context import CalleeResult
 from calfkit.models.state import State
@@ -161,43 +162,57 @@ class TestSurfaceToModel:
         assert r1.text == "E: one" and r2.text == "E: two"
 
 
+_MA_MARKER = ToolCallMarker(tool_name="message_agent", tool_call_id="m1", args={"name": "billing", "message": "hi"})
+
+
 class TestResolveToolCall:
-    """The shared ``tag → ToolCall`` lookup (spec D3), used by both ``ctx.tool_call`` and the agent's
-    ``_resolve_slot``: **carriage-first** for the ``message_agent``/``isolate_state`` arm, else **state**."""
+    """The shared ``tag → ToolCall`` lookup (spec D3/D7), used by both ``ctx.tool_call`` and the agent's
+    ``_resolve_slot``: **carriage-first** via the echoed ``CallMarker`` for the
+    ``message_agent``/``isolate_state`` arm, else **state** (``state.tool_calls[tag]``)."""
 
     def test_state_arm_returns_the_full_call_with_args(self) -> None:
         state = State()
         state.add_tool_call(ToolCallPart("web_search", {"q": "kafka"}, tool_call_id="c1"))
-        call = resolve_tool_call(state, tag="c1", carried_tool_name=None)
+        call = resolve_tool_call(state, tag="c1", carried_marker=None)
         assert call is not None
         assert call.tool_name == "web_search"
         assert call.args == {"q": "kafka"}  # the FULL call — args intact (normal tool / fan-out sibling)
 
-    def test_carriage_arm_reconstructs_with_args_none(self) -> None:
-        # A carried tool_name (the message_agent arm) reconstructs a minimal call, args unknown.
-        call = resolve_tool_call(State(), tag="m1", carried_tool_name="message_agent")
+    def test_carriage_arm_reconstructs_the_full_call_from_the_marker(self) -> None:
+        # The carried marker reconstructs the FULL call — name, id, AND real args (D1 shape (i) / D7).
+        call = resolve_tool_call(State(), tag="m1", carried_marker=_MA_MARKER)
         assert call is not None
         assert call.tool_name == "message_agent"
-        assert call.args is None  # the peer arm can't recover args (documented limitation, D3/D5)
-        assert call.tool_call_id == "m1"
+        assert call.args == {"name": "billing", "message": "hi"}  # REAL args — the deliberate delta (was None)
+        assert call.tool_call_id == "m1"  # Q1: sourced from the marker, not the tag
+
+    def test_carriage_arm_tolerates_a_marker_with_no_args_and_no_tag(self) -> None:
+        # [R1-M2/m3] decode-tolerance + Q1 decoupling: a marker off the wire may carry ``args=None``, and
+        # the reconstructed id comes from the marker even when ``tag`` is None (never the deleted ``tag or ""``).
+        marker = ToolCallMarker(tool_name="message_agent", tool_call_id="m9", args=None)
+        call = resolve_tool_call(State(), tag=None, carried_marker=marker)
+        assert call is not None
+        assert call.tool_name == "message_agent"
+        assert call.args is None
+        assert call.tool_call_id == "m9"
 
     def test_carriage_arm_never_reads_the_foreign_state_collision_guard(self) -> None:
         # THE collision guard (Phase-0 finding): the folded state is the PEER's — it may contain a
-        # tool-call under the SAME tag. Carriage-first must ignore it and return the message_agent
-        # reconstruction, never the peer's foreign call.
+        # tool-call under the SAME tag. Carriage-first must ignore it and reconstruct from the marker,
+        # never the peer's foreign call.
         peer_state = State()
         peer_state.add_tool_call(ToolCallPart("PEER_TOOL", {"a": 1}, tool_call_id="m1"))
-        call = resolve_tool_call(peer_state, tag="m1", carried_tool_name="message_agent")
+        call = resolve_tool_call(peer_state, tag="m1", carried_marker=_MA_MARKER)
         assert call is not None
         assert call.tool_name == "message_agent"  # NOT "PEER_TOOL"
-        assert call.args is None  # NOT the peer's {"a": 1}
+        assert call.args == {"name": "billing", "message": "hi"}  # the MARKER's args, NOT the peer's {"a": 1}
 
     def test_missing_tag_returns_none(self) -> None:
         state = State()
         state.add_tool_call(ToolCallPart("web_search", {"q": "x"}, tool_call_id="c1"))
-        assert resolve_tool_call(state, tag="absent", carried_tool_name=None) is None  # tag not registered
-        assert resolve_tool_call(state, tag=None, carried_tool_name=None) is None  # no tag
-        assert resolve_tool_call(state, tag="", carried_tool_name=None) is None  # empty tag
+        assert resolve_tool_call(state, tag="absent", carried_marker=None) is None  # tag not registered
+        assert resolve_tool_call(state, tag=None, carried_marker=None) is None  # no tag
+        assert resolve_tool_call(state, tag="", carried_marker=None) is None  # empty tag
 
 
 class TestResolveFailingToolCall:
@@ -211,20 +226,20 @@ class TestResolveFailingToolCall:
     def test_normal_tool_fold_resolves_from_state_with_args(self) -> None:
         state = State()
         state.add_tool_call(ToolCallPart("web_search", {"q": "kafka"}, tool_call_id="c1"))
-        ctx = _agent_ctx(state=state, failing_call=CalleeResult(frame_id="f", tag="c1", tool_name=None))
+        ctx = _agent_ctx(state=state, failing_call=CalleeResult(frame_id="f", tag="c1", marker=None))
         call = resolve_failing_tool_call(ctx)
         assert call is not None and call.tool_name == "web_search" and call.args == {"q": "kafka"}
 
-    def test_message_agent_fold_resolves_from_carriage(self) -> None:
-        # The failing_call carries tool_name (message_agent arm); the state is the PEER's (foreign).
+    def test_message_agent_fold_resolves_from_the_marker(self) -> None:
+        # The failing_call carries the echoed marker; the state is the PEER's (foreign) — ignored.
         peer_state = State()
         peer_state.add_tool_call(ToolCallPart("PEER_TOOL", {"a": 1}, tool_call_id="bx"))
         ctx = _agent_ctx(
             state=peer_state,
-            failing_call=CalleeResult(frame_id="f", tag="m1", tool_name="message_agent", target_topic="agent.billing.private.input"),
+            failing_call=CalleeResult(frame_id="f", tag="m1", marker=_MA_MARKER, target_topic="agent.billing.private.input"),
         )
         call = resolve_failing_tool_call(ctx)
-        assert call is not None and call.tool_name == "message_agent" and call.args is None
+        assert call is not None and call.tool_name == "message_agent" and call.args == {"name": "billing", "message": "hi"}
 
 
 class TestAgentSeamContextToolCall:
