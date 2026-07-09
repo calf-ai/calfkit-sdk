@@ -628,7 +628,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             frame = envelope.internal_workflow_state.unwind_frame()
             retargeted = replace(frame, target_topic=output.target_topic, payload=None, fanout_id=None)
             if output.clear_overrides:
-                # Genuine handoff (handoff-tool-transport-spec §5/C2): null the frame's per-run overrides so the tailcallee — a
+                # Genuine handoff (handoff-tool-transport-spec §5; C2 in agent-mesh-spec): null the frame's per-run overrides so the tailcallee — a
                 # DIFFERENT agent — uses its OWN tools/model. `prepare_context` re-applies `frame.overrides`
                 # onto `state.overrides` at the callee's start, so BOTH channels must be nulled (`run()`
                 # nulls the state channel on the carried State). Default `False` preserves overrides for the

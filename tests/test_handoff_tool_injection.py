@@ -147,8 +147,9 @@ def test_handoff_name_unreserved_without_a_handoff_handle() -> None:
 
 def test_reserved_names_also_guard_the_tools_selector_arm() -> None:
     """The reservation gate's SECOND arm (review round 1): named `Tools` selectors are
-    checked too — a discover-resolved tool node of a reserved name must not construct,
-    for either built-in, or the §3.0 fork would hijack it at runtime."""
+    checked too — a NAMED selector carrying a reserved name must not construct, for either
+    built-in, or the §3.0 fork would hijack it at runtime. (`Tools(discover=True)`
+    resolution remains the explicitly deferred gap, agent.py's gate comment.)"""
     with pytest.raises(ValueError, match="reserved"):
         _agent(TestModel(), tools=[Tools(HANDOFF_TOOL)], peers=[Handoff("billing")])
     with pytest.raises(ValueError, match="reserved"):
