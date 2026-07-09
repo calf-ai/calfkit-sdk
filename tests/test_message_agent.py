@@ -284,3 +284,15 @@ async def test_message_agent_absent_without_a_messaging_handle() -> None:
     agent = Agent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_capture))  # NO peers=
     await agent.run(_make_ctx(State()))
     assert "message_agent" not in captured["tools"]
+
+
+def test_handoff_name_reserved_for_handoff_only_agent() -> None:
+    # Companion to the messaging-only assertion above (handoff spec §2/§3.0): reservation is
+    # per-handle-kind — a Handoff-only agent reserves `handoff_to_agent` (its own built-in) while
+    # leaving `message_agent` unreserved.
+    user_tool = ToolBinding(
+        dispatch_topic="t.in",
+        tool_def=ToolDefinition(name="handoff_to_agent", description="x", parameters_json_schema={"type": "object", "properties": {}}),
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        Agent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[user_tool], peers=[Handoff("refunds")])

@@ -70,7 +70,9 @@ class ToolResultStep(_StepBase):
 
 
 class HandoffStep(_StepBase):
-    """A handoff to a peer agent (spec §3.2) — emitted even for an offline target."""
+    """A handoff to a peer agent (spec §3.2) — emitted only when a transfer actually happens
+    (ADR-0035: a stale/invalid target is a standard rejection and projects as an ``is_error``
+    ``ToolResultStep`` pair instead)."""
 
     kind: Literal["handoff"] = "handoff"
     target: str

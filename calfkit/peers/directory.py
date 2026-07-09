@@ -6,8 +6,8 @@ live, self-excluded ``(name, description)`` peers, sorted by name. A curated nam
 view is omitted with a per-turn WARNING (mirroring the unresolved-selector warning in selector
 resolution); a degraded or missing view warns-and-degrades to an empty directory, never raising on
 reader health (§9). ``render_peer_directory`` formats the entries into a directory body (or a "none
-reachable" sentinel) — shared by the ``message_agent`` tool description (§5.2) and the ``HandoffRequest``
-option doc (§5.3).
+reachable" sentinel) — shared by the ``message_agent`` and ``handoff_to_agent`` tool descriptions
+(§5.2, handoff-tool-transport-spec §2).
 """
 
 from __future__ import annotations
@@ -78,8 +78,8 @@ def resolve_live_peers(view: ControlPlaneView[AgentCard] | None, handles: Sequen
 def render_peer_directory(entries: Sequence[tuple[str, str | None]]) -> str:
     """Format the resolved peers into a directory body: ``name — description`` per line (sorted, name-only
     when a peer has no description); an empty set renders the "none reachable" sentinel. Shared by the
-    ``message_agent`` tool description (§5.2, still advertised so the model retains the capability) and the
-    ``HandoffRequest`` option doc (§5.3)."""
+    ``message_agent`` and ``handoff_to_agent`` tool descriptions (both always advertised so the model
+    retains the capability; §5.2, handoff-tool-transport-spec §2)."""
     if not entries:
         return _NONE_REACHABLE
     return "\n".join(f"{name} — {description}" if description else name for name, description in entries)

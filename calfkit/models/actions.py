@@ -89,9 +89,10 @@ class TailCall(Generic[StateT], _Call[StateT]):
     If current execution has a callback committment to its callee, the tailcallee inherits it.
 
     ``clear_overrides`` (opt-in, default ``False``) nulls the carried frame's per-run overrides at the
-    publish chokepoint — set only on a genuine HANDOFF (§5.3/C2), where the tailcallee is a DIFFERENT agent
-    and must use its own tools/model, not the caller's per-invocation ``tool_overrides``/``model_settings``.
-    Default ``False`` PRESERVES ``frame.overrides`` (correct for the all-invalid / staleness self-retry,
+    publish chokepoint — set only on a genuine HANDOFF (handoff-tool-transport-spec §5; C2 in
+    agent-mesh-spec), where the tailcallee is a DIFFERENT agent and must use its own tools/model,
+    not the caller's per-invocation ``tool_overrides``/``model_settings``.
+    Default ``False`` PRESERVES ``frame.overrides`` (correct for the all-invalid self-retry,
     which tailcalls to *self* and keeps the caller's surface). ``init=False`` keeps the positional
     ``(target_topic, state)`` construction — a ``TailCall`` carries no route/body/tag — while letting
     ``clear_overrides`` participate in ``__eq__``/``__repr__`` (mirrors ``Call``)."""

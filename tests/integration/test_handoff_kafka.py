@@ -4,12 +4,13 @@ The over-the-wire counterpart to the offline ``tests/test_handoff_dispatch.py`` 
 drive ``agent.run`` directly with a stubbed agents view; what they CANNOT prove — and what these do — is the
 handoff spine against a live broker, end to end:
 
-* agent B advertises its :class:`AgentCard`; agent A's gated agents view materializes it and builds the
-  per-turn ``HandoffRequest`` ``Literal`` over the live directory;
-* A produces a ``HandoffRequest``; the framework retargets A's frame (preserving the original caller's
-  callback) to B's PR-A derived input topic (``agent.{B}.private.input``) and A drops out;
-* B continues the full conversation (it sees A's handoff output cross-agent) and answers A's ORIGINAL
-  caller — the driver — not A;
+* agent B advertises its :class:`AgentCard`; agent A's gated agents view materializes it and renders the
+  live directory into the reserved ``handoff_to_agent`` tool's description (handoff-tool-transport-spec §2);
+* A CALLS ``handoff_to_agent``; calfkit arbitration wins the turn, authors the closing ModelRequest, and the
+  framework retargets A's frame (preserving the original caller's callback) to B's derived input topic
+  (``agent.{B}.private.input``) — A drops out;
+* B continues the full conversation (A's briefing — the tool call's args — surfaces cross-agent via the
+  POV projection) and answers A's ORIGINAL caller — the driver — not A;
 * chained handoffs compose (A->B->C reaches the original caller), a handoff inside a peer-message folds
   into the messaging caller's tool result, and a direct handoff clears the caller's per-run overrides (C2).
 
@@ -25,7 +26,7 @@ from collections.abc import Callable
 import pytest
 
 from calfkit._vendor.pydantic_ai import models
-from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.client import Client
@@ -34,6 +35,8 @@ from calfkit.models.agents import AGENTS_TOPIC, AgentCard
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef, agent_tool
 from calfkit.peers import Handoff, Messaging
+from calfkit.peers.directory import _NONE_REACHABLE
+from calfkit.peers.handoff import _STUB_TOOL_NOT_EXECUTED, HANDOFF_TOOL
 from calfkit.worker import Worker
 from tests.integration._kafka_helpers import fast_control_plane
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, final_model, retry_prompt_texts, returns_by_call_id, scripted_model
@@ -70,14 +73,13 @@ async def _await_agents_view(bootstrap: str, predicate: Callable[[ControlPlaneVi
         await view.stop()
 
 
-def _emit_handoff(name: str, message: str) -> FunctionModel:
-    """A model that produces a ``HandoffRequest`` as its turn output — finding the output-tool name from the
-    offered ``output_tools`` (``final_result`` for a str agent, ``final_result_HandoffRequest`` for a
-    structured one) — to transfer control to ``name``."""
+def _emit_handoff(name: str, message: str, *siblings: ToolCallPart) -> FunctionModel:
+    """A model that CALLS the reserved ``handoff_to_agent`` tool (handoff-tool-transport-spec §2) to
+    transfer control to ``name`` — optionally co-emitting sibling tool calls (the arbitration stubs them)."""
 
     def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        tool = next(t for t in info.output_tools if t.name == "final_result" or "HandoffRequest" in t.name)
-        return ModelResponse(parts=[ToolCallPart(tool.name, {"name": name, "message": message}, tool_call_id="h1")])
+        assert any(t.name == HANDOFF_TOOL for t in info.function_tools)  # the reserved def rides the toolset
+        return ModelResponse(parts=[*siblings, ToolCallPart(HANDOFF_TOOL, {"name": name, "message": message}, tool_call_id="h1")])
 
     return FunctionModel(_fn)
 
@@ -87,9 +89,9 @@ def _msg_call(name: str, message: str, *, tool_call_id: str) -> ToolCallPart:
 
 
 async def test_handoff_transfers_to_peer_who_answers_original_caller(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """A (``peers=[Handoff(B)]``) produces a HandoffRequest; control transfers to B over the wire; B
+    """A (``peers=[Handoff(B)]``) calls ``handoff_to_agent``; control transfers to B over the wire; B
     continues the conversation and answers the ORIGINAL caller (the driver) — A dropped out. A's handoff
-    output rode the carried conversation, attributed to A."""
+    turn rode the carried conversation, attributed to A."""
     a_name = f"{topic_namespace}-A"
     b_name = f"{topic_namespace}-B"
     a_in = f"{topic_namespace}.A.input"
@@ -202,15 +204,22 @@ async def test_handoff_inside_peer_message_folds_to_messaging_caller(kafka_boots
 
 
 async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """A ``Handoff`` agent with NO live in-scope peer (a curated ghost never deployed): the HandoffRequest
-    member is omitted (an empty ``Literal`` is unbuildable) and an ephemeral note is injected, so A answers
-    directly over the wire — it never crashes or offers an action it can only fail."""
+    """A ``Handoff`` agent with NO live in-scope peer (a curated ghost never deployed): the
+    ``handoff_to_agent`` tool still rides the toolset with the "(no peer agents are currently reachable)"
+    sentinel directory (spec §2 — the capability stays visible), and A answers directly over the wire."""
     a_name = f"{topic_namespace}-A"
     ghost = f"{topic_namespace}-ghost"  # in A's curated scope but never deployed -> not live
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=final_model("I'll handle it myself"), peers=[Handoff(ghost)])
+    def _answers_directly(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        # The tool RIDES the toolset with the sentinel directory (spec §2) — asserted in-model
+        # so the over-the-wire claim in this docstring is actually checked (review round 1).
+        tool = next(t for t in info.function_tools if t.name == HANDOFF_TOOL)
+        assert tool.description.endswith(_NONE_REACHABLE)
+        return ModelResponse(parts=[TextPart("I'll handle it myself")])
+
+    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=FunctionModel(_answers_directly), peers=[Handoff(ghost)])
 
     driver = Client.connect(kafka_bootstrap)
     a_worker = _worker(kafka_bootstrap, nodes=[agent_a], control_plane=control_plane)
@@ -218,7 +227,7 @@ async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstra
     async with a_worker:
         result = await driver.agent(topic=a_in).execute("can you help", timeout=120)
 
-    assert result.output is not None and "handle it myself" in result.output  # answered directly; no handoff member offered
+    assert result.output is not None and "handle it myself" in result.output  # answered directly; sentinel tool was offered
 
     await driver.aclose()
     await a_worker._client.aclose()
@@ -265,6 +274,80 @@ async def test_direct_handoff_clears_caller_overrides(kafka_bootstrap: str, topi
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert "B_OWN_TOOL_OK" in str(returns_by_call_id(result.message_history)["bt1"])
     assert b_tool_name not in " ".join(retry_prompt_texts(result.message_history))  # not shadowed by A's override
+
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
+
+
+async def test_winning_handoff_stubs_parallel_sibling_over_the_wire(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """Early semantics end to end (spec §3/§4): A co-emits a REAL tool call and the handoff in one
+    response; the handoff wins — the sibling tool NEVER executes (its node would have returned a marker),
+    its closing stub rides B's inherited history, and B answers the original caller."""
+    a_name, b_name = f"{topic_namespace}-A", f"{topic_namespace}-B"
+    a_tool_name = f"{topic_namespace}-atool"
+    a_in = f"{topic_namespace}.A.input"
+    control_plane = fast_control_plane(kafka_bootstrap)
+
+    def _atool() -> str:
+        return "SIBLING_TOOL_RAN"  # must never appear anywhere
+
+    a_tool: ToolNodeDef = agent_tool(_atool, name=a_tool_name)
+    agent_a = Agent(
+        a_name,
+        system_prompt="x",
+        subscribe_topics=a_in,
+        model_client=_emit_handoff(b_name, "take over", ToolCallPart(a_tool_name, {}, tool_call_id="t1")),
+        tools=[a_tool],
+        peers=[Handoff(b_name)],
+    )
+    agent_b = Agent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("B finished it"))
+
+    driver = Client.connect(kafka_bootstrap)
+    b_worker = _worker(kafka_bootstrap, nodes=[agent_b], control_plane=control_plane)
+    a_worker = _worker(kafka_bootstrap, nodes=[agent_a, a_tool], control_plane=control_plane)
+
+    async with b_worker:
+        await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's card {b_name!r}")
+        async with a_worker:
+            result = await driver.agent(topic=a_in).execute("do both things", timeout=120)
+
+    assert result.output is not None and "B finished it" in result.output  # the handoff won; B answered the caller
+    returns = returns_by_call_id(result.message_history)
+    assert str(returns["t1"]) == _STUB_TOOL_NOT_EXECUTED  # the sibling was closed by the §4 stub...
+    assert "SIBLING_TOOL_RAN" not in str(result.message_history)  # ...and its node never executed
+
+    await driver.aclose()
+    await b_worker._client.aclose()
+    await a_worker._client.aclose()
+
+
+async def test_briefing_reaches_the_peer_over_the_wire(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """spec §6 end to end: B's model demonstrably SEES A's briefing — the handoff tool call's args,
+    surfaced by the POV projection as an attributed user turn — in its projected input."""
+    a_name, b_name = f"{topic_namespace}-A", f"{topic_namespace}-B"
+    a_in = f"{topic_namespace}.A.input"
+    briefing = "the customer wants a refund for order 1234"
+    control_plane = fast_control_plane(kafka_bootstrap)
+
+    def _b_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        flat = str(messages)
+        briefed = briefing in flat and f"<{a_name}>" in flat  # attributed to A, carrying the message
+        return ModelResponse(parts=[TextPart(f"BRIEFED={briefed}")])
+
+    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=_emit_handoff(b_name, briefing), peers=[Handoff(b_name)])
+    agent_b = Agent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=FunctionModel(_b_fn))
+
+    driver = Client.connect(kafka_bootstrap)
+    b_worker = _worker(kafka_bootstrap, nodes=[agent_b], control_plane=control_plane)
+    a_worker = _worker(kafka_bootstrap, nodes=[agent_a], control_plane=control_plane)
+
+    async with b_worker:
+        await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's card {b_name!r}")
+        async with a_worker:
+            result = await driver.agent(topic=a_in).execute("please help", timeout=120)
+
+    assert result.output is not None and "BRIEFED=True" in result.output
 
     await driver.aclose()
     await b_worker._client.aclose()

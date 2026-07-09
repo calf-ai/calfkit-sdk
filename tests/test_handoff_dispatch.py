@@ -1,245 +1,384 @@
-"""PR-C Item 4: the final-output-branch handoff dispatch (§5.3/§5.4).
+"""The handoff TOOL transport's turn dispatch (handoff-tool-transport-spec §3-§5/§7, impl-plan S2b).
 
-When the model produces a ``HandoffRequest`` as its turn output, the final-output branch (which has already
-persisted A's output via ``extend_with_responses``) routes by ``isinstance``:
-- LIVE target -> null ``state.overrides`` + ``TailCall(derive_input_topic(name), clear_overrides=True)`` — the
-  frame retargets preserving frame_id/tag/callback_topic + caller_node_id, so the peer inherits A's ORIGINAL
-  caller + full conversation and A drops out; both override channels are cleared (C2).
-- STALE (target gone between render and dispatch) -> append a FEEDBACK TURN + ``TailCall`` to SELF (no
-  clear_overrides). The feedback turn makes the history tail a ``ModelRequest`` so the re-entered model is
-  forced to re-decide; without it, pydantic-ai's ``UserPromptNode`` no-model-call shortcut would return the
-  stale handoff output verbatim in native/prompted mode (the CRITICAL regression).
-
-Invalid/self/hallucinated names never reach here — the per-turn ``Literal`` + pydantic-ai auto-retry handle
-them (covered in tests/test_handoff_request.py).
+The model requests a transfer by calling ``handoff_to_agent``; calfkit arbitrates the whole
+response (§3.0-gated): the first VALID handoff wins the turn — siblings are closed by stub
+``ToolReturnPart``s in ONE closing ``ModelRequest`` (§4), ``state.tool_calls``/``tool_results``
+stay untouched, the winner emits ``HandoffStep`` only, and ``_dispatch_handoff`` (a pure
+TailCall builder) relinquishes to the peer. Invalid handoffs are standard pre-dispatch
+rejections (``RetryPromptPart`` + error step pair) — a stale target no longer emits a
+``HandoffStep`` (documented contract change, ADR-0035).
 """
 
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
-from calfkit._vendor.pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
-from calfkit.models.actions import ReturnCall, TailCall
-from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY, derive_input_topic
+from calfkit.models.actions import Call, ReturnCall, TailCall
+from calfkit.models.agents import derive_input_topic
+from calfkit.models.marker import ToolCallMarker
 from calfkit.models.state import OverridesState, State
-from calfkit.models.step import AgentMessageStep, HandoffStep
+from calfkit.models.step import AgentMessageStep, HandoffStep, ToolCallStep, ToolResultStep
 from calfkit.nodes import Agent
-from calfkit.peers import Handoff
-from calfkit.peers.handoff import HandoffRequest
-from tests.test_tool_errors import _make_ctx
+from calfkit.peers import Handoff, Messaging
+from calfkit.peers.handoff import (
+    _REJECT_NONE_ONLINE,
+    _REJECT_UNREACHABLE,
+    _STUB_HANDOFF_NOT_EXECUTED,
+    _STUB_TOOL_NOT_EXECUTED,
+    HANDOFF_TOOL,
+)
+from tests._peer_fakes import agents_view as _view
+from tests._peer_fakes import ctx_with_view as _ctx_with_view
+from tests._peer_fakes import handoff_part as _handoff_part
+from tests._peer_fakes import triage_agent as _agent
+from tests._peer_fakes import user_tool as _user_tool
 
 
-class _MutableView:
-    """A duck-typed agents view whose snapshot can change between reads — to simulate the render->dispatch
-    staleness race (and a peer flapping back online for the self-retry re-entry)."""
-
-    def __init__(self, cards: dict[str, str | None]) -> None:
-        self._cards = cards
-
-    def snapshot(self) -> dict[str, Any]:
-        return {n: SimpleNamespace(description=d) for n, d in self._cards.items()}
-
-    def set(self, cards: dict[str, str | None]) -> None:
-        self._cards = cards
-
-
-def _view(cards: dict[str, str | None]) -> _MutableView:
-    return _MutableView(cards)
-
-
-def _ctx_with_view(view: object) -> Any:
-    ctx = _make_ctx(State())
-    ctx._resources = {AGENTS_VIEW_RESOURCE_KEY: view}
-    ctx._ancestor_callers = frozenset()
-    return ctx
-
-
-def _agent(model: Any, **kw: Any) -> Agent[Any]:
-    return Agent("triage", subscribe_topics="triage.in", model_client=model, **kw)
-
-
-def _emit_handoff(name: str, message: str) -> Any:
-    """A FunctionModel function that emits the HandoffRequest output-tool call (finding its name from the
-    offered output_tools — ``final_result`` for a str agent, ``final_result_HandoffRequest`` for a structured
-    one), so pydantic-ai parses ``result.output`` into a HandoffRequest instance."""
+def _emit_once_then_text(*parts: Any) -> FunctionModel:
+    """Emit the given parts on the FIRST model call; plain text on any later call (re-entry)."""
+    calls = {"n": 0}
 
     def _fn(messages: list[Any], info: AgentInfo) -> ModelResponse:
-        tool = next(t for t in info.output_tools if t.name == "final_result" or "HandoffRequest" in t.name)
-        return ModelResponse(parts=[ToolCallPart(tool_name=tool.name, args={"name": name, "message": message}, tool_call_id="h1")])
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ModelResponse(parts=list(parts))
+        return ModelResponse(parts=[ModelTextPart("FRESH")])
 
-    return _fn
+    model = FunctionModel(_fn)
+    model._test_calls = calls  # type: ignore[attr-defined]
+    return model
 
 
-# ── unit: _dispatch_handoff routing (live / stale) ──
+def _closing_request(state: State) -> ModelRequest:
+    last = state.message_history[-1]
+    assert isinstance(last, ModelRequest), f"history must end with the closing ModelRequest, got {type(last).__name__}"
+    return last
 
 
-def test_dispatch_handoff_live_target_tailcalls_with_clear_overrides() -> None:
+# --------------------------------------------------------------------------- #
+# _dispatch_handoff — a pure TailCall builder (spec §5)                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_dispatch_handoff_builds_the_relinquish_tailcall() -> None:
     agent = _agent(TestModel(), peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
     ctx.state.overrides = OverridesState()  # the caller's per-run overrides are present
-    result = agent._dispatch_handoff(HandoffRequest(name="billing", message="take over"), ctx)
+    result = agent._dispatch_handoff("billing", ctx)
     assert isinstance(result, TailCall)
-    assert result.target_topic == derive_input_topic("billing")  # relinquish to the peer's input topic
-    assert result.clear_overrides is True  # genuine handoff -> clear the frame channel (C2)
-    assert ctx.state.overrides is None  # ...and the state channel (both nulled)
+    assert result.target_topic == derive_input_topic("billing")
+    assert result.clear_overrides is True  # frame channel cleared (C2)
+    assert ctx.state.overrides is None  # ...and the state channel (both nulled, single home §5)
     assert result.state is ctx.state  # carries the CURRENT full conversation
 
 
-def test_dispatch_handoff_stale_target_self_retries_with_feedback_turn() -> None:
-    agent = _agent(TestModel(), peers=[Handoff("billing")])
-    ctx = _ctx_with_view(_view({}))  # billing gone (stale at dispatch)
-    result = agent._dispatch_handoff(HandoffRequest(name="billing", message="x"), ctx)
-    assert isinstance(result, TailCall)
-    assert result.target_topic == agent._return_topic  # self-retry, NOT a relinquish
-    assert result.clear_overrides is False  # keep A's own surface (self-retry to self)
-    last = ctx.state.message_history[-1]  # a feedback turn is appended so the model re-decides on re-entry
-    assert isinstance(last, ModelRequest)
-    assert any(isinstance(p, UserPromptPart) for p in last.parts)
+# --------------------------------------------------------------------------- #
+# Winner path (plan tests 1-3)                                                 #
+# --------------------------------------------------------------------------- #
 
 
-def test_dispatch_handoff_stale_target_warns(caplog: pytest.LogCaptureFixture) -> None:
-    # The stale self-retry is the entry to an unbounded loop (#251), so it must be operator-visible: a
-    # WARNING naming the offline target is the only signal of a stale-handoff ring until #251 lands a bound.
-    agent = _agent(TestModel(), peers=[Handoff("billing")])
-    ctx = _ctx_with_view(_view({}))  # billing offline
-    with caplog.at_level(logging.WARNING):
-        agent._dispatch_handoff(HandoffRequest(name="billing", message="x"), ctx)
-    # the agent's own stale-self-retry WARNING (not the directory's curated-absent warning, which is a
-    # different logger): names the offline target, from calfkit.nodes.agent.
-    assert any(r.levelname == "WARNING" and r.name == "calfkit.nodes.agent" and "billing" in r.message for r in caplog.records)
-
-
-async def test_staleness_self_retry_re_invokes_the_model() -> None:
-    # CRITICAL regression guard: the feedback turn makes the history tail a ModelRequest, defeating
-    # pydantic-ai's UserPromptNode no-model-call shortcut — so the re-entered run CALLS the model and
-    # returns a FRESH decision, NOT the stale handoff output returned VERBATIM (the native/prompted bug).
-    #
-    # The shortcut only fires when instructions are EMPTY, so this agent has system_prompt="" AND the
-    # re-entry view has the peer live again (no ephemeral note) — making instructions empty so the shortcut
-    # WOULD fire if the history tail were the (terminal) stale ModelResponse. Removing the feedback-turn
-    # append from _dispatch_handoff makes this test FAIL (calls==0, the stale text returned verbatim).
-    calls = {"n": 0}
-
-    def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
-        calls["n"] += 1
-        return ModelResponse(parts=[ModelTextPart("FRESH")])
-
-    agent = Agent("triage", subscribe_topics="triage.in", system_prompt="", model_client=FunctionModel(_model), peers=[Handoff("billing")])
-    view = _view({})  # billing offline -> _dispatch_handoff sees it stale
-    ctx = _ctx_with_view(view)
-    # A produced a handoff (native/prompted = a TERMINAL JSON TextPart), already persisted by the branch:
-    stale = '{"name":"billing","message":"x"}'
-    ctx.state.extend_with_responses([ModelResponse(parts=[ModelTextPart(stale)])], agent.name)
-    agent._dispatch_handoff(HandoffRequest(name="billing", message="x"), ctx)  # stale -> appends the feedback turn
-    view.set({"billing": "Billing."})  # peer flaps back online -> re-entry has EMPTY instructions (no note)
-    result = await agent.run(ctx)  # re-entry: the ModelRequest tail must force the model call
-    assert calls["n"] == 1  # the model WAS re-invoked (the no-model-call shortcut did NOT fire)
-    assert isinstance(result, ReturnCall)
-    answer = "".join(getattr(p, "text", "") for p in result.value)
-    assert "FRESH" in answer and stale not in answer  # the FRESH decision, NOT the stale handoff verbatim
-
-
-# ── end-to-end: the model produces a HandoffRequest output (str + structured agents) ──
-
-
-async def test_str_agent_produces_handoff_and_dispatches_to_peer() -> None:
-    calls = {"n": 0}
-
-    def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
-        calls["n"] += 1
-        return _emit_handoff("billing", "please take over")(messages, info)
-
-    agent = _agent(FunctionModel(_model), peers=[Handoff("billing")])
+async def test_winner_alone_relinquishes_with_closing_request(caplog: pytest.LogCaptureFixture) -> None:
+    """Plan test 1: TailCall to the peer; ONE closing ModelRequest with the winner's
+    'Transferred' return; tool_calls/tool_results untouched; HandoffStep only; DEBUGs."""
+    model = _emit_once_then_text(_handoff_part("billing", "customer needs a refund"))
+    agent = _agent(model, peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
-    result = await agent.run(ctx)
-    assert isinstance(result, TailCall)  # discriminated by isinstance, dispatched as a relinquish
+    with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.agent"):
+        result = await agent.run(ctx)
+
+    assert isinstance(result, TailCall)
     assert result.target_topic == derive_input_topic("billing")
     assert result.clear_overrides is True
     assert ctx.state.overrides is None
-    assert calls["n"] == 1  # terminal — producing the handoff ends the run (no further model turn)
+    assert model._test_calls["n"] == 1  # terminal — the winning handoff ends the turn
+
+    closing = _closing_request(ctx.state)
+    (ret,) = closing.parts
+    assert isinstance(ret, ToolReturnPart)
+    assert ret.tool_call_id == "h1" and ret.tool_name == HANDOFF_TOOL
+    assert ret.content == "Transferred to billing."
+
+    assert ctx.state.tool_calls == {}  # §4: no registration on a winning turn
+    assert ctx.state.tool_results == {}
+
+    draft = ctx._step_draft or []
+    assert [type(e).__name__ for e in draft] == ["HandoffStep"]  # winner emits HandoffStep ONLY
+    assert isinstance(draft[0], HandoffStep) and draft[0].target == "billing" and draft[0].reason == "customer needs a refund"
+
+    assert any(r.levelno == logging.DEBUG and "relinquish" in r.message for r in caplog.records)
 
 
-async def test_structured_agent_produces_handoff_and_dispatches_identically() -> None:
-    # The branch keys on isinstance(result.output, HandoffRequest), NOT the output mode — a structured
-    # final_output_type (handoff member renamed final_result_HandoffRequest) dispatches the same way.
-    class _Answer(BaseModel):
-        text: str
+async def test_winner_with_preamble_drafts_message_then_handoff() -> None:
+    """Plan test 1 (preamble variant): AgentMessageStep then HandoffStep — today's stream shape."""
+    model = _emit_once_then_text(ModelTextPart("Let me transfer you to billing."), _handoff_part("billing", "take over"))
+    agent = _agent(model, peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": "Billing."}))
+    await agent.run(ctx)
+    draft = ctx._step_draft or []
+    assert [type(e).__name__ for e in draft] == ["AgentMessageStep", "HandoffStep"]
+    assert isinstance(draft[0], AgentMessageStep) and draft[0].parts[0].text == "Let me transfer you to billing."
 
-    agent = Agent(
-        "triage",
-        subscribe_topics="triage.in",
-        model_client=FunctionModel(_emit_handoff("billing", "ctx")),
-        final_output_type=_Answer,
-        peers=[Handoff("billing")],
+
+async def test_winner_stubs_every_parallel_sibling(caplog: pytest.LogCaptureFixture) -> None:
+    """Plan test 2: winner + tool + message_agent siblings → no Call/batch; every sibling
+    closed in the closing request with the §4 stubs; sibling step pairs + HandoffStep."""
+    model = _emit_once_then_text(
+        ToolCallPart(tool_name="search", args={}, tool_call_id="t1"),
+        ToolCallPart(tool_name="message_agent", args={"name": "support", "message": "hi"}, tool_call_id="m1"),
+        _handoff_part("billing", "take over"),
     )
+    agent = _agent(model, tools=[_user_tool("search")], peers=[Messaging("support"), Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": None, "support": None}))
+    with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.agent"):
+        result = await agent.run(ctx)
+
+    assert isinstance(result, TailCall)  # NOT a Call / list[Call] — nothing dispatches
+    assert result.target_topic == derive_input_topic("billing")
+
+    closing = _closing_request(ctx.state)
+    by_id = {p.tool_call_id: p for p in closing.parts}
+    assert set(by_id) == {"h1", "t1", "m1"}
+    assert by_id["h1"].content == "Transferred to billing."
+    assert by_id["t1"].content == _STUB_TOOL_NOT_EXECUTED
+    assert by_id["m1"].content == _STUB_TOOL_NOT_EXECUTED
+    assert ctx.state.tool_calls == {} and ctx.state.tool_results == {}
+
+    draft = ctx._step_draft or []
+    call_steps = [e for e in draft if isinstance(e, ToolCallStep)]
+    result_steps = [e for e in draft if isinstance(e, ToolResultStep)]
+    assert [c.tool_call_id for c in call_steps] == ["t1", "m1"]  # NO ToolCallStep for the winner
+    assert {r.tool_call_id: r.is_error for r in result_steps} == {"t1": False, "m1": False}
+    assert all(r.parts[0].text == _STUB_TOOL_NOT_EXECUTED for r in result_steps)
+    assert isinstance(draft[-1], HandoffStep)
+
+    assert any(r.levelno == logging.DEBUG and "stub" in r.message for r in caplog.records)
+
+
+async def test_first_valid_handoff_wins_rejected_and_later_stubbed() -> None:
+    """Plan test 3 (§3.1): [invalid, valid, valid] — first gets an error step pair + a
+    generic closing stub; second wins; third gets a non-error stub pair + closing stub."""
+    model = _emit_once_then_text(
+        _handoff_part("ghost", "hi", call_id="h1"),  # invalid: not reachable
+        _handoff_part("billing", "take over", call_id="h2"),
+        _handoff_part("support", "or you", call_id="h3"),
+    )
+    agent = _agent(model, peers=[Handoff("billing", "support", "ghost")])
+    ctx = _ctx_with_view(_view({"billing": None, "support": None}))  # ghost NOT live
+    result = await agent.run(ctx)
+
+    assert isinstance(result, TailCall) and result.target_topic == derive_input_topic("billing")
+
+    closing = _closing_request(ctx.state)
+    by_id = {p.tool_call_id: p.content for p in closing.parts}
+    assert by_id == {
+        "h2": "Transferred to billing.",
+        "h1": _STUB_HANDOFF_NOT_EXECUTED,  # rejected-before-winner: generic transcript stub (§3.1)
+        "h3": _STUB_HANDOFF_NOT_EXECUTED,  # post-winner handoff
+    }
+    assert ctx.state.tool_results == {}  # rejection did NOT ride tool_results on a winning turn
+
+    draft = ctx._step_draft or []
+    results = {e.tool_call_id: e for e in draft if isinstance(e, ToolResultStep)}
+    assert results["h1"].is_error is True  # precise reason in the step stream
+    assert _REJECT_UNREACHABLE.format(name="ghost") in results["h1"].parts[0].text
+    assert results["h3"].is_error is False
+    assert sum(isinstance(e, HandoffStep) for e in draft) == 1
+
+
+# --------------------------------------------------------------------------- #
+# No-winner paths (plan tests 4, 5, 5b, 5c, 5d, 7)                             #
+# --------------------------------------------------------------------------- #
+
+
+async def test_stale_target_is_a_standard_rejection(caplog: pytest.LogCaptureFixture) -> None:
+    """Plan test 4: the render→arbitration staleness race is just an invalid handoff —
+    RetryPromptPart + error pair + self-TailCall; NO HandoffStep (contract change); WARNING."""
+    view = _view({"billing": None, "support": None})
+
+    def _fn(messages: list[Any], info: AgentInfo) -> ModelResponse:
+        view.set({"support": None})  # billing drops between render and arbitration
+        return ModelResponse(parts=[_handoff_part("billing", "x")])
+
+    agent = _agent(FunctionModel(_fn), peers=[Handoff("billing", "support")])
+    ctx = _ctx_with_view(view)
+    with caplog.at_level(logging.WARNING, logger="calfkit.nodes.agent"):
+        result = await agent.run(ctx)
+
+    assert isinstance(result, TailCall)
+    assert result.target_topic == agent._return_topic  # self-retry, NOT a relinquish
+    assert result.clear_overrides is False
+    retry = ctx.state.tool_results.get("h1")
+    assert isinstance(retry, RetryPromptPart)
+    assert retry.content == _REJECT_UNREACHABLE.format(name="billing")
+    draft = ctx._step_draft or []
+    assert not any(isinstance(e, HandoffStep) for e in draft)  # rejections emit NO HandoffStep
+    assert any(isinstance(e, ToolResultStep) and e.is_error for e in draft)
+    assert any(r.levelname == "WARNING" and "billing" in r.message and "#251" in r.message for r in caplog.records)
+
+
+async def test_zero_live_peers_rejects_with_none_online_reason() -> None:
+    """Plan test 7: the tool is always present, so a call with nobody online gets the clean
+    §9 none-online rejection (never the vendor's unknown-tool retry)."""
+    agent = _agent(_emit_once_then_text(_handoff_part("billing", "hi")), peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({}))
+    result = await agent.run(ctx)
+    assert isinstance(result, TailCall) and result.target_topic == agent._return_topic
+    retry = ctx.state.tool_results.get("h1")
+    assert isinstance(retry, RetryPromptPart) and retry.content == _REJECT_NONE_ONLINE
+
+
+async def test_rejection_re_entry_re_invokes_the_model() -> None:
+    """The surviving staleness-re-invoke guard, through the new machinery: the rejection
+    rides tool_results, so the self-retry re-entry feeds DeferredToolResults and the model
+    is ALWAYS re-invoked for a fresh decision."""
+    model = _emit_once_then_text(_handoff_part("billing", "x"))
+    agent = _agent(model, peers=[Handoff("billing")])
+    view = _view({})  # nobody online → rejection
+    ctx = _ctx_with_view(view)
+    first = await agent.run(ctx)
+    assert isinstance(first, TailCall) and first.target_topic == agent._return_topic
+    assert ctx.state.tool_results["h1"].content == _REJECT_NONE_ONLINE  # the §9 reason
+    view.set({"billing": "Billing."})  # peer online for the re-entry
+    result = await agent.run(ctx)
+    assert model._test_calls["n"] == 2  # the model WAS re-invoked with the retry visible
+    assert isinstance(result, ReturnCall)
+    assert "FRESH" in "".join(getattr(p, "text", "") for p in result.value)
+
+
+async def test_invalid_handoff_plus_valid_tool_mixed_disposition() -> None:
+    """Plan test 5: the rejection lands in tool_results while the valid tool DISPATCHES."""
+    model = _emit_once_then_text(
+        _handoff_part("ghost", "hi"),
+        ToolCallPart(tool_name="search", args={}, tool_call_id="t1"),
+    )
+    agent = _agent(model, tools=[_user_tool("search")], peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
     result = await agent.run(ctx)
+    assert isinstance(result, Call)  # the tool dispatched (single-call arm)
+    assert result.tag == "t1"
+    retry = ctx.state.tool_results.get("h1")
+    assert isinstance(retry, RetryPromptPart)
+    assert retry.content == _REJECT_UNREACHABLE.format(name="ghost")  # the §9 reason, not "no tool named"
+
+
+async def test_invalid_handoff_plus_two_tools_takes_the_parallel_arm() -> None:
+    """Plan test 5b: pending excludes the resolved rejection; the two valid tools return as
+    the parallel list[Call] (which is what opens the 2-slot durable batch at the chokepoint
+    — the fold itself is unchanged machinery, pinned by the fan-out suites and S4 kafka)."""
+    model = _emit_once_then_text(
+        _handoff_part("ghost", "hi"),
+        ToolCallPart(tool_name="search", args={}, tool_call_id="t1"),
+        ToolCallPart(tool_name="book", args={}, tool_call_id="t2"),
+    )
+    agent = _agent(model, tools=[_user_tool("search"), _user_tool("book")], peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": None}))
+    result = await agent.run(ctx)
+    assert isinstance(result, list) and [c.tag for c in result] == ["t1", "t2"]
+    retry = ctx.state.tool_results.get("h1")
+    assert isinstance(retry, RetryPromptPart)
+    assert retry.content == _REJECT_UNREACHABLE.format(name="ghost")
+
+
+async def test_rejected_handoff_with_message_agent_sibling_keeps_the_marker() -> None:
+    """Plan test 5c (spec §5): the handoff fork must not disturb the message_agent arm —
+    the peer Call still carries its ToolCallMarker."""
+    model = _emit_once_then_text(
+        _handoff_part("ghost", "hi"),
+        ToolCallPart(tool_name="message_agent", args={"name": "support", "message": "q"}, tool_call_id="m1"),
+    )
+    agent = _agent(model, peers=[Messaging("support"), Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": None, "support": None}))
+    result = await agent.run(ctx)
+    assert isinstance(result, Call)
+    assert isinstance(result.marker, ToolCallMarker) and result.marker.tool_name == "message_agent"
+    retry = ctx.state.tool_results.get("h1")
+    assert isinstance(retry, RetryPromptPart)
+    assert retry.content == _REJECT_UNREACHABLE.format(name="ghost")
+
+
+async def test_handle_less_agent_user_tool_named_handoff_dispatches_normally() -> None:
+    """Plan test 5d (spec §3.0): no Handoff handle → no interception; the user's own
+    ``handoff_to_agent`` tool is an ordinary tool and dispatches to its node."""
+    model = _emit_once_then_text(ToolCallPart(tool_name=HANDOFF_TOOL, args={}, tool_call_id="u1"))
+    agent = _agent(model, tools=[_user_tool(HANDOFF_TOOL)])
+    ctx = _ctx_with_view(_view({}))
+    result = await agent.run(ctx)
+    assert isinstance(result, Call)
+    assert result.tag == "u1"
+    assert ctx.state.tool_results == {}  # no rejection — never intercepted
+
+
+# --------------------------------------------------------------------------- #
+# Re-entry validity (plan test 6) + the defensive fork (impossible state)      #
+# --------------------------------------------------------------------------- #
+
+
+async def test_peer_re_enters_cleanly_on_the_inherited_state() -> None:
+    """Plan test 6 (the B2 pin): the closing request terminates latest_tool_calls' reverse
+    walk, so peer B makes a clean model call on the carried state — no deferred-results
+    id mismatch, no dangling calls."""
+    model = _emit_once_then_text(_handoff_part("billing", "customer needs a refund"))
+    a = _agent(model, peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": "Billing."}))
+    result = await a.run(ctx)
     assert isinstance(result, TailCall)
-    assert result.target_topic == derive_input_topic("billing")
-    assert result.clear_overrides is True
+
+    b_calls = {"n": 0}
+
+    def _b_model(messages: list[Any], info: AgentInfo) -> ModelResponse:
+        b_calls["n"] += 1
+        return ModelResponse(parts=[ModelTextPart("on it")])
+
+    b = Agent("billing", subscribe_topics="billing.in", model_client=FunctionModel(_b_model))
+    b_ctx = _ctx_with_view(_view({}), state=ctx.state)  # B inherits A's carried state
+    b_result = await b.run(b_ctx)
+    assert b_calls["n"] == 1
+    assert isinstance(b_result, ReturnCall)
+    assert "on it" in "".join(getattr(p, "text", "") for p in b_result.value)
 
 
-# ── step authoring: a handoff hop drafts a HandoffStep (online AND offline target) ──
-
-
-class TestHandoffAuthorsStepEvent:
-    """A handoff hop authors a HandoffStep into ``_step_draft`` (spec §3.2). The event is drafted
-    BEFORE _dispatch_handoff, so an OFFLINE target (stale self-retry) STILL emits it — the impl must
-    not special-case offline handoffs away."""
-
-    async def test_online_target_authors_handoffevent(self) -> None:
-        agent = _agent(FunctionModel(_emit_handoff("billing", "please take over")), peers=[Handoff("billing")])
-        ctx = _ctx_with_view(_view({"billing": "Billing."}))
+async def test_pending_handoff_in_reentry_arm_raises_loudly() -> None:
+    """The defensive fork (plan S2b): a PENDING handoff call surviving to the sequential
+    re-entry arm is impossible by construction — a silent skip would hide a bug, so it
+    raises. Contrived state: registered handoff call, no result, sequential mode."""
+    agent = _agent(TestModel(), sequential_only_mode=True, peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": None}))
+    part = _handoff_part("billing", "x")
+    ctx.state.extend_with_responses([ModelResponse(parts=[part])], agent.name)
+    ctx.state.add_tool_call(part)  # registered but unresolved — the impossible state
+    with pytest.raises(RuntimeError, match="handoff"):
         await agent.run(ctx)
-        hos = [e for e in (ctx._step_draft or []) if isinstance(e, HandoffStep)]
-        assert len(hos) == 1 and hos[0].target == "billing" and hos[0].reason == "please take over"
 
-    async def test_handoff_hop_with_preamble_drafts_message_then_handoff(self) -> None:
-        # When the handoff hop's model also emits preamble text, the draft carries AgentMessageStep THEN
-        # HandoffStep (the handoff-branch preamble append).
-        def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
-            tool = next(t for t in info.output_tools if t.name == "final_result" or "HandoffRequest" in t.name)
-            return ModelResponse(
-                parts=[
-                    ModelTextPart("Let me transfer you to billing."),
-                    ToolCallPart(tool_name=tool.name, args={"name": "billing", "message": "take over"}, tool_call_id="h1"),
-                ]
-            )
 
-        agent = _agent(FunctionModel(_model), peers=[Handoff("billing")])
-        ctx = _ctx_with_view(_view({"billing": "Billing."}))
-        await agent.run(ctx)
-        draft = ctx._step_draft or []
-        assert [type(e).__name__ for e in draft] == ["AgentMessageStep", "HandoffStep"]
-        assert isinstance(draft[0], AgentMessageStep) and draft[0].parts[0].text == "Let me transfer you to billing."
-        assert isinstance(draft[1], HandoffStep) and draft[1].target == "billing"
+async def test_returning_handoff_a_to_b_to_a_re_enters_cleanly() -> None:
+    """The A-return direction of spec §4's re-entry pin (review round 1): after A→B→A, A
+    re-enters over its OWN persisted handoff turn (real call + self-owned closing request)
+    plus B's surfaced turn — one clean model call, no deferred-results mismatch."""
+    a_model = _emit_once_then_text(_handoff_part("billing", "take over"))
+    a = _agent(a_model, peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": None}))
+    assert isinstance(await a.run(ctx), TailCall)
 
-    async def test_offline_target_still_authors_handoffevent(self) -> None:
-        # The real "offline" scenario is the render->dispatch race: billing is live when the output member is
-        # offered (so the model CAN hand off), then offline by dispatch (-> stale self-retry). The HandoffStep
-        # is authored BEFORE _dispatch_handoff, so it is still drafted despite the self-retry.
-        gone = {"yet": False}
+    b_model = _emit_once_then_text(_handoff_part("triage", "back to you", call_id="h2"))
+    b = Agent("billing", subscribe_topics="billing.in", model_client=b_model, peers=[Handoff("triage")])
+    b_ctx = _ctx_with_view(_view({"triage": None}), state=ctx.state)
+    assert isinstance(await b.run(b_ctx), TailCall)  # billing hands BACK to triage
 
-        class _FlapView:
-            def snapshot(self) -> dict[str, Any]:
-                return {} if gone["yet"] else {"billing": SimpleNamespace(description="Billing.")}
-
-        def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
-            out = _emit_handoff("billing", "please take over")(messages, info)  # billing live at render
-            gone["yet"] = True  # ...then offline for the dispatch staleness check
-            return out
-
-        agent = _agent(FunctionModel(_model), peers=[Handoff("billing")])
-        ctx = _ctx_with_view(_FlapView())
-        result = await agent.run(ctx)
-        assert isinstance(result, TailCall) and result.target_topic == agent._return_topic  # stale -> self-retry
-        hos = [e for e in (ctx._step_draft or []) if isinstance(e, HandoffStep)]
-        assert len(hos) == 1 and hos[0].target == "billing" and hos[0].reason == "please take over"
+    a2_ctx = _ctx_with_view(_view({"billing": None}), state=b_ctx.state)
+    result = await a.run(a2_ctx)
+    assert a_model._test_calls["n"] == 2  # exactly one clean re-entry model call
+    assert isinstance(result, ReturnCall)
+    assert "FRESH" in "".join(getattr(p, "text", "") for p in result.value)

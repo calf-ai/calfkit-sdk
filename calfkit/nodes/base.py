@@ -628,7 +628,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             frame = envelope.internal_workflow_state.unwind_frame()
             retargeted = replace(frame, target_topic=output.target_topic, payload=None, fanout_id=None)
             if output.clear_overrides:
-                # Genuine handoff (§5.3/C2): null the frame's per-run overrides so the tailcallee — a
+                # Genuine handoff (handoff-tool-transport-spec §5; C2 in agent-mesh-spec): null the frame's per-run overrides so the tailcallee — a
                 # DIFFERENT agent — uses its OWN tools/model. `prepare_context` re-applies `frame.overrides`
                 # onto `state.overrides` at the callee's start, so BOTH channels must be nulled (`run()`
                 # nulls the state channel on the carried State). Default `False` preserves overrides for the
@@ -914,7 +914,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         This decouples "needs the snapshot machinery" from "does parallel fan-out", so a
         ``sequential_only_mode`` messaging agent still snapshots/restores the caller's state for a lone
         ``message_agent`` (a degenerate one-element batch) while keeping its tool routing one-at-a-time. A
-        ``Handoff``-only agent needs NO durable batch — a ``HandoffRequest`` is the turn's *output*, never a
+        ``Handoff``-only agent needs NO durable batch — a winning handoff is a ``TailCall`` disposition, never a
         ``Call``, so it never opens one (keyed on ``_messaging_handles``, not any ``peers`` handle). For
         non-agent nodes (no ``_messaging_handles``) it equals :attr:`_is_fanout_capable`. Gates the store
         ``@resource``, ``_classify_fanout``, and the OPEN trigger."""

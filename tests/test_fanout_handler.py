@@ -225,7 +225,7 @@ def test_needs_durable_batch_decouples_from_fanout_capability() -> None:
     # fan-out (`_is_fanout_capable`) OR can dispatch an `isolate_state` call (it carries a `Messaging`
     # handle, signalled by `_messaging_handles`). Decoupled so a `sequential_only_mode` messaging agent
     # still gets the machinery for a lone `message_agent`; for non-messaging nodes — incl. a Handoff-only
-    # agent (a HandoffRequest is the turn's OUTPUT, never a Call) — it equals `_is_fanout_capable`.
+    # agent (a winning handoff is a TailCall disposition, never a dispatched Call) — it equals `_is_fanout_capable`.
     plain = NodeDef(node_id="n", subscribe_topics=["n.in"])  # not fan-out-capable, no messaging
     assert plain._needs_durable_batch is False
     fanout = _SingleCallFanoutNode(node_id="f", subscribe_topics=["f.in"])  # fan-out-capable

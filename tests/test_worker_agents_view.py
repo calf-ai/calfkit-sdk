@@ -116,7 +116,7 @@ class TestAgentsViewRegistration:
 
     def test_registered_for_a_handoff_only_agent(self) -> None:
         # PR-C: a `Handoff` handle ALSO sets `_peers`, so a Handoff-only agent (no Messaging) still trips
-        # the gate — handoff needs the live agents view to render its HandoffRequest targets. (The store
+        # the gate — handoff needs the live agents view to render its tool-description directory. (The store
         # @resource is narrowed to messaging, but the agents-view gate stays on any `_peers` handle.)
         from calfkit.nodes.agent import Agent
         from calfkit.peers import Handoff

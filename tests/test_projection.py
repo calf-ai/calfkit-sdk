@@ -8,6 +8,7 @@ message. These tests use the REAL vendored pydantic-ai types.
 from __future__ import annotations
 
 import copy
+import logging
 
 from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
@@ -271,12 +272,12 @@ def test_structured_output_preamble_no_response_returns_empty():
     assert structured_output_preamble([_user("hello")]) == ""
 
 
-def test_handoff_shaped_union_member_is_surfaced():
-    """The agent-mesh case: a final_result_HandoffRequest union member surfaces cross-agent.
-
-    A handoff models control transfer as a structured-output union member; in tool mode it is a
-    renamed output tool whose args carry the member's fields directly. The handing agent's
-    structured handoff output must reach the receiving agent.
+def test_legacy_structured_output_handoff_history_still_surfaces():
+    """Spec §11 regression pin: OLD persisted histories from the retired structured-output
+    handoff transport (a ``final_result_HandoffRequest`` output-tool call) must still
+    deserialize and surface cross-agent via the ``_is_output_tool`` prefix rule — free
+    behavior, not a compat feature; a future ``_is_output_tool`` refactor must not silently
+    break legacy-history briefings.
     """
     history: list[ModelMessage] = [
         _response(
@@ -292,35 +293,6 @@ def test_handoff_shaped_union_member_is_surfaced():
     out = project(history, viewer="refunds")
 
     assert '<triage>\n{"message":"escalating","name":"refunds"}' in _user_prompt_texts(out)
-
-
-def test_str_agent_handoff_surfaces_to_peer():
-    """The str-output agent handoff (complements the structured case above): its union has a single
-    structured member, so the output tool is named exactly ``final_result`` (not renamed). Its handoff args
-    must still surface cross-agent, attributed to the handing agent — both JSON shapes are legible to B."""
-    history: list[ModelMessage] = [
-        _response(
-            ToolCallPart(tool_name="final_result", args={"name": "refunds", "message": "escalating"}, tool_call_id="h1"),
-            name="triage",
-        ),
-    ]
-
-    out = project(history, viewer="refunds")
-
-    assert '<triage>\n{"message":"escalating","name":"refunds"}' in _user_prompt_texts(out)
-
-
-def test_native_prompted_handoff_surfaces_to_peer():
-    """The native/prompted handoff (the Anthropic+thinking path): A's HandoffRequest is JSON *text*,
-    surfaced verbatim by the text rule, attributed to the handing agent (the JSON is union-wrapped in this
-    mode, but the projection renders whatever A produced — truthful, never fabricated)."""
-    history: list[ModelMessage] = [
-        _response(TextPart(content='{"result":{"kind":"HandoffRequest","data":{"name":"refunds","message":"escalating"}}}'), name="triage"),
-    ]
-
-    out = project(history, viewer="refunds")
-
-    assert '<triage>\n{"result":{"kind":"HandoffRequest","data":{"name":"refunds","message":"escalating"}}}' in _user_prompt_texts(out)
 
 
 def test_ordinary_function_tool_call_is_not_surfaced():
@@ -366,9 +338,8 @@ def test_prefix_lookalike_function_tool_is_not_surfaced():
 def test_renamed_union_tool_empty_args_is_omitted():
     """A renamed (union) output tool with falsy args produces no surface → turn omitted (§5.5).
 
-    Locks the ``if p.args:`` truthiness branch for the renamed namespace — the agent-mesh
-    handoff case (an empty ``final_result_HandoffRequest`` must still be omitted, not
-    surfaced as ``<author>\\n{}``).
+    Locks the ``if p.args:`` truthiness branch for the renamed namespace (an empty renamed
+    output tool must still be omitted, not surfaced as ``<author>\\n{}``).
     """
     for empty in (None, {}):
         history: list[ModelMessage] = [
@@ -776,3 +747,93 @@ def test_self_response_is_new_object_via_replace():
     # Shallow ``replace`` shares the part list verbatim (parts are never mutated in
     # place, and the ids must survive for the §6.2 deferred-results re-entry).
     assert emitted[0].parts is self_resp.parts
+
+
+# --------------------------------------------------------------------------- #
+# Handoff TOOL transport surfacing (handoff-tool-transport-spec §6, S1)        #
+# --------------------------------------------------------------------------- #
+
+
+def _handoff_call_turn(*, author: str, target: str, message: str, tool_call_id: str = "h1") -> list[ModelMessage]:
+    """A's winning handoff turn under the tool transport: the ``handoff_to_agent`` call
+    plus the calfkit-authored closing ``ModelRequest`` (spec §4)."""
+    return [
+        _response(
+            ToolCallPart(tool_name="handoff_to_agent", args={"name": target, "message": message}, tool_call_id=tool_call_id),
+            name=author,
+        ),
+        _tool_return("handoff_to_agent", f"Transferred to {target}.", tool_call_id=tool_call_id),
+    ]
+
+
+def test_handoff_tool_call_surfaces_to_peer():
+    """spec §6: the reserved ``handoff_to_agent`` call's args surface cross-agent exactly
+    like output-tool args — B's only briefing channel under the tool transport."""
+    history = _handoff_call_turn(author="triage", target="refunds", message="escalating")
+
+    out = project(history, viewer="refunds")
+
+    assert '<triage>\n{"message":"escalating","name":"refunds"}' in _user_prompt_texts(out)
+
+
+def test_handoff_closing_request_stubs_dropped_for_peer():
+    """The closing request's ToolReturnParts are A-owned → dropped for viewer B (existing
+    owner-map rule, pinned here for the handoff turn shape)."""
+    history = _handoff_call_turn(author="triage", target="refunds", message="escalating")
+
+    out = project(history, viewer="refunds")
+
+    assert not any(isinstance(p, ToolReturnPart) for m in out if isinstance(m, ModelRequest) for p in m.parts)
+
+
+def test_handoff_tool_call_self_view_verbatim():
+    """Viewer A (self) keeps its own handoff turn verbatim — the real ToolCallPart and the
+    A-owned closing request survive (multi-participant history: B answered after)."""
+    history = [
+        *_handoff_call_turn(author="triage", target="refunds", message="escalating"),
+        _response(TextPart(content="refund issued"), name="refunds"),
+    ]
+
+    out = project(history, viewer="triage")
+
+    self_resp = next(m for m in out if isinstance(m, ModelResponse))
+    assert any(isinstance(p, ToolCallPart) and p.tool_name == "handoff_to_agent" for p in self_resp.parts)
+    assert any(isinstance(p, ToolReturnPart) and p.tool_call_id == "h1" for m in out if isinstance(m, ModelRequest) for p in m.parts)
+
+
+def test_handoff_tool_call_unparseable_args_logged_and_skipped(caplog):
+    """spec §6 totality pin: unparseable handoff args are WARNING-logged and skipped —
+    the turn drops like an ordinary internal call, never raising (mirrors the
+    output-tool arm's log-and-drop)."""
+    history: list[ModelMessage] = [
+        _response(
+            ToolCallPart(tool_name="handoff_to_agent", args="not json {{", tool_call_id="h1"),
+            name="triage",
+        ),
+        _response(TextPart(content="hello"), name="refunds"),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="calfkit.nodes._projection"):
+        out = project(history, viewer="refunds")
+
+    assert not any("handoff_to_agent" in t or "not json" in t for t in _user_prompt_texts(out))
+    assert any("omitting structured component" in r.message for r in caplog.records)
+
+
+def test_stubbed_second_handoff_args_also_surface_to_peer():
+    """Spec §6 accepted corner (review round 1): the arm matches EVERY handoff_to_agent
+    call by name, so a stubbed second-valid handoff's args also reach B — documented noise.
+    A later 'fix' in either direction must be a deliberate decision, not a drive-by."""
+    history: list[ModelMessage] = [
+        _response(
+            ToolCallPart(tool_name="handoff_to_agent", args={"name": "refunds", "message": "the winning briefing"}, tool_call_id="h1"),
+            ToolCallPart(tool_name="handoff_to_agent", args={"name": "support", "message": "the stubbed briefing"}, tool_call_id="h2"),
+            name="triage",
+        ),
+    ]
+
+    out = project(history, viewer="refunds")
+
+    texts = " ".join(_user_prompt_texts(out))
+    assert "the winning briefing" in texts
+    assert "the stubbed briefing" in texts
