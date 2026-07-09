@@ -337,9 +337,8 @@ def test_prefix_lookalike_function_tool_is_not_surfaced():
 def test_renamed_union_tool_empty_args_is_omitted():
     """A renamed (union) output tool with falsy args produces no surface → turn omitted (§5.5).
 
-    Locks the ``if p.args:`` truthiness branch for the renamed namespace — the agent-mesh
-    handoff case (an empty ``final_result_HandoffRequest`` must still be omitted, not
-    surfaced as ``<author>\\n{}``).
+    Locks the ``if p.args:`` truthiness branch for the renamed namespace (an empty renamed
+    output tool must still be omitted, not surfaced as ``<author>\\n{}``).
     """
     for empty in (None, {}):
         history: list[ModelMessage] = [

@@ -141,11 +141,11 @@ async def test_triage_messages_billing_and_hands_off_to_refunds(kafka_bootstrap:
         for p in m.parts
     ), "expected triage to consult billing via the message_agent tool"
 
-    # HANDOFF: triage's handoff output rode the carried conversation (attributed to triage), and
+    # HANDOFF: triage's handoff turn (the handoff_to_agent call) rode the carried conversation (attributed to triage), and
     # refunds — not triage — produced the final answer to the original caller.
     assert refund.output is not None
     responses = [m for m in refund.message_history if isinstance(m, ModelResponse)]
-    assert any(m.name == triage for m in responses), "expected triage's handoff output in the carried conversation"
+    assert any(m.name == triage for m in responses), "expected triage's handoff turn in the carried conversation"
     assert responses[-1].name == refunds, "expected refunds (not triage) to produce the final answer"
 
     await driver.aclose()
