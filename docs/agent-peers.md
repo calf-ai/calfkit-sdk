@@ -62,11 +62,14 @@ triage = Agent(
 )
 ```
 
-When the model decides to hand off, it produces a `HandoffRequest(name, message)` as
-its turn's **output** — not a tool call. Control transfers to the named peer: it
-continues the conversation with `message` as context and answers your agent's
-**original** caller directly. The handing agent relinquishes control and does not
-regain it.
+When the model decides to hand off, it calls the built-in `handoff_to_agent(name,
+message)` tool (injected automatically — its description lists the live peers).
+The handoff wins the turn: any other tool calls in the same response are **not
+executed** (they are closed with stub results), and control transfers to the named
+peer — it continues the conversation with `message` as context and answers your
+agent's **original** caller directly. The handing agent relinquishes control and
+does not regain it. The name `handoff_to_agent` is reserved: a user tool by that
+name raises at construction when a `Handoff` handle is present.
 
 Use messaging when you need an answer back; use handoff when another agent should
 own the rest of the conversation.

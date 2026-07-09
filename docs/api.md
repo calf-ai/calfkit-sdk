@@ -47,7 +47,7 @@ Members of the `RunEvent` union, surfaced by `stream()` / `events()` as a run pr
 | `AgentMessageEvent` | `"agent_message"` | an agent hop | `parts` — the hop's preamble text |
 | `ToolCallEvent` | `"tool_call"` | an agent hop | `tool_call_id`, `name`, `args: str \| dict \| None` (raw model emission) |
 | `ToolResultEvent` | `"tool_result"` | a tool node / consulted peer / rejected call | `tool_call_id`, `name`, `parts`, `is_error: bool` |
-| `HandoffEvent` | `"handoff"` | an agent hop | `target`, `reason` |
+| `HandoffEvent` | `"handoff"` | an agent hop — emitted only when a transfer actually happens (a stale/invalid target is a rejection and projects as an `is_error` `ToolResultEvent` pair instead) | `target`, `reason` |
 
 Each is a **frozen** model discriminated on its `kind` literal, and also carries hop identity (`correlation_id`, `depth`, `frame_id`, `emitter`). A fifth type, `AgentThinkingEvent` (`kind="agent_thinking"`), is **defined but not emitted in v1** — it is not in the `RunEvent` union and not top-level re-exported; it lives at `calfkit.models.step` for forward compatibility.
 
@@ -514,7 +514,7 @@ agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
               peers=[Handoff(discover=True)])             # discover: any live agent
 ```
 
-A frozen, identity-only handle to peer agents, with the same construction rules as `Messaging` (named XOR `discover=True`; both, or the empty handle, raise `ValueError`). Names the peers an agent may transfer control to: the model emits a `HandoffRequest(name, message)` as its turn output, control moves to the named peer, and the handing agent does not regain it. Handles are independent across capabilities, and a `discover=True` handle is the sole author of its own capability's scope (no named handle of the same kind alongside it). Naming the agent's own name in either handle raises `ValueError` at `Agent` construction.
+A frozen, identity-only handle to peer agents, with the same construction rules as `Messaging` (named XOR `discover=True`; both, or the empty handle, raise `ValueError`). Names the peers an agent may transfer control to: the handle injects the reserved built-in `handoff_to_agent(name, message)` tool (its description carries the live peer directory, re-rendered every turn; an empty directory renders a "none reachable" sentinel). When the model calls it with a valid live target, the handoff wins the turn — sibling tool calls in the same response are not executed and are closed with stub results — control moves to the named peer, and the handing agent does not regain it. An invalid or offline target is rejected with model-visible feedback (the standard tool-rejection path). The tool name is reserved against user tools whenever a `Handoff` handle is present. Handles are independent across capabilities, and a `discover=True` handle is the sole author of its own capability's scope (no named handle of the same kind alongside it). Naming the agent's own name in either handle raises `ValueError` at `Agent` construction.
 
 See also: [How to let agents find and reach each other at runtime](agent-peers.md).
 
