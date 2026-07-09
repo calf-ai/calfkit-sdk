@@ -147,19 +147,21 @@ Daemon logs live at `~/.calfkit/logs/agents-<address>-<targets>.log`,
 overwritten on each launch — consult them *before* relaunching over a broken
 daemon.
 
-## Control the broker directly
+## Control the mesh directly
 
 ```console
-$ ck dev broker status
+$ ck dev mesh status
 127.0.0.1:9092: pid 51234, running, started 2026-07-01T22:38:13+00:00
 ```
 
-- `ck dev broker start` — connect-or-spawn and return. Idempotent.
-- `ck dev broker stop` — stop the dev broker at the target address
+- `ck dev mesh start` — run the broker in the **foreground** (its output streams
+  to your terminal; Ctrl-C stops it). Add `-d`/`--detach` to run it as a
+  detached daemon and return instead — idempotent connect-or-spawn.
+- `ck dev mesh stop` — stop the dev broker at the target address
   (`--all` stops every running one).
-- `ck dev broker restart` — stop then start. **The data is in-memory**, so this
-  is the clean slate: all topics and messages are gone. (A reboot resets it the
-  same way.)
+- `ck dev mesh restart` — stop then re-spawn a detached daemon. **The data is
+  in-memory**, so this is the clean slate: all topics and messages are gone.
+  (A reboot resets it the same way.)
 
 Target a non-default address with `--host/-H` on any of these; each address is
 its own independent single-node mesh.

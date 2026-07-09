@@ -267,11 +267,11 @@ def test_fresh_broker_first_run_end_to_end(isolated_home: Path, tmp_path: Path) 
         assert stop.exit_code == 0, stop.stdout + str(stop.exception)
         assert f"stopped daemon pid {pid}" in stop.stdout
 
-        broker_stop = _invoke(["dev", "broker", "stop", "--host", host])
+        broker_stop = _invoke(["dev", "mesh", "stop", "--host", host])
         assert broker_stop.exit_code == 0, broker_stop.stdout + str(broker_stop.exception)
         assert f"stopped {host}" in broker_stop.stdout
         assert is_reachable(host, timeout=2.0) is False
     finally:
         if pid is not None:
             _reap_tree(pid)
-        _invoke(["dev", "broker", "stop", "--host", host])  # belt-and-braces if the assert path bailed early
+        _invoke(["dev", "mesh", "stop", "--host", host])  # belt-and-braces if the assert path bailed early

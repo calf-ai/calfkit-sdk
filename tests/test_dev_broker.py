@@ -371,7 +371,7 @@ def test_spawn_that_exits_during_startup_fails_fast_with_the_log_tail(monkeypatc
 
 
 def test_spawn_killed_by_a_signal_hints_at_a_concurrent_stop(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A lock-free `ck dev broker stop/restart` can race an in-flight readiness wait (spec §5.3);
+    # A lock-free `ck dev mesh stop/restart` can race an in-flight readiness wait (spec §5.3);
     # the negative returncode gets a hint instead of a bare "exit code -15".
     def factory(cmd: list[str], **kwargs: object) -> FakePopen:
         proc = FakePopen(cmd, **kwargs)
@@ -514,6 +514,108 @@ def test_detach_kwargs_per_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(os, "name", "nt")
     expected = getattr(subprocess, "DETACHED_PROCESS", 0)
     assert dev_broker._detach_kwargs() == {"creationflags": expected}
+
+
+# --- spawn_foreground: the attached spawn (the `ck dev mesh start` foreground path) ----------------
+
+
+def test_foreground_spawns_attached_when_loopback_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    spawned = _capture_popen(monkeypatch)
+    resolve_bin = CountingResolveBin(_BIN)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False, True))  # absent, then ready
+
+    proc = dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=resolve_bin)
+
+    assert resolve_bin.calls == 1
+    (spawned_proc,) = spawned
+    assert spawned_proc is proc, "the live attached process is returned for the caller to wait on"
+    # Byte-identical argv to the detached spawn, so the §5.4 ownership scan recognizes it too.
+    assert proc.cmd == _broker_argv()
+    # Attached: shares our session (Ctrl-C reaches it) and inherits the terminal (no log redirect).
+    assert "start_new_session" not in proc.kwargs
+    assert proc.kwargs["stdin"] is subprocess.DEVNULL
+    assert "stdout" not in proc.kwargs and "stderr" not in proc.kwargs
+
+
+def test_foreground_errors_when_a_broker_is_already_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Foreground cannot attach to an already-detached daemon — refuse (no spawn, no binary resolve).
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(True))
+    with pytest.raises(DevBrokerError, match="already running"):
+        dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=MustNotCall())
+
+
+def test_foreground_refuses_a_non_loopback_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same connect-only rule as ensure_broker (spec §5.2): never spawn at a non-loopback address.
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="connect-only"):
+        dev_broker.spawn_foreground(normalize(["203.0.113.7:9092"]), resolve_bin=MustNotCall())
+
+
+def test_foreground_readiness_timeout_kills_the_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    spawned = _capture_popen(monkeypatch)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))  # absent, then never ready
+    with pytest.raises(DevBrokerError, match="did not become ready"):
+        dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN), timeout=0.05)
+    (proc,) = spawned
+    assert proc.killed is True
+
+
+def test_foreground_spawn_that_exits_during_startup_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    def factory(cmd: list[str], **kwargs: object) -> FakePopen:
+        proc = FakePopen(cmd, **kwargs)
+        proc.returncode = 1  # bind failure — died immediately
+        return proc
+
+    monkeypatch.setattr(dev_broker, "Popen", factory)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="exited during startup"):
+        dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
+
+
+def test_foreground_wrong_arch_binary_surfaces_a_distinct_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The exec-time failure twin of test_wrong_arch_binary_surfaces_a_distinct_error (detached path).
+    def factory(cmd: list[str], **kwargs: object) -> FakePopen:
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(dev_broker, "Popen", factory)
+    monkeypatch.setattr(dev_broker, "is_reachable", scripted_probe(False))
+    with pytest.raises(DevBrokerError, match="failed to launch"):
+        dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
+
+
+def test_foreground_holds_the_lock_across_probe_and_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attached spawn takes the same §5.3 lock and releases it once ready, before the caller
+    blocks on the process — a concurrent invocation must never see the not-yet-ready broker."""
+    from contextlib import contextmanager
+
+    events: list[str] = []
+
+    @contextmanager
+    def spy_lock():  # type: ignore[no-untyped-def]
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    def factory(cmd: list[str], **kwargs: object) -> FakePopen:
+        events.append("popen")
+        return FakePopen(cmd, **kwargs)
+
+    probe = scripted_probe(False, True)
+
+    def probing(bootstrap: object, *, timeout: float) -> bool:
+        events.append("probe")
+        result: bool = probe(bootstrap, timeout=timeout)
+        return result
+
+    monkeypatch.setattr(dev_broker, "_spawn_lock", spy_lock)
+    monkeypatch.setattr(dev_broker, "Popen", factory)
+    monkeypatch.setattr(dev_broker, "is_reachable", probing)
+    dev_broker.spawn_foreground(normalize(["localhost"]), resolve_bin=CountingResolveBin(_BIN))
+    assert events[0] == "lock"
+    assert events[-1] == "unlock"
+    assert events[1:-1] == ["probe", "popen", "probe"], "probe→spawn→readiness must all run under the lock"
 
 
 # --- the spawn lock (spec §5.3) ---------------------------------------------------------------------

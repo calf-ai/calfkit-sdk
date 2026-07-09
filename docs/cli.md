@@ -251,7 +251,7 @@ delegating to the equivalent top-level command, every `ck dev` command
 **ensures a broker** at the target address: if one is reachable it is reused;
 otherwise a bundled [Tansu](https://tansu.io) broker (in-memory, Kafka-compatible)
 is spawned as a detached background daemon that persists until an explicit
-`ck dev broker stop`/`restart` or a reboot.
+`ck dev mesh stop`/`restart` or a reboot.
 
 ```text
 ck dev run  TARGET [TARGET ...] [--detach/-d] [OPTIONS]
@@ -259,7 +259,7 @@ ck dev chat [NAME | TARGET ...] [OPTIONS]
 ck dev status [OPTIONS]
 ck dev stop (NAME [NAME ...] | --all) [OPTIONS]
 ck dev down [OPTIONS]
-ck dev broker (start | stop | status | restart) [OPTIONS]
+ck dev mesh (start [--detach/-d] | stop | status | restart) [OPTIONS]
 ```
 
 The bundled broker requires the **`[mesh]` extra** (`pip install 'calfkit[mesh]'`),
@@ -270,14 +270,16 @@ extra installed (resolution order: `CALF_TANSU_BIN` → bundled → `tansu` on
 `PATH`). Without the extra, foreground `ck dev run` and the `ck dev chat`
 attach forms still work as pure clients against an already-reachable broker —
 but everything that manages agent daemons needs the extra's process scan.
-`ck dev status`, `ck dev stop`, `ck dev down`, `ck dev broker stop`, and
-`ck dev broker status` exit `2` with the install hint without it (one edge:
-`ck dev broker stop` against a *multi-address* target is a messaged no-op —
+`ck dev status`, `ck dev stop`, `ck dev down`, `ck dev mesh stop`, and
+`ck dev mesh status` exit `2` with the install hint without it (one edge:
+`ck dev mesh stop` against a *multi-address* target is a messaged no-op —
 multi-address is never a spawn target, so there is nothing to scan);
 `ck dev run -d` and `ck dev chat TARGET…` need it to launch (they still
 succeed on a core install when every target is already online — pure reuse
-never scans); `ck dev broker start`/`restart` degrade gracefully (reuse/borrow
-still works; only the managed-vs-reused classification is lost). See
+never scans); `ck dev mesh start -d`/`restart` degrade gracefully (reuse/borrow
+still works; only the managed-vs-reused classification is lost). Bare foreground
+`ck dev mesh start` never reuses — it errors if a broker is already reachable —
+so it only needs the binary, not the scan. See
 [How to run a local mesh with `ck dev`](local-dev-mesh.md).
 
 ### Spawn rules
@@ -400,7 +402,7 @@ shown all the same.
 | --- | --- |
 | `stop NAME…` | Stop the daemon(s) owning those names — **whole-daemon**: co-hosted names go down together and every one is narrated (`stopped daemon pid 51288 (agents: general, finance)`). SIGTERM → 8 s grace → SIGKILL, delivered to the daemon's whole **process group**. |
 | `stop --all` | Every `ck dev` agent daemon on **every** address (ignores `--host`). |
-| `down` | `stop --all`, then `broker stop` at the resolved address. |
+| `down` | `stop --all`, then `mesh stop` at the resolved address. |
 
 Names resolve **within the target address** while `--all`/`down` sweep
 globally — that is the one name-vs-address asymmetry in the family. An unknown
@@ -412,9 +414,10 @@ Foreground runs and chat-session workers **survive `down`** by design (they
 carry no marker) and will error against the stopped broker — stop them where
 they run. Finding nothing to stop is a messaged no-op, exit `0`.
 
-### `ck dev broker`
+### `ck dev mesh`
 
-Direct control of the dev broker daemon, decoupled from any app run. Every
+Direct control of the local dev mesh — the broker your agents run on —
+decoupled from any app run. Every
 subcommand takes `--host`/`-H` (same precedence as above; default
 `127.0.0.1:9092`) and loads `./.env` first, like `ck dev run`/`ck dev chat` —
 so a `.env`-set `CALFKIT_MESH_URL` targets the same address across every
@@ -422,10 +425,11 @@ so a `.env`-set `CALFKIT_MESH_URL` targets the same address across every
 
 | Command | Behavior |
 | --- | --- |
-| `start` | Connect-or-spawn and return (the daemon keeps running). Idempotent. |
+| `start` | Run the broker in the **foreground** (its output streams to your terminal; Ctrl-C stops it). Errors if a broker is already running — foreground can't attach, so stop it or use `-d`. |
+| `start -d`/`--detach` | Connect-or-spawn a **detached** daemon and return (it keeps running). Idempotent — the shape `ck dev run`/`ck dev chat` share when they ensure a broker. |
 | `stop` | Stop the dev broker at the target address. `--all` stops every running dev broker (ignores `--host`). A no-op with a message when none matches. |
 | `status` | List the running dev broker(s) (address, pid, start time) and probe the target address — a reachable broker that isn't a dev broker reports as *reachable, not managed by calfkit*. |
-| `restart` | `stop` then `start` — the clean slate (all in-memory data is lost). |
+| `restart` | `stop` then re-spawn a detached daemon — the clean slate (all in-memory data is lost). |
 
 `ck dev` manages **dev brokers only**: a process is recognized by its command
 line (an in-memory-engine `tansu` bound to the target address), whoever started
