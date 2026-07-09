@@ -37,6 +37,7 @@ from subprocess import Popen
 from typing import Any
 
 from calfkit.cli._dev_probe import is_reachable
+from calfkit.cli._wait import NULL_REPORTER, WaitReporter
 
 DEFAULT_PORT = 9092
 DEFAULT_TIMEOUT = 5.0
@@ -320,6 +321,7 @@ def ensure_broker(
     *,
     resolve_bin: Callable[[], str],
     timeout: float = DEFAULT_TIMEOUT,
+    reporter: WaitReporter = NULL_REPORTER,
 ) -> BrokerInfo:
     """Connect-or-spawn: return the broker serving *target*, spawning one only when the address is
     a single loopback address with nothing reachable there (spec §5.2).
@@ -349,7 +351,7 @@ def ensure_broker(
         if not (target.is_single and target.is_loopback):
             raise _connect_only_error(target)
         binary = _resolve_binary(resolve_bin)
-        return _spawn_and_wait(target, binary, timeout)
+        return _spawn_and_wait(target, binary, timeout, reporter=reporter)
 
 
 def _resolve_binary(resolve_bin: Callable[[], str]) -> str:
@@ -415,35 +417,38 @@ def _startup_detail(log_path: Path | None) -> str:
     return f"; log tail from {log_path}:\n{_log_tail(log_path)}"
 
 
-def _await_ready(proc: Any, listener: str, timeout: float, *, log_path: Path | None) -> None:
+def _await_ready(proc: Any, listener: str, timeout: float, *, log_path: Path | None, reporter: WaitReporter = NULL_REPORTER) -> None:
     """Block until *proc* answers on *listener*, or raise (spec §5.2): a startup exit fails fast, a
     readiness timeout kills the spawn first. Shared by the detached and foreground spawns; *log_path*
-    selects where a failure points the reader — a log file, or the terminal (``None``)."""
+    selects where a failure points the reader — a log file, or the terminal (``None``). *reporter*
+    renders the wait (the ``Starting dev broker …`` line for the detached path); the foreground path
+    passes the default no-op, since Tansu's own output already streams to the terminal."""
     deadline = time.monotonic() + timeout
-    while True:
-        if proc.poll() is not None:
-            code = proc.returncode
-            if code is not None and code < 0:
-                cause = f"killed by a signal ({code}) — a concurrent `ck dev mesh stop/restart`?"
-            else:
-                cause = f"exit code {code}"
-            raise DevBrokerError(f"the dev broker exited during startup ({cause})" + _startup_detail(log_path))
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            proc.kill()
-            try:
-                proc.wait(timeout=DEFAULT_GRACE)  # reap our own child — no zombie for long-lived callers
-            except subprocess.TimeoutExpired:
-                pass  # kill was delivered; the CLI exits next and init reaps
-            raise DevBrokerError(f"the dev broker did not become ready within {timeout:.1f}s" + _startup_detail(log_path))
-        # Per-attempt probe budget: capped at 1s so proc.poll() keeps getting re-checked, and
-        # bounded by the remaining deadline so the total wait never overshoots `timeout`.
-        if is_reachable(listener, timeout=min(1.0, max(0.1, remaining))):
-            break
-        time.sleep(_READINESS_POLL_INTERVAL)
+    with reporter:
+        while True:
+            if proc.poll() is not None:
+                code = proc.returncode
+                if code is not None and code < 0:
+                    cause = f"killed by a signal ({code}) — a concurrent `ck dev mesh stop/restart`?"
+                else:
+                    cause = f"exit code {code}"
+                raise DevBrokerError(f"the dev broker exited during startup ({cause})" + _startup_detail(log_path))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                try:
+                    proc.wait(timeout=DEFAULT_GRACE)  # reap our own child — no zombie for long-lived callers
+                except subprocess.TimeoutExpired:
+                    pass  # kill was delivered; the CLI exits next and init reaps
+                raise DevBrokerError(f"the dev broker did not become ready within {timeout:.1f}s" + _startup_detail(log_path))
+            # Per-attempt probe budget: capped at 1s so proc.poll() keeps getting re-checked, and
+            # bounded by the remaining deadline so the total wait never overshoots `timeout`.
+            if is_reachable(listener, timeout=min(1.0, max(0.1, remaining))):
+                break
+            time.sleep(_READINESS_POLL_INTERVAL)
 
 
-def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
+def _spawn_and_wait(target: Target, binary: str, timeout: float, *, reporter: WaitReporter = NULL_REPORTER) -> BrokerInfo:
     listener = target.listener
     log_path = _calfkit_dir() / "logs" / f"tansu-{target.key}.log"
     cmd = _broker_cmd(binary, listener)
@@ -460,7 +465,7 @@ def _spawn_and_wait(target: Target, binary: str, timeout: float) -> BrokerInfo:
         except OSError as exc:
             # Wrong-arch / corrupt binary fails at exec time (spec §7.3) — distinct from a timeout.
             raise DevBrokerError(f"failed to launch the dev broker binary {binary!r}: {exc}") from exc
-    _await_ready(proc, listener, timeout, log_path=log_path)
+    _await_ready(proc, listener, timeout, log_path=log_path, reporter=reporter)
     return BrokerInfo(
         listener=listener,
         pid=proc.pid,

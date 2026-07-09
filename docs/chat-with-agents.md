@@ -19,10 +19,22 @@ a different broker with `--host`.
 
 ## Pick an agent and start chatting
 
-Run `ck chat` with no arguments to see who's online and choose one:
+Run `ck chat` with no arguments to pick from the agents online. On an interactive
+terminal the menu is **live** — it refreshes as agents come online or go offline,
+so one you start in another terminal appears here without re-running anything. Move
+the highlight with ↑/↓, press Enter to pick, and `q` / `Esc` / Ctrl-C to quit:
 
 ```console
 $ ck chat
+Select an agent  (↑/↓ move · Enter pick · q quit)
+  researcher   Deep web research with citations
+❯ support-bot  Handles customer support tickets and refunds
+```
+
+When the output isn't a terminal (piped or redirected), `ck chat` falls back to a
+static numbered menu:
+
+```console
 Discovering agents...
 Online agents
 
@@ -30,7 +42,11 @@ Online agents
   2  support-bot  Handles customer support tickets and refunds
 
 Select an agent [1-2, q to quit]: 2
+```
 
+Either way, once you choose, the session opens:
+
+```text
 Chatting with support-bot. Type /exit or press Ctrl-D to leave.
 ```
 
