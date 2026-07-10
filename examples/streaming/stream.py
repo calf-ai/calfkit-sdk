@@ -50,7 +50,8 @@ async def main() -> None:
                     print(f"  {mark} {name} → {_text(parts)}")
                 case HandoffEvent(target=target, reason=reason):
                     # Not emitted by this single-agent run — appears when an agent hands
-                    # off or consults a peer (see docs/agent-peers.md).
+                    # off to a peer (a consult streams the peer's own steps instead;
+                    # see docs/agent-peers.md).
                     print(f"  🤝 handoff → {target}: {reason}")
                 case RunCompleted():
                     print("  🏁 run completed")
