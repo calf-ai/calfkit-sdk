@@ -324,9 +324,9 @@ async def test_i2_no_residue_single_run_oracle(container, monkeypatch) -> None:
     # fact + call step, then the fold hop's result step.
     flat = [(type(e).__name__, getattr(e, "tool_call_id", None)) for hop in recorded for e in hop]
     assert flat == [("AgentMessageStep", None), ("ToolCallStep", "c1"), ("ToolResultStep", "c1")]
-    # Field-level residue scan of the terminal envelope: no step event shapes, no draft channel.
+    # Field-level residue scan of the terminal envelope: no step event shapes.
     assert terminals, "expected the terminal return envelope to be captured"
     dump = terminals[-1].model_dump_json()
     step_shapes = ('"kind":"tool_call"', '"kind":"tool_result"', '"kind":"agent_message"', '"kind":"handoff"', '"kind":"agent_thinking"')
-    for residue in (*step_shapes, "_step_draft"):
+    for residue in step_shapes:
         assert residue not in dump, f"step residue {residue!r} leaked into the terminal envelope"

@@ -1,5 +1,5 @@
 """Body-fact declaration through the kernel + the step publish's wire shape (caller-side
-step-emission spec §3.1/§3.4) — successor to the v1 ``project_steps`` suite (that machinery is
+step-emission spec §3.1/§3.4) — successor to the v1 chokepoint-projection suite (that machinery is
 deleted; the ledger's unit contracts live in ``test_step_ledger.py``, the kernel pair law in
 ``test_step_pair_law.py``, outcome mapping E2E in ``test_step_outcome_e2e.py``).
 

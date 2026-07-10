@@ -12,7 +12,6 @@ from calfkit.models.marker import CallMarker
 from calfkit.models.payload import ContentPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.state import OverridesState, State
-from calfkit.models.step import StepEvent
 
 _EMPTY_RESOURCES: Mapping[str, Any] = MappingProxyType({})
 
@@ -210,12 +209,6 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     _ancestor_callers: frozenset[tuple[str, str]] = PrivateAttr(default_factory=frozenset)
     _resources: Mapping[str, Any] | None = PrivateAttr(default=None)
     _reply: ReturnMessage | FaultMessage | None = PrivateAttr(default=None)
-    # The agent's authored WIRE step events (`*Step`) for THIS hop (spec §2.5): off-wire (PrivateAttr →
-    # never serialized), per-hop (rebuilt each Kafka re-entry), framework-written by the agent body in
-    # run() and read at the disposition chokepoint. Typed to the `StepEvent` wire union so the node says
-    # exactly what it is surfacing (not generic ContentParts); identity is stamped onto the surface
-    # `*Event` caller-side by `_to_surface` (§3.4).
-    _step_draft: list[StepEvent] | None = PrivateAttr(default=None)
 
     @property
     def correlation_id(self) -> str:
