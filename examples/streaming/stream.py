@@ -45,12 +45,13 @@ async def main() -> None:
                     print(f"  💬 {_text(parts)}")
                 case ToolCallEvent(name=name, args=args):
                     print(f"  🔧 calling {name}({args})")
-                case ToolResultEvent(name=name, parts=parts, is_error=is_error):
-                    mark = "⚠️ error" if is_error else "✅"
+                case ToolResultEvent(name=name, parts=parts, outcome=outcome):
+                    mark = {"failed": "⚠️ failed", "denied": "🚫 denied"}.get(outcome, "✅")
                     print(f"  {mark} {name} → {_text(parts)}")
                 case HandoffEvent(target=target, reason=reason):
                     # Not emitted by this single-agent run — appears when an agent hands
-                    # off or consults a peer (see docs/agent-peers.md).
+                    # off to a peer (a consult streams the peer's own steps instead;
+                    # see docs/agent-peers.md).
                     print(f"  🤝 handoff → {target}: {reason}")
                 case RunCompleted():
                     print("  🏁 run completed")

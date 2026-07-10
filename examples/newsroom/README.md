@@ -37,12 +37,14 @@ answers you, because the handoff transferred the conversation:
 
 ```text
 >>> Write a short news brief about the city's new downtown bike-share program.
-🔧 [editor] message_agent({"name": "researcher", "message": "Background on the downtown bike-share program?"})
+🔧 [editor] message_agent({'name': 'researcher', 'message': 'Background on the downtown bike-share program?'})
   🔧 [researcher] search_archive({'topic': 'downtown bike-share program'})
-↩  [researcher] replies: City council approved it 7-2; 120 docks across 15 stations; first month free...
-🔧 [editor] message_agent({"name": "fact_checker", "message": "Verify the dock counts and the 'first month free' claim."})
+  ↩  [search_archive] replies: City council approved it 7-2; 120 docks across 15 stations; first month free...
+↩  [message_agent] replies: City council approved it 7-2; 120 docks across 15 stations; first month free...
+🔧 [editor] message_agent({'name': 'fact_checker', 'message': "Verify the dock counts and the 'first month free' claim."})
   🔧 [fact_checker] check_claim({'claim': '120 docks, 15 stations, first month free'})
-↩  [fact_checker] replies: All claims verified against the confirmed record.
+  ↩  [check_claim] replies: All claims verified against the confirmed record.
+↩  [message_agent] replies: All claims verified against the confirmed record.
 🤝 [editor] hands off to [writer] (draft the final brief)
 --- the writer's brief ---
 The city council has approved a downtown bike-share program in a 7-2 vote ...

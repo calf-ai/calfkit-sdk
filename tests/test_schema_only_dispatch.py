@@ -32,7 +32,7 @@ from calfkit.nodes import Agent
 # Reuse the proven helpers from the override-mode tests rather than
 # re-implementing. If these helpers move or rename, the import is a
 # fail-fast signal to update both tests together.
-from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls
+from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap
 
 
 def _make_schema_only_tool(
@@ -82,7 +82,7 @@ async def test_schema_only_tool_via_tools_kwarg_dispatches_without_validation() 
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # Dispatch happened — no RetryPromptPart stored, result is a Call to
     # the tool's subscribe topic with the tool_call_id carried as a ToolCallRef body.
@@ -119,7 +119,7 @@ async def test_schema_only_tool_malformed_args_become_retry_prompt() -> None:
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # All (one) calls were invalid → the agent TailCalls itself to give
     # the LLM another turn with the retry prompt visible in tool_results.

@@ -44,9 +44,9 @@ from calfkit import retry_text_part
 @agent.on_tool_error
 def handle_tool_failure(tool_call, ctx, report):
     if tool_call.tool_name == "get_price":
-        return last_known_price(ctx)                                 # substitute a fallback → is_error=False
+        return last_known_price(ctx)                                 # substitute a fallback → the model sees a success
     if tool_call.tool_name == "web_search":
-        return retry_text_part(f"search failed: {report.message}")   # is_error=True — the model can retry
+        return retry_text_part(f"search failed: {report.message}")   # a model-visible error — the model can retry
     return None                                                      # any other tool failure escalates
 ```
 

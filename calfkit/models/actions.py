@@ -52,9 +52,9 @@ class Call(Generic[StateT], _Call[StateT]):
     marker: CallMarker | None = None
     """The echo marker rail's carriage (spec D4) — a typed, ``kind``-discriminated
     :class:`~calfkit.models.marker.CallMarker`, framework-reserved and keyword-only, threaded onto the
-    pushed ``CallFrame.marker`` exactly as ``tag`` is (and echoed verbatim on the reply). Set by
-    ``Agent._message_agent_call`` (the sole producer in this PR). ``None`` for a call the framework
-    stamps none on."""
+    pushed ``CallFrame.marker`` exactly as ``tag`` is (and echoed verbatim on the reply). Stamped on
+    EVERY agent tool dispatch — both dispatch arms and ``message_agent`` (universal stamping,
+    caller-side step-emission spec §3.2). ``None`` for a call the framework stamps none on."""
 
     def __init__(
         self,

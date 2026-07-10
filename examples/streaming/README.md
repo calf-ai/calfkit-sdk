@@ -64,6 +64,7 @@ your output will vary.
 - **Observe across runs.** `handle.stream()` follows one run; `client.events()`
   is a firehose over **every** run on the client's inbox (and the only way to
   observe a `send()` run). It is best-effort — see the guide.
-- **See handoffs and sub-agents.** A `HandoffEvent`, and tool/peer steps at
-  `depth > 1`, appear once an agent hands off or consults a peer — add a peer
-  with [`Messaging` / `Handoff`](../../docs/agent-peers.md).
+- **See handoffs and sub-agents.** A `HandoffEvent` appears when an agent hands
+  off (the successor's steps continue at the same depth — a handoff transfers the
+  conversation, it doesn't nest); a consulted peer's own steps stream at
+  `depth > 1` — add a peer with [`Messaging` / `Handoff`](../../docs/agent-peers.md).

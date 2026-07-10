@@ -17,10 +17,11 @@ state-first provenance assumptions (spec D3), but against a LIVE broker so the c
   ``test_message_agent_kafka.py::test_peer_fault_runs_callers_on_callee_error``. See
   ``notes/2026-07-07-agent-tool-error-reception-phase0-findings.md``.
 
-The same folds also confirm the **echo marker rail** end-to-end over the wire: ``failing_call.marker``
-is ``None`` for a normal tool and a ``ToolCallMarker(tool_name="message_agent", …)`` for a peer fold, so
-``ctx.tool_call`` reconstructs the full call — including the **real args** — from the marker when the
-peer's foreign state can't provide it (the identity carriage the resolver reads carriage-first).
+The same folds also confirm the **echo marker rail** end-to-end over the wire: with universal
+stamping (caller-side step-emission spec §3.2), ``failing_call.marker`` carries the full call
+identity for EVERY tool fold — normal tools and ``message_agent`` peers alike — so ``ctx.tool_call``
+reconstructs the full call (including the **real args**) carriage-first from the marker, even when
+a peer's foreign state can't provide it.
 
 The probe (:class:`_ToolCallProbe`) captures the seam's view of the failing call, then **declines**
 so the fault still escalates (capture-in-callback, assert-in-test-body). Opt-in (``-m kafka``); skips
@@ -82,8 +83,8 @@ class _ToolCallProbe:
                 "error_type": fault.error_type,
                 "tag": tag,
                 "target_topic": failing.target_topic if failing is not None else None,
-                # The echoed marker carries the caller's tool identity for the message_agent arm (None for a
-                # normal tool, which stamps no marker); ``ctx.tool_call`` reconstructs the full call from it.
+                # The echoed marker carries the caller's tool identity for EVERY dispatched call (universal
+                # stamping); ``ctx.tool_call`` reconstructs the full call carriage-first from it.
                 "failing_marker_tool_name": failing.marker.tool_name if (failing is not None and failing.marker is not None) else None,
                 "tool_call_args": tool_call.args if tool_call is not None else None,
                 "state_tool_call_tags": sorted(tool_calls.keys()),
@@ -125,7 +126,7 @@ async def test_gate_a_single_tool_fault_resolves_via_state_over_the_wire(kafka_b
     assert call["resolved_present"] is True  # state carried back across the wire → state-first hits
     assert call["resolved_has_args"] is True  # full ToolCallPart with .args (grounds D3 over the wire)
     assert call["resolved_tool_name"] == "boom"
-    assert call["failing_marker_tool_name"] is None  # a normal tool stamps NO marker (message_agent-only in PR 1)
+    assert call["failing_marker_tool_name"] == "boom"  # universal stamping: the marker crossed the wire (step-emission spec §3.2)
 
 
 async def test_gate_b1_fanout_sibling_resolves_via_real_ktables_store(kafka_bootstrap: str, topic_namespace: str) -> None:
@@ -165,7 +166,7 @@ async def test_gate_b1_fanout_sibling_resolves_via_real_ktables_store(kafka_boot
     assert call["resolved_present"] is True  # sibling state mirrored back through the real store
     assert call["resolved_has_args"] is True  # .args intact for the parallel tool (grounds D3 state-first)
     assert call["resolved_tool_name"] == "boom"
-    assert call["failing_marker_tool_name"] is None  # a normal fan-out tool stamps NO marker
+    assert call["failing_marker_tool_name"] == "boom"  # universal stamping: each fan-out sibling's marker crossed the wire
 
 
 def _worker(bootstrap: str, *, nodes: list, control_plane: ControlPlaneConfig) -> Worker:
@@ -296,10 +297,10 @@ async def test_gate_b2_mixed_batch_amplification(kafka_bootstrap: str, topic_nam
     tool_firings = [c for c in recorder.calls if c["tag"] == "c1"]
     peer_firings = [c for c in recorder.calls if c["tag"] == "m1"]
     assert len(tool_firings) == 1 and len(peer_firings) == 1, f"expected one firing each, got {recorder.calls}"
-    # The tool sibling: state-first resolves with args, and carries NO interim carriage.
+    # The tool sibling: the state lookup still resolves with args, and its own marker rode the wire.
     assert tool_firings[0]["resolved_present"] is True
     assert tool_firings[0]["resolved_has_args"] is True
-    assert tool_firings[0]["failing_marker_tool_name"] is None  # the normal tool stamps no marker
+    assert tool_firings[0]["failing_marker_tool_name"] == "boom"  # universal stamping: the tool sibling is marked too
     # The message_agent sibling: its tag is absent from the (peer's) folded state → state-first misses,
     # the channel (target_topic) is populated, and the carriage delivered the identity. (The folded state
     # carries the peer's own tool_calls, not an empty seed — the Phase-0 finding for the lone case above

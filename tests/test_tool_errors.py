@@ -33,10 +33,19 @@ from calfkit.models.payload import TextPart, is_retry
 from calfkit.models.state import OverridesState, State
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef
+from calfkit.nodes._steps import Observed
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _unwrap(result: object) -> object:
+    """The kernel's ``Observed`` unwrap (step-emission spec §3.1b), for tests that drive
+    ``agent.run(ctx)`` directly: a fact-capable dispatch exit returns ``Observed(action, facts)``;
+    these dispatch-contract tests assert on the ACTION. Final-output ``ReturnCall``s are bare —
+    call sites asserting those need (and get) no unwrap."""
+    return result.action if isinstance(result, Observed) else result
 
 
 def _make_ctx(
@@ -305,7 +314,7 @@ async def test_agent_validates_args_and_adds_retry_prompt_on_bad_args():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # All (one) tool calls invalid → the agent TailCalls itself to give the LLM
     # another turn with the retry prompt visible in tool_results.
@@ -346,7 +355,7 @@ async def test_agent_dispatches_valid_args_unchanged():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # Single valid call → single-call dispatch via a plain Call (no durable batch).
     assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
@@ -390,7 +399,7 @@ async def test_agent_partial_validation_failure_dispatches_valid_calls():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # The invalid call must surface as a RetryPromptPart in tool_results so
     # the LLM sees the typed feedback once the valid call completes.
@@ -456,7 +465,7 @@ async def test_agent_skips_validation_for_schema_only_override_tools():
     state = State()
     state.overrides = OverridesState(override_agent_tools=[schema_only])
     ctx = _make_ctx(state)
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # No RetryPromptPart — validation was skipped, so the call dispatches.
     assert tool_call_id not in ctx.state.tool_results
@@ -493,7 +502,7 @@ async def test_agent_handles_malformed_json_args_as_retry_prompt():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     assert isinstance(result, TailCall), f"expected TailCall (all calls invalid), got {type(result).__name__}"
 
@@ -531,7 +540,7 @@ async def test_agent_handles_non_dict_json_args_as_retry_prompt():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     assert isinstance(result, TailCall)
     stored = ctx.state.tool_results.get("tc-array")
@@ -629,7 +638,7 @@ async def test_agent_override_path_malformed_args_become_retry_prompt():
 
     state = State(overrides=OverridesState(override_agent_tools=[schema_only_override]))
     ctx = _make_ctx(state)
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     assert isinstance(result, TailCall), f"expected TailCall (all calls invalid), got {type(result).__name__}"
 
@@ -679,7 +688,7 @@ async def test_agent_validator_raising_runtime_error_becomes_retry_prompt():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # All (one) calls invalid → TailCall to give the LLM another turn;
     # critically, no exception escapes the dispatch loop.
@@ -718,7 +727,7 @@ async def test_agent_validator_failure_branch_continues_loop():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     # Bad call lands as a RetryPromptPart; good call is dispatched (only one
     # valid pending call remains, so the agent takes the single-call plain-Call branch).
@@ -762,7 +771,7 @@ async def test_agent_handles_typeerror_args_as_retry_prompt():
     )
 
     ctx = _make_ctx(State())
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     assert isinstance(result, TailCall), f"expected TailCall, got {type(result).__name__}"
     stored = ctx.state.tool_results.get("tc-typeerr")

@@ -46,8 +46,8 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import State
-from calfkit.models.step import ToolCallStep, ToolResultStep
 from calfkit.nodes import Agent, ConsumerNode, ToolNodeDef, agent_tool, consumer
+from calfkit.nodes._steps import DeniedCall, Observed
 from calfkit.worker import Worker
 from tests.providers import get_users_name, prepare_worker
 from tests.utils import wait_for_condition
@@ -321,8 +321,10 @@ async def test_tailcall_self_retry_targets_private_return_topic():
     ctx = SessionRunContext(state=state, deps={})
     ctx._correlation_id = "cid"
 
-    result = await agent.run(ctx)
+    observed = await agent.run(ctx)
 
+    assert isinstance(observed, Observed), f"expected Observed (fact-capable dispatch exit); got {type(observed).__name__}"
+    result = observed.action
     assert isinstance(result, TailCall), f"expected TailCall (all-invalid retry); got {type(result).__name__}"
     assert result.target_topic == agent._return_topic, (
         f"TailCall.target_topic={result.target_topic!r}; "
@@ -333,14 +335,13 @@ async def test_tailcall_self_retry_targets_private_return_topic():
         "TailCall target must not be the public subscribe topic — would leak self-retries to co-tenants"
     )
 
-    # The unknown-tool rejection arm (the registry/toolset mismatch this branch defends against) authors the
-    # paired ToolCallStep + is_error ToolResultStep step, via the same _reject_invalid_call seam as the
-    # other arms (spec §3.2; round-1 review MAJOR-1 — the pairing must hold for every rejection path).
-    draft = ctx._step_draft or []
-    tcs = [e for e in draft if isinstance(e, ToolCallStep)]
-    trs = [e for e in draft if isinstance(e, ToolResultStep)]
-    assert len(tcs) == 1 and tcs[0].tool_call_id == "c1" and tcs[0].name == "unreachable_tool"
-    assert len(trs) == 1 and trs[0].tool_call_id == "c1" and trs[0].is_error is True
+    # The unknown-tool rejection arm (the registry/toolset mismatch this branch defends against)
+    # declares the born-closed DeniedCall fact via the same _reject_invalid_call seam as the other
+    # arms (step-emission spec §3.1a; round-1 review MAJOR-1 — the pairing must hold for every
+    # rejection path; the ledger expands the fact into the paired call + denied result).
+    denied = [f for f in observed.facts if isinstance(f, DeniedCall)]
+    assert len(denied) == 1 and denied[0].tool_call_id == "c1" and denied[0].tool_name == "unreachable_tool"
+    assert denied[0].reason_parts[0].text
 
     # Also exercise the downstream ``_publish_action`` TailCall branch end-
     # to-end. The agent.run pin above proves ``target_topic`` is set

@@ -16,7 +16,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes import Agent, agent_tool
-from calfkit.nodes.agent import BaseAgentNodeDef
+from calfkit.nodes._steps import HopStepLedger
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -37,13 +37,14 @@ def _call_then_final(messages: list[ModelMessage], info: AgentInfo) -> ModelResp
 
 
 async def test_step_emission_failure_does_not_break_the_run(container, monkeypatch) -> None:  # noqa: ANN001
-    # Force the chokepoint's project_steps to raise on every agent hop; the §2.5/§2.9 guard must
-    # swallow it and still publish the action, so execute() COMPLETES (an unguarded raise would hang
-    # the run — the tool Call would never publish).
-    def _boom(self, output, ctx, frame):  # noqa: ANN001, ANN202
-        raise RuntimeError("step projection boom")
+    # Force the ledger's flush to raise on every hop exit; the kernel's exit-flush helper owns the
+    # best-effort log-and-drop guard (I1), so the run still COMPLETES (an unguarded raise would
+    # escape to FastStream and — under ACK_FIRST — hang the run: the tool Call would never publish).
+    # Replacing HopStepLedger.flush WHOLESALE still lands inside the helper's guard.
+    async def _boom(self, broker, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        raise RuntimeError("step flush boom")
 
-    monkeypatch.setattr(BaseAgentNodeDef, "project_steps", _boom)
+    monkeypatch.setattr(HopStepLedger, "flush", _boom)
 
     worker = container.get(Worker)
     agent = Agent(
@@ -84,14 +85,16 @@ async def test_stream_yields_intermediate_steps_then_terminal(container) -> None
         events = [e async for e in handle.stream()]
     kinds = [type(e).__name__ for e in events]
     assert kinds[-1] == "RunCompleted"  # terminal last (terminal-bearing stream)
-    assert "AgentMessageEvent" in kinds  # the hop's preamble
-    assert "ToolCallEvent" in kinds  # the requested tool call
-    assert "ToolResultEvent" in kinds  # the tool's result (inner-frame ReturnCall, depth>1)
-    # the tool result carries the tool's output + is not an error
+    assert "AgentMessageEvent" in kinds  # the hop's preamble (a Said fact, absorbed at the unwrap)
+    assert "ToolCallEvent" in kinds  # the requested tool call (note_dispatch from the marker)
+    assert "ToolResultEvent" in kinds  # the CALLER's fold-minted result (spec §3.2 — not the tool's)
+    # the tool result carries the resolved slot parts + resolved as a success
     tr = next(e for e in events if type(e).__name__ == "ToolResultEvent")
-    assert tr.is_error is False
+    assert tr.outcome == "success"
     assert "guarded-1967" in tr.parts[0].text
-    # depth orients the caller: the agent hop runs at inbound depth 1, the tool result at depth 2.
+    # depth orients the caller: both the dispatch hop and the FOLD hop run at the agent's inbound
+    # depth 1 — the result is minted by the folding caller, no longer by the tool at depth 2.
     am = next(e for e in events if type(e).__name__ == "AgentMessageEvent")
     assert am.depth == 1
-    assert tr.depth == 2
+    assert tr.depth == 1
+    assert tr.emitter == "stream_agent"  # the folding caller

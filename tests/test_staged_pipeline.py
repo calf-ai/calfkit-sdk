@@ -25,6 +25,7 @@ from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, record_outcome
+from calfkit.nodes._steps import HopStepLedger
 from calfkit.nodes.base import _CONSUMED, _BatchClosed, _BatchFaulted, _BatchOpen, _Declined
 from calfkit.nodes.node import NodeDef
 from tests._fanout_fakes import FakeFanoutBatchStore
@@ -192,7 +193,7 @@ async def _agg(
     """Drive ``_aggregate`` with a freshly built run_ctx + seam_ctx (sharing state); return all three."""
     run_ctx = _store_ctx(store, state=state, deps=deps)
     seam = _seam(node, run_ctx, env, kind)
-    result = await node._aggregate(run_ctx, seam, kind, env, "corr-1", broker or _CaptureBroker())
+    result = await node._aggregate(run_ctx, seam, kind, env, HopStepLedger(), "corr-1", broker or _CaptureBroker())
     return run_ctx, seam, result
 
 
@@ -450,7 +451,9 @@ class TestExecute:
         ctx._correlation_id = "corr-1"
         env = _plain_env()
         seam = node._build_seam_context(ctx, env, {}, "call")
-        result = await node._execute(ctx, seam, "call", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        result = await node._execute(
+            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+        )
         assert isinstance(result, ReturnCall) and result.value == "done"
 
     async def test_return_stateless_continuation_runs_body(self) -> None:
@@ -459,7 +462,9 @@ class TestExecute:
         ctx._correlation_id = "corr-1"
         env = _plain_env(reply=ReturnMessage(in_reply_to="A", tag="tc1", parts=[]))  # unmarked → _BatchClosed
         seam = node._build_seam_context(ctx, env, {}, "return")
-        result = await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        result = await node._execute(
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+        )
         assert isinstance(result, ReturnCall)
 
     async def test_return_parked_fold_is_consumed_without_running_body(self) -> None:
@@ -469,7 +474,9 @@ class TestExecute:
         ctx = _store_ctx(store)
         env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])  # 1 of 2 → parks
         seam = node._build_seam_context(ctx, env, {}, "return")
-        result = await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        result = await node._execute(
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+        )
         assert result is _CONSUMED  # parked fold — the body never runs
 
     async def test_all_declined_body_is_declined(self) -> None:
@@ -478,7 +485,9 @@ class TestExecute:
         ctx._correlation_id = "corr-1"
         env = _plain_env()
         seam = node._build_seam_context(ctx, env, {}, "call")
-        result = await node._execute(ctx, seam, "call", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        result = await node._execute(
+            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+        )
         assert isinstance(result, _Declined) and result.reason == "all_declined"
 
 
@@ -511,7 +520,9 @@ class TestClosureSeams:
         ctx = _store_ctx(store)
         seam = node._build_seam_context(ctx, env, {}, "return")
 
-        await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        await node._execute(
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+        )
 
         assert before_states == [{"marker": "restored"}]  # fired ONCE, observing the RESTORED snapshot state
         assert after_fired == [1]  # after_node also fired exactly once at closure
@@ -531,7 +542,9 @@ class TestClosureSeams:
         ctx = _store_ctx(store)
         seam = node._build_seam_context(ctx, env, {}, "return")
 
-        result = await node._execute(ctx, seam, "return", env, None, None, awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker())
+        result = await node._execute(
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+        )
 
         assert result is _CONSUMED  # the fold parked (incomplete batch)
         assert fired == []  # before_node did NOT fire on a mid-batch sibling (§6.4)

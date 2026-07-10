@@ -162,8 +162,8 @@ async for event in handle.stream():
             ...                             # the agent's preamble text for a hop
         case ToolCallEvent(name=name, args=args):
             ...                             # a tool the model is about to call
-        case ToolResultEvent(name=name, is_error=is_error):
-            ...                             # a tool's result (is_error=True for a retryable error)
+        case ToolResultEvent(name=name, outcome=outcome):
+            ...                             # a call's result: "success" / "failed" / "denied"
         case HandoffEvent(target=target, reason=reason):
             ...                             # control transferred to another agent
         case RunCompleted() | RunFailed():
@@ -182,17 +182,22 @@ terminals plus four intermediate step-event types, all importable from `calfkit`
 | Event | Emitted by | Carries |
 | --- | --- | --- |
 | `AgentMessageEvent` | an agent hop | `parts` — the agent's preamble text for the hop |
-| `ToolCallEvent` | an agent hop | `tool_call_id`, `name`, `args` (the raw model emission: `str` / `dict` / `None`) |
-| `ToolResultEvent` | a tool node, a consulted peer, or an agent's rejected call | `tool_call_id`, `name`, `parts`, `is_error` |
+| `ToolCallEvent` | the calling agent's dispatch hop | `tool_call_id`, `name`, `args` (the parsed dict for a dispatched call; a denied call keeps the raw model emission) |
+| `ToolResultEvent` | the **folding caller** — the agent that made the call mints the result as the reply folds | `tool_call_id`, `name`, `parts`, `outcome` (`"success"` / `"failed"` / `"denied"`) |
 | `HandoffEvent` | an agent hop | `target` (the peer) and `reason` |
 
 Every step event also carries hop identity — `correlation_id`, `depth`, `frame_id`,
 `emitter` — so you can place an event within a multi-agent run: a consulted peer or
 sub-agent streams its own hops at `depth > 1`, all to the original caller. Pair a
-`ToolCallEvent` with its `ToolResultEvent` by **`tool_call_id`** (the names can differ — a
-peer consult's `ToolCallEvent.name` is `message_agent`, while the matching
-`ToolResultEvent.name` is the peer's name). Branch with `isinstance` / `match` on the
-closed union.
+`ToolCallEvent` with its `ToolResultEvent` by **`tool_call_id`**; the `name` is consistent
+on both halves (a peer consult's call **and** result both read `message_agent`). Branch
+with `isinstance` / `match` on the closed union.
+
+**Who answered a peer consult?** A consult's result is minted by the *calling* agent as it
+folds the reply, so `ToolResultEvent.name` is `message_agent`, not the answering agent's
+name. The peer you *requested* is in the call event's `args`; if control was handed off
+along the way, the subtree's `HandoffEvent`s stream to your inbox too — a UI that wants to
+show who actually answered composes the two.
 
 > `AgentThinkingEvent` is **defined but not emitted** in v1 — it is not a `RunEvent`
 > member and never appears on a stream.
@@ -203,6 +208,18 @@ logged and dropped, and a real failure arrives only as the terminal `RunFailed`.
 intermediate queue is **consume-once**: a late `stream()` drains whatever steps are still
 buffered, once. For a guaranteed record of a run's outcome, use the terminal (`result()`),
 not the steps.
+
+**Pair closure is a documented contract, not a synthesized guarantee.** Every call an agent
+dispatches gets exactly one result event from its caller, delivered best-effort. Three rules
+let a consumer close its books:
+
+1. **The terminal is the closing bracket.** `RunCompleted` / `RunFailed` closes every
+   still-open pair — treat an unresolved call as finished-unobserved.
+2. **A `failed` result for a peer/sub-agent call closes its subtree.** The callee is gone;
+   its descendants' open pairs will never resolve. (If an ancestor *substitutes a success*
+   over a dead subtree, that result reads `success` — rule 1 still closes the rest.)
+3. **Any single step may be lost** (at-most-once). The pair law is a soft wire invariant;
+   the hub never fabricates a closing event.
 
 **Step events surface RAW parts.** A `ToolResultEvent` or `AgentMessageEvent` carries the
 unprojected reply parts — they are **not** coerced to your `output_type`. Only `result()`

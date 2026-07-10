@@ -6,10 +6,13 @@ The over-the-wire counterpart to the offline channel / projection / reception un
 * a node consumer **survives** an unmatched (unstamped) message after the envelope-filter cutover —
   the real ``consume()`` swallow that ``TestKafkaBroker.publish`` bypasses (it re-raises instead);
 * a real agent run's per-hop steps reach a held handle's ``stream()`` over the wire, in order,
-  terminal-last, with correct ``is_error``;
-* **all depths** stream to the ORIGINAL caller — a consulted ``message_agent`` peer's reply, produced
-  at depth > 1, reaches the client as a ``ToolResultEvent`` (the same root-callback propagation the
-  single-agent test demonstrates for a depth-2 tool).
+  terminal-last, with the correct ``outcome`` and fold-hop identity (emitter = the folding caller);
+* the parked-sibling TRICKLE (I5): each fan-out fold's result step reaches the client as that reply
+  folds — the real broker preserves the trickle-before-terminal order the inline offline broker
+  cannot (the completing fold's re-entry executes inline there);
+* **all depths** stream to the ORIGINAL caller — a consulted ``message_agent`` peer's answer,
+  folded by the caller, reaches the client as its fold-minted ``ToolResultEvent``
+  (``name="message_agent"``, spec §5.2).
 
 Opt-in (``-m kafka``); skips cleanly without Docker. CI-lane only.
 """
@@ -125,8 +128,43 @@ async def test_single_agent_stream_yields_steps_then_terminal(kafka_bootstrap: s
     assert kinds[-1] == "RunCompleted"  # terminal-bearing, terminal last
     assert "ToolCallEvent" in kinds  # the agent hop's requested tool call
     tr = next((e for e in events if type(e).__name__ == "ToolResultEvent"), None)
-    assert tr is not None and tr.is_error is False  # the tool's result (an inner-frame ReturnCall, depth > 1)
+    assert tr is not None and tr.outcome == "success"  # the CALLER's fold-minted result (spec §3.2)
     assert "TOOL_RESULT_OK" in tr.parts[0].text
+    # Fold-hop identity (I12/§5.2): emitter = the folding caller at its inbound depth.
+    assert tr.emitter == f"{topic_namespace}-A"
+    assert tr.depth == 1
+    await driver.aclose()
+    await worker._client.aclose()
+
+
+async def test_fanout_sibling_folds_trickle_over_the_wire(kafka_bootstrap: str, topic_namespace: str) -> None:
+    # The trickle (I5, kafka-lane pin): each parked sibling fold publishes its ONE-event result step as
+    # that reply folds — over the real broker both trickles precede the terminal (the offline inline
+    # broker reorders the completing fold's trickle past the terminal; here the real wire preserves it).
+    a_in = f"{topic_namespace}.A.input"
+    t1, t2 = _tool(f"{topic_namespace}-t1"), _tool(f"{topic_namespace}-t2")
+    agent = Agent(
+        f"{topic_namespace}-A",
+        system_prompt="x",
+        subscribe_topics=a_in,
+        model_client=scripted_model([ToolCallPart(t1.name, {}, tool_call_id="c1"), ToolCallPart(t2.name, {}, tool_call_id="c2")]),
+        tools=[t1, t2],
+    )
+    driver = Client.connect(kafka_bootstrap)
+    worker = _worker(kafka_bootstrap, nodes=[agent, t1, t2], control_plane=fast_control_plane(kafka_bootstrap))
+    async with worker:
+        handle = await driver.agent(topic=a_in).start("go", correlation_id=f"{topic_namespace}-fan")
+        events = await _collect_stream(handle, timeout=120)
+    assert type(events[-1]).__name__ == "RunCompleted"
+    results = [e for e in events if type(e).__name__ == "ToolResultEvent"]
+    # BOTH sibling folds trickled before the terminal, each a success closure (the pair law's fold side).
+    assert {r.tool_call_id for r in results} == {"c1", "c2"}
+    assert all(r.outcome == "success" for r in results)
+    # Identity anchors (I12/§5.2): emitter = the folding caller; the parked-fold frame_id is the BATCH
+    # frame id — identical across the batch's folds.
+    assert all(r.emitter == f"{topic_namespace}-A" for r in results)
+    assert all(r.depth == 1 for r in results)  # the fold hop's inbound depth (a depth-1 caller)
+    assert len({r.frame_id for r in results}) == 1
     await driver.aclose()
     await worker._client.aclose()
 
@@ -157,9 +195,16 @@ async def test_all_depths_peer_consult_reply_reaches_original_caller(kafka_boots
             events = await _collect_stream(handle, timeout=120)
     kinds = [type(e).__name__ for e in events]
     assert kinds[-1] == "RunCompleted"
-    # B's reply reached A's client as a ToolResultEvent (depth > 1 → original caller, the all-depths spine).
-    tool_results = [e for e in events if type(e).__name__ == "ToolResultEvent"]
-    assert any("42" in (tr.parts[0].text if tr.parts else "") for tr in tool_results)
+    # B's answer reached A's client as A's FOLD-MINTED ToolResultEvent (the all-depths spine): keyed by
+    # the m1 call id, name = marker.tool_name ("message_agent" — §5.2's hard break from the answering
+    # peer's name), emitted by the folding caller A.
+    (tr,) = [e for e in events if type(e).__name__ == "ToolResultEvent"]
+    assert tr.tool_call_id == "m1"
+    assert tr.name == "message_agent"
+    assert tr.outcome == "success"
+    assert tr.emitter == a_name
+    assert tr.depth == 1  # minted at A's fold hop, not at B's depth-2 hop
+    assert "42" in tr.parts[0].text
     await driver.aclose()
     await b_worker._client.aclose()
     await a_worker._client.aclose()

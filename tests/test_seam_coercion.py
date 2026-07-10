@@ -20,6 +20,7 @@ from calfkit.models.error_report import ErrorReport
 from calfkit.models.payload import DataPart
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.state import State
+from calfkit.nodes._steps import Observed
 from calfkit.nodes.base import BaseNodeDef
 
 
@@ -176,6 +177,14 @@ class TestCoerceGuards:
         node = _node()
         with pytest.raises(SeamContractError):
             node._coerce_output(_ctx(State()), Next())
+
+    def test_rejects_observed(self) -> None:
+        # Step-emission spec §3.1(b): ``Observed`` is the framework BODY's fact carriage — seams run
+        # on plain NodeResults and never see facts, so a seam returning one is rejected loudly (the
+        # same teaching-guard family as Next above), never coerced into a garbage output.
+        node = _node()
+        with pytest.raises(SeamContractError):
+            node._coerce_output(_ctx(State()), Observed(ReturnCall(state=State(), value="x")))
 
     def test_allows_a_plain_user_model_output(self) -> None:
         # A non-State pydantic model is a legitimate structured output (→ DataPart),

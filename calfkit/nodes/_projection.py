@@ -137,10 +137,10 @@ def structured_output_preamble(new_messages: list[ModelMessage]) -> str:
 
 
 def step_preamble(new_messages: list[ModelMessage]) -> str:
-    """The agent's preamble text for a NON-terminal (tool-dispatch / handoff) hop's step event
-    (intermediate-step-streaming spec §3.2): the concatenated ``TextPart`` text of the hop's
-    **final** ``ModelResponse``, excluding thinking/tool-call/file parts. Empty ⇒ the caller authors
-    no ``AgentMessage``.
+    """The agent's preamble text for a NON-terminal (tool-dispatch / handoff) hop
+    (caller-side step-emission spec §5.4): the concatenated ``TextPart`` text of the hop's
+    **final** ``ModelResponse``, excluding thinking/tool-call/file parts. Empty ⇒ the body declares
+    no ``Said`` fact.
 
     Final-``ModelResponse``-only is load-bearing: concatenating ALL ``ModelResponse``s would surface
     §2.2-out-of-scope internal-retry preamble. Unlike :func:`structured_output_preamble`, this needs

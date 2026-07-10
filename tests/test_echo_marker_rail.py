@@ -1,7 +1,9 @@
 """The echo marker rail (echo-rail spec §4) — the marker rides the frame, echoes verbatim on the
 reply wherever ``in_reply_to``/``tag`` are echoed today, and is read at the fold. Cohesive test home
 for the rail's plumbing (``CallFrame.marker`` / ``invoke_frame`` / ``_ReplyBase.marker`` / ``Call.marker``
-/ the base echo + threading / ``CalleeResult.marker``).
+/ the base echo + threading / ``CalleeResult.marker``) and its producers: with universal stamping
+(caller-side step-emission spec §3.2) EVERY agent tool dispatch stamps the marker — both ordinary
+dispatch arms and ``message_agent``.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from faststream.kafka import KafkaBroker, TestKafkaBroker
 
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit._vendor.pydantic_ai.models.test import TestModel
+from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.envelope import Envelope
 from calfkit.models.error_report import ErrorReport
@@ -23,11 +26,14 @@ from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import CalleeResult, SeamContext
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
+from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
+from calfkit.nodes._steps import Observed
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.peers import Messaging
 from tests._fanout_fakes import FakeFanoutBatchStore
+from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap
 
 _MARKER = ToolCallMarker(tool_name="message_agent", tool_call_id="m1", args={"name": "billing", "message": "hi"})
 _M2 = ToolCallMarker(tool_name="web_search", tool_call_id="c1", args={"q": "kafka"})
@@ -312,18 +318,60 @@ class TestCalleeResultMarker:
         assert CalleeResult(frame_id="f").marker is None
 
 
-# ── The sole producer + the net-simplified SlotRef (interim carriage retired) ──
+# ── The producers (universal stamping) + the net-simplified SlotRef (interim carriage retired) ──
 
 
 class TestMessageAgentProducer:
     def test_message_agent_call_stamps_the_marker(self) -> None:
-        # ``_message_agent_call`` is the sole rail producer in this PR — it stamps the full call identity
-        # (name, id, args) onto ``Call.marker`` (was the interim ``Call.tool_name``).
+        # ``_message_agent_call`` stamps the full call identity (name, id, args) onto ``Call.marker``
+        # (was the interim ``Call.tool_name``); unchanged by universal stamping (step-emission spec §3.2).
         agent = Agent("caller", subscribe_topics="caller.in", model_client=TestModel(), peers=[Messaging("billing")])
         call = agent._message_agent_call(ToolCallPart("message_agent", {"name": "billing", "message": "hi"}, tool_call_id="m1"))
         assert call.marker == ToolCallMarker(tool_name="message_agent", tool_call_id="m1", args={"name": "billing", "message": "hi"})
         assert call.isolate_state is True
         assert call.tag == "m1"
+
+
+def _search_binding() -> ToolBinding:
+    """A validator-less ``ToolBinding`` — enough surface for the dispatch arms to route a call."""
+    return ToolBinding(
+        dispatch_topic="tools.search.input",
+        tool_def=ToolDefinition(
+            name="search",
+            description="Synthetic tool with one required string arg.",
+            parameters_json_schema={"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+        ),
+    )
+
+
+class TestUniversalStamping:
+    """Universal marker stamping (step-emission spec §3.2): EVERY agent tool dispatch carries the
+    complete call identity on ``Call.marker`` — args as the PARSED dict (re-parsed per dispatched
+    call, spec §5.2), not the raw model emission."""
+
+    async def test_single_dispatch_arm_stamps_the_marker(self) -> None:
+        # args authored as a JSON STRING — the marker must carry the PARSED dict.
+        call = ToolCallPart(tool_name="search", args='{"q": "hello"}', tool_call_id="c-single")
+        agent = Agent("stamp_single", subscribe_topics="stamp_single.in", model_client=_model_emits_tool_calls([call]), tools=[_search_binding()])
+        observed = await agent.run(_make_ctx(State()))
+        # Fact-capable dispatch exits return Observed UNCONDITIONALLY — an empty facts tuple is the
+        # permitted shape for this preamble-less turn (step-emission spec §3.1b).
+        assert isinstance(observed, Observed) and observed.facts == ()
+        result = observed.action
+        assert isinstance(result, Call)
+        assert result.marker == ToolCallMarker(tool_name="search", tool_call_id="c-single", args={"q": "hello"})
+
+    async def test_fanout_sibling_arm_stamps_each_marker(self) -> None:
+        calls = [
+            ToolCallPart(tool_name="search", args={"q": "a"}, tool_call_id="c-a"),
+            ToolCallPart(tool_name="search", args='{"q": "b"}', tool_call_id="c-b"),
+        ]
+        agent = Agent("stamp_fanout", subscribe_topics="stamp_fanout.in", model_client=_model_emits_tool_calls(calls), tools=[_search_binding()])
+        result = _unwrap(await agent.run(_make_ctx(State())))
+        assert isinstance(result, list) and len(result) == 2
+        markers = {c.marker.tool_call_id: c.marker for c in result if c.marker is not None}
+        assert markers.get("c-a") == ToolCallMarker(tool_name="search", tool_call_id="c-a", args={"q": "a"})
+        assert markers.get("c-b") == ToolCallMarker(tool_name="search", tool_call_id="c-b", args={"q": "b"})
 
 
 class TestSlotRefNetSimplified:
@@ -351,7 +399,9 @@ class TestResolveCalleeEchoesMarker:
         await node._resolve_callee(_seam_ctx(), "fault", reply, target_topic="agent.billing.private.input")
         assert captured["marker"] == _MARKER  # the echoed marker reaches the failing_call the seam reads
 
-    async def test_normal_tool_fault_has_no_marker(self) -> None:
+    async def test_unstamped_reply_folds_with_no_marker(self) -> None:
+        # A marker-absent reply is SYNTHETIC-ONLY since universal stamping (every live agent dispatch is
+        # marked) — kept as the decode-tolerance pin: a foreign/legacy reply without a marker still folds.
         captured: dict[str, Any] = {}
         node = self._capturing_node(captured)
         reply = FaultMessage(in_reply_to="f1", tag="c1", error=ErrorReport(error_type="calf.exception", message="boom"))  # unstamped

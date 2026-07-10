@@ -22,10 +22,12 @@ from calfkit.models.actions import ReturnCall, TailCall
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.payload import DataPart
 from calfkit.nodes import Agent
+from calfkit.nodes._steps import Observed
 from calfkit.peers import Handoff
 from tests._peer_fakes import agents_view as _view
 from tests._peer_fakes import ctx_with_view as _ctx_with_view
 from tests._peer_fakes import handoff_part
+from tests.test_tool_errors import _unwrap
 
 
 class _Answer(BaseModel):
@@ -83,16 +85,17 @@ async def test_rank2_handoff_beats_prompted_mode_json_text_answer() -> None:
         peers=[Handoff("billing")],
     )
     ctx = _ctx_with_view(_view({"billing": None}))
-    result = await agent.run(ctx)
+    observed = await agent.run(ctx)
 
+    assert isinstance(observed, Observed)
+    result = observed.action
     assert isinstance(result, TailCall)  # the HANDOFF wins
     assert result.target_topic == derive_input_topic("billing")
-    # The losing JSON-text answer surfaces as the hop's PREAMBLE step (the step_preamble
+    # The losing JSON-text answer surfaces as the hop's PREAMBLE fact (the step_preamble
     # docstring's deliberate §8 corner — review round 1): text lost the turn, so "the text
-    # this hop emitted" is exactly what the step carries.
-    draft = ctx._step_draft or []
-    assert [type(e).__name__ for e in draft] == ["AgentMessageStep", "HandoffStep"]
-    assert draft[0].parts[0].text == '{"text": "the answer"}'
+    # this hop emitted" is exactly what the Said fact carries.
+    assert [type(f).__name__ for f in observed.facts] == ["Said", "HandedOff"]
+    assert observed.facts[0].parts[0].text == '{"text": "the answer"}'
 
 
 async def test_rank2_handoff_beats_str_agent_text_answer() -> None:
@@ -104,7 +107,7 @@ async def test_rank2_handoff_beats_str_agent_text_answer() -> None:
 
     agent = Agent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_model), peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
 
     assert isinstance(result, TailCall)
     assert result.target_topic == derive_input_topic("billing")
