@@ -554,10 +554,11 @@ class BaseAgentNodeDef(
         args = tool_call.args_as_dict()
         seed = State()
         seed.stage_message(ModelRequest.user_text_prompt(args["message"]))
-        # The sole echo-marker-rail producer in this PR (spec D4/D6): a peer call runs on a fresh seed
-        # State, so its fault folds with the PEER's foreign state (the caller's tag absent) — the marker
-        # rides the frame and echoes on the reply, and ``resolve_failing_tool_call`` reconstructs the full
-        # call from it (carriage-first) instead of consulting ``state.tool_calls`` (spec D3/D7).
+        # The marker matters most here (spec D4/D6): a peer call runs on a fresh seed State, so its
+        # fault folds with the PEER's foreign state (the caller's tag absent) — the marker rides the
+        # frame and echoes on the reply, and ``resolve_failing_tool_call`` reconstructs the full call
+        # from it (carriage-first) instead of consulting ``state.tool_calls`` (spec D3/D7). The two
+        # ordinary dispatch arms stamp the same way (universal stamping, step-emission spec §3.2).
         marker = ToolCallMarker(tool_name=_MESSAGE_AGENT_TOOL, tool_call_id=tool_call.tool_call_id, args=args)
         return Call[State](derive_input_topic(args["name"]), seed, tag=tool_call.tool_call_id, isolate_state=True, marker=marker)
 
@@ -890,6 +891,14 @@ class BaseAgentNodeDef(
                     # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
                     # echoes it on reply.tag and the agent materializes the result at that slot.
                     tag=target_tool_call.tool_call_id,
+                    # Universal stamping (step-emission spec §3.2): the complete call identity rides the
+                    # frame and echoes on the reply. args re-parsed here — everything in
+                    # ``pending_tool_calls`` passed the ``args_as_dict()`` gate, so this cannot raise.
+                    marker=ToolCallMarker(
+                        tool_name=target_tool_call.tool_name,
+                        tool_call_id=target_tool_call.tool_call_id,
+                        args=target_tool_call.args_as_dict(),
+                    ),
                 )
             else:
                 # Parallel fan-out: each sibling Call carries its tool_call_id as ``tag`` so the callee
@@ -900,6 +909,8 @@ class BaseAgentNodeDef(
                     # Per-kind sibling construction (§5.4 / L13): a message_agent gets a fresh-seeded
                     # isolate_state Call to the peer's derived topic (no ToolCallRef body); a tool gets a
                     # deep-copied caller state + its ToolCallRef. They open one durable batch and fold by tag.
+                    # Both stamp the marker (universal stamping, step-emission spec §3.2); args re-parsed
+                    # per sibling — the parse gate already admitted everything in ``pending_tool_calls``.
                     self._message_agent_call(tc)
                     if tc.tool_name == _MESSAGE_AGENT_TOOL
                     else Call[State](
@@ -907,6 +918,7 @@ class BaseAgentNodeDef(
                         ctx.state.model_copy(deep=True),
                         body=ToolCallRef.from_tool_call_part(tc),
                         tag=tc.tool_call_id,
+                        marker=ToolCallMarker(tool_name=tc.tool_name, tool_call_id=tc.tool_call_id, args=tc.args_as_dict()),
                     )
                     for tc in pending_tool_calls
                 ]

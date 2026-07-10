@@ -1,8 +1,11 @@
 """Phase 0 de-risk gates for the agent tool-error reception feature (offline lane).
 
-These are **characterization probes** of *existing* framework behaviour, run before any
-feature code is written, to prove the provenance assumptions the design (spec D3,
-state-first resolution) depends on:
+These are **characterization probes** of *existing* framework behaviour, originally run before any
+feature code was written, to prove the state-provenance assumptions the design (spec D3) depended
+on. (Since universal marker stamping — caller-side step-emission spec §3.2 — the resolver reads
+carriage-first from the echoed marker for every tool fold; the state provenance probed here remains
+the marker-absent fallback. The probes read ``ctx.state.tool_calls`` directly, so they still pin
+exactly what they always did.)
 
 * **Gate A** — a single tool fault folds back to the agent's ``on_callee_error``
   seam with ``ctx.state.tool_calls[tag]`` populated as the *full* ``ToolCallPart`` (with ``.args``).
@@ -86,7 +89,7 @@ class _ToolCallProbe:
 async def test_gate_a_single_tool_fault_resolves_via_state_with_args(container) -> None:
     # Gate A: a single tool fault folds to on_callee_error with the caller's State
     # carried back on the reply, so state.tool_calls[tag] resolves the FULL ToolCallPart (with
-    # .args). This is the state-first happy path the resolver will reuse (spec D3).
+    # .args) — the state provenance that remains the resolver's marker-absent fallback (spec D3).
     recorder = _ToolCallProbe()
     worker = container.get(Worker)
     agent = Agent(
@@ -119,8 +122,8 @@ async def test_gate_a_single_tool_fault_resolves_via_state_with_args(container) 
 async def test_gate_b1_fanout_sibling_fault_resolves_via_state_with_args(container) -> None:
     # Gate B1: a normal (non-message_agent) fan-out sibling fault also folds with the caller's
     # State — the deep-copied sibling state is mirrored back unchanged — so state.tool_calls[tag]
-    # resolves the FULL ToolCallPart WITH .args. This grounds state-first for parallel tools (the
-    # slot-first plan bug caught in review round 2 would strip .args here).
+    # resolves the FULL ToolCallPart WITH .args. This grounds the state fallback for parallel tools
+    # (the slot-first plan bug caught in review round 2 would strip .args here).
     recorder = _ToolCallProbe()
     worker = container.get(Worker)
     agent = Agent(

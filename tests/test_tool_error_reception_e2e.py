@@ -19,6 +19,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, Mod
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
+from calfkit.models.marker import ToolCallMarker
 from calfkit.models.payload import retry_text_part
 from calfkit.nodes import Agent, agent_tool
 from calfkit.nodes._tool_error import surface_to_model
@@ -82,6 +83,26 @@ async def test_surface_to_model_converts_a_single_tool_fault(container) -> None:
     assert result.output is not None and "ValueError: kaboom(7)" in result.output
     assert capture["retries"] == ["ValueError: kaboom(7)"]  # materialized as a RetryPromptPart (is_error=True)
     assert capture["returns"] == []
+
+
+async def test_marked_tool_fault_reconstructs_tool_call_from_the_marker(container) -> None:
+    # L18k pin (caller-side step emission, spec §5.2): universal marker stamping makes
+    # ``resolve_tool_call`` carriage-first for EVERY tool fault — ``ctx.tool_call`` inside
+    # ``on_tool_error`` is reconstructed from the echoed marker, so ``.args`` is the PARSED
+    # dict even when the model emitted a JSON string.
+    capture: dict[str, list[str]] = {}
+    seen: dict[str, Any] = {}
+
+    def on_error(tool_call: Any, ctx: Any, report: Any) -> Any:
+        seen["args"] = tool_call.args
+        seen["marker"] = ctx.failing_call.marker if ctx.failing_call is not None else None
+        return retry_text_part(f"handled: {report.message}")
+
+    agent = _agent("s_l18k", _react_model([ToolCallPart("kaboom", '{"x": 7}')], capture), tools=[kaboom], on_tool_error=on_error)
+    await _run(container, agent, kaboom)
+    assert capture["retries"] == ["handled: kaboom(7)"]
+    assert seen["args"] == {"x": 7}  # the parsed dict from the marker, NOT the raw '{"x": 7}' emission
+    assert isinstance(seen["marker"], ToolCallMarker) and seen["marker"].tool_name == "kaboom"
 
 
 async def test_custom_handler_branches_on_tool_name_and_converts(container) -> None:

@@ -81,14 +81,15 @@ def resolve_tool_call(state: State, tag: str | None, *, carried_marker: CallMark
     """The single ``tag → ToolCall`` resolution (spec D3/D7), shared by :attr:`AgentSeamContext.tool_call`
     and the agent's ``_resolve_slot`` so the lookup lives in one place.
 
-    **Carriage-first** for the ``message_agent``/``isolate_state`` arm: a ``carried_marker`` (the echoed
-    :class:`~calfkit.models.marker.CallMarker`, present ONLY for that arm) reconstructs the **full** call
-    — name, id, AND args — from the marker ALONE, WITHOUT reading the reply state (that state is the
-    *peer's* / foreign, so consulting it would only "work" by tag non-collision — the Phase-0 finding).
+    **Carriage-first** whenever a ``carried_marker`` (the echoed
+    :class:`~calfkit.models.marker.CallMarker`) is present — with universal stamping (caller-side
+    step-emission spec §3.2 / L18k) that is EVERY agent-dispatched call, normal tools included: the
+    marker ALONE reconstructs the **full** call — name, id, AND **parsed-dict** args — WITHOUT reading
+    the reply state (for a ``message_agent`` peer that state is *foreign*, so consulting it would only
+    "work" by tag non-collision — the Phase-0 finding; the marker is the identity carriage of record).
     The ``tool_call_id`` comes from ``marker.tool_call_id``, never ``tag`` (Q1: the follow-up deprecates
-    ``tag``'s echo role, so the reconstruction must not lean on it). **State** otherwise
-    (``state.tool_calls[tag]``): the full call for a normal single-call or fan-out tool whose own
-    ``State`` rode back on the reply.
+    ``tag``'s echo role, so the reconstruction must not lean on it). **State** as the marker-absent
+    fallback (``state.tool_calls[tag]``): a reply answering an unstamped call.
     """
     if carried_marker is not None:
         return ToolCall(tool_name=carried_marker.tool_name, tool_call_id=carried_marker.tool_call_id, args=carried_marker.args)
