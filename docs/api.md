@@ -45,9 +45,9 @@ Members of the `RunEvent` union, surfaced by `stream()` / `events()` as a run pr
 | Symbol | `kind` | Emitted by | Carries |
 | --- | --- | --- | --- |
 | `AgentMessageEvent` | `"agent_message"` | an agent hop | `parts` — the hop's preamble text |
-| `ToolCallEvent` | `"tool_call"` | an agent hop | `tool_call_id`, `name`, `args: str \| dict \| None` (raw model emission) |
-| `ToolResultEvent` | `"tool_result"` | a tool node / consulted peer / rejected call | `tool_call_id`, `name`, `parts`, `is_error: bool` |
-| `HandoffEvent` | `"handoff"` | an agent hop — emitted only when a transfer actually happens (a stale/invalid target is a rejection and projects as an `is_error` `ToolResultEvent` pair instead) | `target`, `reason` |
+| `ToolCallEvent` | `"tool_call"` | the calling agent's dispatch hop | `tool_call_id`, `name`, `args: str \| dict \| None` — the **parsed dict** for a dispatched call; a denied (never-dispatched) call keeps the raw model emission |
+| `ToolResultEvent` | `"tool_result"` | the **folding caller** — the agent that made the call mints the result as the reply folds (tool return, consulted peer's answer, and rejection alike) | `tool_call_id`, `name`, `parts`, `outcome: "success" \| "failed" \| "denied"` |
+| `HandoffEvent` | `"handoff"` | an agent hop — emitted only when a transfer actually happens (a stale/invalid target is a rejection and streams as a `denied` `ToolResultEvent` pair instead) | `target`, `reason` |
 
 Each is a **frozen** model discriminated on its `kind` literal, and also carries hop identity (`correlation_id`, `depth`, `frame_id`, `emitter`). A fifth type, `AgentThinkingEvent` (`kind="agent_thinking"`), is **defined but not emitted in v1** — it is not in the `RunEvent` union and not top-level re-exported; it lives at `calfkit.models.step` for forward compatibility.
 
@@ -69,7 +69,7 @@ The agent-only `on_tool_error` surface for converting a faulting tool result int
 | `surface_to_model` | Zero-argument prebuilt `on_tool_error` handler: converts *every* tool failure into a model-visible error result (level-A text). Pass as `Agent(on_tool_error=[surface_to_model()])`. |
 | `ToolCall` | calfkit's name for the vendored model-request tool-call type (`.tool_name` / `.args`) an `on_tool_error` handler receives — distinct from the wire `ToolCallPart` (`.kwargs`). |
 | `render_fault_for_model` | `render_fault_for_model(report) -> str` — the level-A renderer: the top exception line (`exception.type: message`, or `message` alone for a framework fault). |
-| `retry_text_part` | Build a `calf.retry`-marked text part; return it from a seam handler to show the model an error (`is_error=True`). |
+| `retry_text_part` | Build a `calf.retry`-marked text part; return it from a seam handler to show the model an error (the result streams as `outcome="failed"`). |
 | `AgentSeamContext` | The agent-enriched [`SeamContext`](#seamcontext) (adds a lazy `ctx.tool_call`); the `ctx` an `on_tool_error` handler receives. |
 | `ToolErrorHandler` | Type alias for an `on_tool_error` handler — `Callable[[ToolCall, AgentSeamContext, ErrorReport], …]`. |
 
@@ -285,7 +285,7 @@ Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams
 
 `ctx` is a [`SeamContext`](#seamcontext); for the error seams, `fault` is an [`ErrorReport`](#errors--faults). (Returning a node *action* — a `Call`/`ReturnCall`/…, the kind a node body returns to dispatch work — is accepted from `before_node` but raises `SeamContractError` from `after_node`.)
 
-**`on_tool_error`** (agents only) is sugar over `on_callee_error`: it hoists the failing tool to a flat `tool_call: ToolCall` param (`.tool_name` / `.args`) so a handler branches on `tool_call.tool_name`. Its `ctx` is an `AgentSeamContext` (a [`SeamContext`](#seamcontext) with a lazy `ctx.tool_call`). Return a value to substitute a successful result (`is_error=False`) or `retry_text_part(msg)` to show the model an error (`is_error=True`); **constructor-registered** `on_tool_error` handlers run before **constructor** `on_callee_error` on the same chain (a decorator entry, of either seam, appends after all constructor entries). The zero-argument prebuilt **`surface_to_model()`** converts *every* tool failure into a model-visible error — the top exception line, via `render_fault_for_model(report)`. Recipes: [How to handle errors and faults](error-handling.md).
+**`on_tool_error`** (agents only) is sugar over `on_callee_error`: it hoists the failing tool to a flat `tool_call: ToolCall` param (`.tool_name` / `.args`) so a handler branches on `tool_call.tool_name`. Its `ctx` is an `AgentSeamContext` (a [`SeamContext`](#seamcontext) with a lazy `ctx.tool_call`). Return a value to substitute a successful result (streams as `outcome="success"` — the model's view) or `retry_text_part(msg)` to show the model an error (streams as `outcome="failed"`); **constructor-registered** `on_tool_error` handlers run before **constructor** `on_callee_error` on the same chain (a decorator entry, of either seam, appends after all constructor entries). The zero-argument prebuilt **`surface_to_model()`** converts *every* tool failure into a model-visible error — the top exception line, via `render_fault_for_model(report)`. Recipes: [How to handle errors and faults](error-handling.md).
 
 **Minting:** `raise NodeFaultError(error_type, ...)` from any seam (or the node body) converts to a fault verbatim and **bypasses `on_node_error`** (the mint rule). Inside `on_node_error` / `on_callee_error`, raising `NodeFaultError` mints; raising any *other* exception is treated as that handler declining.
 
