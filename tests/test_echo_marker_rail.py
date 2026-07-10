@@ -32,7 +32,7 @@ from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.peers import Messaging
 from tests._fanout_fakes import FakeFanoutBatchStore
-from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls
+from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap
 
 _MARKER = ToolCallMarker(tool_name="message_agent", tool_call_id="m1", args={"name": "billing", "message": "hi"})
 _M2 = ToolCallMarker(tool_name="web_search", tool_call_id="c1", args={"q": "kafka"})
@@ -352,7 +352,7 @@ class TestUniversalStamping:
         # args authored as a JSON STRING — the marker must carry the PARSED dict.
         call = ToolCallPart(tool_name="search", args='{"q": "hello"}', tool_call_id="c-single")
         agent = Agent("stamp_single", subscribe_topics="stamp_single.in", model_client=_model_emits_tool_calls([call]), tools=[_search_binding()])
-        result = await agent.run(_make_ctx(State()))
+        result = _unwrap(await agent.run(_make_ctx(State())))
         assert isinstance(result, Call)
         assert result.marker == ToolCallMarker(tool_name="search", tool_call_id="c-single", args={"q": "hello"})
 
@@ -362,7 +362,7 @@ class TestUniversalStamping:
             ToolCallPart(tool_name="search", args='{"q": "b"}', tool_call_id="c-b"),
         ]
         agent = Agent("stamp_fanout", subscribe_topics="stamp_fanout.in", model_client=_model_emits_tool_calls(calls), tools=[_search_binding()])
-        result = await agent.run(_make_ctx(State()))
+        result = _unwrap(await agent.run(_make_ctx(State())))
         assert isinstance(result, list) and len(result) == 2
         markers = {c.marker.tool_call_id: c.marker for c in result if c.marker is not None}
         assert markers.get("c-a") == ToolCallMarker(tool_name="search", tool_call_id="c-a", args={"q": "a"})

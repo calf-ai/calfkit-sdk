@@ -3,10 +3,10 @@
 The model requests a transfer by calling ``handoff_to_agent``; calfkit arbitrates the whole
 response (§3.0-gated): the first VALID handoff wins the turn — siblings are closed by stub
 ``ToolReturnPart``s in ONE closing ``ModelRequest`` (§4), ``state.tool_calls``/``tool_results``
-stay untouched, the winner emits ``HandoffStep`` only, and ``_dispatch_handoff`` (a pure
-TailCall builder) relinquishes to the peer. Invalid handoffs are standard pre-dispatch
-rejections (``RetryPromptPart`` + error step pair) — a stale target no longer emits a
-``HandoffStep`` (documented contract change, ADR-0035).
+stay untouched, the winner declares a ``HandedOff`` fact only (the turn returns ``Observed``),
+and ``_dispatch_handoff`` (a pure TailCall builder) relinquishes to the peer. Invalid handoffs
+are standard pre-dispatch rejections (``RetryPromptPart`` + a born-closed ``DeniedCall`` fact) —
+a stale target declares no ``HandedOff`` (documented contract change, ADR-0035/0039).
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.state import OverridesState, State
-from calfkit.models.step import AgentMessageStep, HandoffStep, ToolCallStep, ToolResultStep
 from calfkit.nodes import Agent
+from calfkit.nodes._steps import DeniedCall, HandedOff, Observed, Said
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.handoff import (
     _REJECT_NONE_ONLINE,
@@ -45,6 +45,7 @@ from tests._peer_fakes import ctx_with_view as _ctx_with_view
 from tests._peer_fakes import handoff_part as _handoff_part
 from tests._peer_fakes import triage_agent as _agent
 from tests._peer_fakes import user_tool as _user_tool
+from tests.test_tool_errors import _unwrap
 
 
 def _emit_once_then_text(*parts: Any) -> FunctionModel:
@@ -97,8 +98,10 @@ async def test_winner_alone_relinquishes_with_closing_request(caplog: pytest.Log
     agent = _agent(model, peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.agent"):
-        result = await agent.run(ctx)
+        observed = await agent.run(ctx)
 
+    assert isinstance(observed, Observed)
+    result = observed.action
     assert isinstance(result, TailCall)
     assert result.target_topic == derive_input_topic("billing")
     assert result.clear_overrides is True
@@ -114,9 +117,8 @@ async def test_winner_alone_relinquishes_with_closing_request(caplog: pytest.Log
     assert ctx.state.tool_calls == {}  # §4: no registration on a winning turn
     assert ctx.state.tool_results == {}
 
-    draft = ctx._step_draft or []
-    assert [type(e).__name__ for e in draft] == ["HandoffStep"]  # winner emits HandoffStep ONLY
-    assert isinstance(draft[0], HandoffStep) and draft[0].target == "billing" and draft[0].reason == "customer needs a refund"
+    # The winner declares a HandedOff fact ONLY — no pair (frame-mirror rule, step-emission §6).
+    assert observed.facts == (HandedOff(target="billing", message="customer needs a refund"),)
 
     assert any(r.levelno == logging.DEBUG and "relinquish" in r.message for r in caplog.records)
 
@@ -126,10 +128,11 @@ async def test_winner_with_preamble_drafts_message_then_handoff() -> None:
     model = _emit_once_then_text(ModelTextPart("Let me transfer you to billing."), _handoff_part("billing", "take over"))
     agent = _agent(model, peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
-    await agent.run(ctx)
-    draft = ctx._step_draft or []
-    assert [type(e).__name__ for e in draft] == ["AgentMessageStep", "HandoffStep"]
-    assert isinstance(draft[0], AgentMessageStep) and draft[0].parts[0].text == "Let me transfer you to billing."
+    observed = await agent.run(ctx)
+    assert isinstance(observed, Observed)
+    assert [type(f).__name__ for f in observed.facts] == ["Said", "HandedOff"]
+    said = observed.facts[0]
+    assert isinstance(said, Said) and said.parts[0].text == "Let me transfer you to billing."
 
 
 async def test_winner_stubs_every_parallel_sibling(caplog: pytest.LogCaptureFixture) -> None:
@@ -143,8 +146,10 @@ async def test_winner_stubs_every_parallel_sibling(caplog: pytest.LogCaptureFixt
     agent = _agent(model, tools=[_user_tool("search")], peers=[Messaging("support"), Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None, "support": None}))
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.agent"):
-        result = await agent.run(ctx)
+        observed = await agent.run(ctx)
 
+    assert isinstance(observed, Observed)
+    result = observed.action
     assert isinstance(result, TailCall)  # NOT a Call / list[Call] — nothing dispatches
     assert result.target_topic == derive_input_topic("billing")
 
@@ -156,14 +161,12 @@ async def test_winner_stubs_every_parallel_sibling(caplog: pytest.LogCaptureFixt
     assert by_id["m1"].content == _STUB_TOOL_NOT_EXECUTED
     assert ctx.state.tool_calls == {} and ctx.state.tool_results == {}
 
-    draft = ctx._step_draft or []
-    call_steps = [e for e in draft if isinstance(e, ToolCallStep)]
-    result_steps = [e for e in draft if isinstance(e, ToolResultStep)]
-    assert [c.tool_call_id for c in call_steps] == ["t1", "m1"]  # NO ToolCallStep for the winner
-    # Stub siblings are refusals-to-dispatch: ``denied``, never ``success`` (spec §7a).
-    assert {r.tool_call_id: r.outcome for r in result_steps} == {"t1": "denied", "m1": "denied"}
-    assert all(r.parts[0].text == _STUB_TOOL_NOT_EXECUTED for r in result_steps)
-    assert isinstance(draft[-1], HandoffStep)
+    denied = [f for f in observed.facts if isinstance(f, DeniedCall)]
+    # Stub siblings are born-closed DeniedCall facts (refusals-to-dispatch, spec §7a) — the ledger
+    # expands each into its denied pair; NO fact for the winner.
+    assert [d.tool_call_id for d in denied] == ["t1", "m1"]
+    assert all(d.reason_parts[0].text == _STUB_TOOL_NOT_EXECUTED for d in denied)
+    assert isinstance(observed.facts[-1], HandedOff)
 
     assert any(r.levelno == logging.DEBUG and "stub" in r.message for r in caplog.records)
 
@@ -178,8 +181,10 @@ async def test_first_valid_handoff_wins_rejected_and_later_stubbed() -> None:
     )
     agent = _agent(model, peers=[Handoff("billing", "support", "ghost")])
     ctx = _ctx_with_view(_view({"billing": None, "support": None}))  # ghost NOT live
-    result = await agent.run(ctx)
+    observed = await agent.run(ctx)
 
+    assert isinstance(observed, Observed)
+    result = observed.action
     assert isinstance(result, TailCall) and result.target_topic == derive_input_topic("billing")
 
     closing = _closing_request(ctx.state)
@@ -191,12 +196,11 @@ async def test_first_valid_handoff_wins_rejected_and_later_stubbed() -> None:
     }
     assert ctx.state.tool_results == {}  # rejection did NOT ride tool_results on a winning turn
 
-    draft = ctx._step_draft or []
-    results = {e.tool_call_id: e for e in draft if isinstance(e, ToolResultStep)}
-    assert results["h1"].outcome == "denied"  # rejected handoff (§7b); precise reason in the step stream
-    assert _REJECT_UNREACHABLE.format(name="ghost") in results["h1"].parts[0].text
-    assert results["h3"].outcome == "denied"  # post-winner stub (§7a)
-    assert sum(isinstance(e, HandoffStep) for e in draft) == 1
+    denied = {f.tool_call_id: f for f in observed.facts if isinstance(f, DeniedCall)}
+    # Rejected handoff (§7b): the PRECISE reason rides its denied pair; post-winner stub (§7a).
+    assert _REJECT_UNREACHABLE.format(name="ghost") in denied["h1"].reason_parts[0].text
+    assert denied["h3"].reason_parts[0].text == _STUB_HANDOFF_NOT_EXECUTED
+    assert sum(isinstance(f, HandedOff) for f in observed.facts) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -216,17 +220,18 @@ async def test_stale_target_is_a_standard_rejection(caplog: pytest.LogCaptureFix
     agent = _agent(FunctionModel(_fn), peers=[Handoff("billing", "support")])
     ctx = _ctx_with_view(view)
     with caplog.at_level(logging.WARNING, logger="calfkit.nodes.agent"):
-        result = await agent.run(ctx)
+        observed = await agent.run(ctx)
 
+    assert isinstance(observed, Observed)
+    result = observed.action
     assert isinstance(result, TailCall)
     assert result.target_topic == agent._return_topic  # self-retry, NOT a relinquish
     assert result.clear_overrides is False
     retry = ctx.state.tool_results.get("h1")
     assert isinstance(retry, RetryPromptPart)
     assert retry.content == _REJECT_UNREACHABLE.format(name="billing")
-    draft = ctx._step_draft or []
-    assert not any(isinstance(e, HandoffStep) for e in draft)  # rejections emit NO HandoffStep
-    assert any(isinstance(e, ToolResultStep) and e.outcome == "denied" for e in draft)
+    assert not any(isinstance(f, HandedOff) for f in observed.facts)  # rejections declare NO HandedOff
+    assert any(isinstance(f, DeniedCall) and f.tool_call_id == "h1" for f in observed.facts)
     assert any(r.levelname == "WARNING" and "billing" in r.message and "#251" in r.message for r in caplog.records)
 
 
@@ -235,7 +240,7 @@ async def test_zero_live_peers_rejects_with_none_online_reason() -> None:
     §9 none-online rejection (never the vendor's unknown-tool retry)."""
     agent = _agent(_emit_once_then_text(_handoff_part("billing", "hi")), peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(result, TailCall) and result.target_topic == agent._return_topic
     retry = ctx.state.tool_results.get("h1")
     assert isinstance(retry, RetryPromptPart) and retry.content == _REJECT_NONE_ONLINE
@@ -249,7 +254,7 @@ async def test_rejection_re_entry_re_invokes_the_model() -> None:
     agent = _agent(model, peers=[Handoff("billing")])
     view = _view({})  # nobody online → rejection
     ctx = _ctx_with_view(view)
-    first = await agent.run(ctx)
+    first = _unwrap(await agent.run(ctx))
     assert isinstance(first, TailCall) and first.target_topic == agent._return_topic
     assert ctx.state.tool_results["h1"].content == _REJECT_NONE_ONLINE  # the §9 reason
     view.set({"billing": "Billing."})  # peer online for the re-entry
@@ -267,7 +272,7 @@ async def test_invalid_handoff_plus_valid_tool_mixed_disposition() -> None:
     )
     agent = _agent(model, tools=[_user_tool("search")], peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(result, Call)  # the tool dispatched (single-call arm)
     assert result.tag == "t1"
     retry = ctx.state.tool_results.get("h1")
@@ -286,7 +291,7 @@ async def test_invalid_handoff_plus_two_tools_takes_the_parallel_arm() -> None:
     )
     agent = _agent(model, tools=[_user_tool("search"), _user_tool("book")], peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(result, list) and [c.tag for c in result] == ["t1", "t2"]
     retry = ctx.state.tool_results.get("h1")
     assert isinstance(retry, RetryPromptPart)
@@ -302,7 +307,7 @@ async def test_rejected_handoff_with_message_agent_sibling_keeps_the_marker() ->
     )
     agent = _agent(model, peers=[Messaging("support"), Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None, "support": None}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(result, Call)
     assert isinstance(result.marker, ToolCallMarker) and result.marker.tool_name == "message_agent"
     retry = ctx.state.tool_results.get("h1")
@@ -316,7 +321,7 @@ async def test_handle_less_agent_user_tool_named_handoff_dispatches_normally() -
     model = _emit_once_then_text(ToolCallPart(tool_name=HANDOFF_TOOL, args={}, tool_call_id="u1"))
     agent = _agent(model, tools=[_user_tool(HANDOFF_TOOL)])
     ctx = _ctx_with_view(_view({}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(result, Call)
     assert result.tag == "u1"
     assert ctx.state.tool_results == {}  # no rejection — never intercepted
@@ -334,7 +339,7 @@ async def test_peer_re_enters_cleanly_on_the_inherited_state() -> None:
     model = _emit_once_then_text(_handoff_part("billing", "customer needs a refund"))
     a = _agent(model, peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
-    result = await a.run(ctx)
+    result = _unwrap(await a.run(ctx))
     assert isinstance(result, TailCall)
 
     b_calls = {"n": 0}
@@ -373,12 +378,12 @@ async def test_returning_handoff_a_to_b_to_a_re_enters_cleanly() -> None:
     a_model = _emit_once_then_text(_handoff_part("billing", "take over"))
     a = _agent(a_model, peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
-    assert isinstance(await a.run(ctx), TailCall)
+    assert isinstance(_unwrap(await a.run(ctx)), TailCall)
 
     b_model = _emit_once_then_text(_handoff_part("triage", "back to you", call_id="h2"))
     b = Agent("billing", subscribe_topics="billing.in", model_client=b_model, peers=[Handoff("triage")])
     b_ctx = _ctx_with_view(_view({"triage": None}), state=ctx.state)
-    assert isinstance(await b.run(b_ctx), TailCall)  # billing hands BACK to triage
+    assert isinstance(_unwrap(await b.run(b_ctx)), TailCall)  # billing hands BACK to triage
 
     a2_ctx = _ctx_with_view(_view({"billing": None}), state=b_ctx.state)
     result = await a.run(a2_ctx)

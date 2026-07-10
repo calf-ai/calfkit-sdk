@@ -29,7 +29,7 @@ from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent
 from calfkit.nodes.agent import _serialize_message_reply
 from calfkit.peers import Handoff, Messaging
-from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls
+from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap
 
 
 def _view(cards: dict[str, str | None]) -> object:
@@ -66,7 +66,7 @@ async def test_message_agent_dispatches_isolate_state_peer_call() -> None:
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing", "balance?")]), peers=[Messaging("billing")]
     )
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(result, Call)
     assert result.target_topic == "agent.billing.private.input"
     assert result.isolate_state is True
@@ -81,7 +81,7 @@ async def test_message_agent_offline_target_retries() -> None:
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("ghost")]), peers=[Messaging(discover=True)]
     )
     ctx = _ctx_with_view(_view({"billing": None}))  # ghost not live
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(ctx.state.tool_results.get("tc1"), RetryPromptPart)
     assert isinstance(result, TailCall)  # all calls invalid -> self-retry
 
@@ -137,7 +137,7 @@ async def test_message_agent_parallel_mixed_batch_dispatches_per_kind() -> None:
     agent = Agent(
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([msg, add]), tools=[tool], peers=[Messaging("billing")]
     )
-    result = await agent.run(_ctx_with_view(_view({"billing": "Billing."})))
+    result = _unwrap(await agent.run(_ctx_with_view(_view({"billing": "Billing."}))))
     assert isinstance(result, list) and len(result) == 2
     by_tag = {c.tag: c for c in result}
     peer = by_tag["m1"]
@@ -167,7 +167,7 @@ async def test_message_agent_is_never_looked_up_in_tools_registry() -> None:
         tools=[tool],
         peers=[Messaging("billing")],
     )
-    result = await agent.run(_ctx_with_view(_view({"billing": "Billing."})))
+    result = _unwrap(await agent.run(_ctx_with_view(_view({"billing": "Billing."}))))
     assert isinstance(result, Call)
     assert result.target_topic == "agent.billing.private.input"  # the peer, NOT the "add" tool (adder.in)
     assert result.isolate_state is True
@@ -221,7 +221,7 @@ async def test_message_agent_non_ancestor_target_is_allowed() -> None:
     # suspended in the chain) must still dispatch. `other` is an ancestor, `billing` is the target.
     agent = Agent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing")]), peers=[Messaging("billing")])
     ctx = _ctx_with_view(_view({"billing": None}), ancestors=frozenset({("other", "agent")}))
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(result, Call)
     assert result.target_topic == "agent.billing.private.input"  # dispatched, not a false cycle
     assert "tc1" not in ctx.state.tool_results  # no retry
@@ -242,7 +242,7 @@ async def test_message_agent_invalid_sibling_excluded_from_batch() -> None:
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([bad, good, add]), tools=[tool], peers=[Messaging(discover=True)]
     )
     ctx = _ctx_with_view(_view({"billing": None}))  # billing live, ghost offline
-    result = await agent.run(ctx)
+    result = _unwrap(await agent.run(ctx))
     assert isinstance(ctx.state.tool_results.get("bad1"), RetryPromptPart)  # ghost excluded
     assert isinstance(result, list) and len(result) == 2  # only the two valid siblings dispatched
     by_tag = {c.tag: c for c in result}

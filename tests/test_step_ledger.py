@@ -296,6 +296,16 @@ class TestFlush:
         await _flush(ledger, broker, disposition=ReturnCall(state=State(), value="answer"))
         assert broker.published == []
 
+    async def test_broker_none_with_publishable_events_clamps_and_drains(self) -> None:
+        # The impossible-by-contract input (a rooted, non-empty flush with NO broker) clamps —
+        # total, never raises — and still drains (at-most-once holds even for this shape).
+        ledger = HopStepLedger()
+        ledger.folded(_MARKER, [TextPart(text="r")])
+        await _flush(ledger, None, root_callback="client.return")
+        broker = _FakeBroker()
+        await _flush(ledger, broker)
+        assert broker.published == []  # drained by the clamped flush
+
     async def test_flush_is_total_no_internal_wrap(self) -> None:
         # The best-effort log-and-drop guard lives at the KERNEL's exit-flush helper (F1), not here —
         # a broker raise propagates (this is what makes the I1 monkeypatch guard test meaningful).

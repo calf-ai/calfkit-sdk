@@ -245,6 +245,41 @@ async def test_i6_flush_then_failed_action_publish_publishes_exactly_one_step_me
     assert state["step_count"] == 1  # ONE StepMessage for the hop; the fault-exit flush was drained
 
 
+async def test_open_guard_fault_exit_flushes_drained_and_faults(container, monkeypatch) -> None:
+    # The fan-out OPEN guard (spec §3.4 / plan F1): a raise out of _handle_fanout_open faults the
+    # caller on the pre-mutation snapshot, with the exit flush invoked first — a drained no-op
+    # (the chokepoint flush already published the dispatch steps), so exactly ONE StepMessage
+    # still publishes for the hop and the run fails cleanly instead of hanging.
+    from calfkit.nodes.agent import BaseAgentNodeDef
+
+    async def _boom_open(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("open boom")
+
+    monkeypatch.setattr(BaseAgentNodeDef, "_handle_fanout_open", _boom_open)
+    calls = [ToolCallPart("pair_echo", {}, tool_call_id="c1"), ToolCallPart("pair_ok", {}, tool_call_id="c2")]
+    agent = _agent("og_agent", _react(calls), tools=[pair_echo, pair_ok])
+    worker = container.get(Worker)
+    worker.add_nodes(agent, pair_echo, pair_ok)
+    prepare_worker(container)
+    broker = container.get(KafkaBroker)
+    client = container.get(Client)
+
+    orig_publish = broker.publish
+    step_count = {"n": 0}
+
+    async def spy(message: Any, *args: Any, **kwargs: Any) -> Any:
+        if (kwargs.get("headers") or {}).get(HDR_WIRE) == StepMessage.WIRE:
+            step_count["n"] += 1
+        return await orig_publish(message, *args, **kwargs)
+
+    monkeypatch.setattr(broker, "publish", spy)
+    async with TestKafkaBroker(broker):
+        handle = await client.agent(topic="og_agent.in").start("go")
+        events = [e async for e in handle.stream()]
+    assert type(events[-1]).__name__ == "RunFailed"  # the guard faulted the caller; no hang
+    assert step_count["n"] == 1  # the chokepoint flush; the guard's exit flush was a drained no-op
+
+
 # --------------------------------------------------------------------------- #
 # I2 — no residue (single-run oracle)                                          #
 # --------------------------------------------------------------------------- #
