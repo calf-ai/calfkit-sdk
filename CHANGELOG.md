@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.8](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.7...v0.12.8) (2026-07-10)
+
+
+### Features
+
+* caller-side arg validation for discovered tools ([#343](https://github.com/calf-ai/calfkit-sdk/issues/343)) ([c8466e7](https://github.com/calf-ai/calfkit-sdk/commit/c8466e7ab030d688bc5dba8dbc783b815ad46dac))
+* caller-side events emission ([#342](https://github.com/calf-ai/calfkit-sdk/issues/342)) ([8861e59](https://github.com/calf-ai/calfkit-sdk/commit/8861e596d6deef47049ad65c30921b460920549b))
+* **cli:** foreground `ck dev mesh start` and rename broker group to mesh ([#338](https://github.com/calf-ai/calfkit-sdk/issues/338)) ([fe8d222](https://github.com/calf-ai/calfkit-sdk/commit/fe8d222fe286e9c172741a74b22b4fedc73bbc37))
+* echo marker rail — typed call-identity carriage echoed on the reply ([#339](https://github.com/calf-ai/calfkit-sdk/issues/339)) ([faa4c05](https://github.com/calf-ai/calfkit-sdk/commit/faa4c05424c11eaeba643b011f18bd459c7ef238))
+* live wait-progress feedback and live agent picker for ck dev ([#336](https://github.com/calf-ai/calfkit-sdk/issues/336)) ([ce4f48a](https://github.com/calf-ai/calfkit-sdk/commit/ce4f48ad23339c96f1842d2ce03d77eded27bbae))
+* remove `sequential_only_mode` from Agents ([#341](https://github.com/calf-ai/calfkit-sdk/issues/341)) ([e3afae5](https://github.com/calf-ai/calfkit-sdk/commit/e3afae5bcd3c808e604bab0444fa4ff1c935f02b))
+* tool-based handoff ([#340](https://github.com/calf-ai/calfkit-sdk/issues/340)) ([69a3e26](https://github.com/calf-ai/calfkit-sdk/commit/69a3e267b144dcdbb1afda5cf376c1ebcd25888d))
+
 ## [0.12.7](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.6...v0.12.7) (2026-07-08)
 
 
