@@ -265,7 +265,6 @@ async def test_chat_loop_renders_transcript_and_threads_history(container: objec
         subscribe_topics="agent.helpbot.private.input",  # == derive_input_topic("helpbot")
         model_client=FunctionModel(_preamble_call_then_final),
         tools=[_lookup_year],
-        sequential_only_mode=True,
     )
     worker.add_nodes(agent, _lookup_year)
     prepare_worker(container)

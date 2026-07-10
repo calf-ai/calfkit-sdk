@@ -5,7 +5,7 @@ The carriage switch (fault-rail §4.5/§6.9): a tool returns its result on the r
 (``_resolve_slot``) keyed by the echoed ``tag`` — no more ``state.tool_results`` blob-write. These
 drive a REAL single tool call through ``TestKafkaBroker`` to prove the full round trip:
 
-- a single (sequential) tool call's result materializes and the agent resumes to a final answer
+- a single tool call's result materializes and the agent resumes to a final answer
   incorporating it — THE regression guard for the single-call ``tag`` (decision 9): without the tag
   on the ``Call``, the reply's ``tag`` is ``None`` and ``_resolve_slot`` no-ops, so the agent never
   sees the result and loops;
@@ -51,10 +51,10 @@ def _call_then_echo_the_tool_result(messages: list[ModelMessage], info: AgentInf
 
 
 async def test_single_tool_call_result_materializes_and_agent_resumes(container) -> None:
-    # THE single-call tag regression guard (decision 9): a sequential agent calls one tool; the tool's
+    # THE single-call tag regression guard (decision 9): the agent calls one tool; the tool's
     # result rides the reply slot and must materialize at the callee slot (keyed by the echoed tag) so
     # the agent's next turn sees it. Without the tag on the Call, the reply tag is None, _resolve_slot
-    # no-ops, the tool result never materializes, and the sequential agent loops until the TTL.
+    # no-ops, the tool result never materializes, and the agent loops until the TTL.
     worker = container.get(Worker)
     agent = Agent(
         "year_agent",
@@ -62,7 +62,6 @@ async def test_single_tool_call_result_materializes_and_agent_resumes(container)
         subscribe_topics="year_agent.input",
         model_client=FunctionModel(_call_then_echo_the_tool_result),
         tools=[lookup_year],
-        sequential_only_mode=True,
     )
     worker.add_nodes(agent, lookup_year)
     prepare_worker(container)
@@ -103,7 +102,6 @@ async def test_tool_model_retry_round_trips_as_retry_prompt(container) -> None:
         subscribe_topics="retry_agent.input",
         model_client=FunctionModel(_call_then_react_to_the_retry),
         tools=[flaky_tool],
-        sequential_only_mode=True,
     )
     worker.add_nodes(agent, flaky_tool)
     prepare_worker(container)

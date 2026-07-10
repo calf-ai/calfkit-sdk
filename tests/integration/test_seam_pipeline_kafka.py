@@ -93,7 +93,6 @@ def _agent(node_id: str, *, agent_in: str, publish_topic: str | None = None, **s
         subscribe_topics=agent_in,
         publish_topic=publish_topic,
         model_client=final_model(),
-        sequential_only_mode=True,
         **seams,
     )
 

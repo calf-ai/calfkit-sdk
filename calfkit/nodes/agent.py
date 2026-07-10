@@ -114,7 +114,6 @@ class BaseAgentNodeDef(
         tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None = None,
         model_client: PydanticModelClient,
         final_output_type: OutputSpec[AgentOutputT] = str,  # type: ignore[assignment]
-        sequential_only_mode: bool = False,
         model_settings: ModelSettings | dict[str, Any] | None = None,
         peers: Sequence[Messaging | Handoff] | None = None,
     ):
@@ -127,13 +126,10 @@ class BaseAgentNodeDef(
         self._tool_selectors: list[ToolSelector] = []
         self._eager_tool_nodes: list[BaseToolNodeDef] = []
         self._add_tools(tools)  # enforce the tool-surface contract, then commit (raises before agent-loop build)
-        self.sequential_only_mode = sequential_only_mode
         # peers= (ADR-0015/0019): capability handles for agent-to-agent reach (Messaging — consult; Handoff
-        # — transfer control), validated + stored BEFORE the fan-out store @resource gate below (decision
-        # 1(b): `_needs_durable_batch` reads `self._messaging_handles`, so a `sequential_only_mode` messaging
-        # agent gets the store for its lone `message_agent`; a Handoff-only agent needs none). The own-name
-        # reject lives here — a handle can't see the enclosing agent's name (M2); `peers=` type-validates
-        # each element is a `Messaging`/`Handoff` handle (M4: no cross-absorption with `tools=`).
+        # — transfer control). The own-name reject lives here — a handle can't see the enclosing agent's
+        # name (M2); `peers=` type-validates each element is a `Messaging`/`Handoff` handle (M4: no
+        # cross-absorption with `tools=`).
         peer_handles = tuple(peers or ())
         for peer in peer_handles:
             if not isinstance(peer, (Messaging, Handoff)):
@@ -207,15 +203,15 @@ class BaseAgentNodeDef(
             model_settings=cast(ModelSettings | None, model_settings),
         )
 
-        if self._needs_durable_batch:
-            # An agent that needs the durable batch machinery owns its store as a node @resource (opened
-            # by the worker lifecycle before serving; mirrors the worker's Capability View resource).
-            # `_needs_durable_batch` (decision 1(b)) is true for a true fan-out agent OR a messaging agent
-            # (a `peers` handle) — so a `sequential_only_mode` messaging agent still gets the store for its
-            # lone `message_agent`'s degenerate batch, while its tool routing stays one-at-a-time. The
-            # @resource never runs under the synchronous TestKafkaBroker — offline, the test harness
-            # injects a fake into the bag instead (tests/providers.py::prepare_worker).
-            self.resource(name=FANOUT_STORE_KEY)(self._fanout_store_resource)
+        # Every agent owns its durable fan-out store as a node @resource (opened by the worker
+        # lifecycle before serving; mirrors the worker's Capability View resource). Registration is
+        # unconditional: no agent is statically fan-out-free — callers can inject override tools over
+        # the wire and `Tools` selectors resolve at runtime. Offline the @resource must not dial a
+        # real cluster: the autouse `_offline_fanout_store` fixture (tests/conftest.py) swaps
+        # `KtablesFanoutBatchStore` → `OfflineFanoutBatchStore` for every non-kafka `worker.start()`;
+        # handler-driven tests never start the worker (the @resource never runs), so
+        # tests/providers.py::prepare_worker injects a fake into the resource bag instead.
+        self.resource(name=FANOUT_STORE_KEY)(self._fanout_store_resource)
 
     @staticmethod
     def _compose_instructions(name: str, system_prompt: str) -> str:
@@ -277,9 +273,8 @@ class BaseAgentNodeDef(
 
     @property
     def _is_fanout_capable(self) -> bool:
-        """A non-sequential agent folds durable fan-out batches in-node; a
-        ``sequential_only_mode`` agent issues only single calls and never fans out."""
-        return not self.sequential_only_mode
+        """An agent folds durable fan-out batches in-node."""
+        return True
 
     @property
     def _seam_output_type(self) -> Any:
@@ -678,43 +673,15 @@ class BaseAgentNodeDef(
 
         if len(latest_tool_calls) > 0:
             if not ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
-                if self.sequential_only_mode:
-                    target_tool_call = next(tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results)
-                    # Defensive fork (handoff spec §3.0-gated, spec §10): a handoff call is finalized in the
-                    # delivery that produced it (winner → closing request; rejection → tool_results), so a
-                    # PENDING one arriving from outside the function means corrupt/replayed state — raise
-                    # loudly rather than skip (or mis-dispatch it to the registry lookup below).
-                    if self._handoff_handles and target_tool_call.tool_name == HANDOFF_TOOL:
-                        raise RuntimeError(
-                            f"[{ctx.correlation_id[:8]}] pending handoff call reached the sequential re-entry arm — "
-                            f"impossible by construction; state is corrupt. node={self.name} "
-                            f"tool_call_id={target_tool_call.tool_call_id}"
-                        )
-                    logger.debug(
-                        "[%s] routing pending tool call=%s tool=%s node=%s",
-                        ctx.correlation_id[:8],
-                        target_tool_call.tool_call_id,
-                        target_tool_call.tool_name,
-                        self.name,
-                    )
-                    if target_tool_call.tool_name == _MESSAGE_AGENT_TOOL:
-                        return self._message_agent_call(target_tool_call)
-                    return Call[State](
-                        tools_registry[target_tool_call.tool_name].dispatch_topic,
-                        ctx.state,
-                        body=ToolCallRef.from_tool_call_part(target_tool_call),
-                        # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
-                        # echoes it on reply.tag and the agent materializes the result at that slot.
-                        tag=target_tool_call.tool_call_id,
-                    )
-                else:
-                    remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
-                    raise RuntimeError(
-                        f"[{ctx.correlation_id[:8]}] Parallel mode reached incomplete tool calls in run(). "
-                        f"node={self.name} frame_id={ctx.frame_id} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
-                        f"The durable in-node fold should re-enter run() only on a complete batch — this indicates "
-                        f"the fan-out did not fully fold before re-entry (e.g. a lost batch from rebalance/restart)."
-                    )
+                remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
+                raise RuntimeError(
+                    f"[{ctx.correlation_id[:8]}] Reached incomplete tool calls in run(). "
+                    f"node={self.name} frame_id={ctx.frame_id} "
+                    f"remaining={[(tc.tool_call_id, tc.tool_name) for tc in remaining]}. "
+                    f"run() must only re-enter with every latest tool call resolved — this indicates "
+                    f"corrupt or half-folded state (e.g. a lost fan-out batch from rebalance/restart, "
+                    f"or a replayed/hand-built State carrying an unresolved call)."
+                )
 
             tool_results = DeferredToolResults(calls={tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id) for tc in latest_tool_calls})
 
@@ -763,7 +730,7 @@ class BaseAgentNodeDef(
             # + a ToolCallStep per requested call (raw model emission; covers message_agent + valid +
             # invalid) + an is_error ToolResultStep for each call this hop rejects (the arms below, via
             # _reject_invalid_call). Read at the chokepoint via project_steps; committed to ctx._step_draft
-            # after the loop. A pre-model re-dispatch hop never reaches here, so its draft stays None ⇒ no step.
+            # after the loop. A hop that never reaches this dispatch loop (e.g. a final-output turn) leaves its draft None ⇒ no step.
             #
             # Authoring runs OUTSIDE the chokepoint's best-effort wrap (spec §2.9), so a raise here would
             # FAULT the run — the one thing a step must never do. It is total by construction: step_preamble
@@ -905,7 +872,7 @@ class BaseAgentNodeDef(
 
             pending_tool_calls = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
 
-            if self.sequential_only_mode or len(pending_tool_calls) == 1:
+            if len(pending_tool_calls) == 1:
                 target_tool_call = pending_tool_calls[0]
                 logger.debug(
                     "[%s] routing new tool call=%s tool=%s node=%s",
@@ -976,7 +943,7 @@ class BaseAgentNodeDef(
         ``ToolResultStep`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
         ``tool_call_id``, not name). ``is_error`` is derived once here, coerce-first. Otherwise
         (``Call`` / ``list[Call]`` / ``TailCall``) the agent's authored ``_step_draft`` is the
-        projection — ``None`` on a pre-model re-dispatch hop ⇒ ``[]`` (the double-emit guard)."""
+        projection — ``None`` on a hop that authored no draft (e.g. a final-output turn) ⇒ ``[]``."""
         if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
             parts = _coerce_to_parts(output.value)
             return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]

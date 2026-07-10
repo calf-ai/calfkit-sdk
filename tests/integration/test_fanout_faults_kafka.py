@@ -1,7 +1,7 @@
 """Suite X — fan-out fault paths over the real durable store.
 
-A fan-out-capable agent (no ``sequential_only_mode``) opens a real
-``KtablesFanoutBatchStore`` and folds N sibling replies; these tests drive faulting
+A fan-out agent opens a real ``KtablesFanoutBatchStore`` and folds N sibling
+replies; these tests drive faulting
 siblings through that durable fold over the wire (offline-only today):
 
 * **X-1** — one unhandled sibling fault → at closure the batch fails with a *flattened*

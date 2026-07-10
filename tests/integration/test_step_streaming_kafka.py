@@ -115,7 +115,6 @@ async def test_single_agent_stream_yields_steps_then_terminal(kafka_bootstrap: s
         subscribe_topics=a_in,
         model_client=scripted_model([ToolCallPart(tool_name, {}, tool_call_id="t1")]),
         tools=[tool],
-        sequential_only_mode=True,
     )
     driver = Client.connect(kafka_bootstrap)
     worker = _worker(kafka_bootstrap, nodes=[agent, tool], control_plane=fast_control_plane(kafka_bootstrap))

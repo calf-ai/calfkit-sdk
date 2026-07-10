@@ -39,7 +39,6 @@ async def test_model_retry_round_trips_as_calf_retry_not_a_fault(kafka_bootstrap
         publish_topic=agent_pub,
         model_client=scripted_model([ToolCallPart("needs_retry", {"x": -1}, tool_call_id="c1")]),
         tools=[needs_retry],
-        sequential_only_mode=True,
     )
     await ensure_topic(kafka_bootstrap, agent_pub)
     driver = Client.connect(kafka_bootstrap)

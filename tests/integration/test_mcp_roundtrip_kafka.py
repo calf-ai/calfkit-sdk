@@ -14,7 +14,6 @@ distributed loop over a live broker —
 Coverage (happy + contract/edge paths — fault paths live with the fault-rail work):
   * single dispatch and concurrent fan-out (baseline);
   * fan-out slot routing keyed by tool_call_id (same tool twice);
-  * sequential mode (one call per turn, no durable store);
   * routing across two MCP servers; reply routing for two agents on one toolbox;
   * the ``include`` trust boundary; and dynamic ``tools/list_changed`` re-discovery.
 
@@ -350,54 +349,6 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     # Same tool name, two ids, two distinct results in their own slots.
     assert "5" in _serialized(by_id["call-a"])
     assert "30" in _serialized(by_id["call-b"])
-
-    await driver.aclose()
-    await toolbox_worker._client.aclose()
-    await agent_worker._client.aclose()
-
-
-async def test_sequential_mode_dispatches_without_fanout(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """A sequential-only agent emitting two calls dispatches them one per turn
-    and never opens the durable fan-out store (no calf.fanout topics), yet both
-    results still round-trip."""
-    agent_id = f"{topic_namespace}-seq-agent"
-    agent_in = f"{topic_namespace}.seq-agent.input"
-    control_plane = fast_control_plane(kafka_bootstrap)
-    server_name = _server_name(topic_namespace)
-
-    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    agent = Agent(
-        agent_id,
-        system_prompt="call both tools sequentially",
-        subscribe_topics=agent_in,
-        model_client=scripted_model(
-            [
-                ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-add"),
-                ToolCallPart(_ns(server_name, "echo"), {"text": "hi"}, tool_call_id="call-echo"),
-            ]
-        ),
-        tools=[toolbox.select(include=_TOOLS)],
-        sequential_only_mode=True,
-    )
-    assert not agent._is_fanout_capable
-
-    driver = Client.connect(kafka_bootstrap)
-    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
-    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
-
-    async with toolbox_worker:
-        await _await_capability(kafka_bootstrap, server_name, timeout=60)
-        async with agent_worker:
-            result = await driver.agent(topic=agent_in).execute("add then echo", timeout=120)
-            topics = await _topics(kafka_bootstrap)
-
-    assert result.output is not None and FINAL_OUTPUT in result.output
-    returns = tool_returns(result.message_history)
-    assert "5" in _serialized(returns[_ns(server_name, "add")])
-    assert "hi" in _serialized(returns[_ns(server_name, "echo")])
-    # No durable store was opened — the sequential path never fans out.
-    assert f"calf.fanout.{agent_id}.state" not in topics
-    assert f"calf.fanout.{agent_id}.basestate" not in topics
 
     await driver.aclose()
     await toolbox_worker._client.aclose()

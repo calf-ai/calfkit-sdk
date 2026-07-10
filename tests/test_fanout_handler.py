@@ -1,10 +1,10 @@
 """PR-4 step 6b: the in-node fan-out machinery on BaseNodeDef.
 
-Tested in isolation against the injected fake store + constructed envelopes (the
-@resource never runs offline, so a fan-out agent just gets `agent.resources[KEY] =
-fake`). These pin the pieces the staged handler wires together in 6b-B:
+Tested in isolation against the injected fake store + constructed envelopes (these
+tests are handler-driven — no worker lifecycle, so the @resource never runs and a
+fan-out agent just gets `agent.resources[KEY] = fake`). These pin the pieces the staged handler wires together in 6b-B:
 
-- _is_fanout_capable: only non-sequential agents fan out durably
+- _is_fanout_capable: agents fan out durably; every other node kind does not
 - _resolve_fanout_store: the store comes from ctx.resources, required for fan-out
 - _classify_fanout: marker + reply slot => SIBLING fold / RE-ENTRY close / NORMAL
 """
@@ -48,12 +48,11 @@ def _model(_messages: object, _info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart("ok")])
 
 
-def _agent(*, sequential: bool = False) -> Agent[str]:
+def _agent() -> Agent[str]:
     return Agent(
         name="a",
         subscribe_topics=["a.in"],
         model_client=FunctionModel(_model),
-        sequential_only_mode=sequential,
     )
 
 
@@ -79,10 +78,6 @@ def test_agent_is_fanout_capable() -> None:
     assert _agent()._is_fanout_capable is True
 
 
-def test_sequential_agent_is_not_fanout_capable() -> None:
-    assert _agent(sequential=True)._is_fanout_capable is False
-
-
 # ── store resolution ─────────────────────────────────────────────────────────
 
 
@@ -106,16 +101,11 @@ def test_resolve_fanout_store_raises_when_absent() -> None:
 
 
 def test_fanout_agent_registers_durable_store_resource() -> None:
-    # A non-sequential agent registers the node-owned fan-out store @resource (opened by the
+    # Every agent registers the node-owned fan-out store @resource unconditionally (opened by the
     # worker lifecycle in production; injected by prepare_worker offline). The @resource itself
     # is not run here — only its registration is asserted.
     names = {name for name, _ in _agent()._resource_registry()}
     assert FANOUT_STORE_KEY in names
-
-
-def test_sequential_agent_registers_no_store_resource() -> None:
-    names = {name for name, _ in _agent(sequential=True)._resource_registry()}
-    assert FANOUT_STORE_KEY not in names
 
 
 # ── classification ───────────────────────────────────────────────────────────
@@ -221,16 +211,16 @@ def test_call_isolate_state_field() -> None:
 
 
 def test_needs_durable_batch_decouples_from_fanout_capability() -> None:
-    # decision 1(b), NARROWED in PR-C: the durable-batch machinery is needed iff the node can parallel-
-    # fan-out (`_is_fanout_capable`) OR can dispatch an `isolate_state` call (it carries a `Messaging`
-    # handle, signalled by `_messaging_handles`). Decoupled so a `sequential_only_mode` messaging agent
-    # still gets the machinery for a lone `message_agent`; for non-messaging nodes — incl. a Handoff-only
-    # agent (a winning handoff is a TailCall disposition, never a dispatched Call) — it equals `_is_fanout_capable`.
+    # decision 1(b), retained as future-proofing: the durable-batch machinery is needed iff the node can
+    # parallel-fan-out (`_is_fanout_capable`) OR can dispatch an `isolate_state` call (it carries a
+    # `Messaging` handle, signalled by `_messaging_handles`). Every agent satisfies the first disjunct;
+    # the decoupling is only observable on a non-agent node carrying Messaging handles, pinned here
+    # synthetically.
     plain = NodeDef(node_id="n", subscribe_topics=["n.in"])  # not fan-out-capable, no messaging
     assert plain._needs_durable_batch is False
     fanout = _SingleCallFanoutNode(node_id="f", subscribe_topics=["f.in"])  # fan-out-capable
     assert fanout._needs_durable_batch is True
-    plain._messaging_handles = ("messaging-handle",)  # type: ignore[attr-defined]  # a sequential messaging agent
+    plain._messaging_handles = ("messaging-handle",)  # type: ignore[attr-defined]  # a messaging-only node
     assert plain._needs_durable_batch is True
     plain._messaging_handles = ()  # type: ignore[attr-defined]  # no messaging handle => no machinery
     assert plain._needs_durable_batch is False
@@ -313,10 +303,10 @@ class _IsolateStateBareCallNode(NodeDef[Any]):
         return Call("agent.peer.private.input", State(), tag="tc1", isolate_state=True)
 
 
-class _SequentialMessagingNode(NodeDef[Any]):
-    """A NON-fan-out-capable node (a ``sequential_only_mode`` analog) carrying a ``Messaging`` handle, whose
-    body returns a BARE ``Call(isolate_state=True)``: ``_needs_durable_batch`` is True via
-    ``_messaging_handles`` (1(b), narrowed to messaging in PR-C — a Handoff-only agent needs no batch)."""
+class _MessagingOnlyNode(NodeDef[Any]):
+    """A NON-fan-out-capable node carrying a ``Messaging`` handle, whose body returns a BARE
+    ``Call(isolate_state=True)``: ``_needs_durable_batch`` is True via ``_messaging_handles``
+    (decision 1(b) — the decoupling retained for exactly this non-agent shape)."""
 
     _messaging_handles = ("messaging-handle",)
 
@@ -347,10 +337,10 @@ async def test_lone_isolate_state_call_opens_degenerate_batch() -> None:
     assert await fake.read_basestate("A") is not None  # caller state snapshotted at OPEN
 
 
-async def test_sequential_messaging_node_opens_degenerate_batch() -> None:
-    # decision 1(b): a NON-fan-out-capable node (sequential_only_mode analog) carrying a Messaging handle
-    # is `_needs_durable_batch`, so it still opens the degenerate batch for a lone isolate_state call.
-    node = _SequentialMessagingNode(node_id="seq", subscribe_topics=["seq.in"])
+async def test_messaging_only_node_opens_degenerate_batch() -> None:
+    # decision 1(b): a NON-fan-out-capable node carrying a Messaging handle is
+    # `_needs_durable_batch`, so it still opens the degenerate batch for a lone isolate_state call.
+    node = _MessagingOnlyNode(node_id="msg", subscribe_topics=["msg.in"])
     assert node._is_fanout_capable is False and node._needs_durable_batch is True
     fake, _ = await _drive_open(node)
     assert await fake.read_state("A") is not None
@@ -411,10 +401,10 @@ async def test_unflagged_bare_call_stays_fast_path() -> None:
 
 def test_classify_fanout_uses_needs_durable_batch() -> None:
     # decision 1(b): the fold/close continuation gate keys on `_needs_durable_batch`, not
-    # `_is_fanout_capable` — so a sequential messaging agent (Messaging handle, not fan-out-capable)
+    # `_is_fanout_capable` — so a messaging-only node (Messaging handle, not fan-out-capable)
     # classifies + folds its marked sibling/re-entry continuations.
-    node = _SequentialMessagingNode(node_id="seq", subscribe_topics=["seq.in"])
-    marked = CallFrame(target_topic="seq.in", callback_topic="caller", frame_id="A", fanout_id="A")
+    node = _MessagingOnlyNode(node_id="msg", subscribe_topics=["msg.in"])
+    marked = CallFrame(target_topic="msg.in", callback_topic="caller", frame_id="A", fanout_id="A")
     env = Envelope(
         context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=Stack([marked])),
@@ -629,14 +619,14 @@ async def test_fanout_store_resource_raises_without_bootstrap() -> None:
         await gen.__anext__()
 
 
-# ── parallel-mode incomplete-batch guard in run() (coverage d) ────────────────
+# ── incomplete-batch guard in run() (coverage d) ─────────────────────────────
 
 
-async def test_parallel_run_on_incomplete_batch_raises_runtime_error() -> None:
+async def test_run_on_incomplete_batch_raises_runtime_error() -> None:
     # (coverage d) run() must only be re-entered on a COMPLETE batch (the durable close materializes
-    # every outcome first). A parallel-mode ctx whose latest tool-call set is incomplete (one call
-    # has no result) is the lost-batch/rebalance signal — run() raises a diagnostic RuntimeError
-    # rather than silently proceeding.
+    # every outcome first). A ctx whose latest tool-call set is incomplete (one call has no result)
+    # is the lost-batch/rebalance signal — run() raises a diagnostic RuntimeError rather than
+    # silently proceeding.
     agent = Agent(
         "agent_incomplete_batch",
         system_prompt="x",

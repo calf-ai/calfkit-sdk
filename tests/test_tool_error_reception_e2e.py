@@ -68,8 +68,8 @@ async def _run(container: Any, agent: Agent[str], *tools: Any, message: str = "g
         return await client.agent(topic=agent.subscribe_topics[0]).execute(message, timeout=10)
 
 
-def _agent(name: str, model: FunctionModel, *, tools: list[Any], sequential: bool = True, **seams: Any) -> Agent[str]:
-    return Agent(name, subscribe_topics=f"{name}.in", model_client=model, tools=tools, sequential_only_mode=sequential, **seams)
+def _agent(name: str, model: FunctionModel, *, tools: list[Any], **seams: Any) -> Agent[str]:
+    return Agent(name, subscribe_topics=f"{name}.in", model_client=model, tools=tools, **seams)
 
 
 # ── conversion: the model sees the level-A is_error result ─────────────────────
@@ -142,7 +142,7 @@ async def test_same_tool_twice_distinct_tags_both_convert(container) -> None:
     # A parallel batch of the SAME tool (distinct tags) → surface_to_model converts each independently.
     capture: dict[str, list[str]] = {}
     calls = [ToolCallPart("kaboom", {"x": 1}, tool_call_id="t1"), ToolCallPart("kaboom", {"x": 2}, tool_call_id="t2")]
-    agent = _agent("s6", _react_model(calls, capture), tools=[kaboom], sequential=False, on_tool_error=[surface_to_model()])
+    agent = _agent("s6", _react_model(calls, capture), tools=[kaboom], on_tool_error=[surface_to_model()])
     await _run(container, agent, kaboom)
     assert sorted(capture["retries"]) == ["ValueError: kaboom(1)", "ValueError: kaboom(2)"]
 
@@ -152,7 +152,7 @@ async def test_fanout_sibling_fault_converts(container) -> None:
     # successful sibling folds normally. Both results reach the model, the run finalizes.
     capture: dict[str, list[str]] = {}
     calls = [ToolCallPart("kaboom", {"x": 9}, tool_call_id="t1"), ToolCallPart("ok_tool", {"x": 5}, tool_call_id="t2")]
-    agent = _agent("s7", _react_model(calls, capture), tools=[kaboom, ok_tool], sequential=False, on_tool_error=[surface_to_model()])
+    agent = _agent("s7", _react_model(calls, capture), tools=[kaboom, ok_tool], on_tool_error=[surface_to_model()])
     await _run(container, agent, kaboom, ok_tool)
     assert capture["retries"] == ["ValueError: kaboom(9)"]  # the faulting sibling converted
     assert capture["returns"] == ["ok(5)"]  # the successful sibling folded normally
@@ -221,7 +221,7 @@ async def test_d12_one_unhandled_sibling_escalates_the_whole_batch(container) ->
             return retry_text_part("converted-1")  # convert the x=1 sibling
         return None  # decline the x=2 sibling → unhandled → the batch escalates
 
-    agent = _agent("e6", _react_model(calls, capture), tools=[kaboom], sequential=False, on_tool_error=selective)
+    agent = _agent("e6", _react_model(calls, capture), tools=[kaboom], on_tool_error=selective)
     with pytest.raises(NodeFaultError):
         await _run(container, agent, kaboom)
     assert capture == {}  # the converted sibling was discarded — the batch escalated as a fault group
@@ -270,7 +270,7 @@ async def test_m2_fanout_sibling_state_mutation_is_discarded(container) -> None:
     # fold-time state mutation surviving a fan-out.
     capture: dict[str, bool] = {}
     calls = [ToolCallPart("kaboom", {"x": 1}, tool_call_id="t1"), ToolCallPart("kaboom", {"x": 2}, tool_call_id="t2")]
-    agent = _agent("m2f", _marker_scan_model(calls, capture), tools=[kaboom], sequential=False, on_tool_error=_mutate_and_convert)
+    agent = _agent("m2f", _marker_scan_model(calls, capture), tools=[kaboom], on_tool_error=_mutate_and_convert)
     await _run(container, agent, kaboom)
     assert capture["saw_marker"] is False  # discarded at close
 

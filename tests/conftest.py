@@ -67,12 +67,6 @@ def container():
     c.close()
 
 
-@pytest.fixture(params=["parallel", "sequential"])
-def agent_constructor_args_sequential_modes(request) -> dict[str, bool]:
-    mode: str = request.param
-    return {"sequential_only_mode": mode == "sequential"}
-
-
 @pytest.fixture(params=["openai_responses", "openai_chat"])
 def agent_constructor_args_model_client(request) -> dict[str, Any]:
     model_type: str = request.param
@@ -101,7 +95,7 @@ def deploy_agent(agent_constructor_args_model_client, container) -> SimpleAgent:
 
 
 @pytest.fixture
-def deploy_function_agent(agent_constructor_args_sequential_modes, container) -> Agent:
+def deploy_function_agent(container) -> Agent:
     worker = container.get(Worker)
     model = container.get(FunctionModel)
     agent = Agent(
@@ -110,9 +104,7 @@ def deploy_function_agent(agent_constructor_args_sequential_modes, container) ->
         subscribe_topics="test_function_agent.input",
         publish_topic="test_function_agent.output",
         model_client=model,
-        **agent_constructor_args_sequential_modes,
     )
-    print(f"\nDeployed agent with sequential_only_mode={agent_constructor_args_sequential_modes}")
     worker.add_nodes(agent)
     return agent
 

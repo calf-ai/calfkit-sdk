@@ -106,7 +106,6 @@ async def test_gate_a_single_tool_fault_resolves_via_state_over_the_wire(kafka_b
         subscribe_topics=agent_in,
         model_client=scripted_model([ToolCallPart("boom", {"x": 7}, tool_call_id="c1")]),
         tools=[boom],
-        sequential_only_mode=True,
         on_callee_error=recorder,
     )
     driver = Client.connect(kafka_bootstrap)

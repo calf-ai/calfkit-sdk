@@ -37,9 +37,10 @@ def _final_model() -> FunctionModel:
 async def test_stray_non_toolcallref_call_to_agent_inbox_is_disposed_not_swallowed() -> None:
     # PR-A `_private_input_topic` contract: a stray `call` (NO x-calf-kind header => classified "call"; no
     # reply slot; a non-ToolCallRef body) delivered to an agent's derived input topic is disposed by the
-    # EXISTING pipeline — it does NOT raise/escape into FastStream. (A sequential agent with no peers is
-    # not `_needs_durable_batch`, so no fan-out store is needed to drive the handler offline.)
-    agent = Agent("a", subscribe_topics="a.in", model_client=_final_model(), sequential_only_mode=True)
+    # EXISTING pipeline — it does NOT raise/escape into FastStream. (No fan-out store is needed to
+    # drive the handler offline: a stray-call disposal never resolves the store, and the @resource
+    # never runs when the handler is driven directly.)
+    agent = Agent("a", subscribe_topics="a.in", model_client=_final_model())
     frame = CallFrame(target_topic=derive_input_topic("a"), callback_topic=None, payload={"not": "a ToolCallRef"})
     env = Envelope(context=SessionRunContext(state=State(), deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([frame])))
     broker = _CaptureBroker()

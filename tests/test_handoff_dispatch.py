@@ -350,16 +350,18 @@ async def test_peer_re_enters_cleanly_on_the_inherited_state() -> None:
     assert "on it" in "".join(getattr(p, "text", "") for p in b_result.value)
 
 
-async def test_pending_handoff_in_reentry_arm_raises_loudly() -> None:
-    """The defensive fork (plan S2b): a PENDING handoff call surviving to the sequential
-    re-entry arm is impossible by construction — a silent skip would hide a bug, so it
-    raises. Contrived state: registered handoff call, no result, sequential mode."""
-    agent = _agent(TestModel(), sequential_only_mode=True, peers=[Handoff("billing")])
+async def test_pending_handoff_at_reentry_raises_incomplete_reentry() -> None:
+    """Corrupt-state tripwire (successor to the deleted sequential-arm fork test): a PENDING
+    handoff call surviving to re-entry is impossible by construction — a handoff is finalized
+    in the delivery that produced it — so it must trip the unconditional incomplete-re-entry
+    RuntimeError, never skip or mis-dispatch to the registry lookup. Guards against a future
+    pre-model handoff routing landing ahead of the gate."""
+    agent = _agent(TestModel(), peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
     part = _handoff_part("billing", "x")
     ctx.state.extend_with_responses([ModelResponse(parts=[part])], agent.name)
     ctx.state.add_tool_call(part)  # registered but unresolved — the impossible state
-    with pytest.raises(RuntimeError, match="handoff"):
+    with pytest.raises(RuntimeError, match="incomplete tool calls in run"):
         await agent.run(ctx)
 
 

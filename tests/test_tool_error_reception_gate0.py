@@ -4,7 +4,7 @@ These are **characterization probes** of *existing* framework behaviour, run bef
 feature code is written, to prove the provenance assumptions the design (spec D3,
 state-first resolution) depends on:
 
-* **Gate A** — a single (sequential) tool fault folds back to the agent's ``on_callee_error``
+* **Gate A** — a single tool fault folds back to the agent's ``on_callee_error``
   seam with ``ctx.state.tool_calls[tag]`` populated as the *full* ``ToolCallPart`` (with ``.args``).
 * **Gate B1** — a normal fan-out sibling fault likewise resolves via ``state.tool_calls[tag]``
   **with ``.args`` intact** (the deep-copied sibling state is mirrored back unchanged).
@@ -84,7 +84,7 @@ class _ToolCallProbe:
 
 
 async def test_gate_a_single_tool_fault_resolves_via_state_with_args(container) -> None:
-    # Gate A: a sequential single tool fault folds to on_callee_error with the caller's State
+    # Gate A: a single tool fault folds to on_callee_error with the caller's State
     # carried back on the reply, so state.tool_calls[tag] resolves the FULL ToolCallPart (with
     # .args). This is the state-first happy path the resolver will reuse (spec D3).
     recorder = _ToolCallProbe()
@@ -95,7 +95,6 @@ async def test_gate_a_single_tool_fault_resolves_via_state_with_args(container) 
         subscribe_topics="gatea_agent.input",
         model_client=_scripted([ToolCallPart("boom_tool", {"x": 7}, tool_call_id="c1")]),
         tools=[boom_tool],
-        sequential_only_mode=True,
         on_callee_error=recorder,
     )
     worker.add_nodes(agent, boom_tool)

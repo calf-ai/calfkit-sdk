@@ -52,7 +52,6 @@ async def test_step_emission_failure_does_not_break_the_run(container, monkeypat
         subscribe_topics="guard_agent.input",
         model_client=FunctionModel(_call_then_final),
         tools=[echo_for_guard],
-        sequential_only_mode=True,
     )
     worker.add_nodes(agent, echo_for_guard)
     prepare_worker(container)
@@ -75,7 +74,6 @@ async def test_stream_yields_intermediate_steps_then_terminal(container) -> None
         subscribe_topics="stream_agent.input",
         model_client=FunctionModel(_call_then_final),
         tools=[echo_for_guard],
-        sequential_only_mode=True,
     )
     worker.add_nodes(agent, echo_for_guard)
     prepare_worker(container)

@@ -20,7 +20,7 @@ exact equality (not substring on a CallToolResult like MCP).
 Existing real-broker tool-node coverage was only the durable fan-out test
 (`test_durable_fanout_agent_kafka.py`) — concurrent, no-arg, constant-returning
 tools, as a vehicle for the fan-out store. This module covers the gaps: single
-dispatch, argument and structured-return wire fidelity, sequential mode,
+dispatch, argument and structured-return wire fidelity,
 multi-turn data-flow, cross-worker and multi-agent routing, and the agent's
 pre-dispatch arg validation.
 
@@ -373,46 +373,7 @@ async def test_two_agents_share_one_tool_node_replies_route_per_caller(kafka_boo
     await agent_worker._client.aclose()
 
 
-# ── Group C: modes / multi-turn ──────────────────────────────────────────────
-
-
-async def test_sequential_mode_dispatches_tool_nodes_without_fanout(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """A sequential-only agent emitting two calls dispatches them one per turn
-    and never opens the durable fan-out store, yet both results round-trip."""
-    agent_id = f"{topic_namespace}-tn-seq"
-    agent_in = f"{topic_namespace}.tn-seq.input"
-    agent = Agent(
-        agent_id,
-        system_prompt="add then shout",
-        subscribe_topics=agent_in,
-        model_client=scripted_model(
-            [
-                ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="c-add"),
-                ToolCallPart("shout", {"text": "hi"}, tool_call_id="c-shout"),
-            ]
-        ),
-        tools=[add, shout],
-        sequential_only_mode=True,
-    )
-    assert not agent._is_fanout_capable
-
-    driver = Client.connect(kafka_bootstrap)
-    worker = _worker(kafka_bootstrap, nodes=[agent, add, shout])
-
-    async with worker:
-        result = await driver.agent(topic=agent_in).execute("add then shout", timeout=120)
-        topics = await _topics(kafka_bootstrap)
-
-    assert result.output is not None and FINAL_OUTPUT in result.output
-    returns = tool_returns(result.message_history)
-    assert returns["add"] == 5
-    assert returns["shout"] == "HI"
-    # No durable store was opened — the sequential path never fans out.
-    assert f"calf.fanout.{agent_id}.state" not in topics
-    assert f"calf.fanout.{agent_id}.basestate" not in topics
-
-    await driver.aclose()
-    await worker._client.aclose()
+# ── Group C: multi-turn ──────────────────────────────────────────────────────
 
 
 async def test_multi_turn_tool_use_feeds_result_into_next_call(kafka_bootstrap: str, topic_namespace: str) -> None:
