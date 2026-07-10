@@ -85,14 +85,16 @@ async def test_stream_yields_intermediate_steps_then_terminal(container) -> None
         events = [e async for e in handle.stream()]
     kinds = [type(e).__name__ for e in events]
     assert kinds[-1] == "RunCompleted"  # terminal last (terminal-bearing stream)
-    assert "AgentMessageEvent" in kinds  # the hop's preamble
-    assert "ToolCallEvent" in kinds  # the requested tool call
-    assert "ToolResultEvent" in kinds  # the tool's result (inner-frame ReturnCall, depth>1)
-    # the tool result carries the tool's output + resolved as a success
+    assert "AgentMessageEvent" in kinds  # the hop's preamble (a Said fact, absorbed at the unwrap)
+    assert "ToolCallEvent" in kinds  # the requested tool call (note_dispatch from the marker)
+    assert "ToolResultEvent" in kinds  # the CALLER's fold-minted result (spec §3.2 — not the tool's)
+    # the tool result carries the resolved slot parts + resolved as a success
     tr = next(e for e in events if type(e).__name__ == "ToolResultEvent")
     assert tr.outcome == "success"
     assert "guarded-1967" in tr.parts[0].text
-    # depth orients the caller: the agent hop runs at inbound depth 1, the tool result at depth 2.
+    # depth orients the caller: both the dispatch hop and the FOLD hop run at the agent's inbound
+    # depth 1 — the result is minted by the folding caller, no longer by the tool at depth 2.
     am = next(e for e in events if type(e).__name__ == "AgentMessageEvent")
     assert am.depth == 1
-    assert tr.depth == 2
+    assert tr.depth == 1
+    assert tr.emitter == "stream_agent"  # the folding caller

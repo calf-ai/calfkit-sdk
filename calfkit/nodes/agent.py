@@ -1,6 +1,6 @@
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from typing import Any, ClassVar, Generic, Literal, cast
+from typing import Any, ClassVar, Generic, cast
 
 import pydantic_core
 from pydantic import ValidationError
@@ -23,8 +23,7 @@ from calfkit._vendor.pydantic_ai.tools import DeferredToolResults, ToolDefinitio
 from calfkit._vendor.pydantic_ai.toolsets.external import ExternalToolset
 from calfkit.controlplane import ControlPlaneStamp, advertises
 from calfkit.exceptions import DeserializationError, safe_exc_message
-from calfkit.models import Call, CallFrame, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
-from calfkit.models._coerce import _coerce_to_parts
+from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard, derive_input_topic
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.envelope import Envelope
@@ -33,11 +32,11 @@ from calfkit.models.node_result import _extract_text, extract_lenient
 from calfkit.models.payload import RETRY_MARKER, ContentPart, FilePart, is_retry, render_parts_as_text
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.session_context import SessionRunContext
-from calfkit.models.step import AgentMessageStep, HandoffStep, StepEvent, ToolCallStep, ToolResultStep
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef, ToolProvider, ToolSelector, split_tool_declarations
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, FanoutBatchStore, KtablesFanoutBatchStore
 from calfkit.nodes._projection import project, step_preamble, structured_output_preamble
 from calfkit.nodes._seams import ON_CALLEE_ERROR, validate_positional_arity
+from calfkit.nodes._steps import DeniedCall, HandedOff, Observed, Said, StepFact
 from calfkit.nodes._tool_error import AgentSeamContext, ToolErrorHandler, _adapt_tool_error, _as_list, resolve_tool_call
 from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
 from calfkit.nodes.tool import BaseToolNodeDef, Tools
@@ -74,15 +73,6 @@ def _serialize_message_reply(parts: list[ContentPart] | None) -> str:
         return pydantic_core.to_json(p).decode()
 
     return render_parts_as_text(parts, render_other=_render_other, empty="(no content)")
-
-
-def _step_tool_call(tool_call: ToolCallPart) -> ToolCallStep:
-    """The ``ToolCallStep`` for a raw model emission (spec §3.2). The raw ``args`` can be an off-spec
-    scalar (pydantic-ai's ``ToolCallPart`` is a non-validating dataclass), so any non-(str/dict/None)
-    value is coerced to its string form, keeping ``ToolCallStep.args`` within ``str | dict | None``."""
-    raw = tool_call.args
-    args = raw if (raw is None or isinstance(raw, (str, dict))) else str(raw)
-    return ToolCallStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, args=args)
 
 
 class BaseAgentNodeDef(
@@ -436,15 +426,16 @@ class BaseAgentNodeDef(
         view = ctx.resources.get(AGENTS_VIEW_RESOURCE_KEY)
         return handoff_tool_def(resolve_live_peers(view, handles, self_name=self.name))
 
-    def _execute_winning_handoff(self, disposition: HandoffDisposition, ctx: SessionRunContext, step_draft: list[StepEvent]) -> TailCall[State]:
-        """Execute a winning-handoff turn (handoff spec §3/§3.1/§4/§7): author the sibling and
-        rejected step pairs + the ``HandoffStep`` (the winner gets NO call/result pair — today's
-        exact stream shape), close EVERY call of the response in ONE ``ModelRequest`` of
-        ``ToolReturnPart``s appended to ``message_history`` (provider-validity: no dangling calls;
-        the request also terminates ``latest_tool_calls``' reverse walk so the peer re-enters
-        clean), leave ``state.tool_calls``/``tool_results`` UNTOUCHED (§4 — registrations without
-        resolutions would ride dangling to the peer; results would feed its run a foreign
-        ``DeferredToolResults`` set), and relinquish via :meth:`_dispatch_handoff`."""
+    def _execute_winning_handoff(self, disposition: HandoffDisposition, ctx: SessionRunContext, facts: list[StepFact]) -> Observed[State]:
+        """Execute a winning-handoff turn (handoff spec §3/§3.1/§4/§7): declare the sibling and
+        rejected ``DeniedCall`` facts + the winner's ``HandedOff`` (the winner gets NO call/result
+        pair — the frame-mirror rule, step-emission spec §6), close EVERY call of the response in
+        ONE ``ModelRequest`` of ``ToolReturnPart``s appended to ``message_history``
+        (provider-validity: no dangling calls; the request also terminates ``latest_tool_calls``'
+        reverse walk so the peer re-enters clean), leave ``state.tool_calls``/``tool_results``
+        UNTOUCHED (§4 — registrations without resolutions would ride dangling to the peer; results
+        would feed its run a foreign ``DeferredToolResults`` set), and relinquish via
+        :meth:`_dispatch_handoff` — returned as ``Observed`` so the kernel absorbs the turn's facts."""
         winner = disposition.winner
         assert winner is not None  # caller-gated (arbitration found a winner)
         args = winner.args_as_dict()  # always parseable: arbitration validated the winner
@@ -454,9 +445,9 @@ class BaseAgentNodeDef(
             ToolReturnPart(tool_name=winner.tool_name, content=_STUB_TRANSFERRED.format(name=target), tool_call_id=winner.tool_call_id)
         ]
         # Rejected-before-winner handoffs (§3.1): a RetryPromptPart would address A's next model call,
-        # and A has none — the transcript gets the generic stub; the PRECISE reason rides the step pair
-        # AND a WARNING (§7's rejection WARNING is unscoped; the step stream is best-effort, so the
-        # reason must also land on a durable operator channel — without the #251 note, which only
+        # and A has none — the transcript gets the generic stub; the PRECISE reason rides the denied
+        # pair AND a WARNING (§7's rejection WARNING is unscoped; the step stream is best-effort, so
+        # the reason must also land on a durable operator channel — without the #251 note, which only
         # applies to the no-winner self-retry ring).
         for call, reason in disposition.rejected:
             logger.warning(
@@ -465,14 +456,12 @@ class BaseAgentNodeDef(
                 reason,
                 self.name,
             )
-            step_draft.append(_step_tool_call(call))
-            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=reason)], outcome="denied"))
+            facts.append(DeniedCall(tool_call_id=call.tool_call_id, tool_name=call.tool_name, args=call.args, reason_parts=(TextPart(text=reason),)))
             closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub_text(call), tool_call_id=call.tool_call_id))
         for call in disposition.stubbed:
             stub = stub_text(call)
-            step_draft.append(_step_tool_call(call))
             # A never-executed sibling must not read "success" — stubs are refusals-to-dispatch (§7a).
-            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=stub)], outcome="denied"))
+            facts.append(DeniedCall(tool_call_id=call.tool_call_id, tool_name=call.tool_name, args=call.args, reason_parts=(TextPart(text=stub),)))
             closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub, tool_call_id=call.tool_call_id))
         if disposition.stubbed:
             logger.debug(
@@ -482,10 +471,9 @@ class BaseAgentNodeDef(
                 self.name,
             )
 
-        step_draft.append(HandoffStep(target=target, reason=message))
-        ctx._step_draft = step_draft
+        facts.append(HandedOff(target=target, message=message))
         ctx.state.message_history.append(ModelRequest(parts=closing))
-        return self._dispatch_handoff(target, ctx)
+        return Observed(self._dispatch_handoff(target, ctx), tuple(facts))
 
     def _dispatch_handoff(self, name: str, ctx: SessionRunContext) -> TailCall[State]:
         """Relinquish control to the ALREADY-validated live peer (handoff spec §5) — a pure TailCall
@@ -515,26 +503,26 @@ class BaseAgentNodeDef(
         return None
 
     def _reject_invalid_call(
-        self, tool_call: ToolCallPart, ctx: SessionRunContext, step_draft: list[StepEvent], content: str | list[pydantic_core.ErrorDetails]
+        self, tool_call: ToolCallPart, ctx: SessionRunContext, facts: list[StepFact], content: str | list[pydantic_core.ErrorDetails]
     ) -> None:
         """A calfkit-caught invalid call — an unknown tool, malformed/invalid args, a failed validator, or
-        a bad ``message_agent`` target — lands a model-visible ``RetryPromptPart`` AND authors the paired
-        ``is_error`` ``ToolResultStep`` step. This is the single seam for both ON CONTINUING TURNS, so a
-        pre-dispatch rejection can never surface a model retry without its observation step (the one
+        a bad ``message_agent`` target — lands a model-visible ``RetryPromptPart`` AND declares the
+        born-closed ``DeniedCall`` fact (the ledger expands it into the paired call + ``denied`` result,
+        step-emission spec §3.1a). This is the single seam for both ON CONTINUING TURNS, so a
+        pre-dispatch rejection can never surface a model retry without its observation pair (the one
         exception: a §3.1 rejected-before-winner handoff deliberately bypasses it — A relinquishes, so
-        no retry is landed; ``_execute_winning_handoff`` authors its error pair + closing stub) (spec §3.2 lists pre-dispatch rejection
-        as a ``ToolResultStep`` producer; the missing message_agent pairing was round-1 review MAJOR-1).
+        no retry is landed; ``_execute_winning_handoff`` declares its denied pair + closing stub).
         ``content`` is the ``RetryPromptPart`` content — a ``str`` for most arms, or the schema arm's
-        ``e.errors()`` ``list[dict]``; the step renders non-``str`` content to JSON text."""
+        ``e.errors()`` ``list[dict]``; the fact renders non-``str`` content to JSON text."""
         ctx.state.add_tool_result(
             tool_call.tool_call_id, RetryPromptPart(content=content, tool_name=tool_call.tool_name, tool_call_id=tool_call.tool_call_id)
         )
-        # `fallback=str` keeps this render LOCALLY total: it runs outside the §2.9 best-effort wrap, so a
-        # non-JSON-native value in `content` (e.g. a raised exception in a context-bearing ErrorDetails) must
-        # render, never raise — a step must never fault the run.
+        # `fallback=str` keeps this render LOCALLY total: fact construction runs outside the exit-flush
+        # helper's best-effort wrap, so a non-JSON-native value in `content` (e.g. a raised exception in
+        # a context-bearing ErrorDetails) must render, never raise — a fact must never fault the run.
         text = content if isinstance(content, str) else pydantic_core.to_json(content, fallback=str).decode()
-        step_draft.append(
-            ToolResultStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, parts=[TextPart(text=text)], outcome="denied")
+        facts.append(
+            DeniedCall(tool_call_id=tool_call.tool_call_id, tool_name=tool_call.tool_name, args=tool_call.args, reason_parts=(TextPart(text=text),))
         )
 
     def _validate_message_agent(self, tool_call: ToolCallPart, ctx: SessionRunContext) -> str | None:
@@ -636,7 +624,7 @@ class BaseAgentNodeDef(
                     continue
                 tools_registry[binding.name] = binding
 
-    async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Observed[State]:
         tools_registry = dict[str, ToolBinding]()
         if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
             # Override tools arrive over the wire as ToolBindings whose
@@ -730,21 +718,23 @@ class BaseAgentNodeDef(
             ctx.state.extend_with_responses(messages, self.name)
             latest_tool_calls = ctx.state.latest_tool_calls()
 
-            # Author this hop's step draft (spec §2.5/§3.2): preamble (the final ModelResponse's text)
-            # + a ToolCallStep per requested call (raw model emission; covers message_agent + valid +
-            # invalid) + an is_error ToolResultStep for each call this hop rejects (the arms below, via
-            # _reject_invalid_call). Read at the chokepoint via project_steps; committed to ctx._step_draft
-            # after the loop. A hop that never reaches this dispatch loop (e.g. a final-output turn) leaves its draft None ⇒ no step.
+            # Declare this hop's semantic facts (step-emission spec §3.1): the model preamble (Said,
+            # from the total step_preamble extractor — never declared when it yields nothing) + a
+            # born-closed DeniedCall per call this hop rejects (the arms below, via
+            # _reject_invalid_call). Dispatched calls need NO fact — the kernel mints their pair from
+            # the marker (note_dispatch at the chokepoint; folded/fold_failed at the fold). Every
+            # fact-capable exit returns Observed(action, tuple(facts)) UNCONDITIONALLY (an empty
+            # tuple is fine); only the final-output branch returns a bare ReturnCall (it declares no
+            # facts — the terminal-gate belt).
             #
-            # Authoring runs OUTSIDE the chokepoint's best-effort wrap (spec §2.9), so a raise here would
-            # FAULT the run — the one thing a step must never do. It is total by construction: step_preamble
-            # returns a str; a ToolCallPart's tool_call_id/name are str and args is coerced to str|dict|None;
-            # the schema arm renders e.errors() (over JSON-native validated args) via pydantic_core. Keep it
-            # so — a future event field sourced from un-coerced data must coerce here or move under a guard.
-            step_draft: list[StepEvent] = []
+            # Fact construction runs OUTSIDE the exit-flush helper's best-effort wrap, so a raise
+            # here would FAULT the run — the one thing telemetry must never do. It is total by
+            # construction: step_preamble returns a str; DeniedCall coerces args and reason elements
+            # at build (spec §3.1's totality rule).
+            facts: list[StepFact] = []
             _preamble = step_preamble(messages)
             if _preamble:
-                step_draft.append(AgentMessageStep(parts=[TextPart(text=_preamble)]))
+                facts.append(Said(parts=(TextPart(text=_preamble),)))
 
             # Handoff arbitration (spec §3, §3.0-gated): decide the WHOLE response before the per-call
             # loop — early semantics is a whole-response decision. A winning handoff ends the turn: the
@@ -755,12 +745,11 @@ class BaseAgentNodeDef(
             if self._handoff_handles and any(c.tool_name == HANDOFF_TOOL for c in result.output.calls):
                 disposition = arbitrate_handoff(result.output.calls, self._live_peer_names(ctx, self._handoff_handles), self.name)
                 if disposition.winner is not None:
-                    return self._execute_winning_handoff(disposition, ctx, step_draft)
+                    return self._execute_winning_handoff(disposition, ctx, facts)
             rejected_reasons = {id(c): r for c, r in disposition.rejected} if disposition is not None else {}
 
             for tool_call in result.output.calls:
                 ctx.state.add_tool_call(tool_call)
-                step_draft.append(_step_tool_call(tool_call))
 
                 # handoff_to_agent forks BEFORE the tools_registry lookup (handoff spec §3) — reachable
                 # only on a NO-winner turn (a winner returned above), where arbitration rejected EVERY
@@ -777,7 +766,7 @@ class BaseAgentNodeDef(
                         reason,
                         self.name,
                     )
-                    self._reject_invalid_call(tool_call, ctx, step_draft, reason)
+                    self._reject_invalid_call(tool_call, ctx, facts, reason)
                     continue
 
                 # message_agent forks BEFORE the tools_registry lookup (it is never a registry binding):
@@ -787,7 +776,7 @@ class BaseAgentNodeDef(
                 if tool_call.tool_name == _MESSAGE_AGENT_TOOL:
                     rejection = self._validate_message_agent(tool_call, ctx)
                     if rejection is not None:
-                        self._reject_invalid_call(tool_call, ctx, step_draft, rejection)
+                        self._reject_invalid_call(tool_call, ctx, facts, rejection)
                     continue
 
                 binding = tools_registry.get(tool_call.tool_name)
@@ -796,7 +785,7 @@ class BaseAgentNodeDef(
                     no_tool_content = (
                         f"There is no tool named {tool_call.tool_name}, it does not exist. Please ensure you are only calling tools you are provided."  # noqa: E501
                     )
-                    self._reject_invalid_call(tool_call, ctx, step_draft, no_tool_content)
+                    self._reject_invalid_call(tool_call, ctx, facts, no_tool_content)
                     continue
 
                 # Parse args from the LLM's emission. Applies to ALL dispatch
@@ -821,7 +810,7 @@ class BaseAgentNodeDef(
                         content,
                         exc_info=True,
                     )
-                    self._reject_invalid_call(tool_call, ctx, step_draft, content)
+                    self._reject_invalid_call(tool_call, ctx, facts, content)
                     continue
 
                 # Validate against the schema if we have a runtime validator.
@@ -841,7 +830,7 @@ class BaseAgentNodeDef(
                         )
                         # validation_errors is a list[dict] (e.errors()): the RetryPromptPart carries it
                         # verbatim; _reject_invalid_call renders it to JSON text for the step.
-                        self._reject_invalid_call(tool_call, ctx, step_draft, validation_errors)
+                        self._reject_invalid_call(tool_call, ctx, facts, validation_errors)
                         continue
                     except Exception as e:
                         # A user-authored Pydantic ``field_validator`` raised
@@ -858,12 +847,11 @@ class BaseAgentNodeDef(
                             type(e).__name__,
                             exc_info=True,
                         )
-                        self._reject_invalid_call(tool_call, ctx, step_draft, validator_content)
+                        self._reject_invalid_call(tool_call, ctx, facts, validator_content)
                         continue
 
-            # Commit the authored draft so the chokepoint's project_steps surfaces it (covers both the
-            # all-invalid self-retry TailCall and the dispatch Call/list below).
-            ctx._step_draft = step_draft
+            # Every dispatch-loop exit below returns Observed(action, tuple(facts)) UNCONDITIONALLY
+            # (an empty facts tuple is permitted) — the kernel absorbs the facts at the unwrap.
             if ctx.state.all_call_ids_complete(*[tc.tool_call_id for tc in latest_tool_calls]):
                 # TODO: maybe consider a node retry return type that doesn't require round trip to itself.
                 # Tailcall to itself is a roundtrip.
@@ -872,7 +860,7 @@ class BaseAgentNodeDef(
                     ctx.correlation_id[:8],
                     self.name,
                 )
-                return TailCall[State](target_topic=self._return_topic, state=ctx.state)
+                return Observed(TailCall[State](target_topic=self._return_topic, state=ctx.state), tuple(facts))
 
             pending_tool_calls = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
 
@@ -886,22 +874,25 @@ class BaseAgentNodeDef(
                     self.name,
                 )
                 if target_tool_call.tool_name == _MESSAGE_AGENT_TOOL:
-                    return self._message_agent_call(target_tool_call)
-                return Call[State](
-                    tools_registry[target_tool_call.tool_name].dispatch_topic,
-                    ctx.state,
-                    body=ToolCallRef.from_tool_call_part(target_tool_call),
-                    # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
-                    # echoes it on reply.tag and the agent materializes the result at that slot.
-                    tag=target_tool_call.tool_call_id,
-                    # Universal stamping (step-emission spec §3.2): the complete call identity rides the
-                    # frame and echoes on the reply. args re-parsed here — everything in
-                    # ``pending_tool_calls`` passed the ``args_as_dict()`` gate, so this cannot raise.
-                    marker=ToolCallMarker(
-                        tool_name=target_tool_call.tool_name,
-                        tool_call_id=target_tool_call.tool_call_id,
-                        args=target_tool_call.args_as_dict(),
+                    return Observed(self._message_agent_call(target_tool_call), tuple(facts))
+                return Observed(
+                    Call[State](
+                        tools_registry[target_tool_call.tool_name].dispatch_topic,
+                        ctx.state,
+                        body=ToolCallRef.from_tool_call_part(target_tool_call),
+                        # tag=tool_call_id so the tool's reply is self-describing (§4.2): the framework
+                        # echoes it on reply.tag and the agent materializes the result at that slot.
+                        tag=target_tool_call.tool_call_id,
+                        # Universal stamping (step-emission spec §3.2): the complete call identity rides the
+                        # frame and echoes on the reply. args re-parsed here — everything in
+                        # ``pending_tool_calls`` passed the ``args_as_dict()`` gate, so this cannot raise.
+                        marker=ToolCallMarker(
+                            tool_name=target_tool_call.tool_name,
+                            tool_call_id=target_tool_call.tool_call_id,
+                            args=target_tool_call.args_as_dict(),
+                        ),
                     ),
+                    tuple(facts),
                 )
             else:
                 # Parallel fan-out: each sibling Call carries its tool_call_id as ``tag`` so the callee
@@ -925,7 +916,7 @@ class BaseAgentNodeDef(
                     )
                     for tc in pending_tool_calls
                 ]
-                return parallel_tool_calls
+                return Observed(parallel_tool_calls, tuple(facts))
 
         else:
             new_messages = result.new_messages()
@@ -948,23 +939,10 @@ class BaseAgentNodeDef(
                 parts.append(DataPart(data=result.output))
             # Output rides the reply slot (ReturnCall.value -> reply.parts at the
             # chokepoint), not the retired State.final_output_parts side-channel (§4.5).
+            # BARE, deliberately (step-emission spec §3.1b): the final-output branch declares no
+            # facts — its answer rides the terminal / the caller's fold-minted result, so a Said
+            # here would double-report (the belt; the ledger's terminal gate is the suspenders).
             return ReturnCall[State](state=ctx.state, value=parts)
-
-    def project_steps(self, output: NodeResult[State], ctx: SessionRunContext, frame: CallFrame | None) -> list[StepEvent]:
-        """Project this agent hop into step events (spec §2.5 / §3.2).
-
-        An inner-frame ``ReturnCall`` — a consulted ``message_agent`` peer answering, depth > 1 (the
-        chokepoint's terminal gate already excluded the depth-1 run terminal) — becomes a single
-        ``ToolResultStep`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
-        ``tool_call_id``, not name). ``outcome`` is derived once here, coerce-first: retry-marked ⇒
-        ``failed``, else ``success`` (spec §5.1). Otherwise (``Call`` / ``list[Call]`` / ``TailCall``)
-        the agent's authored ``_step_draft`` is the projection — ``None`` on a hop that authored no
-        draft (e.g. a final-output turn) ⇒ ``[]``."""
-        if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
-            parts = _coerce_to_parts(output.value)
-            outcome: Literal["success", "failed"] = "failed" if is_retry(parts) else "success"
-            return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, outcome=outcome)]
-        return ctx._step_draft or []
 
     def _add_tools(self, raw_tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None) -> None:
         """Validate the prospective tool surface against the contract, then commit.

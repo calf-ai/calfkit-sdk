@@ -402,7 +402,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         return fn
 
     @handler("*")
-    async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Next | None:
+    async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Observed[State] | Next | None:
         """The node's default catch-all handler — registered at route ``'*'`` (the
         least-specific pattern, dispatched last in the Chain of Responsibility).
 
@@ -420,6 +420,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         Returns:
             A :class:`~calfkit.models.NodeResult` (a control-flow action), or
             :class:`~calfkit.models.Next` to decline and end the chain (the default).
+            Framework node kinds may pair the action with step facts via ``Observed``
+            (step-emission spec §3.1b) — user handlers return plain actions.
         """
         return Next()
 

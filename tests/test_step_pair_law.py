@@ -285,9 +285,10 @@ async def test_i2_no_residue_single_run_oracle(container, monkeypatch) -> None:
 
     # Run correctness unaffected by total step loss (I1) — the spy published nothing.
     assert result.output is not None and "pair-echo-ok" in result.output
-    # The expected mints were captured: the dispatch hop's call step, then the fold hop's result step.
-    flat = [e for hop in recorded for e in hop]
-    assert [(type(e).__name__, e.tool_call_id) for e in flat] == [("ToolCallStep", "c1"), ("ToolResultStep", "c1")]
+    # The expected mints were captured, in production order (§3.4): the dispatch hop's preamble
+    # fact + call step, then the fold hop's result step.
+    flat = [(type(e).__name__, getattr(e, "tool_call_id", None)) for hop in recorded for e in hop]
+    assert flat == [("AgentMessageStep", None), ("ToolCallStep", "c1"), ("ToolResultStep", "c1")]
     # Field-level residue scan of the terminal envelope: no step event shapes, no draft channel.
     assert terminals, "expected the terminal return envelope to be captured"
     dump = terminals[-1].model_dump_json()
