@@ -206,11 +206,11 @@ class BaseAgentNodeDef(
         # Every agent owns its durable fan-out store as a node @resource (opened by the worker
         # lifecycle before serving; mirrors the worker's Capability View resource). Registration is
         # unconditional: no agent is statically fan-out-free — callers can inject override tools over
-        # the wire and `Tools` selectors resolve at runtime. The @resource never runs under the
-        # synchronous TestKafkaBroker — offline, the autouse `_offline_fanout_store` fixture
-        # (tests/conftest.py) swaps in `OfflineFanoutBatchStore` for the whole non-kafka lane, and
-        # tests/providers.py::prepare_worker injects a fake into the resource bag for handler-driven
-        # tests.
+        # the wire and `Tools` selectors resolve at runtime. Offline the @resource must not dial a
+        # real cluster: the autouse `_offline_fanout_store` fixture (tests/conftest.py) swaps
+        # `KtablesFanoutBatchStore` → `OfflineFanoutBatchStore` for every non-kafka `worker.start()`;
+        # handler-driven tests never start the worker (the @resource never runs), so
+        # tests/providers.py::prepare_worker injects a fake into the resource bag instead.
         self.resource(name=FANOUT_STORE_KEY)(self._fanout_store_resource)
 
     @staticmethod
@@ -676,9 +676,11 @@ class BaseAgentNodeDef(
                 remaining = [tc for tc in latest_tool_calls if tc.tool_call_id not in ctx.state.tool_results]
                 raise RuntimeError(
                     f"[{ctx.correlation_id[:8]}] Reached incomplete tool calls in run(). "
-                    f"node={self.name} frame_id={ctx.frame_id} remaining_ids={[tc.tool_call_id for tc in remaining]}. "
-                    f"The durable in-node fold should re-enter run() only on a complete batch — this indicates "
-                    f"the fan-out did not fully fold before re-entry (e.g. a lost batch from rebalance/restart)."
+                    f"node={self.name} frame_id={ctx.frame_id} "
+                    f"remaining={[(tc.tool_call_id, tc.tool_name) for tc in remaining]}. "
+                    f"run() must only re-enter with every latest tool call resolved — this indicates "
+                    f"corrupt or half-folded state (e.g. a lost fan-out batch from rebalance/restart, "
+                    f"or a replayed/hand-built State carrying an unresolved call)."
                 )
 
             tool_results = DeferredToolResults(calls={tc.tool_call_id: ctx.state.get_tool_result(tc.tool_call_id) for tc in latest_tool_calls})
@@ -728,7 +730,7 @@ class BaseAgentNodeDef(
             # + a ToolCallStep per requested call (raw model emission; covers message_agent + valid +
             # invalid) + an is_error ToolResultStep for each call this hop rejects (the arms below, via
             # _reject_invalid_call). Read at the chokepoint via project_steps; committed to ctx._step_draft
-            # after the loop. A pre-model re-dispatch hop never reaches here, so its draft stays None ⇒ no step.
+            # after the loop. A hop that never reaches this dispatch loop (e.g. a final-output turn) leaves its draft None ⇒ no step.
             #
             # Authoring runs OUTSIDE the chokepoint's best-effort wrap (spec §2.9), so a raise here would
             # FAULT the run — the one thing a step must never do. It is total by construction: step_preamble
@@ -941,7 +943,7 @@ class BaseAgentNodeDef(
         ``ToolResultStep`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
         ``tool_call_id``, not name). ``is_error`` is derived once here, coerce-first. Otherwise
         (``Call`` / ``list[Call]`` / ``TailCall``) the agent's authored ``_step_draft`` is the
-        projection — ``None`` on a pre-model re-dispatch hop ⇒ ``[]`` (the double-emit guard)."""
+        projection — ``None`` on a hop that authored no draft (e.g. a final-output turn) ⇒ ``[]``."""
         if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
             parts = _coerce_to_parts(output.value)
             return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]

@@ -13,9 +13,10 @@ channels:
 * **Channel C** — the client edge: a routed fault is received as a typed ``NodeFaultError``
   (#250 reception), so ``await handle.result()`` raises it carrying the verbatim ``ErrorReport``.
 
-Every case dispatches a single tool call,
-so the fault path is identical to a fan-out-capable agent's, and the durable fan-out
-store (a separate ktables dependency, covered by Suite X) stays out of the way.
+Every case dispatches a single tool call, so no durable fan-out batch is ever opened
+(the single-call plain-``Call`` path). The store @resource still opens at worker startup —
+unconditional for every agent — but the fault path never touches it; batch-fold fault
+coverage lives in Suite X.
 
 Opt-in (``-m kafka`` / ``make test-kafka``); skips cleanly without Docker.
 """

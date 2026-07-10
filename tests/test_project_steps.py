@@ -300,7 +300,7 @@ class TestProjectStepsAgentNode:
         assert agent.project_steps(out, ctx, CallFrame(target_topic="t", callback_topic="cb")) == ctx._step_draft
 
     def test_no_draft_emits_nothing(self) -> None:
-        # the pre-model re-dispatch double-emit guard: _step_draft None -> [].
+        # the no-draft guard: a hop that authored no draft (_step_draft None) -> [].
         agent = _agent_node()
         ctx = SessionRunContext(state=State(), deps={})
         assert ctx._step_draft is None

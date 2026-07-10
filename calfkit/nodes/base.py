@@ -901,8 +901,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
     @property
     def _is_fanout_capable(self) -> bool:
         """Whether this node folds durable fan-out batches in-node. ``False`` for every
-        node kind except an agent (which overrides this) — it gates the staged handler's
-        fan-out recognition and the OPEN dispatch path."""
+        node kind except an agent (which overrides this) — the fan-out disjunct of
+        :attr:`_needs_durable_batch`, which gates the staged handler's fan-out recognition
+        and the OPEN dispatch path."""
         return False
 
     @property
@@ -911,7 +912,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
 
         True iff the node can parallel fan out (:attr:`_is_fanout_capable`) **or** it can dispatch an
         ``isolate_state`` call — i.e. it carries a ``Messaging`` handle (set by ``Agent(peers=[Messaging…])``).
-        For every agent both disjuncts collapse to ``True`` (an agent is always fan-out capable); the
+        For every agent the disjunction collapses to ``True`` via the first disjunct (an agent is always
+        fan-out capable); the
         decoupling from :attr:`_is_fanout_capable` is retained deliberately as future-proofing for a
         non-agent node kind that carries Messaging handles and would need the snapshot machinery for its
         ``isolate_state`` dispatches without folding parallel batches. Gates ``_classify_fanout`` and the

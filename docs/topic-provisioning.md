@@ -102,6 +102,14 @@ references. For each node:
 missing. Agent nodes are detected *structurally* (they expose a `tools`
 collection) so `calfkit.provisioning` stays decoupled from `calfkit.nodes`.
 
+**Not included: the per-agent durable fan-out topics.** Every agent owns two
+compacted topics — `calf.fanout.<name>.state` and `calf.fanout.<name>.basestate` —
+provisioned by the agent's own fan-out store at worker startup (the store's
+ktables readers create them with `ensure_topic=True`). They are part of every
+agent's operational footprint (unconditional — no agent opts out) but are
+self-provisioned by the store rather than computed here; on clusters where the
+worker principal lacks topic-creation rights, create them ahead of deployment.
+
 ### 3.3 `ProvisionReport`
 
 Returned by a successful provisioning pass; the basis for logging / the CLI

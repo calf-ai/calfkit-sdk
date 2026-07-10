@@ -350,6 +350,21 @@ async def test_peer_re_enters_cleanly_on_the_inherited_state() -> None:
     assert "on it" in "".join(getattr(p, "text", "") for p in b_result.value)
 
 
+async def test_pending_handoff_at_reentry_raises_incomplete_reentry() -> None:
+    """Corrupt-state tripwire (successor to the deleted sequential-arm fork test): a PENDING
+    handoff call surviving to re-entry is impossible by construction — a handoff is finalized
+    in the delivery that produced it — so it must trip the unconditional incomplete-re-entry
+    RuntimeError, never skip or mis-dispatch to the registry lookup. Guards against a future
+    pre-model handoff routing landing ahead of the gate."""
+    agent = _agent(TestModel(), peers=[Handoff("billing")])
+    ctx = _ctx_with_view(_view({"billing": None}))
+    part = _handoff_part("billing", "x")
+    ctx.state.extend_with_responses([ModelResponse(parts=[part])], agent.name)
+    ctx.state.add_tool_call(part)  # registered but unresolved — the impossible state
+    with pytest.raises(RuntimeError, match="incomplete tool calls in run"):
+        await agent.run(ctx)
+
+
 async def test_returning_handoff_a_to_b_to_a_re_enters_cleanly() -> None:
     """The A-return direction of spec §4's re-entry pin (review round 1): after A→B→A, A
     re-enters over its OWN persisted handoff turn (real call + self-owned closing request)

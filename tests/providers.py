@@ -172,8 +172,8 @@ class WorkerProvider(Provider):
 def prepare_worker(container):
     worker: Worker = container.get(Worker)
     worker.register_handlers()
-    # Offline analog of the production node-owned fan-out @resource (which never runs under the
-    # synchronous TestKafkaBroker): give each fan-out-capable node a fake durable store, unless a
+    # Offline analog of the production node-owned fan-out @resource (which never runs for
+    # handler-driven tests — no worker.start()): give each fan-out-capable node a fake durable store, unless a
     # test already injected its own (e.g. the spy store in tests/test_durable_fanout_e2e.py).
     for node in worker._nodes:
         if node._is_fanout_capable and FANOUT_STORE_KEY not in node.resources:

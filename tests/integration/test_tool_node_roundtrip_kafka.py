@@ -373,7 +373,7 @@ async def test_two_agents_share_one_tool_node_replies_route_per_caller(kafka_boo
     await agent_worker._client.aclose()
 
 
-# ── Group C: modes / multi-turn ──────────────────────────────────────────────
+# ── Group C: multi-turn ──────────────────────────────────────────────────────
 
 
 async def test_multi_turn_tool_use_feeds_result_into_next_call(kafka_bootstrap: str, topic_namespace: str) -> None:

@@ -1,8 +1,8 @@
 """PR-4 step 6b: the in-node fan-out machinery on BaseNodeDef.
 
-Tested in isolation against the injected fake store + constructed envelopes (the
-@resource never runs offline, so a fan-out agent just gets `agent.resources[KEY] =
-fake`). These pin the pieces the staged handler wires together in 6b-B:
+Tested in isolation against the injected fake store + constructed envelopes (these
+tests are handler-driven — no worker lifecycle, so the @resource never runs and a
+fan-out agent just gets `agent.resources[KEY] = fake`). These pin the pieces the staged handler wires together in 6b-B:
 
 - _is_fanout_capable: agents fan out durably; every other node kind does not
 - _resolve_fanout_store: the store comes from ctx.resources, required for fan-out
@@ -340,7 +340,7 @@ async def test_lone_isolate_state_call_opens_degenerate_batch() -> None:
 async def test_messaging_only_node_opens_degenerate_batch() -> None:
     # decision 1(b): a NON-fan-out-capable node carrying a Messaging handle is
     # `_needs_durable_batch`, so it still opens the degenerate batch for a lone isolate_state call.
-    node = _MessagingOnlyNode(node_id="seq", subscribe_topics=["seq.in"])
+    node = _MessagingOnlyNode(node_id="msg", subscribe_topics=["msg.in"])
     assert node._is_fanout_capable is False and node._needs_durable_batch is True
     fake, _ = await _drive_open(node)
     assert await fake.read_state("A") is not None
@@ -403,8 +403,8 @@ def test_classify_fanout_uses_needs_durable_batch() -> None:
     # decision 1(b): the fold/close continuation gate keys on `_needs_durable_batch`, not
     # `_is_fanout_capable` — so a messaging-only node (Messaging handle, not fan-out-capable)
     # classifies + folds its marked sibling/re-entry continuations.
-    node = _MessagingOnlyNode(node_id="seq", subscribe_topics=["seq.in"])
-    marked = CallFrame(target_topic="seq.in", callback_topic="caller", frame_id="A", fanout_id="A")
+    node = _MessagingOnlyNode(node_id="msg", subscribe_topics=["msg.in"])
+    marked = CallFrame(target_topic="msg.in", callback_topic="caller", frame_id="A", fanout_id="A")
     env = Envelope(
         context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=Stack([marked])),
