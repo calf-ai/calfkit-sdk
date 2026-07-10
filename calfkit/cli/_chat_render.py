@@ -54,7 +54,8 @@ def _parts_text(parts: list[ContentPart]) -> str:
 
 
 def _format_args(args: str | dict[str, Any] | None) -> str:
-    """Render a tool call's args (the raw model emission) compactly."""
+    """Render a tool call's args compactly (a dispatched call carries the parsed dict; a denied
+    call keeps the raw — possibly unparsed — model emission)."""
     if args is None:
         return ""
     if isinstance(args, dict):

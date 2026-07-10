@@ -1,10 +1,10 @@
-"""The step wire vocabulary — two parallel frozen families (intermediate-step-streaming spec §3.1/§3.2,
-impl-plan §6).
+"""The step wire vocabulary — two parallel frozen families (caller-side step-emission spec §5).
 
-WIRE/DRAFT ``*Step`` (frozen, NO identity) carried by ``StepMessage`` (frozen, no validator); identity
-rides once on the message. SURFACE ``*Event`` (frozen, identity REQUIRED) are the public ``RunEvent``
-members, built once caller-side by ``_to_surface``. The two families are separate (not subclasses) so a
-surface event cannot ride the wire. Nothing here emits, routes, or receives a step.
+WIRE ``*Step`` (frozen, NO identity; minted only by the framework's hop ledger) carried by
+``StepMessage`` (frozen, no validator); identity rides once on the message. SURFACE ``*Event``
+(frozen, identity REQUIRED) are the public ``RunEvent`` members, built once caller-side by
+``_to_surface``. The two families are separate (not subclasses) so a surface event cannot ride the
+wire. Nothing here emits, routes, or receives a step.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ class TestWireFilter:
 
 
 # --------------------------------------------------------------------------- #
-# WIRE / DRAFT family — `*Step` (frozen, no identity)                          #
+# WIRE family — `*Step` (frozen, no identity)                                  #
 # --------------------------------------------------------------------------- #
 
 

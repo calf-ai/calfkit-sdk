@@ -148,9 +148,10 @@ async def test_pair_law_fanout_both_directions_at_the_flush(container, monkeypat
     folds = [f for f in flushes if any(type(e).__name__ == "ToolResultStep" for e in f["events"])]
     assert {f["events"][0].tool_call_id for f in folds} == {"c1", "c2"}
     assert all(len(f["events"]) == 1 and f["events"][0].outcome == "success" for f in folds)
-    # Identity anchors (I12/§5.2): emitter = the folding caller; the parked-fold frame_id is the
-    # BATCH frame id — identical across the batch's folds (and distinct per-fold events pair by id).
+    # Identity anchors (I12/§5.2): emitter = the folding caller at its inbound snapshot depth; the
+    # parked-fold frame_id is the BATCH frame id — identical across the batch's folds.
     assert all(f["emitter"] == "pl_fan" for f in folds)
+    assert all(f["depth"] == 1 for f in folds)  # the fold hop's inbound depth (a depth-1 caller)
     assert len({f["frame_id"] for f in folds}) == 1
 
 

@@ -203,7 +203,7 @@ you >
 
 Each turn renders in three tiers: **your input** (`you >`), the agent's live
 **work log** (indented, one line per step, tagged `[message]` / `[tool call]` /
-`[tool result]` / `[tool error]` / `[handoff]`), and the agent's **answer**
+`[tool result]` / `[tool error]` / `[tool denied]` / `[handoff]`), and the agent's **answer**
 (`‹agent› >`). The work log is headed by the agent's name, so it is always clear
 which agent did the work; a mid-turn handoff prints the new agent's name as its
 own header.

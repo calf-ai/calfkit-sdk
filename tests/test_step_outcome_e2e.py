@@ -257,6 +257,7 @@ async def test_terminal_gate_depth2_peer_answer_is_the_callers_fold_result(conta
     assert result.outcome == "success"
     assert result.parts[0].text == "peer answer"
     assert fold["emitter"] == "oc_a7"  # the folding caller, not the answering peer
+    assert fold["depth"] == 1  # the CALLER's inbound snapshot depth — not the peer's depth-2 hop
     # No agent_message from the RETURNING peer hop (any-depth gate) — across ALL flushes, the only
     # agent_message is the caller's dispatch-hop preamble.
     preambles = [e for f in flushes for e in f["events"] if type(e).__name__ == "AgentMessageStep"]

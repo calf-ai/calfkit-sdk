@@ -17,7 +17,8 @@ Three moving parts, all framework-internal (nothing here is re-exported from ``c
 
 **Totality (spec §3.1, normative).** Mint methods and fact constructors run OUTSIDE the kernel's
 best-effort wrap (``folded``/``fold_failed`` on the run's own rail inside ``_aggregate``; fact
-construction inside the body; ``absorb``/``note_dispatch`` at the chokepoint). A raise there faults
+construction inside the body; ``absorb`` at the ``_execute`` unwrap; ``note_dispatch`` at the
+chokepoint). A raise there faults
 — or, mid-batch, aborts — a run that should have proceeded: the one thing telemetry must never do.
 Every field is therefore coerced at build (``DeniedCall`` clamps ``args`` and renders foreign
 ``reason_parts`` elements); a future field sourced from un-coerced data must preserve totality or
@@ -31,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, Protocol
 
 import pydantic_core
+from typing_extensions import assert_never
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_WIRE, NodeKind
 from calfkit._types import StateT
@@ -121,7 +123,7 @@ class HopStepLedger:
     ``DeniedCall`` translation hard-code. A wrong outcome is unrepresentable (I9 made structural).
     """
 
-    _events: list[StepEvent] = field(default_factory=list)
+    _events: list[StepEvent] = field(default_factory=list, init=False)  # not injectable — the seal holds by construction
 
     def folded(self, marker: ToolCallMarker, parts: list[ContentPart]) -> None:
         """Mint the result step for a resolved marked reply: the resolved slot parts VERBATIM
@@ -149,8 +151,13 @@ class HopStepLedger:
                 self._events.append(
                     ToolResultStep(tool_call_id=fact.tool_call_id, name=fact.tool_name, parts=list(fact.reason_parts), outcome="denied")
                 )
-            else:
+            elif isinstance(fact, HandedOff):
                 self._events.append(HandoffStep(target=fact.target, reason=fact.message))
+            else:
+                # Exhaustive over the closed union: a NEW fact member missing its translation arm is
+                # a TYPE-CHECK failure here (spec §5.5's maintenance story), not a latent run fault
+                # at the un-guarded unwrap.
+                assert_never(fact)
 
     def note_dispatch(self, action: NodeResult[Any]) -> None:
         """Mint the call half for every OUTGOING marked ``Call`` (the pair law's dispatch side,

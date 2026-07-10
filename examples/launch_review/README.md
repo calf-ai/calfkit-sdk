@@ -37,15 +37,18 @@ itself, because it never handed off:
 
 ```text
 >>> Are we go for the v2.0 launch on Friday?
-🔧 [release_manager] message_agent({"name": "engineering", "message": "What's the build and test status?"})
+🔧 [release_manager] message_agent({'name': 'engineering', 'message': "What's the build and test status?"})
   🔧 [engineering] build_status()
-↩  [engineering] replies: Build green; 2 flaky tests (non-blocking); release branch cut.
-🔧 [release_manager] message_agent({"name": "security", "message": "Any blocking findings?"})
+  ↩  [build_status] replies: Build green; 2 flaky tests (non-blocking); release branch cut.
+↩  [message_agent] replies: Build green; 2 flaky tests (non-blocking); release branch cut.
+🔧 [release_manager] message_agent({'name': 'security', 'message': 'Any blocking findings?'})
   🔧 [security] security_scan()
-↩  [security] replies: No critical/high; 1 medium scheduled next sprint.
-🔧 [release_manager] message_agent({"name": "legal", "message": "Are we cleared?"})
+  ↩  [security_scan] replies: No critical/high; 1 medium scheduled next sprint.
+↩  [message_agent] replies: No critical/high; 1 medium scheduled next sprint.
+🔧 [release_manager] message_agent({'name': 'legal', 'message': 'Are we cleared?'})
   🔧 [legal] compliance_status()
-↩  [legal] replies: ToS approved; DPA signed; cleared for launch.
+  ↩  [compliance_status] replies: ToS approved; DPA signed; cleared for launch.
+↩  [message_agent] replies: ToS approved; DPA signed; cleared for launch.
 --- recommendation ---
 GO.
 - Engineering: green, only non-blocking flakes.

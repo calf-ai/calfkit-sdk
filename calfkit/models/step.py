@@ -1,11 +1,12 @@
-"""Wire vocabulary + public surface for intermediate step streaming (spec §3.1/§3.2, impl-plan §6).
+"""Wire vocabulary + public surface for step streaming (caller-side step-emission spec §3.1/§5).
 
 Two **parallel, frozen** families:
 
-- **WIRE / DRAFT — ``*Step`` (frozen, NO identity).** Authored by the node side and serialized verbatim
-  inside :class:`StepMessage`; hop identity (``correlation_id``/``depth``/``frame_id``/``emitter``) sits
-  **once** on the message, never per event — so per-event identity is structurally unrepresentable on the
-  wire.
+- **WIRE — ``*Step`` (frozen, NO identity).** Minted ONLY by the framework's per-hop ledger
+  (``calfkit/nodes/_steps.py`` — the construction seal is enforced by an AST sweep in CI) and
+  serialized verbatim inside :class:`StepMessage`; hop identity
+  (``correlation_id``/``depth``/``frame_id``/``emitter``) sits **once** on the message, never per
+  event — so per-event identity is structurally unrepresentable on the wire.
 - **SURFACE — ``*Event`` (frozen, identity REQUIRED).** The public ``RunEvent`` members the caller
   observes via ``stream()``/``events()``; identity is always present, stamped once caller-side by
   ``client.hub._to_surface``.
@@ -24,19 +25,20 @@ from pydantic import BaseModel, ConfigDict, Discriminator
 from calfkit.models.payload import ContentPart
 
 # --------------------------------------------------------------------------- #
-# WIRE / DRAFT family — `*Step` (frozen, no identity)                          #
+# WIRE family — `*Step` (frozen, no identity)                                  #
 # --------------------------------------------------------------------------- #
 
 
 class _StepBase(BaseModel):
-    """Base for every wire/draft step event: frozen, and carries **no** hop identity (identity rides once
-    on the enclosing :class:`StepMessage`). Authored by the node side; serialized verbatim on the wire."""
+    """Base for every wire step event: frozen, and carries **no** hop identity (identity rides once
+    on the enclosing :class:`StepMessage`). Minted only by the framework's hop ledger; serialized
+    verbatim on the wire."""
 
     model_config = ConfigDict(frozen=True)
 
 
 class AgentMessageStep(_StepBase):
-    """The agent's preamble text for the hop (spec §3.2)."""
+    """The agent's preamble text for the hop (caller-side step-emission spec §3.1a — a ``Said`` fact's mint)."""
 
     kind: Literal["agent_message"] = "agent_message"
     parts: list[ContentPart]
@@ -73,7 +75,7 @@ class ToolResultStep(_StepBase):
 
 
 class HandoffStep(_StepBase):
-    """A handoff to a peer agent (spec §3.2) — emitted only when a transfer actually happens
+    """A handoff to a peer agent (caller-side step-emission spec §7) — emitted only when a transfer actually happens
     (ADR-0035, amended by ADR-0039: a stale/invalid target is a standard rejection and streams as a
     ``denied`` ``ToolResultStep`` pair instead)."""
 
@@ -83,7 +85,7 @@ class HandoffStep(_StepBase):
 
 
 class AgentThinkingStep(_StepBase):
-    """The agent's thinking text (spec §5). **Defined but never emitted in v1** — the ``calf.thinking``
+    """The agent's thinking text (caller-side step-emission spec §5.3). **Defined but never emitted in v1** — the ``calf.thinking``
     marker mapping is documented, not wired. It stays in the wire union so the decoder resolves every
     ``kind`` (e.g. a foreign producer's), but ``_on_step`` never surfaces it."""
 
@@ -99,7 +101,7 @@ StepEvent = Annotated[
 
 
 class StepMessage(BaseModel):
-    """The wire body for ``x-calf-wire == "step"`` (spec §3.1). Hop identity sits **once** here; the events
+    """The wire body for ``x-calf-wire == "step"`` (caller-side step-emission spec §9.1). Hop identity sits **once** here; the events
     ride bare (``*Step``, no identity) and are mapped onto frozen surface ``*Event``s caller-side by
     ``client.hub._to_surface``. Frozen, with **no validator** — wire events carry no identity, so there is
     nothing to back-fill."""
@@ -133,14 +135,14 @@ class _RunStepEventBase(BaseModel):
 
 
 class AgentMessageEvent(_RunStepEventBase):
-    """The agent's preamble text for the hop (spec §3.2) — the surfaced form of :class:`AgentMessageStep`."""
+    """The agent's preamble text for the hop — the surfaced form of :class:`AgentMessageStep`."""
 
     kind: Literal["agent_message"] = "agent_message"
     parts: list[ContentPart]
 
 
 class ToolCallEvent(_RunStepEventBase):
-    """A tool call the model requested this hop (spec §3.2) — the surfaced form of :class:`ToolCallStep`."""
+    """A tool call the model requested this hop — the surfaced form of :class:`ToolCallStep`."""
 
     kind: Literal["tool_call"] = "tool_call"
     tool_call_id: str
@@ -161,7 +163,7 @@ class ToolResultEvent(_RunStepEventBase):
 
 
 class HandoffEvent(_RunStepEventBase):
-    """A handoff to a peer agent (spec §3.2) — the surfaced form of :class:`HandoffStep`."""
+    """A handoff to a peer agent — the surfaced form of :class:`HandoffStep`."""
 
     kind: Literal["handoff"] = "handoff"
     target: str
@@ -169,7 +171,7 @@ class HandoffEvent(_RunStepEventBase):
 
 
 class AgentThinkingEvent(_RunStepEventBase):
-    """The agent's thinking text (spec §5). **Defined but never emitted/surfaced in v1** — not a
+    """The agent's thinking text (caller-side step-emission spec §5.3). **Defined but never emitted/surfaced in v1** — not a
     ``RunStepEvent``/``RunEvent`` member and not re-exported. The surfaced form of :class:`AgentThinkingStep`."""
 
     kind: Literal["agent_thinking"] = "agent_thinking"

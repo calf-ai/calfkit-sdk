@@ -29,6 +29,7 @@ from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
+from calfkit.nodes._steps import Observed
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.peers import Messaging
 from tests._fanout_fakes import FakeFanoutBatchStore
@@ -317,7 +318,7 @@ class TestCalleeResultMarker:
         assert CalleeResult(frame_id="f").marker is None
 
 
-# ── The sole producer + the net-simplified SlotRef (interim carriage retired) ──
+# ── The producers (universal stamping) + the net-simplified SlotRef (interim carriage retired) ──
 
 
 class TestMessageAgentProducer:
@@ -352,7 +353,11 @@ class TestUniversalStamping:
         # args authored as a JSON STRING — the marker must carry the PARSED dict.
         call = ToolCallPart(tool_name="search", args='{"q": "hello"}', tool_call_id="c-single")
         agent = Agent("stamp_single", subscribe_topics="stamp_single.in", model_client=_model_emits_tool_calls([call]), tools=[_search_binding()])
-        result = _unwrap(await agent.run(_make_ctx(State())))
+        observed = await agent.run(_make_ctx(State()))
+        # Fact-capable dispatch exits return Observed UNCONDITIONALLY — an empty facts tuple is the
+        # permitted shape for this preamble-less turn (step-emission spec §3.1b).
+        assert isinstance(observed, Observed) and observed.facts == ()
+        result = observed.action
         assert isinstance(result, Call)
         assert result.marker == ToolCallMarker(tool_name="search", tool_call_id="c-single", args={"q": "hello"})
 

@@ -163,6 +163,7 @@ async def test_fanout_sibling_folds_trickle_over_the_wire(kafka_bootstrap: str, 
     # Identity anchors (I12/§5.2): emitter = the folding caller; the parked-fold frame_id is the BATCH
     # frame id — identical across the batch's folds.
     assert all(r.emitter == f"{topic_namespace}-A" for r in results)
+    assert all(r.depth == 1 for r in results)  # the fold hop's inbound depth (a depth-1 caller)
     assert len({r.frame_id for r in results}) == 1
     await driver.aclose()
     await worker._client.aclose()
@@ -202,6 +203,7 @@ async def test_all_depths_peer_consult_reply_reaches_original_caller(kafka_boots
     assert tr.name == "message_agent"
     assert tr.outcome == "success"
     assert tr.emitter == a_name
+    assert tr.depth == 1  # minted at A's fold hop, not at B's depth-2 hop
     assert "42" in tr.parts[0].text
     await driver.aclose()
     await b_worker._client.aclose()

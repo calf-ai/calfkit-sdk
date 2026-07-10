@@ -738,7 +738,7 @@ class BaseAgentNodeDef(
 
             # Handoff arbitration (spec §3, §3.0-gated): decide the WHOLE response before the per-call
             # loop — early semantics is a whole-response decision. A winning handoff ends the turn: the
-            # winner path below authors the sibling step pairs + the closing ModelRequest and relinquishes;
+            # winner path below declares the sibling DeniedCall facts + the closing ModelRequest and relinquishes;
             # NOTHING in this branch dispatches. `disposition` stays None for a handle-less agent, whose
             # user tool named `handoff_to_agent` is never intercepted (spec §3.0).
             disposition: HandoffDisposition | None = None
