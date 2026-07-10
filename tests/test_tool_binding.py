@@ -57,8 +57,8 @@ class TestToolBinding:
 class TestToolBindingWireForm:
     """ToolBinding doubles as the wire model for per-run tool overrides: the
     ``validator`` callable is process-local and must never serialize, so a
-    deserialized binding always dispatches unvalidated (the schema-only
-    carve-out, enforced by the type instead of by convention)."""
+    deserialized binding always carries ``validator=None`` (the agent then
+    validates its args against the advertised schema at dispatch, not here)."""
 
     def make_binding_with_validator(self) -> ToolBinding:
         return ToolBinding(

@@ -99,6 +99,31 @@ def final_model(text: str = FINAL_OUTPUT) -> FunctionModel:
     return FunctionModel(_fn)
 
 
+def correcting_model(bad_calls: list[ToolCallPart], good_calls: list[ToolCallPart]) -> FunctionModel:
+    """A model for the validate → reject → correct loop.
+
+    Emits ``bad_calls`` on its first turn, ``good_calls`` on its second (after the agent rejected
+    the bad args), then finalizes with :data:`FINAL_OUTPUT`. The phase is keyed on how many tool
+    calls THIS MODEL has already emitted (its own ``ToolCallPart``s in prior ``ModelResponse``s) —
+    NOT on the kind of answer it got back. That distinction matters: a caller-side arg rejection
+    reaches the model as a ``ToolReturnPart`` whose content is the schema-violation error (not a
+    ``RetryPromptPart``), indistinguishable by type from a genuine tool result — so keying on
+    "did a tool return?" would finalize on the rejection and never send the correction. Counting
+    own emissions is rendering-agnostic and idempotent (a redelivered turn re-derives the same
+    count from history).
+    """
+
+    def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        emitted = sum(1 for msg in messages if isinstance(msg, ModelResponse) for part in msg.parts if isinstance(part, ToolCallPart))
+        if emitted == 0:
+            return ModelResponse(parts=list(bad_calls))
+        if emitted == 1:
+            return ModelResponse(parts=list(good_calls))
+        return ModelResponse(parts=[TextPart(FINAL_OUTPUT)])
+
+    return FunctionModel(_fn)
+
+
 def reactive_model(decide: Callable[[dict[str, object]], list[ToolCallPart] | None]) -> FunctionModel:
     """A multi-turn model driven by the tool returns seen so far.
 

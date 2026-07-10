@@ -53,10 +53,11 @@ process — is picked up on the next turn. No restarts, no bring-up order.
 
 **Which handle?** Reach for `Tools(...)` when you want the agent's deployment
 decoupled from the tool's code — the schema travels over the plane. Pass the live
-node (`tools=[add]`) when you'd rather bake the schema in and validate arguments
-locally *before* dispatch, at the cost of importing the tool. Same node, either
-handle. (A discovered binding defers argument validation to the tool node; see the
-[design spec](designs/runtime-tool-discoverability-spec.md) for the full trade-off.)
+node (`tools=[add]`) when you'd rather import the tool and bake its schema in. Either
+way the agent validates the model's arguments *before* dispatch: a live node uses the
+tool's own signature validator (with coercion and any custom field validators), while a
+discovered binding checks them against the advertised JSON schema — a non-coercing
+subset check, with the tool node staying authoritative on receipt.
 
 ## Discover every tool node
 

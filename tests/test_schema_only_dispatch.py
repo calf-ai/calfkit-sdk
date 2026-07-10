@@ -1,24 +1,30 @@
 """Schema-only tool dispatch via the ``Agent(tools=[...])`` kwarg path.
 
-Pins two load-bearing properties of the agent loop for tools registered as
+Pins the load-bearing properties of the agent loop for tools registered as
 validator-less ``ToolBinding`` instances passed through the
 ``Agent(tools=[...])`` kwarg:
 
-  1. The agent dispatches the tool call without attempting client-side
-     argument validation. The ``binding.validator is not None`` gate in
-     ``calfkit/nodes/agent.py`` is False for a validator-less binding, so the
-     validation block is skipped entirely.
+  1. A call whose args CONFORM to the binding's advertised
+     ``parameters_json_schema`` dispatches. The binding carries no process-local
+     validator, so the agent builds a schema fallback validator from the advertised
+     schema and checks the args against it before dispatch.
 
-  2. Malformed JSON args from the LLM still become a ``RetryPromptPart`` (an
-     LLM-visible recoverable, not an escalating fault), via the ``args_as_dict()``
-     try/except which runs on *all* dispatch paths regardless of the validation gate.
+  2. A call whose args VIOLATE the advertised schema is rejected pre-dispatch as a
+     ``RetryPromptPart`` — the same in-band recoverable a local tool produces (no
+     more crossing the wire to fault at the callee).
 
-The override-mode tests in ``test_tool_errors.py`` cover the same two
-properties via the ``state.overrides.override_agent_tools`` path; this test
-exercises the ``Agent(tools=[...])`` kwarg branch instead.
+  3. Malformed JSON args from the LLM still become a ``RetryPromptPart`` via the
+     ``args_as_dict()`` try/except which runs on *all* dispatch paths before the
+     validation step.
+
+The override-mode tests in ``test_tool_errors.py`` cover the same properties via the
+``state.overrides.override_agent_tools`` path; this test exercises the
+``Agent(tools=[...])`` kwarg branch instead.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
@@ -34,38 +40,43 @@ from calfkit.nodes import Agent
 # fail-fast signal to update both tests together.
 from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap
 
+# The default schema-only tool: one required string arg, no extra keys.
+_DEFAULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"q": {"type": "string"}},
+    "required": ["q"],
+    "additionalProperties": False,
+}
+
 
 def _make_schema_only_tool(
     *,
     tool_name: str = "search",
     topic_base: str = "tools.search",
+    parameters_json_schema: dict[str, Any] | None = None,
 ) -> ToolBinding:
     """Construct a validator-less ``ToolBinding`` (a schema-only tool).
 
     Carries a real ``ToolDefinition`` (so the LLM sees a valid schema) but
-    ``validator=None`` — which is what makes it "schema-only": the agent's
-    ``binding.validator is not None`` gate is False, skipping validation.
+    ``validator=None`` — the wire form. At dispatch the agent builds a schema fallback
+    validator from ``parameters_json_schema`` (overridable, e.g. to add a typed field
+    for the strictness pin).
     """
     return ToolBinding(
         dispatch_topic=f"{topic_base}.input",
         tool_def=ToolDefinition(
             name=tool_name,
-            description="Synthetic tool with one required string arg.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {"q": {"type": "string"}},
-                "required": ["q"],
-                "additionalProperties": False,
-            },
+            description="Synthetic tool.",
+            parameters_json_schema=parameters_json_schema or _DEFAULT_SCHEMA,
         ),
     )
 
 
-async def test_schema_only_tool_via_tools_kwarg_dispatches_without_validation() -> None:
-    """Property 1: ``Agent(tools=[ToolBinding(...)])`` dispatches the call.
+async def test_schema_only_tool_via_tools_kwarg_dispatches_conforming_args() -> None:
+    """Property 1: ``Agent(tools=[ToolBinding(...)])`` dispatches a schema-CONFORMING call.
 
-    No validator runs (the binding carries none), and the result is a ``Call``
-    to the binding's dispatch topic.
+    The schema fallback validator passes, and the result is a ``Call`` to the binding's
+    dispatch topic.
     """
     schema_only = _make_schema_only_tool()
 
@@ -90,6 +101,77 @@ async def test_schema_only_tool_via_tools_kwarg_dispatches_without_validation() 
     assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
     assert isinstance(result.body, ToolCallRef) and result.body.tool_call_id == tool_call_id
     assert result.target_topic == "tools.search.input"
+
+
+@pytest.mark.parametrize(
+    ("args", "why"),
+    [
+        ({}, "missing required 'q'"),
+        ({"q": "hi", "extra": 1}, "additionalProperties:false forbids 'extra'"),
+        ({"q": 123}, "'q' must be a string"),
+    ],
+    ids=["missing-required", "extra-key", "wrong-type"],
+)
+async def test_schema_only_tool_schema_violating_args_become_retry_prompt(args, why) -> None:
+    """Property 2: args that VIOLATE the advertised schema are rejected pre-dispatch.
+
+    Each shape trips the schema fallback validator and lands a ``RetryPromptPart`` instead of
+    dispatching — the fix's whole point (no fault-at-the-callee for a model mistake).
+    """
+    schema_only = _make_schema_only_tool()
+
+    tcid = "tc-schema-violation"
+    bad_call = ToolCallPart(tool_name="search", args=args, tool_call_id=tcid)
+
+    agent = Agent(
+        "agent_schema_only_violation",
+        system_prompt="x",
+        subscribe_topics="agent_schema_only_violation.input",
+        publish_topic="agent_schema_only_violation.output",
+        model_client=_model_emits_tool_calls([bad_call]),
+        tools=[schema_only],
+    )
+
+    ctx = _make_ctx(State())
+    result = _unwrap(await agent.run(ctx))
+
+    assert isinstance(result, TailCall), f"{why}: expected TailCall, got {type(result).__name__}"
+    stored = ctx.state.tool_results.get(tcid)
+    assert isinstance(stored, RetryPromptPart), f"{why}: expected RetryPromptPart, got {type(stored).__name__}"
+    assert stored.content, f"{why}: expected non-empty violation content"
+
+
+async def test_schema_only_tool_rejects_coercible_but_off_spec_args() -> None:
+    """The strictness delta (spec D6.2): a discovered tool's schema is enforced AS WRITTEN. An
+    integer field emitted as the string ``"3"`` — which a lax callee would coerce — is rejected at
+    the caller and the model retries. This is the deliberate, chosen behavior, not an accident.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"n": {"type": "integer"}},
+        "required": ["n"],
+        "additionalProperties": False,
+    }
+    schema_only = _make_schema_only_tool(tool_name="counter", topic_base="tools.counter", parameters_json_schema=schema)
+
+    tcid = "tc-coercible-off-spec"
+    call = ToolCallPart(tool_name="counter", args={"n": "3"}, tool_call_id=tcid)
+
+    agent = Agent(
+        "agent_schema_only_strict",
+        system_prompt="x",
+        subscribe_topics="agent_schema_only_strict.input",
+        publish_topic="agent_schema_only_strict.output",
+        model_client=_model_emits_tool_calls([call]),
+        tools=[schema_only],
+    )
+
+    ctx = _make_ctx(State())
+    result = _unwrap(await agent.run(ctx))
+
+    assert isinstance(result, TailCall), f"expected TailCall (non-coercing reject), got {type(result).__name__}"
+    stored = ctx.state.tool_results.get(tcid)
+    assert isinstance(stored, RetryPromptPart), f"expected RetryPromptPart, got {type(stored).__name__}"
 
 
 async def test_schema_only_tool_malformed_args_become_retry_prompt() -> None:

@@ -108,7 +108,8 @@ class TestRecordToBindings:
         assert [b.name for b in bindings] == ["docs_server__search", "docs_server__fetch"]
         assert all(isinstance(b, ToolBinding) for b in bindings)
         assert all(b.dispatch_topic == "mcp_server.docs_server" for b in bindings)
-        # Wire-crossing tools dispatch unvalidated (schema-only carve-out).
+        # Validator-less by construction (no local function); the agent validates against the
+        # advertised schema at dispatch.
         assert all(b.validator is None for b in bindings)
 
     def test_tool_def_fields_survive(self) -> None:

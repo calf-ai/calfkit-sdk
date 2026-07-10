@@ -99,7 +99,8 @@ class TestEagerDiscoveredParity:
         discovered = record_to_bindings(node._capability_advert(make_stamp()), name="add")[0]  # discovered; node_kind="tool" stays BARE (C2)
         # Same ToolDefinition — name, description, JSON schema, and every defaulted field.
         assert discovered.tool_def == eager.tool_def
-        # The only difference is the validation locus: eager validates locally; the discovered
-        # binding has no validator (the tool node validates on receipt; bad args -> fault rail).
+        # The only difference is the validation LOCUS, not whether validation happens: the eager
+        # binding carries a signature validator; the discovered binding has none, so the agent
+        # falls back to a validator built from the advertised schema. Same dispatch rail either way.
         assert eager.validator is not None
         assert discovered.validator is None

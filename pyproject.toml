@@ -49,6 +49,11 @@ dependencies = [
     # CLI (`ck`): typer powers the console script, watchfiles powers `ck run --reload`.
     "typer>=0.12",
     "watchfiles>=0.21",
+    # Caller-side tool-arg validation: the Draft 2020-12 reference implementation, used to
+    # compile a runtime validator from a discovered tool's advertised `parameters_json_schema`.
+    # Floor >=4.18 is the first `referencing`-based release (stable `$ref` resolution); already
+    # in the locked closure as a hard dep of `mcp`, so this direct declaration is install-free.
+    "jsonschema>=4.18",
 ]
 
 [project.urls]
@@ -96,6 +101,13 @@ exclude = ["calfkit/_vendor"]
 # two under warn_unused_ignores, so the suppression lives here, env-independent.
 [[tool.mypy.overrides]]
 module = "calfkit_mesh"
+ignore_missing_imports = true
+
+# jsonschema ships no py.typed; its published stubs (types-jsonschema) are a separate package the
+# project does not vendor. Suppress here rather than inline, matching the calfkit_mesh precedent
+# (env-independent under warn_unused_ignores).
+[[tool.mypy.overrides]]
+module = "jsonschema.*"
 ignore_missing_imports = true
 
 [tool.coverage.run]
