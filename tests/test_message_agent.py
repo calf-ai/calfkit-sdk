@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from calfkit._vendor.pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturn
+from calfkit._vendor.pydantic_ai.messages import ModelResponse, RetryPromptPart, ToolCallPart
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit._vendor.pydantic_ai.models.test import TestModel
@@ -149,29 +149,6 @@ async def test_message_agent_parallel_mixed_batch_dispatches_per_kind() -> None:
     assert tool_call.target_topic == "adder.in"
     assert tool_call.isolate_state is False
     assert tool_call.body is not None  # ToolCallRef
-
-
-async def test_message_agent_dispatched_via_reentry_arm() -> None:
-    # A sequential agent that emitted a tool + a message_agent in one turn dispatches them one at a time:
-    # the tool first, then — on RE-ENTRY after the tool returns — the still-pending message_agent. The
-    # re-entry arm must fork on the well-known name BEFORE indexing tools_registry (message_agent is never
-    # a registry binding). Per Ryan: the re-entry arm does NOT re-validate (accepts the §9 staleness window).
-    msg = _msg_call("billing", "balance?", tool_call_id="m1")
-    add = ToolCallPart(tool_name="add", args={}, tool_call_id="a1")
-    state = State()
-    state.add_tool_call(add)
-    state.add_tool_call(msg)
-    state.add_tool_result("a1", ToolReturn(return_value="3", metadata={"tool_call_id": "a1"}))  # the tool already returned
-    state.message_history.append(ModelRequest.user_text_prompt("add then ask billing"))
-    state.message_history.append(ModelResponse(parts=[add, msg]))  # one turn emitted both calls
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=TestModel(), peers=[Messaging("billing")], sequential_only_mode=True)
-    ctx = _ctx_with_view(_view({"billing": "Billing."}))
-    ctx.state = state  # the re-entry state; the model is never called (the pending call dispatches first)
-    result = await agent.run(ctx)
-    assert isinstance(result, Call)
-    assert result.target_topic == "agent.billing.private.input"
-    assert result.isolate_state is True
-    assert result.tag == "m1"
 
 
 async def test_message_agent_is_never_looked_up_in_tools_registry() -> None:

@@ -279,7 +279,6 @@ async def test_deferred_tool_reentry_keeps_self_tool_call_ids_no_user_error():
         subscribe_topics="viewer.input",
         model_client=model,  # pyright: ignore[reportArgumentType]
         tools=[tool_node],
-        sequential_only_mode=True,
     )
 
     # Multi-participant canonical history with the viewer's own in-flight tool call last.

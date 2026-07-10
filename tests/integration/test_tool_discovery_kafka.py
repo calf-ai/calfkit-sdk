@@ -222,7 +222,6 @@ async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str
         publish_topic=agent_pub,
         model_client=scripted_model([ToolCallPart(tool_name, {"a": "not-an-int", "b": 3}, tool_call_id="c1")]),
         tools=[Tools(tool_name)],
-        sequential_only_mode=True,  # single dispatch; keep the durable fan-out store out of the fault path
     )
     await ensure_topic(kafka_bootstrap, agent_pub)
 

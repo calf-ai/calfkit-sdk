@@ -15,7 +15,7 @@ that only exists under a real lifecycle against a live broker:
 * the durable fold + the self-published re-entry close the batch over the wire,
   so the agent resumes to a final result.
 
-Crucially this test injects **no** store: the agent is a plain non-sequential
+Crucially this test injects **no** store: the agent is a plain
 :class:`~calfkit.nodes.Agent`, which auto-registers its ``@resource`` in
 ``__init__``; the worker's resource phase opens the real ktables-backed store
 before serving. An offline ``FunctionModel`` removes any LLM dependency — only
@@ -120,7 +120,7 @@ async def test_fanout_agent_opens_real_store_and_resumes_over_the_wire(kafka_boo
         tools=[fanout_tool_a, fanout_tool_b],
     )
 
-    # A non-sequential agent auto-registers its durable-store @resource in
+    # An agent auto-registers its durable-store @resource in
     # __init__; the worker lifecycle opens the REAL KtablesFanoutBatchStore.
     # Guard the premise of this test: nothing pre-seeds the bag (the offline
     # fake-injection pattern must NOT be in play here).

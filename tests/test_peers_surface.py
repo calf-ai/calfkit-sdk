@@ -101,16 +101,19 @@ def test_messaging_in_tools_raises() -> None:
         _agent(tools=[Messaging("billing")])
 
 
-def test_sequential_messaging_agent_registers_fanout_store() -> None:
-    # decision 1(b): a `sequential_only_mode` messaging agent still needs the durable-batch store for its
-    # lone message_agent (it is `_needs_durable_batch` via `_peers`), even though it routes tools
-    # one-at-a-time. A sequential agent WITHOUT peers registers no store.
+def test_every_agent_registers_fanout_store() -> None:
+    # Uniform store rule: every agent registers the durable-batch store @resource unconditionally —
+    # plain, Messaging, and Handoff-only alike. No agent is statically fan-out-free (override tools
+    # arrive over the wire; Tools selectors resolve at runtime). The messaging-vs-handoff
+    # `_needs_durable_batch` distinction is no longer observable on agents; its non-agent form is
+    # pinned by test_fanout_handler.py::test_needs_durable_batch_decouples_from_fanout_capability.
     from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 
-    messaging_seq = Agent(name="t", subscribe_topics="t.in", model_client=TestModel(), sequential_only_mode=True, peers=[Messaging("p")])
-    assert FANOUT_STORE_KEY in [n for n, _ in messaging_seq._resource_cms()]
-    plain_seq = Agent(name="t2", subscribe_topics="t2.in", model_client=TestModel(), sequential_only_mode=True)
-    assert FANOUT_STORE_KEY not in [n for n, _ in plain_seq._resource_cms()]
+    plain = Agent(name="t", subscribe_topics="t.in", model_client=TestModel())
+    messaging = Agent(name="t2", subscribe_topics="t2.in", model_client=TestModel(), peers=[Messaging("p")])
+    handoff_only = Agent(name="t3", subscribe_topics="t3.in", model_client=TestModel(), peers=[Handoff("p")])
+    for agent in (plain, messaging, handoff_only):
+        assert FANOUT_STORE_KEY in [n for n, _ in agent._resource_cms()]
 
 
 def test_agent_messaging_discover_exclusivity() -> None:
@@ -250,14 +253,3 @@ def test_same_name_in_messaging_and_handoff_is_allowed_and_partitioned() -> None
     a = _agent(peers=[Messaging("billing"), Handoff("billing")])
     assert a._messaging_handles == [Messaging("billing")]
     assert a._handoff_handles == [Handoff("billing")]
-
-
-def test_sequential_handoff_only_agent_registers_no_fanout_store() -> None:
-    # decision 1(b), NARROWED for PR-C: `_needs_durable_batch` keys on MESSAGING handles, not any peer. A
-    # Handoff-only agent never dispatches an isolate_state Call (a winning handoff is a TailCall, not
-    # a Call), so a SEQUENTIAL Handoff-only agent (not fanout-capable) provisions NO durable store — unlike
-    # a sequential MESSAGING agent (test_sequential_messaging_agent_registers_fanout_store).
-    from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
-
-    handoff_seq = Agent(name="t", subscribe_topics="t.in", model_client=TestModel(), sequential_only_mode=True, peers=[Handoff("p")])
-    assert FANOUT_STORE_KEY not in [n for n, _ in handoff_seq._resource_cms()]

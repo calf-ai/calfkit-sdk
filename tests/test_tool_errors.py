@@ -348,7 +348,7 @@ async def test_agent_dispatches_valid_args_unchanged():
     ctx = _make_ctx(State())
     result = await agent.run(ctx)
 
-    # Single valid call → sequential dispatch via Call (no parallel batch).
+    # Single valid call → single-call dispatch via a plain Call (no durable batch).
     assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
     assert tool_call_id not in ctx.state.tool_results
 
@@ -405,7 +405,7 @@ async def test_agent_partial_validation_failure_dispatches_valid_calls():
     # the worker reply.
     assert valid_id not in ctx.state.tool_results
 
-    # Only one valid pending call remains, so the agent takes the sequential
+    # Only one valid pending call remains, so the agent takes the single-call
     # dispatch branch (len(pending_tool_calls) == 1 → single Call, not list).
     if isinstance(result, list):
         target_ids = [call.body.tool_call_id for call in result if isinstance(call, Call)]
@@ -721,7 +721,7 @@ async def test_agent_validator_failure_branch_continues_loop():
     result = await agent.run(ctx)
 
     # Bad call lands as a RetryPromptPart; good call is dispatched (only one
-    # valid pending call remains, so the agent takes the sequential Call branch).
+    # valid pending call remains, so the agent takes the single-call plain-Call branch).
     bad_stored = ctx.state.tool_results.get("tc-bad-002")
     assert isinstance(bad_stored, RetryPromptPart)
     assert "tc-good-002" not in ctx.state.tool_results, "good call should still be pending dispatch"

@@ -901,8 +901,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
     @property
     def _is_fanout_capable(self) -> bool:
         """Whether this node folds durable fan-out batches in-node. ``False`` for every
-        node type except a non-sequential agent (which overrides this) — it gates the
-        staged handler's fan-out recognition and the OPEN dispatch path."""
+        node kind except an agent (which overrides this) — it gates the staged handler's
+        fan-out recognition and the OPEN dispatch path."""
         return False
 
     @property
@@ -911,13 +911,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
 
         True iff the node can parallel fan out (:attr:`_is_fanout_capable`) **or** it can dispatch an
         ``isolate_state`` call — i.e. it carries a ``Messaging`` handle (set by ``Agent(peers=[Messaging…])``).
-        This decouples "needs the snapshot machinery" from "does parallel fan-out", so a
-        ``sequential_only_mode`` messaging agent still snapshots/restores the caller's state for a lone
-        ``message_agent`` (a degenerate one-element batch) while keeping its tool routing one-at-a-time. A
-        ``Handoff``-only agent needs NO durable batch — a winning handoff is a ``TailCall`` disposition, never a
-        ``Call``, so it never opens one (keyed on ``_messaging_handles``, not any ``peers`` handle). For
-        non-agent nodes (no ``_messaging_handles``) it equals :attr:`_is_fanout_capable`. Gates the store
-        ``@resource``, ``_classify_fanout``, and the OPEN trigger."""
+        For every agent both disjuncts collapse to ``True`` (an agent is always fan-out capable); the
+        decoupling from :attr:`_is_fanout_capable` is retained deliberately as future-proofing for a
+        non-agent node kind that carries Messaging handles and would need the snapshot machinery for its
+        ``isolate_state`` dispatches without folding parallel batches. Gates ``_classify_fanout`` and the
+        OPEN trigger."""
         return self._is_fanout_capable or bool(getattr(self, "_messaging_handles", None))
 
     def _resolve_fanout_store(self, ctx: SessionRunContext) -> FanoutBatchStore:
@@ -1200,8 +1198,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         marker rides the node's OWN frame (``fanout_id`` set), so it is the top frame when
         a fan-out continuation re-enters; the reply slot's ``in_reply_to`` then tells a
         sibling callee (≠ the frame id) from the re-entry (== it). Gated on
-        ``_needs_durable_batch`` (decision 1(b)) so a sequential messaging agent's
-        degenerate-batch continuations classify + fold, not just a parallel-fan-out agent's."""
+        ``_needs_durable_batch`` (decision 1(b)) so any degenerate one-element batch's
+        continuations classify + fold, not just a true parallel fan-out's."""
         if not self._needs_durable_batch:
             return None
         frame = envelope.internal_workflow_state.current_frame_or_none
@@ -1852,8 +1850,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         # history). A bare Call is normalized to a one-element list first so a flagged bare Call cannot
         # slip through to _publish_action's bare-Call fast path (which would skip the snapshot, C1). An
         # *unflagged* single Call / 1-element list stays a stateless continuation and reroutes to the
-        # plain publish in _publish_action below. Gated on `_needs_durable_batch` (not `_is_fanout_capable`),
-        # so a `sequential_only_mode` messaging agent also opens the degenerate batch for its lone peer message.
+        # plain publish in _publish_action below. Gated on `_needs_durable_batch` (the retained 1(b)
+        # decoupling — see its docstring), so a lone `message_agent` opens its degenerate batch here.
         fanout_calls = [output] if isinstance(output, Call) else output
         if (
             self._needs_durable_batch

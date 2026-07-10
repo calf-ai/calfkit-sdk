@@ -218,7 +218,6 @@ Agent(
     tools: Sequence[...] | None = None,
     model_client: PydanticModelClient,
     final_output_type: type = str,
-    sequential_only_mode: bool = False,
     model_settings: ModelSettings | dict | None = None,
     peers: Sequence[Messaging | Handoff] | None = None,
 )

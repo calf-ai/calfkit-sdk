@@ -13,7 +13,7 @@ channels:
 * **Channel C** — the client edge: a routed fault is received as a typed ``NodeFaultError``
   (#250 reception), so ``await handle.result()`` raises it carrying the verbatim ``ErrorReport``.
 
-The agents run ``sequential_only_mode=True``: every case dispatches a single tool call,
+Every case dispatches a single tool call,
 so the fault path is identical to a fan-out-capable agent's, and the durable fan-out
 store (a separate ktables dependency, covered by Suite X) stays out of the way.
 
@@ -54,7 +54,6 @@ def _agent(node_id: str, *, agent_in: str, agent_pub: str, tool, call: ToolCallP
         publish_topic=agent_pub,
         model_client=scripted_model([call]),
         tools=[tool],
-        sequential_only_mode=True,
         **seams,
     )
 

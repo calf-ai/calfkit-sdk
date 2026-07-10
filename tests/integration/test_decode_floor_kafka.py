@@ -48,7 +48,6 @@ async def test_undecodable_body_floored_and_worker_survives(kafka_bootstrap: str
         subscribe_topics=agent_in,
         model_client=scripted_model([ToolCallPart("ok_a", {}, tool_call_id="c1")]),
         tools=[ok_a],
-        sequential_only_mode=True,
     )
     await ensure_topic(kafka_bootstrap, agent_in)
     driver = Client.connect(kafka_bootstrap)

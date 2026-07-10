@@ -350,19 +350,6 @@ async def test_peer_re_enters_cleanly_on_the_inherited_state() -> None:
     assert "on it" in "".join(getattr(p, "text", "") for p in b_result.value)
 
 
-async def test_pending_handoff_in_reentry_arm_raises_loudly() -> None:
-    """The defensive fork (plan S2b): a PENDING handoff call surviving to the sequential
-    re-entry arm is impossible by construction — a silent skip would hide a bug, so it
-    raises. Contrived state: registered handoff call, no result, sequential mode."""
-    agent = _agent(TestModel(), sequential_only_mode=True, peers=[Handoff("billing")])
-    ctx = _ctx_with_view(_view({"billing": None}))
-    part = _handoff_part("billing", "x")
-    ctx.state.extend_with_responses([ModelResponse(parts=[part])], agent.name)
-    ctx.state.add_tool_call(part)  # registered but unresolved — the impossible state
-    with pytest.raises(RuntimeError, match="handoff"):
-        await agent.run(ctx)
-
-
 async def test_returning_handoff_a_to_b_to_a_re_enters_cleanly() -> None:
     """The A-return direction of spec §4's re-entry pin (review round 1): after A→B→A, A
     re-enters over its OWN persisted handoff turn (real call + self-owned closing request)

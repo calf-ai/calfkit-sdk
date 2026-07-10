@@ -38,7 +38,6 @@ def _agent(node_id: str, *, agent_in: str, agent_pub: str, call: ToolCallPart) -
         publish_topic=agent_pub,
         model_client=scripted_model([call]),
         tools=[ctx_overflow],
-        sequential_only_mode=True,
     )
 
 

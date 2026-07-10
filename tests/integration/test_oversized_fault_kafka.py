@@ -61,7 +61,6 @@ async def test_oversized_fault_strips_to_minimal_and_still_arrives(kafka_bootstr
         subscribe_topics=agent_in,
         model_client=scripted_model([ToolCallPart("oversized_fault", {"x": 1}, tool_call_id="c1")]),
         tools=[oversized_fault],
-        sequential_only_mode=True,
     )
     driver = Client.connect(kafka_bootstrap, inbox_topic=reply_topic)
     worker = fault_worker(kafka_bootstrap, nodes=[agent, oversized_fault])
