@@ -93,9 +93,10 @@ def _namespace_prefix(node_kind: str, name: str) -> str:
 def record_to_bindings(record: CapabilityRecord, *, name: str) -> list[ToolBinding]:
     """Expand a record into validator-less :class:`ToolBinding`s.
 
-    Wire-crossing tools dispatch unvalidated (the schema-only carve-out): the advertiser
-    validates arguments on receipt — the toolbox's MCP server, or the tool node's own
-    function schema.
+    Validator-less by construction (no local function to build a signature validator from — only
+    the advertised schema): the agent validates args at dispatch against
+    ``parameters_json_schema`` (a non-coercing subset check), and the advertiser stays
+    authoritative on receipt — the toolbox's MCP server, or the tool node's own function schema.
 
     ``name`` is the advertiser's identity (its ``node_id`` / capability key — the
     control-plane wire key, never a field in the record value), supplied by the caller.

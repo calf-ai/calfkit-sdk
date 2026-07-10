@@ -8,18 +8,18 @@ its schema at runtime from the capability view, then dispatching the call over K
 
     the tool node advertises -> the agent's view catch-up includes it
       -> the model emits a tool call
-      -> the agent resolves ``Tools(name)`` from the view (validator=None: schema-only)
-      -> dispatches a ToolCallRef over Kafka to the tool node's topic
+      -> the agent resolves ``Tools(name)`` from the view (validator=None: no local validator)
+      -> validates the args against the advertised schema, then dispatches a ToolCallRef over Kafka
       -> the tool node runs the Python function
       -> the return value comes back over Kafka
       -> the agent re-enters the model loop and finalizes.
 
-The bad-args case is the discovered-binding contrast with the eager path
-(``test_invalid_tool_node_args_rejected_before_dispatch``): a discovered binding has NO
-validator, so the agent does NOT reject schema-invalid args locally — it dispatches them,
-the tool node raises on receipt, and the chokepoint escalates a typed ``calf.exception``
-``FaultMessage`` on the agent's ``publish_topic`` mirror (observed via the fault tap; typed
-client reception is deferred to #250).
+The bad-args case now matches the eager path
+(``test_invalid_tool_node_args_rejected_before_dispatch``): a discovered binding has no local
+validator, so the agent builds one from the advertised schema and rejects schema-invalid args
+BEFORE dispatch — a model-visible ``RetryPromptPart``, not a fault. The tool node never runs the
+bad call, and the model self-corrects on the next turn (the full advertise → discover → reject →
+correct → dispatch → result loop).
 
 Opt-in (``-m kafka`` / ``make test-kafka``); skips cleanly without Docker. Run with
 ``uv run --group integration pytest tests/integration/test_tool_discovery_kafka.py -m kafka``.
@@ -33,19 +33,23 @@ from typing import Any
 
 import pytest
 
-from calfkit._protocol import HDR_ERROR_TYPE, HDR_KIND
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
-from calfkit.models.error_report import FaultTypes
 from calfkit.nodes import Agent, ToolNodeDef, Tools, agent_tool
 from calfkit.worker import Worker
-from tests.integration._fault_kafka import ensure_topic
-from tests.integration._fault_tap import fault_tap
 from tests.integration._kafka_helpers import fast_control_plane
-from tests.integration._roundtrip_helpers import FINAL_OUTPUT, capturing_model, scripted_model, tool_returns
+from tests.integration._roundtrip_helpers import (
+    FINAL_OUTPUT,
+    capturing_model,
+    correcting_model,
+    retry_prompt_texts,
+    returns_by_call_id,
+    scripted_model,
+    tool_returns,
+)
 
 # Every test here needs a real broker. FunctionModel is offline, but pydantic-ai still
 # gates "model requests" behind this flag (matches the other kafka-lane agent suites).
@@ -72,6 +76,19 @@ def _add_tool(name: str) -> ToolNodeDef:
         return a + b
 
     return agent_tool(add, name=name)
+
+
+def _counting_add_tool(name: str) -> tuple[ToolNodeDef, list[dict]]:
+    """Like :func:`_add_tool` but records every invocation into a returned list. Workers run
+    in-process on the kafka lane, so the closure list is mutated live — a direct "did the tool
+    body run, and with what args?" observable (no fault-tap timeout race)."""
+    calls: list[dict] = []
+
+    def add(a: int, b: int) -> int:
+        calls.append({"a": a, "b": b})
+        return a + b
+
+    return agent_tool(add, name=name), calls
 
 
 async def _wait(predicate: Callable[[], bool], *, timeout: float, what: str) -> None:
@@ -203,27 +220,25 @@ async def test_model_pov_matches_the_advertised_tool(kafka_bootstrap: str, topic
     await agent_worker._client.aclose()
 
 
-async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """A discovered binding carries NO validator (schema-only), so the agent dispatches
-    schema-invalid args instead of rejecting them locally (the eager path's contrast): the
-    tool node raises on receipt and the chokepoint escalates a typed ``calf.exception``
-    ``FaultMessage`` on the agent's ``publish_topic`` mirror."""
+async def test_discovered_bad_args_rejected_before_dispatch(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """A discovered binding has no local validator, so the agent builds one from the advertised
+    schema and rejects schema-invalid args BEFORE dispatch — matching the eager path. The tool
+    node never runs the bad call (no Kafka dispatch, no fault); the model sees a json-schema
+    violation and finalizes."""
     tool_name = f"{topic_namespace}-add"
-    agent_id = f"{topic_namespace}-disc-fault"
-    agent_in = f"{topic_namespace}.disc-fault.input"
-    agent_pub = f"{topic_namespace}.disc-fault.mirror"
+    agent_id = f"{topic_namespace}-disc-reject"
+    agent_in = f"{topic_namespace}.disc-reject.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    tool = _add_tool(tool_name)
+    tool, calls = _counting_add_tool(tool_name)
     agent = Agent(
         agent_id,
         system_prompt="add with bad args",
         subscribe_topics=agent_in,
-        publish_topic=agent_pub,
+        # `a` is typed int in the advertised schema; the model emits a string -> schema violation.
         model_client=scripted_model([ToolCallPart(tool_name, {"a": "not-an-int", "b": 3}, tool_call_id="c1")]),
         tools=[Tools(tool_name)],
     )
-    await ensure_topic(kafka_bootstrap, agent_pub)
 
     driver = Client.connect(kafka_bootstrap)
     tool_worker = _worker(kafka_bootstrap, nodes=[tool], control_plane=control_plane)
@@ -231,16 +246,63 @@ async def test_discovered_bad_args_escalate_unhandled_fault(kafka_bootstrap: str
 
     async with tool_worker:
         await _await_capability(kafka_bootstrap, tool_name, timeout=60)
-        async with agent_worker, fault_tap(kafka_bootstrap, agent_pub) as tap:
-            await driver.agent(topic=agent_in).start("add with bad args")  # reply owed; the discovered binding dispatches the bad args
+        async with agent_worker:
+            result = await driver.agent(topic=agent_in).execute("add with bad args", timeout=120)
 
-            fault, headers = await tap.next_fault(timeout=60)
-            # The bad args reached the tool node (the discovered binding did NOT validate
-            # locally), and its raise escalated as a typed unhandled fault.
-            assert headers[HDR_KIND] == "fault"
-            assert headers[HDR_ERROR_TYPE] == FaultTypes.EXCEPTION
-            assert fault.error.error_type == FaultTypes.EXCEPTION
-            assert fault.error.exception is not None  # the tool's exception class
+    # Finalized (scripted_model treats the retry as "acted" -> FINAL_OUTPUT), the tool body NEVER
+    # ran (rejected pre-dispatch), and the model saw the typed json-schema violation. The rejection
+    # surfaces in the persisted transcript as the answer to call "c1" (a tool-return-style entry on
+    # some paths, a retry prompt on others — check both, mirroring the eager template).
+    assert result.output is not None and FINAL_OUTPUT in result.output
+    assert calls == [], f"the tool must not run on schema-invalid args, but it saw: {calls}"
+    surfaced = f"{returns_by_call_id(result.message_history).get('c1', '')} {' '.join(retry_prompt_texts(result.message_history))}"
+    assert "json_schema_violation" in surfaced, f"expected the schema violation surfaced to the model, got: {surfaced!r}"
+
+    await driver.aclose()
+    await tool_worker._client.aclose()
+    await agent_worker._client.aclose()
+
+
+async def test_discovered_bad_args_retry_loop_self_corrects(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """The full advertise -> discover -> reject -> correct -> dispatch -> result loop over a real
+    broker: the model emits schema-invalid args, sees the caller-side rejection, re-emits
+    conforming args on the next turn, and the corrected call round-trips to ``5``."""
+    tool_name = f"{topic_namespace}-add"
+    agent_id = f"{topic_namespace}-disc-correct"
+    agent_in = f"{topic_namespace}.disc-correct.input"
+    control_plane = fast_control_plane(kafka_bootstrap)
+
+    tool, calls = _counting_add_tool(tool_name)
+    agent = Agent(
+        agent_id,
+        system_prompt="add two numbers",
+        subscribe_topics=agent_in,
+        model_client=correcting_model(
+            [ToolCallPart(tool_name, {"a": "not-an-int", "b": 3}, tool_call_id="bad")],
+            [ToolCallPart(tool_name, {"a": 2, "b": 3}, tool_call_id="good")],
+        ),
+        tools=[Tools(tool_name)],
+    )
+
+    driver = Client.connect(kafka_bootstrap)
+    tool_worker = _worker(kafka_bootstrap, nodes=[tool], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
+
+    async with tool_worker:
+        await _await_capability(kafka_bootstrap, tool_name, timeout=60)
+        async with agent_worker:
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3", timeout=120)
+
+    # The rejection was model-visible (a json-schema violation on the "bad" call) AND recoverable:
+    # the corrected "good" call dispatched over the wire and 5 came back. The tool ran exactly once
+    # — with the GOOD args only. Probe by call id so the bad rejection and good result don't collide.
+    assert result.output is not None and FINAL_OUTPUT in result.output
+    by_id = returns_by_call_id(result.message_history)
+    surfaced_bad = f"{by_id.get('bad', '')} {' '.join(retry_prompt_texts(result.message_history))}"
+    assert "json_schema_violation" in surfaced_bad, f"expected the bad call's schema violation surfaced, got: {surfaced_bad!r}"
+    assert by_id.get("good") == 5
+    assert tool_returns(result.message_history)[tool_name] == 5
+    assert calls == [{"a": 2, "b": 3}], f"the tool must run once with corrected args only, but saw: {calls}"
 
     await driver.aclose()
     await tool_worker._client.aclose()

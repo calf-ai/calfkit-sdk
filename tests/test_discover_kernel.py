@@ -48,7 +48,7 @@ class TestResolveAllCapabilities:
     def test_discovered_bindings_are_validatorless(self) -> None:
         result = resolve_all_capabilities(_FakeView({"add": _record("add")}), node_kind="tool")
         assert [b.name for b in result.bindings] == ["add"]
-        assert result.bindings[0].validator is None  # discovered = schema-only (node validates on receipt)
+        assert result.bindings[0].validator is None  # discovered = no local validator (agent validates against the advertised schema at dispatch)
 
     def test_poisoned_record_of_the_right_kind_degrades_to_invalid_targets(self) -> None:
         # An empty dispatch_topic survives the tolerant reader but fails ToolBinding's

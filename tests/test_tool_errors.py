@@ -32,8 +32,8 @@ from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.payload import TextPart, is_retry
 from calfkit.models.state import OverridesState, State
 from calfkit.models.tool_dispatch import ToolBinding
-from calfkit.nodes import Agent, ToolNodeDef
-from calfkit.nodes._steps import Observed
+from calfkit.nodes import Agent, ToolNodeDef, Tools
+from calfkit.nodes._steps import DeniedCall, Observed
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -426,13 +426,10 @@ async def test_agent_partial_validation_failure_dispatches_valid_calls():
         )
 
 
-async def test_agent_skips_validation_for_schema_only_override_tools():
-    # Override carve-out: a validator-less ToolBinding (the wire form — the
-    # validator never serializes) skips the validation branch entirely.
-    # Without this carve-out, an override toolset would crash on every
-    # dispatch because there is no validator to call. Pins the documented
-    # limitation so a future refactor that adds validation for overrides
-    # updates this test deliberately.
+async def test_agent_validates_schema_only_override_tools():
+    # A validator-less ToolBinding (the wire form — the validator never serializes) is validated
+    # at dispatch against its ADVERTISED parameters_json_schema: the agent builds a schema
+    # fallback validator, so bad args are rejected pre-dispatch exactly like a local tool's.
     def typed_tool(ctx: ToolContext, x: int) -> str:
         return f"got {x}"
 
@@ -442,22 +439,21 @@ async def test_agent_skips_validation_for_schema_only_override_tools():
         publish_topic="tool.typed_tool.output",
     )
 
-    # Construct a wire-form binding mirroring the real tool but lacking the
-    # validator. It must take the override path in agent.run.
+    # A wire-form binding mirroring the real tool but lacking the validator. It takes the override
+    # path in agent.run; its tool_def carries the pydantic-generated schema (x: integer, required).
     schema_only = ToolBinding(
         tool_def=full_tool_node.tool_schema,
         dispatch_topic=full_tool_node.subscribe_topics[0],
     )
 
     tool_call_id = "tc-override"
-    # Args that would fail validation if the validator ran.
     bad_call = ToolCallPart(tool_name="typed_tool", args={"x": "not-a-number"}, tool_call_id=tool_call_id)
 
     agent = Agent(
-        "agent_override_skip",
+        "agent_override_validate",
         system_prompt="x",
-        subscribe_topics="agent_override_skip.input",
-        publish_topic="agent_override_skip.output",
+        subscribe_topics="agent_override_validate.input",
+        publish_topic="agent_override_validate.output",
         model_client=_model_emits_tool_calls([bad_call]),
         tools=[full_tool_node],
     )
@@ -465,12 +461,135 @@ async def test_agent_skips_validation_for_schema_only_override_tools():
     state = State()
     state.overrides = OverridesState(override_agent_tools=[schema_only])
     ctx = _make_ctx(state)
+    raw = await agent.run(ctx)
+    result = _unwrap(raw)
+
+    # The schema-rejected call does NOT dispatch: a RetryPromptPart lands and the single all-invalid
+    # turn tail-calls itself so the LLM sees the typed feedback.
+    assert isinstance(result, TailCall), f"expected TailCall, got {type(result).__name__}"
+    stored = ctx.state.tool_results.get(tool_call_id)
+    assert isinstance(stored, RetryPromptPart), f"expected RetryPromptPart, got {type(stored).__name__}: {stored!r}"
+    assert stored.content, "expected non-empty json-schema violation content"
+    # The step side: the rejection is declared as a DeniedCall fact (the ledger expands it into the
+    # denied ToolCall+ToolResult pair — we assert what our change produces, not the ledger).
+    assert isinstance(raw, Observed)
+    assert any(isinstance(f, DeniedCall) and f.tool_call_id == tool_call_id for f in raw.facts), "expected a DeniedCall fact for the rejected call"
+
+
+async def test_agent_local_tool_keeps_its_signature_validator_not_the_schema_fallback():
+    # Freeze pin (anti-double-validation): a LOCAL tool carries a signature validator, so the
+    # schema fallback must NOT also run. The signature validator lax-coerces "3" -> 3 and
+    # dispatches; the non-coercing schema validator would REJECT "3" for an integer. If the flip
+    # ran BOTH, this call would wrongly retry — so a dispatched Call proves the fallback is a
+    # fallback, not an addition.
+    def typed_tool(ctx: ToolContext, x: int) -> str:
+        return f"got {x}"
+
+    tool_node = ToolNodeDef.create_tool_node(
+        func=typed_tool,
+        subscribe_topics="tool.typed_tool.input",
+        publish_topic="tool.typed_tool.output",
+    )
+
+    tool_call_id = "tc-coerce"
+    coercible_call = ToolCallPart(tool_name="typed_tool", args={"x": "3"}, tool_call_id=tool_call_id)
+
+    agent = Agent(
+        "agent_local_coerce",
+        system_prompt="x",
+        subscribe_topics="agent_local_coerce.input",
+        publish_topic="agent_local_coerce.output",
+        model_client=_model_emits_tool_calls([coercible_call]),
+        tools=[tool_node],
+    )
+
+    ctx = _make_ctx(State())
     result = _unwrap(await agent.run(ctx))
 
-    # No RetryPromptPart — validation was skipped, so the call dispatches.
+    assert isinstance(result, Call), f"expected Call (local validator lax-coerces), got {type(result).__name__}"
     assert tool_call_id not in ctx.state.tool_results
-    assert isinstance(result, Call), f"expected Call, got {type(result).__name__}"
-    assert isinstance(result.body, ToolCallRef) and result.body.tool_call_id == tool_call_id
+
+
+async def test_agent_validates_discovered_tool_args():
+    # A discovered tool (resolved from the capability view via a `Tools` selector) is validator-less
+    # but carries an advertised schema; the agent validates against it at dispatch. Drives the full
+    # run() so the selector resolves from ctx.resources into the dispatch registry.
+    from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, CapabilityToolDef
+    from tests.test_tools_selector import make_tool_record
+
+    typed_schema = {
+        "type": "object",
+        "properties": {"x": {"type": "integer"}},
+        "required": ["x"],
+        "additionalProperties": False,
+    }
+    # The default record schema is the permissive floor (accepts anything) — the typed override is
+    # load-bearing, else bad args validate fine and the test could never go red.
+    record = make_tool_record("add", tools=[CapabilityToolDef(name="add", parameters_json_schema=typed_schema)])
+
+    tool_call_id = "tc-discovered"
+    bad_call = ToolCallPart(tool_name="add", args={"x": "not-a-number"}, tool_call_id=tool_call_id)
+
+    agent = Agent(
+        "agent_discovered_validate",
+        system_prompt="x",
+        subscribe_topics="agent_discovered_validate.input",
+        publish_topic="agent_discovered_validate.output",
+        model_client=_model_emits_tool_calls([bad_call]),
+        tools=[Tools("add")],
+    )
+
+    ctx = _make_ctx(State())
+    ctx._resources = {CAPABILITY_VIEW_RESOURCE_KEY: {"add": record}}
+    raw = await agent.run(ctx)
+    result = _unwrap(raw)
+
+    assert isinstance(result, TailCall), f"expected TailCall, got {type(result).__name__}"
+    stored = ctx.state.tool_results.get(tool_call_id)
+    assert isinstance(stored, RetryPromptPart), f"expected RetryPromptPart, got {type(stored).__name__}"
+    assert isinstance(raw, Observed)
+    assert any(isinstance(f, DeniedCall) and f.tool_call_id == tool_call_id for f in raw.facts)
+
+
+async def test_agent_mixed_batch_validator_less_dispatches_valid_rejects_invalid():
+    # Mixed batch on validator-less (override) bindings: the invalid call lands a RetryPromptPart
+    # and the valid call still dispatches — mirrors the local-tool partial-failure contract.
+    def tool_a(ctx: ToolContext, x: int) -> str:
+        return f"a={x}"
+
+    def tool_b(ctx: ToolContext, y: str) -> str:
+        return f"b={y}"
+
+    node_a = ToolNodeDef.create_tool_node(func=tool_a, subscribe_topics="tool.tool_a.input", publish_topic="tool.tool_a.output")
+    node_b = ToolNodeDef.create_tool_node(func=tool_b, subscribe_topics="tool.tool_b.input", publish_topic="tool.tool_b.output")
+    override_a = ToolBinding(tool_def=node_a.tool_schema, dispatch_topic=node_a.subscribe_topics[0])
+    override_b = ToolBinding(tool_def=node_b.tool_schema, dispatch_topic=node_b.subscribe_topics[0])
+
+    valid_id, invalid_id = "tc-valid", "tc-invalid"
+    valid_call = ToolCallPart(tool_name="tool_a", args={"x": 5}, tool_call_id=valid_id)
+    invalid_call = ToolCallPart(tool_name="tool_b", args={"y": 123}, tool_call_id=invalid_id)  # int for a string schema
+
+    agent = Agent(
+        "agent_mixed_validator_less",
+        system_prompt="x",
+        subscribe_topics="agent_mixed_validator_less.input",
+        publish_topic="agent_mixed_validator_less.output",
+        model_client=_model_emits_tool_calls([valid_call, invalid_call]),
+        tools=[node_a, node_b],
+    )
+
+    state = State()
+    state.overrides = OverridesState(override_agent_tools=[override_a, override_b])
+    ctx = _make_ctx(state, frame_id="frame-mixed")
+    result = _unwrap(await agent.run(ctx))
+
+    # The invalid call is rejected in-band; the valid one is left pending and dispatches (a single
+    # remaining pending call → a plain Call).
+    invalid_stored = ctx.state.tool_results.get(invalid_id)
+    assert isinstance(invalid_stored, RetryPromptPart), f"expected RetryPromptPart for the invalid call, got {type(invalid_stored).__name__}"
+    assert valid_id not in ctx.state.tool_results
+    assert isinstance(result, Call), f"expected the valid call to dispatch as a Call, got {type(result).__name__}"
+    assert isinstance(result.body, ToolCallRef) and result.body.tool_call_id == valid_id
 
 
 async def test_agent_handles_malformed_json_args_as_retry_prompt():

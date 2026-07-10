@@ -109,7 +109,7 @@ class TestToolsResolveTools:
         assert isinstance(result, SelectorResult)
         assert [b.name for b in result.bindings] == ["add"]
         assert result.bindings[0].dispatch_topic == "tool.add.input"
-        assert result.bindings[0].validator is None  # discovered = schema-only (node validates on receipt)
+        assert result.bindings[0].validator is None  # discovered = no local validator (agent validates against the advertised schema at dispatch)
         assert not result.unresolved
 
     def test_resolves_multiple_names(self) -> None:
@@ -146,7 +146,7 @@ class TestToolsThroughAgent:
         view = {"add": make_tool_record("add"), "sub": make_tool_record("sub")}
         agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
         assert sorted(registry) == ["add", "sub"]
-        assert all(registry[n].validator is None for n in registry)  # discovered = schema-only
+        assert all(registry[n].validator is None for n in registry)  # discovered = no local validator (schema-checked at dispatch)
 
     def test_eager_static_tool_wins_on_collision(self, caplog: pytest.LogCaptureFixture) -> None:
         # The per-turn registry merge: when a discovered binding's name is already in the
@@ -205,7 +205,7 @@ class TestToolsDiscoverMode:
         )
         result = Tools(discover=True).resolve_tools(view)
         assert sorted(b.name for b in result.bindings) == ["add", "sub"]  # toolbox record excluded
-        assert all(b.validator is None for b in result.bindings)  # discovered = schema-only
+        assert all(b.validator is None for b in result.bindings)  # discovered = no local validator (schema-checked at dispatch)
         assert not result.unresolved
 
 

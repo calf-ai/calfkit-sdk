@@ -25,6 +25,7 @@ from calfkit.controlplane import ControlPlaneStamp, advertises
 from calfkit.exceptions import DeserializationError, safe_exc_message
 from calfkit.models import Call, DataPart, NodeResult, ReturnCall, State, TailCall, TextPart
 from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentCard, derive_input_topic
+from calfkit.models.args_schema import schema_args_validator
 from calfkit.models.capability import CAPABILITY_VIEW_RESOURCE_KEY, SelectorResult
 from calfkit.models.envelope import Envelope
 from calfkit.models.marker import ToolCallMarker
@@ -627,9 +628,9 @@ class BaseAgentNodeDef(
     async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Observed[State]:
         tools_registry = dict[str, ToolBinding]()
         if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
-            # Override tools arrive over the wire as ToolBindings whose
-            # validator was stripped at serialization, so they dispatch
-            # unvalidated (the documented schema-only carve-out).
+            # Override tools arrive over the wire as ToolBindings whose validator was stripped at
+            # serialization (validator=None); the dispatch loop validates their args against the
+            # advertised schema instead (the schema fallback), so they are not unvalidated.
             tools_registry = {binding.name: binding for binding in ctx.state.overrides.override_agent_tools}
         elif self.tools:
             tools_registry = {binding.name: binding for binding in self.tools}
@@ -789,9 +790,10 @@ class BaseAgentNodeDef(
                     continue
 
                 # Parse args from the LLM's emission. Applies to ALL dispatch
-                # paths so that malformed-JSON args from override (schema-only)
-                # tools are also surfaced as an LLM-visible RetryPromptPart at the
-                # agent, instead of dispatching unparseable args across the wire.
+                # paths so that malformed-JSON args from a validator-less binding
+                # (override, discovered) are also surfaced as an LLM-visible
+                # RetryPromptPart at the agent, instead of dispatching unparseable
+                # args across the wire.
                 #
                 # ``args_as_dict()`` can raise more than just ValueError /
                 # AssertionError: ``pydantic_core.from_json`` raises TypeError
@@ -813,42 +815,46 @@ class BaseAgentNodeDef(
                     self._reject_invalid_call(tool_call, ctx, facts, content)
                     continue
 
-                # Validate against the schema if we have a runtime validator.
-                # Validator-less bindings (e.g. wire-deserialized overrides)
-                # skip this step and dispatch unvalidated; this is the
-                # documented carve-out.
-                if binding.validator is not None:
-                    try:
-                        binding.validator(args)
-                    except ValidationError as e:
-                        validation_errors = e.errors(include_url=False, include_context=False)
-                        logger.warning(
-                            "[%s] tool=%s arg validation failed at dispatch: %s",
-                            ctx.correlation_id[:8],
-                            tool_call.tool_name,
-                            validation_errors,
-                        )
-                        # validation_errors is a list[dict] (e.errors()): the RetryPromptPart carries it
-                        # verbatim; _reject_invalid_call renders it to JSON text for the step.
-                        self._reject_invalid_call(tool_call, ctx, facts, validation_errors)
-                        continue
-                    except Exception as e:
-                        # A user-authored Pydantic ``field_validator`` raised
-                        # something other than ``ValidationError`` (e.g.
-                        # ``RuntimeError``, ``TypeError``, a custom exception).
-                        # Surface as ``RetryPromptPart`` so the LLM can retry
-                        # rather than letting the exception escape ``run()`` and
-                        # silently hang the caller.
-                        validator_content = f"Tool argument validator raised {type(e).__name__}: {safe_exc_message(e)}"
-                        logger.warning(
-                            "[%s] tool=%s arg validator raised %s; surfacing as RetryPromptPart",
-                            ctx.correlation_id[:8],
-                            tool_call.tool_name,
-                            type(e).__name__,
-                            exc_info=True,
-                        )
-                        self._reject_invalid_call(tool_call, ctx, facts, validator_content)
-                        continue
+                # Validate args before dispatch. A local tool carries a signature-built validator
+                # (rich: field_validators, coercion); a wire-crossing binding (discovered /
+                # override / hand-rolled) carries none, so we fall back to a validator compiled
+                # from its advertised ``parameters_json_schema`` — a non-coercing subset check
+                # against the contract shown to the model. The callee stays authoritative. The
+                # factory is TOTAL (it raises nothing except the ``ValidationError`` contract error),
+                # so the build sits OUTSIDE the try: a raise here would be a logic bug, not a retry.
+                validator = binding.validator or schema_args_validator(binding.tool_def.parameters_json_schema)
+                try:
+                    validator(args)
+                except ValidationError as e:
+                    validation_errors = e.errors(include_url=False, include_context=False)
+                    logger.warning(
+                        "[%s] tool=%s arg validation failed at dispatch: %s",
+                        ctx.correlation_id[:8],
+                        tool_call.tool_name,
+                        validation_errors,
+                    )
+                    # validation_errors is a list[dict] (e.errors()): the RetryPromptPart carries it
+                    # verbatim; _reject_invalid_call renders it to JSON text for the step.
+                    self._reject_invalid_call(tool_call, ctx, facts, validation_errors)
+                    continue
+                except Exception as e:
+                    # A user-authored Pydantic ``field_validator`` raised
+                    # something other than ``ValidationError`` (e.g.
+                    # ``RuntimeError``, ``TypeError``, a custom exception).
+                    # Surface as ``RetryPromptPart`` so the LLM can retry
+                    # rather than letting the exception escape ``run()`` and
+                    # silently hang the caller. (The schema fallback validator is
+                    # total, so only a local signature validator reaches here.)
+                    validator_content = f"Tool argument validator raised {type(e).__name__}: {safe_exc_message(e)}"
+                    logger.warning(
+                        "[%s] tool=%s arg validator raised %s; surfacing as RetryPromptPart",
+                        ctx.correlation_id[:8],
+                        tool_call.tool_name,
+                        type(e).__name__,
+                        exc_info=True,
+                    )
+                    self._reject_invalid_call(tool_call, ctx, facts, validator_content)
+                    continue
 
             # Every dispatch-loop exit below returns Observed(action, tuple(facts)) UNCONDITIONALLY
             # (an empty facts tuple is permitted) — the kernel absorbs the facts at the unwrap.

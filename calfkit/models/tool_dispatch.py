@@ -15,7 +15,12 @@ if TYPE_CHECKING:
     from calfkit.models.capability import EnumerableCapabilityView
 
 ArgsValidator = Callable[[dict[str, Any]], Any]
-"""Validates LLM-emitted tool args pre-dispatch; raises ``pydantic.ValidationError`` on mismatch."""
+"""Validates LLM-emitted tool args pre-dispatch; raises ``pydantic.ValidationError`` on mismatch.
+
+Two implementations satisfy this contract: a local tool node's signature-built validator, and the
+advertised-schema validator :func:`~calfkit.models.args_schema.schema_args_validator` builds for a
+wire-crossing binding. The latter translates jsonschema's violations into the *same*
+``pydantic.ValidationError``, so the agent's dispatch loop stays blind to which one ran."""
 
 
 class ToolBinding(BaseModel):
@@ -32,8 +37,10 @@ class ToolBinding(BaseModel):
     Doubles as the wire model for per-run tool overrides
     (``OverridesState.override_agent_tools``): ``validator`` is process-local
     and excluded from serialization, so a deserialized binding always carries
-    ``validator=None`` and dispatches unvalidated — the schema-only carve-out,
-    enforced by the type instead of by convention.
+    ``validator=None``. Such a binding is not unvalidated — at dispatch the agent
+    validates its args against the advertised ``tool_def.parameters_json_schema``
+    (:func:`~calfkit.models.args_schema.schema_args_validator`); the ``validator``
+    field only distinguishes a local *signature* validator from that schema fallback.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -46,9 +53,10 @@ class ToolBinding(BaseModel):
     dispatch_topic: str = Field(min_length=1)
     """Target topic for the ``Call`` carrying the :class:`ToolCallRef`."""
     validator: SkipJsonSchema[ArgsValidator | None] = Field(default=None, exclude=True)
-    """Validates args before dispatch; ``None`` dispatches unvalidated (e.g. a
-    schema-only override binding, or an MCP tool where the server validates).
-    Excluded from serialization and JSON schema: callables never ride the wire."""
+    """A local tool node's signature-built validator, or ``None`` for a wire-crossing binding
+    (override, discovered, MCP) — in which case the agent falls back to a validator built from
+    ``tool_def.parameters_json_schema`` at dispatch. Excluded from serialization and JSON schema:
+    callables never ride the wire."""
 
     @property
     def name(self) -> str:

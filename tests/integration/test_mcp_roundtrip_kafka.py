@@ -55,6 +55,7 @@ from tests.integration._kafka_helpers import fast_control_plane
 from tests.integration._roundtrip_helpers import (
     FINAL_OUTPUT,
     capturing_model,
+    correcting_model,
     retry_prompt_texts,
     returns_by_call_id,
     scripted_model,
@@ -647,6 +648,75 @@ async def test_agent_pov_is_namespaced_and_strips_to_bare_on_dispatch(
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert "5" in _serialized(returns[_ns(server_name, "add")])
     assert "hi" in _serialized(returns[_ns(server_name, "echo")])
+
+    await driver.aclose()
+    await toolbox_worker._client.aclose()
+    await agent_worker._client.aclose()
+
+
+async def test_mcp_bad_args_rejected_before_dispatch_then_corrected(
+    kafka_bootstrap: str, topic_namespace: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller-side arg validation applies to a DISCOVERED MCP tool too: the agent builds a validator
+    from the server's advertised ``inputSchema`` and rejects schema-invalid args BEFORE dispatch.
+    The bad call never reaches the MCP server; the model corrects itself and the corrected call
+    round-trips to ``5``.
+
+    "The server never saw the bad call" is proved at the ``mcp.ClientSession.call_tool`` boundary
+    (the same spy the POV test uses): it records exactly one invocation — the corrected ``add(2, 3)``
+    — and never the bad args.
+    """
+    import mcp
+
+    agent_id = f"{topic_namespace}-mcp-reject"
+    agent_in = f"{topic_namespace}.mcp-reject.input"
+    control_plane = fast_control_plane(kafka_bootstrap)
+    server_name = _server_name(topic_namespace)
+
+    # Spy the node->server boundary: record (bare tool name, arguments) for every real call_tool.
+    # calfkit calls ``session.call_tool(name=..., arguments=...)`` (both keyword), so the arguments
+    # ride in kwargs. monkeypatch auto-reverts.
+    seen: list[tuple[str, object]] = []
+    _orig_call_tool = mcp.ClientSession.call_tool
+
+    async def _spy_call_tool(self: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+        seen.append((name, kwargs.get("arguments", args[0] if args else None)))
+        return await _orig_call_tool(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(mcp.ClientSession, "call_tool", _spy_call_tool)
+
+    toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
+    tool = _ns(server_name, "add")  # `add(a: int, b: int)` — the server advertises typed integer args
+    agent = Agent(
+        agent_id,
+        system_prompt="add two numbers",
+        subscribe_topics=agent_in,
+        model_client=correcting_model(
+            [ToolCallPart(tool, {"a": "not-an-int", "b": 3}, tool_call_id="bad")],
+            [ToolCallPart(tool, {"a": 2, "b": 3}, tool_call_id="good")],
+        ),
+        tools=[toolbox.select(include=["add"])],  # include = BARE (C5)
+    )
+
+    driver = Client.connect(kafka_bootstrap)
+    toolbox_worker = _worker(kafka_bootstrap, nodes=[toolbox], control_plane=control_plane)
+    agent_worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=control_plane)
+
+    async with toolbox_worker:
+        await _await_capability(kafka_bootstrap, server_name, timeout=60)
+        async with agent_worker:
+            result = await driver.agent(topic=agent_in).execute("add 2 and 3", timeout=120)
+
+    by_id = returns_by_call_id(result.message_history)
+    # The bad call was rejected caller-side (calfkit's json_schema_violation — NOT a server-side
+    # FastMCP validation error, which would prove the server was contacted).
+    surfaced_bad = f"{by_id.get('bad', '')} {' '.join(retry_prompt_texts(result.message_history))}"
+    assert "json_schema_violation" in surfaced_bad, f"expected a caller-side schema violation, got: {surfaced_bad!r}"
+    # The corrected call round-tripped through the real server.
+    assert result.output is not None and FINAL_OUTPUT in result.output
+    assert "5" in _serialized(by_id.get("good"))
+    # The server saw ONLY the corrected call — the bad args never crossed the node->server boundary.
+    assert seen == [("add", {"a": 2, "b": 3})], f"the server must see only the corrected call, but saw: {seen}"
 
     await driver.aclose()
     await toolbox_worker._client.aclose()
