@@ -87,9 +87,9 @@ async def test_stream_yields_intermediate_steps_then_terminal(container) -> None
     assert "AgentMessageEvent" in kinds  # the hop's preamble
     assert "ToolCallEvent" in kinds  # the requested tool call
     assert "ToolResultEvent" in kinds  # the tool's result (inner-frame ReturnCall, depth>1)
-    # the tool result carries the tool's output + is not an error
+    # the tool result carries the tool's output + resolved as a success
     tr = next(e for e in events if type(e).__name__ == "ToolResultEvent")
-    assert tr.is_error is False
+    assert tr.outcome == "success"
     assert "guarded-1967" in tr.parts[0].text
     # depth orients the caller: the agent hop runs at inbound depth 1, the tool result at depth 2.
     am = next(e for e in events if type(e).__name__ == "AgentMessageEvent")

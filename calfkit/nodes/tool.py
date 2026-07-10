@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import KW_ONLY, dataclass
-from typing import Any, ClassVar, overload
+from typing import Any, ClassVar, Literal, overload
 
 import pydantic_core
 from typing_extensions import Self
@@ -57,11 +57,13 @@ class BaseToolNodeDef(BaseNodeDef):
     def project_steps(self, output: NodeResult[State], ctx: SessionRunContext, frame: CallFrame | None) -> list[StepEvent]:
         """A tool hop always produces a ``ReturnCall`` (success or a ``ModelRetry``); the chokepoint
         only calls this inner-frame (a tool is never a run root, §3.2), so it becomes a single
-        ``ToolResultStep`` keyed by the frame ``tag``. ``is_error`` is derived once here — **coerce
-        first**, then check the ``calf.retry`` marker (``is_retry`` AttributeErrors on a raw scalar)."""
+        ``ToolResultStep`` keyed by the frame ``tag``. ``outcome`` is derived once here — **coerce
+        first**, then check the ``calf.retry`` marker (``is_retry`` AttributeErrors on a raw scalar):
+        retry-marked ⇒ ``failed``, else ``success`` (caller-side step-emission spec §5.1)."""
         if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
             parts = _coerce_to_parts(output.value)
-            return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]
+            outcome: Literal["success", "failed"] = "failed" if is_retry(parts) else "success"
+            return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, outcome=outcome)]
         return []
 
     def validate_call_args(self, args_dict: dict[str, Any]) -> Any:

@@ -113,7 +113,7 @@ def _wire_events() -> list[StepEvent]:
     return [
         AgentMessageStep(parts=[TextPart(text="let me look that up")]),
         ToolCallStep(tool_call_id="c1", name="search", args={"q": "x"}),
-        ToolResultStep(tool_call_id="c1", name="search_tool", parts=[TextPart(text="result")], is_error=False),
+        ToolResultStep(tool_call_id="c1", name="search_tool", parts=[TextPart(text="result")], outcome="success"),
         HandoffStep(target="billing", reason="needs billing"),
     ]
 
@@ -126,7 +126,7 @@ class TestWireStep:
     def test_kind_literals(self) -> None:
         assert AgentMessageStep(parts=[]).kind == "agent_message"
         assert ToolCallStep(tool_call_id="c", name="n").kind == "tool_call"
-        assert ToolResultStep(tool_call_id="c", name="n", parts=[]).kind == "tool_result"
+        assert ToolResultStep(tool_call_id="c", name="n", parts=[], outcome="success").kind == "tool_result"
         assert HandoffStep(target="t", reason="r").kind == "handoff"
         assert AgentThinkingStep(parts=[]).kind == "agent_thinking"
 
@@ -151,9 +151,25 @@ class TestWireStep:
         assert ToolCallStep(tool_call_id="c", name="n", args={"q": "x"}).args == {"q": "x"}
         assert ToolCallStep(tool_call_id="c", name="n").args is None
 
-    def test_is_error_default_and_settable(self) -> None:
-        assert ToolResultStep(tool_call_id="c", name="n", parts=[]).is_error is False
-        assert ToolResultStep(tool_call_id="c", name="n", parts=[], is_error=True).is_error is True
+    def test_outcome_is_required_with_no_default(self) -> None:
+        # REQUIRED, no default (spec §5.1): a defaulted outcome would let constructors silently mint
+        # "success". Tripwire: _StepBase is pydantic-default extra="ignore", so a stray leftover
+        # is_error= kwarg is silently DROPPED — the required outcome is the only construction guard.
+        with pytest.raises(ValidationError):
+            ToolResultStep(tool_call_id="c", name="n", parts=[])  # type: ignore[call-arg]
+        with pytest.raises(ValidationError):
+            ToolResultEvent(tool_call_id="c", name="n", parts=[], **_surface_kwargs())  # type: ignore[call-arg]
+
+    def test_outcome_value_space(self) -> None:
+        for outcome in ("success", "failed", "denied"):
+            assert ToolResultStep(tool_call_id="c", name="n", parts=[], outcome=outcome).outcome == outcome
+        with pytest.raises(ValidationError):
+            ToolResultStep(tool_call_id="c", name="n", parts=[], outcome="error")  # type: ignore[arg-type]
+
+    def test_is_error_is_deleted(self) -> None:
+        # Hard break (spec §5.1): no derived-property sugar, the field is GONE from both families.
+        assert "is_error" not in ToolResultStep.model_fields
+        assert "is_error" not in ToolResultEvent.model_fields
 
 
 class TestStepMessageWire:
@@ -183,7 +199,7 @@ class TestStepMessageWire:
         tc = next(e for e in back.events if isinstance(e, ToolCallStep))
         assert (tc.tool_call_id, tc.name, tc.args) == ("c1", "search", {"q": "x"})
         tr = next(e for e in back.events if isinstance(e, ToolResultStep))
-        assert (tr.name, tr.is_error) == ("search_tool", False)
+        assert (tr.name, tr.outcome) == ("search_tool", "success")
         assert isinstance(tr.parts[0], TextPart) and tr.parts[0].text == "result"
         ho = next(e for e in back.events if isinstance(e, HandoffStep))
         assert (ho.target, ho.reason) == ("billing", "needs billing")
@@ -203,7 +219,7 @@ class TestSurfaceEvent:
         kw = _surface_kwargs()
         assert AgentMessageEvent(parts=[], **kw).kind == "agent_message"
         assert ToolCallEvent(tool_call_id="c", name="n", **kw).kind == "tool_call"
-        assert ToolResultEvent(tool_call_id="c", name="n", parts=[], **kw).kind == "tool_result"
+        assert ToolResultEvent(tool_call_id="c", name="n", parts=[], outcome="success", **kw).kind == "tool_result"
         assert HandoffEvent(target="t", reason="r", **kw).kind == "handoff"
         assert AgentThinkingEvent(parts=[], **kw).kind == "agent_thinking"
 

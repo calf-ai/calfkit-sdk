@@ -334,13 +334,13 @@ async def test_tailcall_self_retry_targets_private_return_topic():
     )
 
     # The unknown-tool rejection arm (the registry/toolset mismatch this branch defends against) authors the
-    # paired ToolCallStep + is_error ToolResultStep step, via the same _reject_invalid_call seam as the
+    # paired ToolCallStep + denied ToolResultStep, via the same _reject_invalid_call seam as the
     # other arms (spec §3.2; round-1 review MAJOR-1 — the pairing must hold for every rejection path).
     draft = ctx._step_draft or []
     tcs = [e for e in draft if isinstance(e, ToolCallStep)]
     trs = [e for e in draft if isinstance(e, ToolResultStep)]
     assert len(tcs) == 1 and tcs[0].tool_call_id == "c1" and tcs[0].name == "unreachable_tool"
-    assert len(trs) == 1 and trs[0].tool_call_id == "c1" and trs[0].is_error is True
+    assert len(trs) == 1 and trs[0].tool_call_id == "c1" and trs[0].outcome == "denied"
 
     # Also exercise the downstream ``_publish_action`` TailCall branch end-
     # to-end. The agent.run pin above proves ``target_topic`` is set

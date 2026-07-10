@@ -25,8 +25,8 @@ def _call(emitter: str, name: str, args: object = None) -> ToolCallEvent:
     return ToolCallEvent(correlation_id="c", depth=0, frame_id="f", emitter=emitter, tool_call_id="t1", name=name, args=args)
 
 
-def _result(emitter: str, name: str, parts: list, *, is_error: bool = False) -> ToolResultEvent:
-    return ToolResultEvent(correlation_id="c", depth=0, frame_id="f", emitter=emitter, tool_call_id="t1", name=name, parts=parts, is_error=is_error)
+def _result(emitter: str, name: str, parts: list, *, outcome: str = "success") -> ToolResultEvent:
+    return ToolResultEvent(correlation_id="c", depth=0, frame_id="f", emitter=emitter, tool_call_id="t1", name=name, parts=parts, outcome=outcome)
 
 
 def _handoff(emitter: str, target: str, reason: str) -> HandoffEvent:
@@ -63,9 +63,15 @@ def test_tool_result_success_tag() -> None:
     assert lines == ["  [tool result]  in transit"]
 
 
-def test_tool_result_error_tag() -> None:
-    lines, _ = _render_step(_result("bot", "issue_refund", [TextPart(text="declined")], is_error=True), "bot")
+def test_tool_result_failed_tag() -> None:
+    lines, _ = _render_step(_result("bot", "issue_refund", [TextPart(text="declined")], outcome="failed"), "bot")
     assert lines == ["  [tool error]   declined"]
+
+
+def test_tool_result_denied_tag() -> None:
+    # ``denied`` gets its own neutral tag (spec §4 / design L18d): a refusal-to-dispatch is not an error.
+    lines, _ = _render_step(_result("bot", "issue_refund", [TextPart(text="not permitted")], outcome="denied"), "bot")
+    assert lines == ["  [tool denied]  not permitted"]
 
 
 def test_handoff_tag_and_content() -> None:

@@ -43,11 +43,12 @@ class AgentMessageStep(_StepBase):
 
 
 class ToolCallStep(_StepBase):
-    """A tool call the model requested this hop, sourced from the model emission (spec §3.2).
+    """A tool call the model requested this hop (caller-side step-emission spec §5.2).
 
     ``kind`` is ``"tool_call"`` — deliberately distinct from ``ContentPart``'s ``ToolCallPart``
-    (``"tool"``). ``args`` carries the *raw* model emission (``str`` | ``dict`` | ``None``): a call
-    whose args failed to parse must still surface, with no parsed dict to carry.
+    (``"tool"``). ``args`` for a DISPATCHED call is the **parsed dict** (sourced from the call
+    marker); a denied (never-dispatched) pair keeps the raw model emission (``str`` | ``dict`` |
+    ``None``) — a call whose args failed to parse must still surface, with no parsed dict to carry.
     """
 
     kind: Literal["tool_call"] = "tool_call"
@@ -57,22 +58,24 @@ class ToolCallStep(_StepBase):
 
 
 class ToolResultStep(_StepBase):
-    """The result of a tool call — success **or** error (spec §3.2). One type for both: a tool-node
-    return, a consulted ``message_agent`` peer's reply, and an agent's pre-dispatch rejection are all "a
-    tool call produced a result"; ``is_error`` (derived once at the producer) distinguishes them.
+    """The result of a tool call (caller-side step-emission spec §5.1). One type for every closure:
+    ``outcome`` distinguishes them — ``success`` (resolved without a retry marker, including a seam
+    handler substituting a plain success value), ``failed`` (retry-marked, or the kernel's fold of an
+    unhandled fault with ``parts=[]``), ``denied`` (the caller refused to dispatch the call).
+    REQUIRED, no default: a defaulted outcome would let constructors silently mint ``success``.
     """
 
     kind: Literal["tool_result"] = "tool_result"
     tool_call_id: str
     name: str
     parts: list[ContentPart]
-    is_error: bool = False
+    outcome: Literal["success", "failed", "denied"]
 
 
 class HandoffStep(_StepBase):
     """A handoff to a peer agent (spec §3.2) — emitted only when a transfer actually happens
-    (ADR-0035: a stale/invalid target is a standard rejection and projects as an ``is_error``
-    ``ToolResultStep`` pair instead)."""
+    (ADR-0035, amended by ADR-0039: a stale/invalid target is a standard rejection and streams as a
+    ``denied`` ``ToolResultStep`` pair instead)."""
 
     kind: Literal["handoff"] = "handoff"
     target: str
@@ -146,14 +149,15 @@ class ToolCallEvent(_RunStepEventBase):
 
 
 class ToolResultEvent(_RunStepEventBase):
-    """The result of a tool call, success or error (spec §3.2) — the surfaced form of
-    :class:`ToolResultStep`. There is no separate ``ToolFailed`` type; ``is_error`` distinguishes them."""
+    """The result of a tool call (caller-side step-emission spec §5.1) — the surfaced form of
+    :class:`ToolResultStep`. There is no separate ``ToolFailed`` type; ``outcome`` distinguishes
+    ``success`` / ``failed`` / ``denied``."""
 
     kind: Literal["tool_result"] = "tool_result"
     tool_call_id: str
     name: str
     parts: list[ContentPart]
-    is_error: bool = False
+    outcome: Literal["success", "failed", "denied"]
 
 
 class HandoffEvent(_RunStepEventBase):

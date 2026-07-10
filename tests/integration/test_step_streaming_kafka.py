@@ -125,7 +125,7 @@ async def test_single_agent_stream_yields_steps_then_terminal(kafka_bootstrap: s
     assert kinds[-1] == "RunCompleted"  # terminal-bearing, terminal last
     assert "ToolCallEvent" in kinds  # the agent hop's requested tool call
     tr = next((e for e in events if type(e).__name__ == "ToolResultEvent"), None)
-    assert tr is not None and tr.is_error is False  # the tool's result (an inner-frame ReturnCall, depth > 1)
+    assert tr is not None and tr.outcome == "success"  # the tool's result (an inner-frame ReturnCall, depth > 1)
     assert "TOOL_RESULT_OK" in tr.parts[0].text
     await driver.aclose()
     await worker._client.aclose()

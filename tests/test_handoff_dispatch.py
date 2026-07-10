@@ -160,7 +160,8 @@ async def test_winner_stubs_every_parallel_sibling(caplog: pytest.LogCaptureFixt
     call_steps = [e for e in draft if isinstance(e, ToolCallStep)]
     result_steps = [e for e in draft if isinstance(e, ToolResultStep)]
     assert [c.tool_call_id for c in call_steps] == ["t1", "m1"]  # NO ToolCallStep for the winner
-    assert {r.tool_call_id: r.is_error for r in result_steps} == {"t1": False, "m1": False}
+    # Stub siblings are refusals-to-dispatch: ``denied``, never ``success`` (spec §7a).
+    assert {r.tool_call_id: r.outcome for r in result_steps} == {"t1": "denied", "m1": "denied"}
     assert all(r.parts[0].text == _STUB_TOOL_NOT_EXECUTED for r in result_steps)
     assert isinstance(draft[-1], HandoffStep)
 
@@ -168,8 +169,8 @@ async def test_winner_stubs_every_parallel_sibling(caplog: pytest.LogCaptureFixt
 
 
 async def test_first_valid_handoff_wins_rejected_and_later_stubbed() -> None:
-    """Plan test 3 (§3.1): [invalid, valid, valid] — first gets an error step pair + a
-    generic closing stub; second wins; third gets a non-error stub pair + closing stub."""
+    """Plan test 3 (§3.1): [invalid, valid, valid] — first gets a denied step pair (precise
+    reason) + a generic closing stub; second wins; third gets a denied stub pair + closing stub."""
     model = _emit_once_then_text(
         _handoff_part("ghost", "hi", call_id="h1"),  # invalid: not reachable
         _handoff_part("billing", "take over", call_id="h2"),
@@ -192,9 +193,9 @@ async def test_first_valid_handoff_wins_rejected_and_later_stubbed() -> None:
 
     draft = ctx._step_draft or []
     results = {e.tool_call_id: e for e in draft if isinstance(e, ToolResultStep)}
-    assert results["h1"].is_error is True  # precise reason in the step stream
+    assert results["h1"].outcome == "denied"  # rejected handoff (§7b); precise reason in the step stream
     assert _REJECT_UNREACHABLE.format(name="ghost") in results["h1"].parts[0].text
-    assert results["h3"].is_error is False
+    assert results["h3"].outcome == "denied"  # post-winner stub (§7a)
     assert sum(isinstance(e, HandoffStep) for e in draft) == 1
 
 
@@ -225,7 +226,7 @@ async def test_stale_target_is_a_standard_rejection(caplog: pytest.LogCaptureFix
     assert retry.content == _REJECT_UNREACHABLE.format(name="billing")
     draft = ctx._step_draft or []
     assert not any(isinstance(e, HandoffStep) for e in draft)  # rejections emit NO HandoffStep
-    assert any(isinstance(e, ToolResultStep) and e.is_error for e in draft)
+    assert any(isinstance(e, ToolResultStep) and e.outcome == "denied" for e in draft)
     assert any(r.levelname == "WARNING" and "billing" in r.message and "#251" in r.message for r in caplog.records)
 
 

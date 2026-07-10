@@ -1,6 +1,6 @@
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from typing import Any, ClassVar, Generic, cast
+from typing import Any, ClassVar, Generic, Literal, cast
 
 import pydantic_core
 from pydantic import ValidationError
@@ -466,12 +466,13 @@ class BaseAgentNodeDef(
                 self.name,
             )
             step_draft.append(_step_tool_call(call))
-            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=reason)], is_error=True))
+            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=reason)], outcome="denied"))
             closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub_text(call), tool_call_id=call.tool_call_id))
         for call in disposition.stubbed:
             stub = stub_text(call)
             step_draft.append(_step_tool_call(call))
-            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=stub)], is_error=False))
+            # A never-executed sibling must not read "success" — stubs are refusals-to-dispatch (§7a).
+            step_draft.append(ToolResultStep(tool_call_id=call.tool_call_id, name=call.tool_name, parts=[TextPart(text=stub)], outcome="denied"))
             closing.append(ToolReturnPart(tool_name=call.tool_name, content=stub, tool_call_id=call.tool_call_id))
         if disposition.stubbed:
             logger.debug(
@@ -532,7 +533,9 @@ class BaseAgentNodeDef(
         # non-JSON-native value in `content` (e.g. a raised exception in a context-bearing ErrorDetails) must
         # render, never raise — a step must never fault the run.
         text = content if isinstance(content, str) else pydantic_core.to_json(content, fallback=str).decode()
-        step_draft.append(ToolResultStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, parts=[TextPart(text=text)], is_error=True))
+        step_draft.append(
+            ToolResultStep(tool_call_id=tool_call.tool_call_id, name=tool_call.tool_name, parts=[TextPart(text=text)], outcome="denied")
+        )
 
     def _validate_message_agent(self, tool_call: ToolCallPart, ctx: SessionRunContext) -> str | None:
         """Validate a message_agent call's target, returning the rejection reason (malformed args / self /
@@ -953,12 +956,14 @@ class BaseAgentNodeDef(
         An inner-frame ``ReturnCall`` — a consulted ``message_agent`` peer answering, depth > 1 (the
         chokepoint's terminal gate already excluded the depth-1 run terminal) — becomes a single
         ``ToolResultStep`` keyed by the frame ``tag`` (``name`` = this peer's ``node_id``; it pairs by
-        ``tool_call_id``, not name). ``is_error`` is derived once here, coerce-first. Otherwise
-        (``Call`` / ``list[Call]`` / ``TailCall``) the agent's authored ``_step_draft`` is the
-        projection — ``None`` on a hop that authored no draft (e.g. a final-output turn) ⇒ ``[]``."""
+        ``tool_call_id``, not name). ``outcome`` is derived once here, coerce-first: retry-marked ⇒
+        ``failed``, else ``success`` (spec §5.1). Otherwise (``Call`` / ``list[Call]`` / ``TailCall``)
+        the agent's authored ``_step_draft`` is the projection — ``None`` on a hop that authored no
+        draft (e.g. a final-output turn) ⇒ ``[]``."""
         if isinstance(output, ReturnCall) and frame is not None and frame.tag is not None:
             parts = _coerce_to_parts(output.value)
-            return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, is_error=is_retry(parts))]
+            outcome: Literal["success", "failed"] = "failed" if is_retry(parts) else "success"
+            return [ToolResultStep(tool_call_id=frame.tag, name=self.node_id, parts=parts, outcome=outcome)]
         return ctx._step_draft or []
 
     def _add_tools(self, raw_tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None) -> None:

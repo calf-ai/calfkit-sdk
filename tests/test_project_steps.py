@@ -66,7 +66,7 @@ def _bad_validator_tool_node() -> ToolNodeDef:
 
 
 def _drafted(ctx: SessionRunContext) -> tuple[list[ToolCallStep], list[ToolResultStep]]:
-    """The (ToolCallStep, is_error ToolResultStep) pair the hop authored into ``_step_draft``."""
+    """The (ToolCallStep, denied ToolResultStep) pair the hop authored into ``_step_draft``."""
     draft = ctx._step_draft or []
     return ([e for e in draft if isinstance(e, ToolCallStep)], [e for e in draft if isinstance(e, ToolResultStep)])
 
@@ -77,7 +77,7 @@ def _agent_emitting(calls: list[ToolCallPart], *, name: str = "a", topics: str =
 
 
 class TestRejectionArmsAuthorPairedSteps:
-    """Every calfkit-caught invalid call surfaces as a ToolCallStep + a paired is_error
+    """Every calfkit-caught invalid call surfaces as a ToolCallStep + a paired denied
     ToolResultStep in the hop's draft (spec §3.2). One test per REACHABLE rejection arm —
     including the message_agent peer-consult arm, whose missing pairing was the round-1 review's
     MAJOR-1. (The ``binding is None`` arm is not exercised: a name absent from the toolset is
@@ -89,7 +89,7 @@ class TestRejectionArmsAuthorPairedSteps:
         await agent.run(_ctx := _make_ctx(State()))
         tcs, trs = _drafted(_ctx)
         assert len(tcs) == 1 and tcs[0].tool_call_id == "m1"
-        assert len(trs) == 1 and trs[0].is_error is True and "Malformed tool arguments" in trs[0].parts[0].text
+        assert len(trs) == 1 and trs[0].outcome == "denied" and "Malformed tool arguments" in trs[0].parts[0].text
 
     async def test_schema_validation_arm_renders_list_dict_content(self) -> None:
         # the ValidationError arm's RetryPromptPart content is a list[dict]; the step must render it to text.
@@ -98,7 +98,7 @@ class TestRejectionArmsAuthorPairedSteps:
         await agent.run(_ctx := _make_ctx(State()))
         tcs, trs = _drafted(_ctx)
         assert len(tcs) == 1 and tcs[0].tool_call_id == "s1"
-        assert len(trs) == 1 and trs[0].is_error is True and isinstance(trs[0].parts[0], TextPart) and trs[0].parts[0].text
+        assert len(trs) == 1 and trs[0].outcome == "denied" and isinstance(trs[0].parts[0], TextPart) and trs[0].parts[0].text
 
     async def test_validator_raise_arm(self) -> None:
         bad = ToolCallPart(tool_name="bad_validator_tool", args={"x": 5}, tool_call_id="v1")
@@ -106,7 +106,7 @@ class TestRejectionArmsAuthorPairedSteps:
         await agent.run(_ctx := _make_ctx(State()))
         tcs, trs = _drafted(_ctx)
         assert len(tcs) == 1 and tcs[0].tool_call_id == "v1"
-        assert len(trs) == 1 and trs[0].is_error is True and "RuntimeError" in trs[0].parts[0].text
+        assert len(trs) == 1 and trs[0].outcome == "denied" and "RuntimeError" in trs[0].parts[0].text
 
     async def test_off_spec_scalar_args_coerced_to_str(self) -> None:
         # a ToolCallPart whose args is a bare int (off-spec provider) — ToolCallStep.args stays str|dict|None.
@@ -118,7 +118,7 @@ class TestRejectionArmsAuthorPairedSteps:
 
     async def test_message_agent_rejection_arm_pairs_a_toolresult(self) -> None:
         # MAJOR-1 regression: a rejected message_agent consult (self-target) authored a ToolCallStep but
-        # NO paired is_error ToolResultStep — a dangling call on the caller's stream. Both must be present,
+        # NO paired denied ToolResultStep — a dangling call on the caller's stream. Both must be present,
         # and the model-facing RetryPromptPart must still land (unchanged).
         agent = _agent_emitting([_msg_call("triage")], name="triage", topics="triage.in", peers=[Messaging(discover=True)])
         ctx = _ctx_with_view(_view({"triage": None, "billing": None}))
@@ -126,7 +126,7 @@ class TestRejectionArmsAuthorPairedSteps:
         assert isinstance(ctx.state.tool_results.get("tc1"), RetryPromptPart)  # model-facing rejection unchanged
         tcs, trs = _drafted(ctx)
         assert len(tcs) == 1 and tcs[0].name == "message_agent" and tcs[0].tool_call_id == "tc1"
-        assert len(trs) == 1 and trs[0].name == "message_agent" and trs[0].tool_call_id == "tc1" and trs[0].is_error is True
+        assert len(trs) == 1 and trs[0].name == "message_agent" and trs[0].tool_call_id == "tc1" and trs[0].outcome == "denied"
 
     def test_reject_invalid_call_render_is_total_on_non_serializable_content(self) -> None:
         # _reject_invalid_call's list-content render (pydantic_core.to_json) runs OUTSIDE the §2.9 wrap, so it
@@ -139,7 +139,7 @@ class TestRejectionArmsAuthorPairedSteps:
         content = [{"type": "value_error", "loc": ("x",), "msg": "bad", "input": "5", "ctx": {"error": ValueError("boom")}}]
         agent._reject_invalid_call(tool_call, ctx, step_draft, content)  # must not raise on the non-serializable ctx
         trs = [e for e in step_draft if isinstance(e, ToolResultStep)]
-        assert len(trs) == 1 and trs[0].is_error is True and trs[0].parts[0].text
+        assert len(trs) == 1 and trs[0].outcome == "denied" and trs[0].parts[0].text
 
 
 class TestChokepointEmission:
@@ -273,22 +273,22 @@ class TestProjectStepsToolNode:
         assert isinstance(tr, ToolResultStep)
         assert tr.tool_call_id == "call-1"
         assert tr.name == _echo_tool.node_id
-        assert tr.is_error is False
+        assert tr.outcome == "success"
         assert tr.parts and isinstance(tr.parts[0], TextPart) and tr.parts[0].text == "tool-output"
 
-    def test_returncall_modelretry_is_error_true(self) -> None:
-        # a tool ModelRetry rides as a calf.retry-marked TextPart on ReturnCall.value -> is_error.
+    def test_returncall_modelretry_outcome_failed(self) -> None:
+        # a tool ModelRetry rides as a calf.retry-marked TextPart on ReturnCall.value -> outcome="failed".
         ctx = SessionRunContext(state=State(), deps={})
         frame = CallFrame(target_topic="echo", callback_topic="cb", tag="call-2")
         events = _echo_tool.project_steps(ReturnCall(state=State(), value=[retry_text_part("narrow it")]), ctx, frame)
-        assert events[0].is_error is True
+        assert events[0].outcome == "failed"
 
-    def test_is_error_coerce_first_no_attributeerror_on_scalar(self) -> None:
+    def test_outcome_coerce_first_no_attributeerror_on_scalar(self) -> None:
         # coerce FIRST: a scalar success value must not AttributeError in is_retry(raw_scalar).
         ctx = SessionRunContext(state=State(), deps={})
         frame = CallFrame(target_topic="echo", callback_topic="cb", tag="call-3")
         events = _echo_tool.project_steps(ReturnCall(state=State(), value="plain"), ctx, frame)  # must not raise
-        assert events[0].is_error is False
+        assert events[0].outcome == "success"
 
 
 class TestProjectStepsAgentNode:
@@ -317,4 +317,4 @@ class TestProjectStepsAgentNode:
         assert len(events) == 1 and isinstance(events[0], ToolResultStep)
         assert events[0].tool_call_id == "consult-1"
         assert events[0].name == agent.node_id
-        assert events[0].is_error is False
+        assert events[0].outcome == "success"

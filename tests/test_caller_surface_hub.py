@@ -22,7 +22,7 @@ from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.payload import TextPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.state import State
-from calfkit.models.step import AgentMessageStep, StepMessage
+from calfkit.models.step import AgentMessageStep, StepMessage, ToolResultEvent, ToolResultStep
 
 _HUB_LOGGER = "calfkit.client.hub"
 _EVENTS_LOGGER = "calfkit.client.events"
@@ -473,6 +473,26 @@ async def test_terminal_only_drops_intermediate_step_events() -> None:
         hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"))
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
     assert isinstance(ev, RunCompleted)  # the step was filtered out; only the terminal surfaced
+
+
+async def test_outcome_surfaces_through_the_generic_splat() -> None:
+    # E3 pin (caller-side step-emission spec §5.3): the hub needs NO code change for the
+    # is_error→outcome break — _to_surface splats model fields generically, so the wire step's
+    # outcome lands verbatim on the surfaced ToolResultEvent.
+    hub = _Hub()
+    async with EventStream(hub, terminal_only=False, buffer_size=8) as stream:
+        step = StepMessage(
+            correlation_id="c-1",
+            emitter="a",
+            depth=2,
+            frame_id="f",
+            events=[ToolResultStep(tool_call_id="t1", name="search", parts=[TextPart(text="nope")], outcome="denied")],
+        )
+        hub._on_step(step)
+        ev = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert isinstance(ev, ToolResultEvent)
+    assert ev.outcome == "denied"
+    assert (ev.correlation_id, ev.emitter, ev.depth, ev.frame_id) == ("c-1", "a", 2, "f")
 
 
 async def test_two_open_streams_each_receive_every_event() -> None:

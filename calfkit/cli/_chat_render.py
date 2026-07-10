@@ -23,15 +23,16 @@ if TYPE_CHECKING:
 
 # One source of truth: each event TYPE -> its tag. Dispatch and TAG_W both read
 # this map, so a tag can never drift between the two. ``ToolResultEvent`` maps to
-# "[tool result]" or, when ``is_error``, the "[tool error]" override below.
+# "[tool result]" or one of the per-outcome overrides below: ``failed`` -> "[tool error]",
+# ``denied`` -> the neutral "[tool denied]" (a refusal-to-dispatch is not an error, spec §4).
 _TAGS: dict[type, str] = {
     AgentMessageEvent: "[message]",
     ToolCallEvent: "[tool call]",
     ToolResultEvent: "[tool result]",
     HandoffEvent: "[handoff]",
 }
-_TOOL_ERROR_TAG = "[tool error]"
-TAG_W = max(len(tag) for tag in (*_TAGS.values(), _TOOL_ERROR_TAG))  # 13, derived — never hardcoded
+_OUTCOME_TAGS = {"failed": "[tool error]", "denied": "[tool denied]"}
+TAG_W = max(len(tag) for tag in (*_TAGS.values(), *_OUTCOME_TAGS.values()))  # 13, derived — never hardcoded
 INDENT = "  "
 TAG_GAP = "  "
 _CONTENT_COL = len(INDENT) + TAG_W + len(TAG_GAP)
@@ -86,7 +87,7 @@ def _render_step(ev: RunStepEvent, current_emitter: str | None) -> tuple[list[st
         content = f"{ev.target} ({ev.reason})"
     else:  # defensive: an unmodeled/future surface step event
         return [], current_emitter
-    tag = _TOOL_ERROR_TAG if isinstance(ev, ToolResultEvent) and ev.is_error else _TAGS[type(ev)]
+    tag = _OUTCOME_TAGS.get(ev.outcome, _TAGS[ToolResultEvent]) if isinstance(ev, ToolResultEvent) else _TAGS[type(ev)]
     lines = ["", ev.emitter] if ev.emitter != current_emitter else []
     lines.extend(_block(tag, content))
     return lines, ev.emitter
