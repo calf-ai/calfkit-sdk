@@ -18,7 +18,7 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes import Agent, agent_tool
-from tests.fakes import CaptureBroker
+from tests._broker_fakes import CaptureBroker
 
 
 def _final_model() -> FunctionModel:

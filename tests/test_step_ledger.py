@@ -23,7 +23,7 @@ from calfkit.models.payload import TextPart, retry_text_part
 from calfkit.models.state import State
 from calfkit.models.step import AgentMessageStep, HandoffStep, StepMessage, ToolCallStep, ToolResultStep
 from calfkit.nodes._steps import DeniedCall, HandedOff, HopStepLedger, Observed, Said
-from tests.fakes import CaptureBroker
+from tests._broker_fakes import CaptureBroker
 
 _MARKER = ToolCallMarker(tool_name="search", tool_call_id="c1", args={"q": "x"})
 _M2 = ToolCallMarker(tool_name="lookup", tool_call_id="c2", args={"id": 7})

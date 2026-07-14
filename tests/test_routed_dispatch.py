@@ -13,7 +13,7 @@ from calfkit.exceptions import RegistryConfigError
 from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, ReturnCall, SessionRunContext, State, TailCall, WorkflowState
 from calfkit.nodes.base import _Declined
 from calfkit.nodes.node import NodeDef
-from tests.fakes import CaptureBroker
+from tests._broker_fakes import CaptureBroker
 
 _CORR = "corr1234"
 

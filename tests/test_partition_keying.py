@@ -68,7 +68,7 @@ from calfkit.models import (  # noqa: E402
     WorkflowState,
 )
 from calfkit.nodes.node import NodeDef  # noqa: E402
-from tests.fakes import CaptureBroker  # noqa: E402
+from tests._broker_fakes import CaptureBroker  # noqa: E402
 
 _CORR = "corr-keying-1"
 

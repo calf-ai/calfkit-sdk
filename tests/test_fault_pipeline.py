@@ -24,7 +24,7 @@ from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.state import OverridesState
 from calfkit.nodes.base import BaseNodeDef
-from tests.fakes import CaptureBroker
+from tests._broker_fakes import CaptureBroker
 
 
 def _node(**kwargs: object) -> BaseNodeDef:

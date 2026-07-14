@@ -28,8 +28,8 @@ from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, record_outcome
 from calfkit.nodes._steps import HopStepLedger
 from calfkit.nodes.base import _CONSUMED, _BatchClosed, _BatchFaulted, _BatchOpen, _Declined
 from calfkit.nodes.node import NodeDef
+from tests._broker_fakes import CaptureBroker
 from tests._fanout_fakes import FakeFanoutBatchStore
-from tests.fakes import CaptureBroker
 
 
 def _node() -> NodeDef[Any]:

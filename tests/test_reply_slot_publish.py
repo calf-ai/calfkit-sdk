@@ -25,7 +25,7 @@ from calfkit.models import (
 )
 from calfkit.models.reply import ReturnMessage
 from calfkit.nodes.node import NodeDef
-from tests.fakes import CaptureBroker
+from tests._broker_fakes import CaptureBroker
 
 _CORR = "corr-1234"
 

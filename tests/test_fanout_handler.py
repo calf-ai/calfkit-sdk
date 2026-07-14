@@ -34,8 +34,8 @@ from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.nodes.node import NodeDef
 from calfkit.worker.lifecycle import ResourceSetupContext
+from tests._broker_fakes import CaptureBroker
 from tests._fanout_fakes import FakeFanoutBatchStore
-from tests.fakes import CaptureBroker
 
 
 def _ctx_with_store(store: FakeFanoutBatchStore, *, deps: dict[str, Any] | None = None) -> SessionRunContext:

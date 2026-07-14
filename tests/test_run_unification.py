@@ -24,7 +24,7 @@ from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.node import NodeDef
 from calfkit.nodes.tool import ToolNodeDef
-from tests.fakes import CaptureBroker
+from tests._broker_fakes import CaptureBroker
 
 _CORR = "corr-run-unif-0"
 
