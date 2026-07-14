@@ -245,12 +245,13 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
     """Whether this node type handles ``Call``s and their ``ReturnCall`` continuations over
     its own workflow state (agent, tool, MCP toolbox, custom ``BaseNodeDef`` subclasses);
     ``False`` only for observers (``ConsumerNode``), which just consume. Subclasses may
-    override it. Load-bearing for registration: such nodes register via the key-ordered
-    subscriber (parallel across correlations, strictly serial and in-order per
-    ``correlation_id`` — the partition key) because handling a continuation is an
-    await-spanning read-modify-write of per-correlation workflow state — the agent's
-    tool-call batch aggregation, the in-node fan-out fold — that a no-affinity
-    ``max_workers>1`` coroutine pool would race."""
+    override it. This is why EVERY node registers via the key-ordered subscriber
+    (parallel across correlations, strictly serial and in-order per ``correlation_id`` —
+    the partition key): handling a continuation is an await-spanning read-modify-write of
+    per-correlation workflow state — the agent's tool-call batch aggregation, the in-node
+    fan-out fold — that a no-affinity ``max_workers>1`` coroutine pool would race.
+    Registration itself no longer branches on this flag (observers share the one
+    consumption model, ADR-0042); it gates control-plane advert registration."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

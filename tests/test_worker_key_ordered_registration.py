@@ -1,10 +1,12 @@
-"""Caller-capable nodes register via the key-ordered subscriber; observers are untouched.
+"""EVERY node registers via the key-ordered subscriber — one consumption model.
 
-This replaces the old ``max_workers=1`` pin suite: per-key lanes now provide, per key, the
-serialization the pin provided across all keys within a subscriber. Caller-capable nodes honor the worker's
-``max_workers`` as cross-correlation parallelism — messages sharing a ``correlation_id``
-(the partition key) stay strictly serial, in order. The framework still chooses the
-subscriber *kind* per node type; it no longer discards the user's concurrency value.
+This replaces the old ``max_workers=1`` pin suite twice over: per-key lanes provide, per
+key, the serialization the pin provided across all keys within a subscriber, and (ADR-0042
+addendum) the observer/caller-capable registration branch is gone — observers gain per-key
+ordering harmlessly (they have no continuation state; the ordering is stronger, never
+weaker). All nodes honor the worker's ``max_workers`` as cross-key parallelism; an explicit
+``extra_subscribe_kwargs["max_workers"]`` wins and is passed exactly once. The stock
+``subscriber()`` builder is never used by the worker.
 """
 
 import pytest
@@ -140,7 +142,7 @@ def test_caller_capable_structural_extra_kwarg_raises_named_error() -> None:
         worker.register_handlers()
 
 
-def test_observer_uses_worker_max_workers(monkeypatch) -> None:  # noqa: ANN001
+def test_observer_registers_key_ordered_with_worker_max_workers(monkeypatch) -> None:  # noqa: ANN001
     client = Client.connect()
     consumer = ConsumerNode(name="obs", consume_fn=lambda ctx: None, subscribe_topics=["events"])
     worker = Worker(client, nodes=[consumer], max_workers=4)
@@ -149,13 +151,14 @@ def test_observer_uses_worker_max_workers(monkeypatch) -> None:  # noqa: ANN001
     worker.register_handlers()
 
     method, kwargs = _registration_for(calls, "obs.private.return")
-    assert method == "subscriber", "observers keep the stock subscriber path"
+    assert method == "key_ordered_subscriber", "one consumption model: observers too"
     assert kwargs["max_workers"] == 4
+    assert not any(m == "subscriber" for m, _t, _k in calls), "the stock builder must be unused"
 
 
 def test_observer_honors_extra_subscribe_kwargs_max_workers(monkeypatch) -> None:  # noqa: ANN001
-    # The observer branch uses setdefault, so an explicit extra value wins over the worker
-    # default (which only fills in when extra didn't set one).
+    # Uniform resolution for every node kind: an explicit extra value wins over the
+    # worker default and is passed exactly once.
     client = Client.connect()
     consumer = ConsumerNode(name="obs", consume_fn=lambda ctx: None, subscribe_topics=["events"])
     worker = Worker(client, nodes=[consumer], max_workers=2, extra_subscribe_kwargs={"max_workers": 5})
@@ -164,8 +167,21 @@ def test_observer_honors_extra_subscribe_kwargs_max_workers(monkeypatch) -> None
     worker.register_handlers()
 
     method, kwargs = _registration_for(calls, "obs.private.return")
-    assert method == "subscriber"
+    assert method == "key_ordered_subscriber"
     assert kwargs["max_workers"] == 5
+
+
+def test_observer_structural_extra_kwarg_raises_named_error() -> None:
+    # ADR-0042 addendum: the key-ordered surface is the ONLY registration path, so its
+    # allow-list contract now covers observers too — an ack_policy override (previously a
+    # functional-but-undocumented at-least-once escape hatch on the stock path) fails
+    # loudly by name instead of silently changing subscriber kinds.
+    client = Client.connect()
+    consumer = ConsumerNode(name="obs", consume_fn=lambda ctx: None, subscribe_topics=["events"])
+    worker = Worker(client, nodes=[consumer], max_workers=2, extra_subscribe_kwargs={"ack_policy": "ACK"})
+
+    with pytest.raises(SetupError, match="ack_policy"):
+        worker.register_handlers()
 
 
 def test_real_registration_yields_key_ordered_subscriber_object() -> None:
@@ -187,7 +203,8 @@ def test_is_caller_capable_matches_node_kind_taxonomy() -> None:
     # Per-class expectations (NOT a formula binding the wire taxonomy to dispatch
     # semantics — a future second observer kind is legitimate): ConsumerNode is the one
     # observer today; every other current kind handles Calls/continuations and must be
-    # caller-capable, so a new caller-capable kind can't silently forget the flag.
+    # caller-capable. Registration no longer branches on this flag (all nodes consume
+    # key-ordered); it still gates control-plane advert registration.
     from calfkit.nodes import Agent, ToolNodeDef
     from calfkit.nodes.base import BaseNodeDef
 

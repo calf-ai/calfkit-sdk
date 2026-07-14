@@ -81,14 +81,12 @@ class Worker(LifecycleHookMixin):
             client: The calfkit Client (Kafka connection).
             nodes: List of ``BaseNodeDef`` instances to host.
             max_workers: Subscriber concurrency cap for every hosted node.
-                Observer (consumer) nodes use FastStream's stock concurrent
-                subscriber (no ordering guarantees between messages).
-                Caller-capable nodes (agents/tools/toolboxes) register via the
-                key-ordered subscriber: up to ``max_workers`` continuations run
-                in parallel across correlations, while messages sharing a
-                ``correlation_id`` (the partition key) are processed strictly
-                serially, in order — the per-workflow serialization that
-                handling a continuation requires. An
+                All nodes register via the key-ordered subscriber: up to
+                ``max_workers`` messages run in parallel across keys, while
+                messages sharing a ``correlation_id`` (the partition key) are
+                processed strictly serially, in order — the per-workflow
+                serialization that handling a continuation requires, harmlessly
+                stronger than observers need. An
                 ``extra_subscribe_kwargs["max_workers"]`` value wins over this
                 one.
             group_id: Optional Kafka consumer group override (defaults to
@@ -385,29 +383,23 @@ class Worker(LifecycleHookMixin):
                 topics,
                 node.publish_topic,
             )
-            # Caller-capable nodes register key-ordered: parallel across correlations,
-            # strictly serial and in-order per correlation_id, the partition key (see
-            # BaseNodeDef.is_caller_capable for WHY continuations need per-workflow
-            # serialization, and calfkit.keying for the key). Observers have no ordering
-            # claim and keep the stock concurrent subscriber. In both branches an
-            # explicit extra_subscribe_kwargs["max_workers"] wins over the worker value
-            # and is passed exactly once.
+            # ONE consumption model for every node kind (ADR-0042): key-ordered —
+            # parallel across keys, strictly serial and in-order per correlation_id, the
+            # partition key (see BaseNodeDef.is_caller_capable for why continuations
+            # need per-workflow serialization, and calfkit.keying for the key).
+            # Observers have no continuation state, so per-key ordering is harmlessly
+            # stronger for them; the uniform path trades their blind-pool throughput
+            # under key skew (and the stock builder's structural kwargs) for a single
+            # registration surface. An explicit extra_subscribe_kwargs["max_workers"]
+            # wins over the worker value and is passed exactly once.
             subscribe_kwargs = dict(self._extra_subscribe_kwargs)
-            if node.is_caller_capable:
-                max_workers = subscribe_kwargs.pop("max_workers", self._max_workers)
-                subscriber = self._client._connection.key_ordered_subscriber(
-                    *topics,
-                    group_id=group_id,
-                    max_workers=max_workers,
-                    **subscribe_kwargs,
-                )
-            else:
-                subscribe_kwargs.setdefault("max_workers", self._max_workers)
-                subscriber = self._client._connection.subscriber(
-                    *topics,
-                    group_id=group_id,
-                    **subscribe_kwargs,
-                )
+            max_workers = subscribe_kwargs.pop("max_workers", self._max_workers)
+            subscriber = self._client._connection.key_ordered_subscriber(
+                *topics,
+                group_id=group_id,
+                max_workers=max_workers,
+                **subscribe_kwargs,
+            )
             handler = subscriber(node.handler, filter=wire_filter(Envelope))
             if node.publish_topic:
                 self._client._connection.publisher(node.publish_topic, **self._extra_publish_kwargs)(handler)
