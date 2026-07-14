@@ -41,7 +41,7 @@ def _validate_consume_fn(consume_fn: Any) -> None:
 
 class ConsumerNode(Generic[OutputT], BaseNodeDef):
     _node_kind: ClassVar[NodeKind] = "consumer"
-    is_caller_capable: ClassVar[bool] = False  # observer: just consumes (no Calls / continuations) → uses the worker's max_workers
+    is_caller_capable: ClassVar[bool] = False  # observer: just consumes; gates advert registration, not the subscriber kind
 
     def __init__(
         self,

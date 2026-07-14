@@ -23,24 +23,10 @@ from calfkit.models.payload import TextPart, retry_text_part
 from calfkit.models.state import State
 from calfkit.models.step import AgentMessageStep, HandoffStep, StepMessage, ToolCallStep, ToolResultStep
 from calfkit.nodes._steps import DeniedCall, HandedOff, HopStepLedger, Observed, Said
+from tests._broker_fakes import CaptureBroker
 
 _MARKER = ToolCallMarker(tool_name="search", tool_call_id="c1", args={"q": "x"})
 _M2 = ToolCallMarker(tool_name="lookup", tool_call_id="c2", args={"id": 7})
-
-
-class _FakeBroker:
-    """Duck-typed stand-in for the ledger's one broker touchpoint (``publish``)."""
-
-    def __init__(self) -> None:
-        self.published: list[dict[str, Any]] = []
-
-    async def publish(self, message: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.published.append({"message": message, "topic": topic, "correlation_id": correlation_id, "key": key, "headers": headers})
-
-
-class _RaisingBroker:
-    async def publish(self, message: Any, **kwargs: Any) -> None:
-        raise RuntimeError("broker down")
 
 
 async def _flush(ledger: HopStepLedger, broker: Any, *, disposition: Any = None, root_callback: str | None = "client.return") -> None:
@@ -124,9 +110,9 @@ class TestLedgerMints:
         ledger = HopStepLedger()
         parts = [TextPart(text="result")]
         ledger.folded(_MARKER, parts)
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
-        (event,) = broker.published[0]["message"].events
+        (event,) = broker.published[0].message.events
         assert isinstance(event, ToolResultStep)
         assert (event.tool_call_id, event.name, event.outcome) == ("c1", "search", "success")
         assert event.parts == parts  # the resolved slot parts, verbatim (I10)
@@ -134,9 +120,9 @@ class TestLedgerMints:
     async def test_folded_retry_marked_mints_failed(self) -> None:
         ledger = HopStepLedger()
         ledger.folded(_MARKER, [retry_text_part("narrow it")])
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
-        (event,) = broker.published[0]["message"].events
+        (event,) = broker.published[0].message.events
         assert event.outcome == "failed"
 
     async def test_fold_failed_mints_failed_with_empty_parts(self) -> None:
@@ -144,27 +130,27 @@ class TestLedgerMints:
         assert list(inspect.signature(HopStepLedger.fold_failed).parameters) == ["self", "marker"]
         ledger = HopStepLedger()
         ledger.fold_failed(_MARKER)
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
-        (event,) = broker.published[0]["message"].events
+        (event,) = broker.published[0].message.events
         assert isinstance(event, ToolResultStep)
         assert (event.tool_call_id, event.name, event.parts, event.outcome) == ("c1", "search", [], "failed")
 
     async def test_absorb_said_mints_agent_message(self) -> None:
         ledger = HopStepLedger()
         ledger.absorb((Said(parts=(TextPart(text="thinking"),)),))
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
-        (event,) = broker.published[0]["message"].events
+        (event,) = broker.published[0].message.events
         assert isinstance(event, AgentMessageStep) and event.parts[0].text == "thinking"
 
     async def test_absorb_denied_call_expands_the_born_closed_pair_atomically(self) -> None:
         # One fact → BOTH halves (a half-pair is unrepresentable, spec §3.1a).
         ledger = HopStepLedger()
         ledger.absorb((DeniedCall(tool_call_id="d1", tool_name="ghost", args='{"x": 1}', reason_parts=(TextPart(text="unknown tool"),)),))
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
-        call, result = broker.published[0]["message"].events
+        call, result = broker.published[0].message.events
         assert isinstance(call, ToolCallStep) and (call.tool_call_id, call.name, call.args) == ("d1", "ghost", '{"x": 1}')
         assert isinstance(result, ToolResultStep) and (result.tool_call_id, result.name, result.outcome) == ("d1", "ghost", "denied")
         assert result.parts[0].text == "unknown tool"
@@ -172,9 +158,9 @@ class TestLedgerMints:
     async def test_absorb_handed_off_maps_message_to_wire_reason(self) -> None:
         ledger = HopStepLedger()
         ledger.absorb((HandedOff(target="billing", message="take over"),))
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
-        (event,) = broker.published[0]["message"].events
+        (event,) = broker.published[0].message.events
         assert isinstance(event, HandoffStep) and (event.target, event.reason) == ("billing", "take over")
 
     def test_no_public_append_exists(self) -> None:
@@ -187,9 +173,9 @@ class TestNoteDispatch:
     async def _dispatched(self, action: Any) -> list[Any]:
         ledger = HopStepLedger()
         ledger.note_dispatch(action)
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
-        return list(broker.published[0]["message"].events) if broker.published else []
+        return list(broker.published[0].message.events) if broker.published else []
 
     async def test_bare_marked_call_mints_one(self) -> None:
         events = await self._dispatched(Call("t.in", State(), tag="c1", marker=_MARKER))
@@ -236,7 +222,7 @@ class TestFlush:
         # action publish re-invokes flush and finds the ledger empty.
         ledger = HopStepLedger()
         ledger.folded(_MARKER, [TextPart(text="r")])
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
         await _flush(ledger, broker)
         assert len(broker.published) == 1
@@ -247,7 +233,7 @@ class TestFlush:
         ledger = HopStepLedger()
         ledger.folded(_MARKER, [TextPart(text="r")])
         await _flush(ledger, None, root_callback=None)
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
         assert broker.published == []
 
@@ -257,16 +243,16 @@ class TestFlush:
         ledger.folded(_MARKER, [TextPart(text="r")])
         ledger.absorb((Said(parts=(TextPart(text="preamble"),)),))
         ledger.note_dispatch(Call("t.in", State(), tag="c2", marker=_M2))
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker, disposition=Call("t.in", State(), tag="c2", marker=_M2))
         (pub,) = broker.published
-        message = pub["message"]
+        message = pub.message
         assert isinstance(message, StepMessage)
         assert (message.correlation_id, message.emitter, message.depth, message.frame_id) == ("cid-1", "agent-a", 1, "F1")
         assert [type(e) for e in message.events] == [ToolResultStep, AgentMessageStep, ToolCallStep]
-        assert pub["topic"] == "client.return"
-        assert pub["key"] == b"cid-1"
-        assert pub["headers"] == {HDR_WIRE: StepMessage.WIRE, HDR_EMITTER: "agent-a", HDR_EMITTER_KIND: "agent"}
+        assert pub.topic == "client.return"
+        assert pub.key == b"cid-1"
+        assert pub.headers == {HDR_WIRE: StepMessage.WIRE, HDR_EMITTER: "agent-a", HDR_EMITTER_KIND: "agent"}
 
     async def test_terminal_gate_drops_agent_message_on_return_call_disposition(self) -> None:
         # §3.4: a returning hop's answer rides its ReturnMessage — an agent_message would double-report.
@@ -274,25 +260,25 @@ class TestFlush:
         ledger = HopStepLedger()
         ledger.folded(_MARKER, [TextPart(text="r")])
         ledger.absorb((Said(parts=(TextPart(text="answer preamble"),)),))
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker, disposition=ReturnCall(state=State(), value="answer"))
         (pub,) = broker.published
-        assert [type(e) for e in pub["message"].events] == [ToolResultStep]
+        assert [type(e) for e in pub.message.events] == [ToolResultStep]
 
     async def test_terminal_gate_does_not_fire_on_fault_exit_disposition_none(self) -> None:
         # A fault exit flushes with disposition=None: the hop's return never published, so a held
         # agent_message is the only record, not a double report (§3.4).
         ledger = HopStepLedger()
         ledger.absorb((Said(parts=(TextPart(text="preamble"),)),))
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker, disposition=None)
         (pub,) = broker.published
-        assert [type(e) for e in pub["message"].events] == [AgentMessageStep]
+        assert [type(e) for e in pub.message.events] == [AgentMessageStep]
 
     async def test_terminal_gate_leaving_nothing_publishes_nothing(self) -> None:
         ledger = HopStepLedger()
         ledger.absorb((Said(parts=(TextPart(text="only a preamble"),)),))
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker, disposition=ReturnCall(state=State(), value="answer"))
         assert broker.published == []
 
@@ -302,7 +288,7 @@ class TestFlush:
         ledger = HopStepLedger()
         ledger.folded(_MARKER, [TextPart(text="r")])
         await _flush(ledger, None, root_callback="client.return")
-        broker = _FakeBroker()
+        broker = CaptureBroker()
         await _flush(ledger, broker)
         assert broker.published == []  # drained by the clamped flush
 
@@ -312,4 +298,4 @@ class TestFlush:
         ledger = HopStepLedger()
         ledger.folded(_MARKER, [TextPart(text="r")])
         with pytest.raises(RuntimeError, match="broker down"):
-            await _flush(ledger, _RaisingBroker())
+            await _flush(ledger, CaptureBroker(raises=RuntimeError("broker down")))

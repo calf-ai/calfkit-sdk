@@ -24,6 +24,7 @@ from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_dispatch import ToolCallRef
 from calfkit.nodes.node import NodeDef
 from calfkit.nodes.tool import ToolNodeDef
+from tests._broker_fakes import CaptureBroker
 
 _CORR = "corr-run-unif-0"
 
@@ -167,21 +168,17 @@ async def test_malformed_toolcallref_body_to_tool_auto_faults_and_logs_loud(capl
         return "ok"  # never invoked — validation fails first
 
     tool = ToolNodeDef.create_tool_node(func=_ok, subscribe_topics="t.in", publish_topic="t.out")
-    published: list[Any] = []
-
-    class _Broker:
-        async def publish(self, envelope: Any, **k: Any) -> None:
-            published.append((envelope, k))
+    broker = CaptureBroker()
 
     env = _envelope(callback_topic="agent.return", payload={"surprise": "nope"})  # not a valid ToolCallRef
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        await tool.handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, _Broker()))
+        await tool.handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, broker))
 
-    assert len(published) == 1  # the auto-fault to the caller — the #201 strand is closed
-    fault_env, kw = published[0]
-    assert kw["topic"] == "agent.return"
-    assert fault_env.reply.error.error_type == "calf.delivery.rejected"
-    assert fault_env.reply.error.details["reason"] == "schema_rejected"
+    assert len(broker.published) == 1  # the auto-fault to the caller — the #201 strand is closed
+    c = broker.published[0]
+    assert c.topic == "agent.return"
+    assert c.message.reply.error.error_type == "calf.delivery.rejected"
+    assert c.message.reply.error.details["reason"] == "schema_rejected"
     validation_logs = [r for r in caplog.records if "validation" in r.message]
     assert validation_logs and validation_logs[0].levelno == logging.WARNING
 
@@ -196,19 +193,15 @@ async def test_unconsumed_routeless_body_auto_faults_callback_aware(caplog: pyte
         async def on_created(self, ctx: SessionRunContext) -> Any:
             return Next()
 
-    published: list[Any] = []
-
-    class _Broker:
-        async def publish(self, envelope: Any, **k: Any) -> None:
-            published.append((envelope, k))
+    broker = CaptureBroker()
 
     env = _envelope(callback_topic="reply.topic", payload={"unread": 1})
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, _Broker()))
+        await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, broker))
 
-    assert len(published) == 1  # the auto-fault, not a strand
-    fault_env = published[0][0]
-    assert fault_env.reply.error.error_type == "calf.delivery.rejected"
-    assert fault_env.reply.error.details["reason"] == "all_declined"
+    assert len(broker.published) == 1  # the auto-fault, not a strand
+    c = broker.published[0]
+    assert c.message.reply.error.error_type == "calf.delivery.rejected"
+    assert c.message.reply.error.details["reason"] == "all_declined"
     dropped = [r for r in caplog.records if "body was not consumed" in r.message]
     assert dropped and dropped[0].levelno == logging.WARNING
