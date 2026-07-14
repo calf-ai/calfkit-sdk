@@ -68,16 +68,9 @@ from calfkit.models import (  # noqa: E402
     WorkflowState,
 )
 from calfkit.nodes.node import NodeDef  # noqa: E402
+from tests._broker_fakes import CaptureBroker  # noqa: E402
 
 _CORR = "corr-keying-1"
-
-
-class _SpyBroker:
-    def __init__(self) -> None:
-        self.published: list[dict] = []
-
-    async def publish(self, message: Any, **kwargs: Any) -> None:
-        self.published.append(kwargs)
 
 
 def _envelope(callback_topic: str | None = "reply.topic") -> Envelope:
@@ -89,18 +82,17 @@ def _envelope(callback_topic: str | None = "reply.topic") -> Envelope:
     )
 
 
-async def _drive(node: NodeDef, *, callback_topic: str | None = "reply.topic") -> _SpyBroker:
-    spy = _SpyBroker()
+async def _drive(node: NodeDef, *, callback_topic: str | None = "reply.topic") -> CaptureBroker:
+    spy = CaptureBroker()
     await node.handler(_envelope(callback_topic), correlation_id=_CORR, headers={}, broker=spy)
     assert spy.published, "the driven path emitted no publish — the test drove nothing"
     return spy
 
 
-def _assert_all_keyed(spy: _SpyBroker) -> None:
-    for kwargs in spy.published:
-        assert kwargs.get("key") == partition_key(_CORR), (
-            f"node-side publish lost the partition key: topic={kwargs.get('topic')!r} "
-            f"key={kwargs.get('key')!r} — per-correlation serialization would silently break"
+def _assert_all_keyed(spy: CaptureBroker) -> None:
+    for call in spy.published:
+        assert call.key == partition_key(_CORR), (
+            f"node-side publish lost the partition key: topic={call.topic!r} key={call.key!r} — per-correlation serialization would silently break"
         )
 
 
@@ -136,7 +128,7 @@ async def test_auto_fault_publish_carries_the_partition_key() -> None:
         async def on_known(self, ctx: SessionRunContext) -> Any:
             return ReturnCall(state=ctx.state, value="handled")
 
-    spy = _SpyBroker()
+    spy = CaptureBroker()
     node = N(node_id="n-fault", subscribe_topics=["t"])
     await node.handler(
         _envelope("reply.topic"),

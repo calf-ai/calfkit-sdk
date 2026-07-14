@@ -28,6 +28,7 @@ from calfkit.nodes._fanout_store import FANOUT_STORE_KEY, record_outcome
 from calfkit.nodes._steps import HopStepLedger
 from calfkit.nodes.base import _CONSUMED, _BatchClosed, _BatchFaulted, _BatchOpen, _Declined
 from calfkit.nodes.node import NodeDef
+from tests._broker_fakes import CaptureBroker
 from tests._fanout_fakes import FakeFanoutBatchStore
 
 
@@ -52,24 +53,6 @@ class _BodyNode(NodeDef[Any]):
 
     async def run(self, ctx: SessionRunContext) -> Any:
         return ReturnCall(state=ctx.state, value="done")
-
-
-class _CaptureBroker:
-    """Records (topic, envelope) per publish — for the re-entry self-publish."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, Any]] = []
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.published.append((topic, envelope))
-
-
-class _RaisingBroker:
-    """A broker stub whose ``publish`` always raises ``KafkaError`` — exercises the
-    re-entry-publish-failure abort path in ``_aggregate``'s ``FoldComplete`` arm."""
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        raise KafkaError("simulated re-entry publish failure")
 
 
 def _fanout_node() -> _FanoutNode:
@@ -193,7 +176,7 @@ async def _agg(
     """Drive ``_aggregate`` with a freshly built run_ctx + seam_ctx (sharing state); return all three."""
     run_ctx = _store_ctx(store, state=state, deps=deps)
     seam = _seam(node, run_ctx, env, kind)
-    result = await node._aggregate(run_ctx, seam, kind, env, HopStepLedger(), "corr-1", broker or _CaptureBroker())
+    result = await node._aggregate(run_ctx, seam, kind, env, HopStepLedger(), "corr-1", broker or CaptureBroker())
     return run_ctx, seam, result
 
 
@@ -243,12 +226,12 @@ class TestAggregate:
         node = _fanout_node()
         store = FakeFanoutBatchStore()
         await _open(store)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return", broker)
         _run_ctx, _seam, result = await _agg(node, store, _marked_env(in_reply_to="f2", tag="tc2", parts=[TextPart(text="r2")]), "return", broker)
         assert isinstance(result, _BatchOpen)  # still parked — the re-entry is a fresh delivery
-        assert [t for t, _ in broker.published] == ["fan.private.return"]  # closure re-entry self-published
-        reentry_env = broker.published[0][1]
+        assert [c.topic for c in broker.published] == ["fan.private.return"]  # closure re-entry self-published
+        reentry_env = broker.published[0].message
         assert reentry_env.reply is not None and reentry_env.reply.in_reply_to == "A"
 
     async def test_sibling_fault_unhandled_folds_as_a_failed_outcome(self) -> None:
@@ -324,7 +307,7 @@ class TestAggregate:
         await _agg(node, store, _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")]), "return")
         # The SECOND fold completes the batch; its re-entry publish raises.
         env2 = _marked_env(in_reply_to="f2", tag="tc2", parts=[TextPart(text="r2")])
-        _run_ctx, _seam, result = await _agg(node, store, env2, "return", _RaisingBroker())
+        _run_ctx, _seam, result = await _agg(node, store, env2, "return", CaptureBroker(raises=KafkaError("simulated re-entry publish failure")))
         assert isinstance(result, _BatchFaulted)  # escalated, not parked
         assert result.report.error_type == FaultTypes.FANOUT_ABORTED
         assert result.report.details[FaultTypes.REASON] == FaultTypes.REASON_REENTRY_FAILED
@@ -434,7 +417,7 @@ class TestMidBatchAbort:
         node.resources[FANOUT_STORE_KEY] = store
         await _open(store)
         env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])
-        resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "return"}, broker=_CaptureBroker())  # type: ignore[arg-type]
+        resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "return"}, broker=CaptureBroker())  # type: ignore[arg-type]
         assert isinstance(resp.body.reply, FaultMessage)  # escalated the node's own exception
         assert resp.body.reply.error.error_type == FaultTypes.EXCEPTION
         assert await store.read_state("A") is None  # the open batch was tombstoned (abort, not _publish_fault)
@@ -452,7 +435,7 @@ class TestExecute:
         env = _plain_env()
         seam = node._build_seam_context(ctx, env, {}, "call")
         result = await node._execute(
-            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
         )
         assert isinstance(result, ReturnCall) and result.value == "done"
 
@@ -463,7 +446,7 @@ class TestExecute:
         env = _plain_env(reply=ReturnMessage(in_reply_to="A", tag="tc1", parts=[]))  # unmarked → _BatchClosed
         seam = node._build_seam_context(ctx, env, {}, "return")
         result = await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
         )
         assert isinstance(result, ReturnCall)
 
@@ -475,7 +458,7 @@ class TestExecute:
         env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])  # 1 of 2 → parks
         seam = node._build_seam_context(ctx, env, {}, "return")
         result = await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
         )
         assert result is _CONSUMED  # parked fold — the body never runs
 
@@ -486,7 +469,7 @@ class TestExecute:
         env = _plain_env()
         seam = node._build_seam_context(ctx, env, {}, "call")
         result = await node._execute(
-            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
         )
         assert isinstance(result, _Declined) and result.reason == "all_declined"
 
@@ -521,7 +504,7 @@ class TestClosureSeams:
         seam = node._build_seam_context(ctx, env, {}, "return")
 
         await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
         )
 
         assert before_states == [{"marker": "restored"}]  # fired ONCE, observing the RESTORED snapshot state
@@ -543,7 +526,7 @@ class TestClosureSeams:
         seam = node._build_seam_context(ctx, env, {}, "return")
 
         result = await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=_CaptureBroker()
+            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
         )
 
         assert result is _CONSUMED  # the fold parked (incomplete batch)

@@ -18,16 +18,7 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.nodes import Agent, agent_tool
-
-
-class _CaptureBroker:
-    """Node-side broker stub: records (topic, headers, envelope) per publish."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, str], Envelope]] = []
-
-    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.published.append((topic, headers, envelope))
+from tests._broker_fakes import CaptureBroker
 
 
 def _final_model() -> FunctionModel:
@@ -43,13 +34,13 @@ async def test_stray_non_toolcallref_call_to_agent_inbox_is_disposed_not_swallow
     agent = Agent("a", subscribe_topics="a.in", model_client=_final_model())
     frame = CallFrame(target_topic=derive_input_topic("a"), callback_topic=None, payload={"not": "a ToolCallRef"})
     env = Envelope(context=SessionRunContext(state=State(), deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([frame])))
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
 
     # No exception escapes; the stray is disposed (fire-and-forget: no reply slot, so nothing is published
     # back to a non-existent caller). The assertion is "handler returned + no spurious reply", which fails
     # loudly if a future change lets a stray raise out of the handler or fabricate a reply.
     await agent.handler(env, correlation_id="c-stray", headers={}, broker=cast(Any, broker))
-    assert all(topic != "a.in" for topic, _h, _e in broker.published)  # no spurious reply to a caller
+    assert all(c.topic != "a.in" for c in broker.published)  # no spurious reply to a caller
 
 
 def test_non_agent_node_is_dormant_in_the_messaging_plane() -> None:

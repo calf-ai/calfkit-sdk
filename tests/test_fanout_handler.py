@@ -34,6 +34,7 @@ from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.nodes.node import NodeDef
 from calfkit.worker.lifecycle import ResourceSetupContext
+from tests._broker_fakes import CaptureBroker
 from tests._fanout_fakes import FakeFanoutBatchStore
 
 
@@ -236,24 +237,6 @@ def test_fanout_open_accepts_singleton_expected() -> None:
         FanoutOpen(fanout_id="x", node_id="a", expected=[])
 
 
-class _CaptureBroker:
-    """Node-side broker stub: records (topic, headers, envelope) per publish."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, str], Envelope]] = []
-
-    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.published.append((topic, headers, envelope))
-
-
-class _RaisingBroker:
-    """Node-side broker stub whose ``publish`` always raises ``KafkaError`` — exercises the OPEN
-    dispatch-abort (§4.4): a sibling publish failing after the batch is durably registered."""
-
-    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        raise KafkaError("simulated sibling publish failure")
-
-
 class _SingleCallFanoutNode(NodeDef[Any]):
     """A fan-out-capable node whose body returns a ONE-element list[Call]."""
 
@@ -278,7 +261,7 @@ async def test_single_call_list_does_not_open_durable_batch() -> None:
         context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=Stack([own])),
     )
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
 
     await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
@@ -286,8 +269,8 @@ async def test_single_call_list_does_not_open_durable_batch() -> None:
     assert await fake.read_state("A") is None
     assert await fake.read_basestate("A") is None
     # The single call was published via the normal parallel path (callee frame NOT fan-out-marked).
-    assert [t for t, _, _ in broker.published] == ["only.tool"]
-    callee = broker.published[0][2].internal_workflow_state.current_frame
+    assert [c.topic for c in broker.published] == ["only.tool"]
+    callee = broker.published[0].message.internal_workflow_state.current_frame
     assert callee.target_topic == "only.tool"
     assert callee.fanout_id is None  # not marked: this is not a durable fan-out
 
@@ -314,7 +297,7 @@ class _MessagingOnlyNode(NodeDef[Any]):
         return Call("agent.peer.private.input", State(), tag="tc1", isolate_state=True)
 
 
-async def _drive_open(node: NodeDef[Any]) -> tuple[FakeFanoutBatchStore, _CaptureBroker]:
+async def _drive_open(node: NodeDef[Any]) -> tuple[FakeFanoutBatchStore, CaptureBroker]:
     fake = FakeFanoutBatchStore()
     node.resources[FANOUT_STORE_KEY] = fake
     own = CallFrame(target_topic=node.subscribe_topics[0], callback_topic="caller", frame_id="A")
@@ -322,7 +305,7 @@ async def _drive_open(node: NodeDef[Any]) -> tuple[FakeFanoutBatchStore, _Captur
         context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=Stack([own])),
     )
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
     await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
     return fake, broker
 
@@ -369,14 +352,14 @@ async def test_degenerate_batch_snapshots_the_caller_state_not_the_seed() -> Non
     caller_state.add_tool_call(ToolCallPart(tool_name="message_agent", args={}, tool_call_id="CALLER_ONLY"))
     own = CallFrame(target_topic="fan.in", callback_topic="caller", frame_id="A")
     env = Envelope(context=SessionRunContext(state=caller_state, deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([own])))
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
     await node.handler(env, correlation_id="c", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
     base = await fake.read_basestate("A")
     assert base is not None
     assert "CALLER_ONLY" in base.snapshot.state.tool_calls  # the snapshot is the caller's state
     assert "SEED_ONLY" not in base.snapshot.state.tool_calls
-    sibling_state = broker.published[0][2].context.state  # the published sibling carries the seed
+    sibling_state = broker.published[0].message.context.state  # the published sibling carries the seed
     assert "SEED_ONLY" in sibling_state.tool_calls
     assert "CALLER_ONLY" not in sibling_state.tool_calls
 
@@ -396,7 +379,7 @@ async def test_unflagged_bare_call_stays_fast_path() -> None:
     bare = _BareUnflaggedNode(node_id="fan2", subscribe_topics=["fan.in"])
     fake, broker = await _drive_open(bare)
     assert await fake.read_state("A") is None
-    assert broker.published[0][2].internal_workflow_state.current_frame.fanout_id is None
+    assert broker.published[0].message.internal_workflow_state.current_frame.fanout_id is None
 
 
 def test_classify_fanout_uses_needs_durable_batch() -> None:
@@ -436,7 +419,7 @@ async def test_single_call_stamps_caller_node_on_pushed_frame() -> None:
     # accumulated inbound stack gives the agent resolver the ancestor chain (the cycle guard).
     node = _BareCallNode(node_id="planner", subscribe_topics=["planner.in"])
     _, broker = await _drive_open(node)
-    frame = broker.published[0][2].internal_workflow_state.current_frame
+    frame = broker.published[0].message.internal_workflow_state.current_frame
     assert frame.caller_node_id == "planner" and frame.caller_node_kind == node._node_kind
 
 
@@ -446,7 +429,7 @@ async def test_fanout_open_stamps_caller_node_on_sibling_frames() -> None:
     # (or lone-isolate_state) message_agent batch — exactly the amplifier ADR-0016 exists to bound.
     node = _IsolateStateBareCallNode(node_id="planner", subscribe_topics=["planner.in"])
     _, broker = await _drive_open(node)
-    frame = broker.published[0][2].internal_workflow_state.current_frame
+    frame = broker.published[0].message.internal_workflow_state.current_frame
     assert frame.caller_node_id == "planner" and frame.caller_node_kind == node._node_kind
 
 
@@ -455,8 +438,8 @@ async def test_parallel_list_stamps_caller_node_on_each_frame() -> None:
     node = _ParallelListNode(node_id="planner", subscribe_topics=["planner.in"])
     _, broker = await _drive_open(node)
     assert len(broker.published) == 2
-    for _topic, _headers, env in broker.published:
-        assert env.internal_workflow_state.current_frame.caller_node_id == "planner"
+    for c in broker.published:
+        assert c.message.internal_workflow_state.current_frame.caller_node_id == "planner"
 
 
 async def test_prepare_context_derives_ancestor_callers() -> None:
@@ -493,7 +476,8 @@ async def test_handle_fanout_open_sibling_publish_failure_aborts_and_escalates()
     )
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
-    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _RaisingBroker()))
+    broker = CaptureBroker(raises=KafkaError("simulated sibling publish failure"))
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the KafkaError
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -516,7 +500,7 @@ async def test_handle_fanout_open_store_failure_aborts_and_escalates(caplog: pyt
         internal_workflow_state=WorkflowState(call_stack=Stack([own])),
     )
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
         resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
@@ -524,17 +508,8 @@ async def test_handle_fanout_open_store_failure_aborts_and_escalates(caplog: pyt
     assert isinstance(resp.body.reply, FaultMessage)  # escalated, did not propagate
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
     # The fault was published point-to-point to the caller (kind=fault), addressed by the inbound stack.
-    assert any(headers.get(HDR_KIND) == "fault" for _, headers, _ in broker.published)
+    assert any(c.headers.get(HDR_KIND) == "fault" for c in broker.published)
     assert any("fan-out OPEN failed" in r.getMessage() for r in caplog.records)
-
-
-class _NonKafkaRaisingBroker:
-    """``publish`` raises a NON-``KafkaError`` — the leg the narrow ``(KafkaError,
-    FanoutStoreUnavailableError)`` catch missed (the C1 escape). Pre-fix this escaped
-    ``_handle_fanout_open`` and ``_handle_delivery`` to FastStream = silent drop under ACK_FIRST."""
-
-    async def publish(self, envelope: Envelope, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        raise ValueError("simulated non-Kafka sibling publish failure")
 
 
 class _FanoutNode(NodeDef[Any]):
@@ -562,7 +537,8 @@ async def test_handle_fanout_open_non_kafka_publish_failure_aborts_and_escalates
     )
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
-    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, _NonKafkaRaisingBroker()))
+    broker = CaptureBroker(raises=ValueError("simulated non-Kafka sibling publish failure"))
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the ValueError
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -580,7 +556,7 @@ async def test_fanout_open_missing_store_faults_caller_not_escape() -> None:
         context=SessionRunContext(state=State(), deps={}),
         internal_workflow_state=WorkflowState(call_stack=Stack([own])),
     )
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
 
     resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
