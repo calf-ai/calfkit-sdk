@@ -386,3 +386,95 @@ async def test_external_stop_after_completed_stop_returns_immediately(recorder: 
     started = time.monotonic()
     await asyncio.wait_for(sub.stop(), timeout=1.0)
     assert time.monotonic() - started < 0.1
+
+
+async def test_start_allocates_then_super_starts_then_spawns_lanes(recorder: ConsumeRecorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """start() ordering (spec §6.2): fresh dispatch state BEFORE super().start() (whose
+    read loop may dispatch into the buffers), lane workers spawned right after."""
+    from faststream.kafka.subscriber.usecase import DefaultSubscriber
+
+    sub = make_key_ordered_subscriber(max_workers=2)
+    sub.consume = recorder
+    observed: dict = {}
+
+    async def fake_parent_start(self) -> None:  # noqa: ANN001
+        observed["lanes_at_parent_start"] = len(self._lanes)
+        observed["tasks_at_parent_start"] = len(self.tasks)
+
+    monkeypatch.setattr(DefaultSubscriber, "start", fake_parent_start)
+    await sub.start()
+
+    assert observed["lanes_at_parent_start"] == 2, "dispatch state must exist before super().start()"
+    assert observed["tasks_at_parent_start"] == 0, "lanes must spawn AFTER super().start()"
+    assert len(sub.tasks) == 2
+    await asyncio.wait_for(sub.stop(), timeout=5.0)
+
+
+async def test_log_stop_failure_branches(recorder: ConsumeRecorder) -> None:
+    sub = make_key_ordered_subscriber(max_workers=1)
+    logged: list[tuple] = []
+    sub._log = lambda *a, **k: logged.append((a, k))
+
+    async def ok() -> None:
+        return None
+
+    task = asyncio.get_running_loop().create_task(ok())
+    await task
+    sub._log_stop_failure(task)  # exception() is None -> no log
+    assert logged == []
+
+    async def cancelled() -> None:
+        await asyncio.sleep(30)
+
+    task2 = asyncio.get_running_loop().create_task(cancelled())
+    await asyncio.sleep(0)
+    task2.cancel()
+    await asyncio.gather(task2, return_exceptions=True)
+    sub._log_stop_failure(task2)  # cancelled -> no log
+    assert logged == []
+
+
+async def test_consume_one_racing_stop_mid_acquire_hands_permit_to_drain(recorder: ConsumeRecorder) -> None:
+    """The post-acquire guard: an intake blocked at the bound when stop initiates must
+    hand its freshly-won permit back and bow out via CancelledError."""
+    sub = make_key_ordered_subscriber(max_workers=1)
+    _started(sub, recorder)
+    bound = 2
+
+    records = [make_record(b"hot") for _ in range(bound)]
+    gates = {r.offset: recorder.gate(r) for r in records}
+    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+
+    blocked = asyncio.create_task(sub.consume_one(make_record(b"hot")))  # blocked in acquire
+    await asyncio.sleep(0.02)
+    assert not blocked.done()
+
+    sub._stop_initiated = True  # what _do_stop sets first
+    gates[records[0].offset].set()  # a completion releases one permit -> wakes the acquire
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(blocked, timeout=2.0)
+
+    for gate in gates.values():
+        gate.set()
+    await wait_until(lambda: recorder.done_count() == bound, recorder=recorder)
+    await asyncio.sleep(0.01)
+    assert sub._limiter.value == bound, "the raced permit was not handed back"
+    for send_stream, _ in sub._lanes:
+        send_stream.close()
+    await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
+
+
+async def test_consume_one_releases_permit_when_enqueue_raises(recorder: ConsumeRecorder) -> None:
+    """The except-BaseException guard around send_nowait: a closed lane (framework bug /
+    shutdown race) re-raises and returns the permit."""
+    import anyio
+
+    sub = make_key_ordered_subscriber(max_workers=1)
+    _started(sub, recorder)
+
+    sub._lanes[0][0].close()  # every key maps to the single lane
+    permits_before = sub._limiter.value
+    with pytest.raises(anyio.ClosedResourceError):
+        await sub.consume_one(make_record(b"any"))
+    assert sub._limiter.value == permits_before
+    await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
