@@ -9,6 +9,7 @@ ordering check.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import zlib
 
@@ -22,8 +23,6 @@ from tests.unit.faststream_ext.conftest import (
     make_record,
     wait_until,
 )
-
-pytestmark = pytest.mark.anyio if False else []  # asyncio_mode=auto; explicit marker unused
 
 
 def _bound(sub) -> int:
@@ -236,6 +235,9 @@ async def test_keyless_records_round_robin_and_warn_once() -> None:
     lanes = [sub._lane_for(None) for _ in range(8)]
     assert lanes == [0, 1, 2, 3, 0, 1, 2, 3], "keyless dispatch must round-robin"
     assert len(warnings) == 1, "keyless WARNING must fire exactly once per run"
+    args, _kwargs = warnings[0]
+    assert args[0] == logging.WARNING, "keyless degradation must log at WARNING (D2: fail loud)"
+    assert "keyless" in args[1]
 
     sub._allocate_dispatch_state()  # new run resets the warn-once flag (D11)
     sub._lane_for(None)

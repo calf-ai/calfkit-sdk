@@ -45,3 +45,104 @@ async def test_entry_publish_is_keyed_via_the_seam(monkeypatch) -> None:  # noqa
     assert published[0]["key"] == partition_key("cid-entry-1")
     assert published[0]["correlation_id"] == "cid-entry-1"
     assert isinstance(state, State)
+
+
+# ---------------------------------------------------------------------------
+# The keying invariant on node-side publishes (spec §11: "every message a
+# caller-capable node consumes carries the policy's partition key" — the node
+# OUTPUT paths produce those inbound messages: Call dispatches, TailCall
+# self-retries, ReturnCall replies, and auto-faults).
+# ---------------------------------------------------------------------------
+
+from typing import Any  # noqa: E402
+
+from calfkit._registry import handler  # noqa: E402
+from calfkit.models import (  # noqa: E402
+    Call,
+    CallFrame,
+    CallFrameStack,
+    Envelope,
+    ReturnCall,
+    SessionRunContext,
+    TailCall,
+    WorkflowState,
+)
+from calfkit.nodes.node import NodeDef  # noqa: E402
+
+_CORR = "corr-keying-1"
+
+
+class _SpyBroker:
+    def __init__(self) -> None:
+        self.published: list[dict] = []
+
+    async def publish(self, message: Any, **kwargs: Any) -> None:
+        self.published.append(kwargs)
+
+
+def _envelope(callback_topic: str | None = "reply.topic") -> Envelope:
+    stack = CallFrameStack()
+    stack.push(CallFrame(target_topic="t", callback_topic=callback_topic))
+    return Envelope(
+        internal_workflow_state=WorkflowState(call_stack=stack),
+        context=SessionRunContext(state=State(), deps={}),
+    )
+
+
+async def _drive(node: NodeDef, *, callback_topic: str | None = "reply.topic") -> _SpyBroker:
+    spy = _SpyBroker()
+    await node.handler(_envelope(callback_topic), correlation_id=_CORR, headers={}, broker=spy)
+    assert spy.published, "the driven path emitted no publish — the test drove nothing"
+    return spy
+
+
+def _assert_all_keyed(spy: _SpyBroker) -> None:
+    for kwargs in spy.published:
+        assert kwargs.get("key") == partition_key(_CORR), (
+            f"node-side publish lost the partition key: topic={kwargs.get('topic')!r} "
+            f"key={kwargs.get('key')!r} — per-correlation serialization would silently break"
+        )
+
+
+async def test_call_dispatch_publish_carries_the_partition_key() -> None:
+    class N(NodeDef):
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return Call("downstream.topic", ctx.state)
+
+    _assert_all_keyed(await _drive(N(node_id="n-call", subscribe_topics=["t"])))
+
+
+async def test_tailcall_self_retry_publish_carries_the_partition_key() -> None:
+    class N(NodeDef):
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return TailCall("t", ctx.state)
+
+    _assert_all_keyed(await _drive(N(node_id="n-tail", subscribe_topics=["t"])))
+
+
+async def test_returncall_reply_publish_carries_the_partition_key() -> None:
+    class N(NodeDef):
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return ReturnCall(state=ctx.state, value="done")
+
+    _assert_all_keyed(await _drive(N(node_id="n-ret", subscribe_topics=["t"])))
+
+
+async def test_auto_fault_publish_carries_the_partition_key() -> None:
+    # A reply-owing delivery whose route matches nothing (and no run() fallback)
+    # auto-faults to the callback — that fault publish must be keyed too.
+    class N(NodeDef):
+        @handler("known.route")
+        async def on_known(self, ctx: SessionRunContext) -> Any:
+            return ReturnCall(state=ctx.state, value="handled")
+
+    spy = _SpyBroker()
+    node = N(node_id="n-fault", subscribe_topics=["t"])
+    await node.handler(
+        _envelope("reply.topic"),
+        correlation_id=_CORR,
+        headers={"x-calf-route": "unmatched.route"},
+        broker=spy,
+    )
+    assert spy.published
+    _assert_all_keyed(spy)

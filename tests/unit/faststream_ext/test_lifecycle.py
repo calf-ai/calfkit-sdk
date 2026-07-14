@@ -430,8 +430,9 @@ async def test_log_stop_failure_branches(recorder: ConsumeRecorder) -> None:
     await asyncio.sleep(0)
     task2.cancel()
     await asyncio.gather(task2, return_exceptions=True)
-    sub._log_stop_failure(task2)  # cancelled -> no log
-    assert logged == []
+    sub._log_stop_failure(task2)  # cancelled -> WARNING (half-stopped state, same as a crash)
+    assert len(logged) == 1
+    assert logged[0][0][0] == logging.WARNING and "cancel" in logged[0][0][1]
 
 
 async def test_consume_one_racing_stop_mid_acquire_hands_permit_to_drain(recorder: ConsumeRecorder) -> None:
@@ -478,3 +479,195 @@ async def test_consume_one_releases_permit_when_enqueue_raises(recorder: Consume
         await sub.consume_one(make_record(b"any"))
     assert sub._limiter.value == permits_before
     await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Shutdown observability (review round 1: silent-failure findings)
+# ---------------------------------------------------------------------------
+
+
+def _spy_log(sub) -> list[tuple]:
+    logged: list[tuple] = []
+    sub._log = lambda *a, **k: logged.append((a, k))
+    return logged
+
+
+async def test_escalation_cancel_is_logged_with_count(recorder: ConsumeRecorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drain timeout force-cancels in-flight handlers whose messages are already
+    committed (ACK_FIRST) — that must leave a WARNING naming the count, never a
+    clean-looking shutdown."""
+    from calfkit._faststream_ext import _subscriber as mod
+
+    monkeypatch.setattr(mod, "_FINALIZATION_GRACE", 0.2)
+    sub = make_key_ordered_subscriber(max_workers=2, graceful_timeout=0.2)
+    logged = _spy_log(sub)
+    _started(sub, recorder)
+
+    stuck = make_record(b"stuck")
+    recorder.gate(stuck)  # never released
+    await sub.consume_one(stuck)
+    await wait_until(lambda: recorder.active_count == 1, recorder=recorder)
+    await asyncio.wait_for(sub.stop(), timeout=3.0)
+
+    warnings = [(a, k) for a, k in logged if a[0] == logging.WARNING and "drain" in a[1]]
+    assert warnings, f"escalation cancel left no WARNING; logged={logged}"
+    assert "1" in warnings[0][0][1], "the WARNING must name how many handlers were cancelled"
+
+
+async def test_disabled_drain_drop_is_logged(recorder: ConsumeRecorder) -> None:
+    """Falsy graceful_timeout drops parked messages by configuration — still loud."""
+    sub = make_key_ordered_subscriber(max_workers=2, graceful_timeout=None)
+    logged = _spy_log(sub)
+    _started(sub, recorder)
+
+    records = [make_record(b"hot") for _ in range(4)]
+    gates = {r.offset: recorder.gate(r) for r in records}
+    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(sub.stop(), timeout=3.0)
+
+    assert any(a[0] == logging.WARNING and "drain" in a[1] for a, _ in logged), f"config-disabled drain dropped messages silently; logged={logged}"
+    for gate in gates.values():
+        gate.set()
+
+
+async def test_clean_graceful_stop_logs_no_warning(recorder: ConsumeRecorder) -> None:
+    """The escalation WARNING must not fire on a healthy drain (no log noise)."""
+    sub = make_key_ordered_subscriber(max_workers=2)
+    logged = _spy_log(sub)
+    _started(sub, recorder)
+    recorder.latency = 0.001
+    await asyncio.wait_for(_feed(sub, [make_record(b"k") for _ in range(3)]), timeout=2.0)
+    await wait_until(lambda: recorder.done_count() == 3, recorder=recorder)
+    await asyncio.wait_for(sub.stop(), timeout=5.0)
+    assert not any(a[0] == logging.WARNING for a, _ in logged), f"spurious WARNING: {logged}"
+
+
+async def test_lane_restart_mid_drain_still_drains_fully(recorder: ConsumeRecorder) -> None:
+    """THE lane-restart-mid-drain regression: a worker crashes while later messages are
+    still parked, the supervisor restarts it on the same stream, and a stop() issued
+    while they are parked must still drain every accepted message."""
+    sub = make_key_ordered_subscriber(max_workers=1)
+    _started(sub, recorder)
+
+    crash = make_record(b"lane-key")
+    recorder.raise_for.add(crash.offset)
+    parked = [make_record(b"lane-key") for _ in range(2)]  # bound=2: 1 executing + 1 parked
+    gates = {r.offset: recorder.gate(r) for r in parked}
+
+    await sub.consume_one(crash)
+    await wait_until(lambda: recorder.done_count() == 1, recorder=recorder)  # crash consumed
+    await asyncio.wait_for(_feed(sub, parked), timeout=2.0)  # parked behind the restart
+
+    stop_task = asyncio.create_task(sub.stop())
+    await asyncio.sleep(0.05)
+    assert not stop_task.done(), "drain returned while restarted-lane messages were parked"
+
+    for gate in gates.values():
+        gate.set()
+    await asyncio.wait_for(stop_task, timeout=5.0)
+    assert recorder.done_count() == 3, "restart-mid-drain lost parked messages"
+
+
+async def test_double_release_accounting_violation_is_logged_every_time(
+    recorder: ConsumeRecorder,
+) -> None:
+    """The max_value tripwire must surface as a specific ERROR at the lane — not mask the
+    unwinding exception, not kill the lane, not launder through the supervisor's generic
+    once-per-identifier message."""
+    sub = make_key_ordered_subscriber(max_workers=1)
+    logged = _spy_log(sub)
+    _started(sub, recorder)
+    bound = 2
+
+    gated = make_record(b"k")
+    gate = recorder.gate(gated)
+    await sub.consume_one(gated)
+    await wait_until(lambda: recorder.active_count == 1, recorder=recorder)
+
+    sub._limiter.release()  # simulate the accounting bug: value hits max while one runs
+    assert sub._limiter.value == bound
+    gate.set()  # lane's finally-release now overflows max_value
+
+    follow_up = make_record(b"k")
+    await sub.consume_one(follow_up)
+    await wait_until(lambda: recorder.done_count() == 2, recorder=recorder)
+
+    errors = [(a, k) for a, k in logged if a[0] == logging.ERROR and "accounting" in a[1]]
+    assert errors, f"double-release invariant violation was not logged: {logged}"
+    for send_stream, _ in sub._lanes:
+        send_stream.close()
+    await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
+
+
+async def test_cancelled_background_stop_is_logged(recorder: ConsumeRecorder) -> None:
+    """A lane-detached stop cancelled by outer teardown is an equivalent half-stopped
+    state to a crashed one — it must leave a trace."""
+    sub = make_key_ordered_subscriber(max_workers=1)
+    logged = _spy_log(sub)
+    _started(sub, recorder)
+
+    hang = asyncio.Event()
+
+    async def hanging_do_stop() -> None:
+        await hang.wait()
+
+    sub._do_stop = hanging_do_stop
+    trigger = make_record(b"k")
+    lane_recorder = _LaneStopRecorder({trigger.offset})
+    lane_recorder.armed.set()
+    lane_recorder.sub = sub
+    sub.consume = lane_recorder
+    await sub.consume_one(trigger)
+    await wait_until(lambda: sub._stop_task is not None)
+
+    sub._stop_task.cancel()
+    await asyncio.gather(sub._stop_task, return_exceptions=True)
+    await asyncio.sleep(0.01)  # let the done-callback run
+    assert any("cancel" in a[1] for a, _ in logged), f"cancelled stop left no trace: {logged}"
+    hang.set()
+    for send_stream, _ in sub._lanes:
+        send_stream.close()
+    await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
+
+
+async def test_post_stop_dropped_dispatch_is_logged(recorder: ConsumeRecorder) -> None:
+    """Messages a racing intake fetched after stop initiation are dropped (documented
+    at-most-once) — with a DEBUG trace, not silently."""
+    sub = make_key_ordered_subscriber(max_workers=1)
+    logged = _spy_log(sub)
+    _started(sub, recorder)
+    await asyncio.wait_for(sub.stop(), timeout=5.0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await sub.consume_one(make_record(b"late"))
+    assert any(a[0] == logging.DEBUG and "stop" in a[1] for a, _ in logged), f"post-stop drop left no trace: {logged}"
+
+
+async def test_keyless_count_is_summarized_at_stop(recorder: ConsumeRecorder) -> None:
+    """Once-per-run warn hides magnitude; the stop summary must carry the count."""
+    sub = make_key_ordered_subscriber(max_workers=2)
+    logged = _spy_log(sub)
+    _started(sub, recorder)
+    for _ in range(5):
+        sub._lane_for(None)
+    await asyncio.wait_for(sub.stop(), timeout=5.0)
+    summaries = [a for a, _ in logged if a[0] == logging.WARNING and "keyless" in a[1] and "5" in a[1]]
+    assert summaries, f"no keyless-count summary at stop: {logged}"
+
+
+async def test_log_stop_failure_survives_a_torn_down_logger(recorder: ConsumeRecorder) -> None:
+    """The done-callback must never raise: a raising callback only reaches asyncio's loop
+    exception handler and displaces the half-stopped trace."""
+    sub = make_key_ordered_subscriber(max_workers=1)
+
+    def broken_log(*a, **k) -> None:
+        raise RuntimeError("logger state torn down")
+
+    sub._log = broken_log
+
+    async def boom() -> None:
+        raise RuntimeError("stop failed")
+
+    task = asyncio.get_running_loop().create_task(boom())
+    await asyncio.gather(task, return_exceptions=True)
+    sub._log_stop_failure(task)  # must not raise

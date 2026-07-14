@@ -5,8 +5,9 @@ This package adds what FastStream 0.7.x lacks: a Kafka subscriber that runs up t
 partition key **serially, in partition order** ("parallel across keys, serial within a
 key"). FastStream's own ``ConcurrentDefaultSubscriber`` dispatches with no key affinity,
 so per-key ordering is lost the moment ``max_workers > 1``; its ordering-preserving
-alternative (``ConcurrentBetweenPartitionsSubscriber``) is non-ACK_FIRST-only and silently
-truncates multi-topic subscriptions to a single topic.
+alternative (``ConcurrentBetweenPartitionsSubscriber``) is non-ACK_FIRST-only and rejects
+multi-topic subscriptions outright (``SetupError``), so it cannot serve ACK_FIRST
+multi-topic consumers at all.
 
 Independence contract
 =====================

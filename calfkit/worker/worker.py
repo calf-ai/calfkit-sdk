@@ -391,8 +391,8 @@ class Worker(LifecycleHookMixin):
             # no-affinity concurrent pool would race. They register via the key-ordered
             # subscriber — up to max_workers continuations in parallel across
             # correlations, strictly serial and in-order per correlation_id (the
-            # partition key; see calfkit.keying) — which is the serialization the old
-            # max_workers=1 pin provided globally, now scoped per key. Observers have no
+            # partition key; see calfkit.keying) — the serialization the old max_workers=1
+            # pin provided across all keys within a subscriber, now scoped per key. Observers have no
             # ordering claim and keep the stock (no-affinity) concurrent subscriber. In
             # both branches an explicit extra_subscribe_kwargs["max_workers"] wins over
             # the worker value and is passed exactly once.

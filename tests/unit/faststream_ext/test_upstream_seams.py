@@ -52,8 +52,8 @@ CALFKIT_DIR = Path(calfkit.__file__).parent
 # This — not aiokafka's constructor signature — is the extension's connection allow-list
 # source (spec D15): aiokafka's signature would over-admit broker-level security kwargs
 # (sasl_*, ssl_context, security_protocol) and enable_auto_commit (which collides with the
-# value KafkaSubscriberConfig derives from ack_first), while under-admitting client_rack
-# (registrator-supported but absent from AIOKafkaConsumer.__init__).
+# value KafkaSubscriberConfig derives from ack_first) — per-subscriber knobs the stock
+# builder deliberately does not expose.
 EXPECTED_CONNECTION_KEYS = frozenset(
     {
         "group_instance_id",

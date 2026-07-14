@@ -6,15 +6,19 @@ Dispatch model (see the package docstring for why upstream has no equivalent):
   worker task. ``crc32(raw_key) % max_workers`` picks the lane, so equal keys always land
   on the same lane and are processed one at a time, in arrival (= per-partition log)
   order. Keyless records carry no ordering claim and round-robin (with a once-per-run
-  WARNING: on a key-ordering subscriber, a keyless record usually means a producer
-  dropped its keying).
-- One global ``anyio.Semaphore(2 * max_workers)`` is the **only** blocking primitive: the
-  read loop acquires before dispatch, the lane worker releases after ``consume()``
-  returns. At the bound the read loop blocks (which pauses ``getone()`` — backpressure,
-  never message drops). Lane buffers are sized equal to the bound, so the post-acquire
-  ``send_nowait`` provably cannot raise ``WouldBlock``: at most ``bound`` permits are
-  un-released, and a lane buffer holds that many. ``max_value`` on the semaphore turns
-  any double-release accounting bug into an error at the bug site.
+  WARNING plus a count in the stop-time summary: on a key-ordering subscriber, a keyless
+  record usually means a producer dropped its keying).
+- One global ``anyio.Semaphore(bound)`` with ``bound = 2 * max_workers`` is the **only**
+  blocking primitive: the read loop acquires before dispatch, the lane worker releases
+  after ``consume()`` returns. At the bound the read loop blocks (which pauses
+  ``getone()`` — backpressure, never message drops). Lane buffers are sized equal to the
+  bound, so the post-acquire ``send_nowait`` provably cannot raise ``WouldBlock``: at most
+  ``bound`` permits are un-released, and a lane buffer holds that many. The bound is
+  computed once per run into ``self._bound`` — the limiter capacity, every lane's buffer
+  size, and the drain's acquire count all read that single field, because their equality
+  IS the invariant. ``max_value`` on the semaphore turns any double-release accounting
+  bug into an error at the bug site (guarded and logged in the lane, so it can neither
+  mask an unwinding exception nor silently loop through supervisor restarts).
 - A ``Semaphore``, not a ``CapacityLimiter``: the permit is released by a different task
   (lane worker) than the acquirer (read loop), which ``CapacityLimiter`` forbids.
 
@@ -28,9 +32,11 @@ the producer under still-draining handlers. The graceful drain acquires **all** 
 that accounts for every parked and executing message regardless of task identity, which
 makes it immune to the supervisor replacing crashed worker tasks. On drain timeout the
 remaining tasks are cancelled *before* the inherited stop so its MultiLock wait doesn't
-burn a second timeout; a bounded finalization wait then collects stragglers best-effort
-(safety against cross-run interference comes from the closed-over per-run state, not from
-that wait).
+burn a second timeout — and the cancellation is WARNING-logged with the abandoned-handler
+count, because under ACK_FIRST those messages are already committed and will not be
+reprocessed. A bounded finalization wait then collects stragglers best-effort (safety
+against cross-run interference comes from the closed-over per-run state, not from that
+wait).
 
 Per-run dispatch state lives in ``_allocate_dispatch_state()`` (subscribers are
 restartable); the shutdown-control fields also exist from ``__init__`` so that ``stop()``
@@ -55,7 +61,7 @@ import itertools
 import logging
 import zlib
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import anyio
 from faststream.kafka.subscriber.usecase import DefaultSubscriber
@@ -85,7 +91,12 @@ _FINALIZATION_GRACE = 5.0
 # also inherited by anything a lane spawns — which is why _do_stop must never read it).
 _serving_lane: ContextVar[bool] = ContextVar("_serving_lane", default=False)
 
-_Lane = tuple["MemoryObjectSendStream[ConsumerRecord]", "MemoryObjectReceiveStream[ConsumerRecord]"]
+
+class _Lane(NamedTuple):
+    """One dispatch lane: the named pair keeps send/receive swap-proof at unpack sites."""
+
+    send: MemoryObjectSendStream[ConsumerRecord]
+    receive: MemoryObjectReceiveStream[ConsumerRecord]
 
 
 class KeyOrderedSubscriber(DefaultSubscriber):
@@ -116,36 +127,33 @@ class KeyOrderedSubscriber(DefaultSubscriber):
         # untouched semaphore so the never-started drain succeeds trivially; lanes stay
         # empty until start() so a never-started subscriber allocates no streams.
         self._lanes: list[_Lane] = []
-        self._limiter = self._new_limiter()
+        self._reset_run_state()
+
+    # -- per-run dispatch state (test seams; see module docstring) -------------------
+
+    def _reset_run_state(self) -> None:
+        """The single enumeration of the per-run control fields (called from both
+        ``__init__`` and ``_allocate_dispatch_state`` — never let the two drift)."""
+        self._bound = _DISPATCH_BOUND_FACTOR * self.max_workers
+        self._limiter = anyio.Semaphore(self._bound, max_value=self._bound)
         self._round_robin = itertools.count()
         self._warned_keyless = False
+        self._keyless_count = 0
         self._stop_task: asyncio.Task[None] | None = None
         self._stop_initiated = False
         self._intake_task: asyncio.Task[Any] | None = None
 
-    # -- per-run dispatch state (test seams; see module docstring) -------------------
-
-    def _new_limiter(self) -> anyio.Semaphore:
-        bound = _DISPATCH_BOUND_FACTOR * self.max_workers
-        return anyio.Semaphore(bound, max_value=bound)
-
     def _allocate_dispatch_state(self) -> None:
-        bound = _DISPATCH_BOUND_FACTOR * self.max_workers
-        self._limiter = self._new_limiter()
-        self._round_robin = itertools.count()
-        self._lanes = [anyio.create_memory_object_stream["ConsumerRecord"](max_buffer_size=bound) for _ in range(self.max_workers)]
-        self._warned_keyless = False
-        self._stop_task = None
-        self._stop_initiated = False
-        self._intake_task = None
+        self._reset_run_state()
+        self._lanes = [_Lane(*anyio.create_memory_object_stream["ConsumerRecord"](max_buffer_size=self._bound)) for _ in range(self.max_workers)]
 
     def _spawn_lanes(self) -> None:
         limiter = self._limiter
-        for _, receive_stream in self._lanes:
+        for lane in self._lanes:
             # Closed-over (stream, limiter) task args — NOT self attributes — so a
             # supervisor crash-restart resumes the same queue with coherent permits, and
             # nothing can release into a later run's semaphore.
-            self.add_task(self._serve_lane, (receive_stream, limiter))
+            self.add_task(self._serve_lane, (lane.receive, limiter))
 
     # -- lifecycle --------------------------------------------------------------------
 
@@ -172,7 +180,8 @@ class KeyOrderedSubscriber(DefaultSubscriber):
             # _serving_lane, so the lane context it may inherit is inert — no respawn.
             self._stop_task = asyncio.create_task(self._do_stop())
             # A lane-detached stop is never awaited; without this callback a _do_stop
-            # crash would be a silently half-stopped subscriber.
+            # crash (or cancellation by outer teardown) would be a silently
+            # half-stopped subscriber.
             self._stop_task.add_done_callback(self._log_stop_failure)
         if _serving_lane.get():
             # StopConsume/SystemExit from a handler: upstream consume() calls stop()
@@ -185,16 +194,35 @@ class KeyOrderedSubscriber(DefaultSubscriber):
         self._stop_initiated = True  # gates consume_one's dispatch
         if self._intake_task is not None:
             self._intake_task.cancel()  # a getone()-blocked loop can't see a flag
-        for send_stream, _ in self._lanes:
-            send_stream.close()  # no more dispatch; receivers drain buffered items,
+        for lane in self._lanes:
+            lane.send.close()  # no more dispatch; receivers drain buffered items,
             # then their `async for` ends (anyio: EndOfStream only when the buffer is
             # empty AND no sender is open)
-        drained = await self._drain(self._outer_config.graceful_timeout)
+        timeout = self._outer_config.graceful_timeout
+        drained = await self._drain(timeout)
         pending = [task for task in self.tasks if not task.done()]
         if not drained:
+            if pending:
+                # Under ACK_FIRST these messages are already committed: cancelling their
+                # handlers abandons them permanently. Never let that look like a clean
+                # shutdown.
+                cause = f"graceful drain timed out after {timeout}s" if timeout else "graceful drain disabled (falsy graceful_timeout)"
+                self._log(
+                    logging.WARNING,
+                    f"key-ordered subscriber: {cause}; force-cancelling {len(pending)} "
+                    "worker task(s) with messages parked or in flight — their offsets "
+                    "are already committed (ACK_FIRST) and they will NOT be reprocessed",
+                )
             for task in pending:
                 task.cancel()  # escalation: cancel NOW so the stuck handlers' MultiLock
                 # entries unwind and super().stop()'s wait doesn't burn a second timeout
+        if self._keyless_count:
+            self._log(
+                logging.WARNING,
+                f"key-ordered subscriber consumed {self._keyless_count} keyless "
+                "message(s) this run — those were round-robined with NO per-key "
+                "ordering (see the earlier warning)",
+            )
         await super().stop()  # running=False, MultiLock wait (≈instant after a
         # successful drain), TasksMixin cancel, consumer.stop()
         if pending:
@@ -213,7 +241,7 @@ class KeyOrderedSubscriber(DefaultSubscriber):
         limiter = self._limiter
 
         async def _acquire_all() -> None:
-            for _ in range(_DISPATCH_BOUND_FACTOR * self.max_workers):
+            for _ in range(self._bound):
                 await limiter.acquire()
 
         try:
@@ -223,23 +251,35 @@ class KeyOrderedSubscriber(DefaultSubscriber):
         return True
 
     def _log_stop_failure(self, task: asyncio.Task[None]) -> None:
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is None:
-            return
-        self._log(
-            logging.ERROR,
-            f"key-ordered subscriber background stop failed ({exc!r}); subscriber may be half-stopped",
-            # _log's exc_info is typed Exception | None; a BaseException (exotic here)
-            # still gets its repr in the message above.
-            exc_info=exc if isinstance(exc, Exception) else None,
-        )
+        try:
+            if task.cancelled():
+                # An outer teardown cancelled the background stop: same half-stopped
+                # state as a crash, so it gets the same trace.
+                self._log(
+                    logging.WARNING,
+                    "key-ordered subscriber background stop was cancelled; subscriber may be half-stopped",
+                )
+                return
+            exc = task.exception()
+            if exc is None:
+                return
+            self._log(
+                logging.ERROR,
+                f"key-ordered subscriber background stop failed ({exc!r}); subscriber may be half-stopped",
+                # _log's exc_info is typed Exception | None; a BaseException (exotic
+                # here) still gets its repr in the message above.
+                exc_info=exc if isinstance(exc, Exception) else None,
+            )
+        except Exception:  # noqa: BLE001 - the logger state may already be torn down
+            # A raising done-callback would only reach asyncio's loop exception handler
+            # and displace this trace; there is nowhere better left to report to.
+            pass
 
     # -- dispatch ---------------------------------------------------------------------
 
     def _lane_for(self, key: bytes | None) -> int:
         if key is None:
+            self._keyless_count += 1
             self._warn_keyless_once()
             return next(self._round_robin) % self.max_workers
         return zlib.crc32(key) % self.max_workers
@@ -252,22 +292,26 @@ class KeyOrderedSubscriber(DefaultSubscriber):
             logging.WARNING,
             "keyless message on a key-ordered subscriber: routing round-robin with NO "
             "per-key ordering. A producer for these topics likely dropped its partition "
-            "key.",
+            "key. (Warned once per run; the total count is reported at stop.)",
         )
 
     async def consume_one(self, msg: ConsumerRecord) -> None:
         if self._stop_initiated:
             # Post-stop dispatch (racing intake, or a supervisor-restarted read loop):
             # the lanes are closed and — after a successful drain — every permit is
-            # held, so exit the read loop via cancellation (supervisor-ignored).
+            # held, so exit the read loop via cancellation (supervisor-ignored). The
+            # message is dropped (documented at-most-once); leave a trace.
+            self._log(logging.DEBUG, "key-ordered subscriber dropped a message fetched after stop initiation")
             raise asyncio.CancelledError
         await self._limiter.acquire()  # the ONLY wait point: at the bound, block
         if self._stop_initiated:
             self._limiter.release()  # raced stop mid-acquire: hand the permit back to
-            raise asyncio.CancelledError  # the drain and bow out
+            # the drain and bow out (same documented at-most-once drop as above)
+            self._log(logging.DEBUG, "key-ordered subscriber dropped a message fetched after stop initiation")
+            raise asyncio.CancelledError
         try:
-            send_stream, _ = self._lanes[self._lane_for(msg.key)]
-            send_stream.send_nowait(msg)  # never blocks: lane buffer == bound
+            self._lanes[self._lane_for(msg.key)].send.send_nowait(msg)  # never blocks:
+            # lane buffer == bound
         except BaseException:
             self._limiter.release()
             raise
@@ -282,4 +326,15 @@ class KeyOrderedSubscriber(DefaultSubscriber):
             try:
                 await self.consume(msg)  # upstream: middleware, context, error swallowing
             finally:
-                limiter.release()
+                try:
+                    limiter.release()
+                except ValueError:
+                    # The max_value tripwire fired: permit accounting is violated — a
+                    # framework bug. Log it specifically EVERY time (the supervisor's
+                    # generic trace dedups per exception identity) and keep the lane
+                    # alive; re-raising here would also mask whatever exception this
+                    # finally is unwinding (e.g. the shutdown cancellation).
+                    self._log(
+                        logging.ERROR,
+                        "key-ordered permit accounting invariant violated (double release) — a framework bug, please report; the lane continues",
+                    )

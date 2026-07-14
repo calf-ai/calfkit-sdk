@@ -151,3 +151,19 @@ async def test_generic_composition_handler_filter_publisher() -> None:
         await test_broker.publish("hello", topic="in-topic")
         assert seen == ["hello"]
         publisher.mock.assert_called_once_with("echo:hello")
+
+
+def test_add_call_passthroughs_actually_flow() -> None:
+    """D15's allow-listed passthroughs must reach the subscriber's call options — not
+    just be accepted by the signature."""
+    broker = _KeyOrderedBroker()
+
+    def sentinel_parser(msg):  # pragma: no cover - identity sentinel
+        return msg
+
+    def sentinel_decoder(msg):  # pragma: no cover - identity sentinel
+        return msg
+
+    sub = broker.key_ordered_subscriber("topic-a", group_id="g", max_workers=2, parser=sentinel_parser, decoder=sentinel_decoder)
+    assert sub._call_options.parser is sentinel_parser
+    assert sub._call_options.decoder is sentinel_decoder

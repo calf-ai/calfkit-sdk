@@ -1,7 +1,7 @@
 """Caller-capable nodes register via the key-ordered subscriber; observers are untouched.
 
-This replaces the old ``max_workers=1`` pin suite: per-key lanes now provide the
-serialization the pin used to provide globally. Caller-capable nodes honor the worker's
+This replaces the old ``max_workers=1`` pin suite: per-key lanes now provide, per key, the
+serialization the pin provided across all keys within a subscriber. Caller-capable nodes honor the worker's
 ``max_workers`` as cross-correlation parallelism — messages sharing a ``correlation_id``
 (the partition key) stay strictly serial, in order. The framework still chooses the
 subscriber *kind* per node type; it no longer discards the user's concurrency value.

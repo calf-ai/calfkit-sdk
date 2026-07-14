@@ -14,8 +14,8 @@ stock builder forwards per-subscriber into ``AIOKafkaConsumer`` — ``CONNECTION
 canaried against the stock builder's signature. That set, not aiokafka's constructor, is
 the source of truth: aiokafka's signature would over-admit broker-level security kwargs
 (``sasl_*``, ``ssl_context``, ``security_protocol``) and ``enable_auto_commit`` (which
-collides with the value the config derives from the ack policy), while under-admitting
-``client_rack`` (stock-supported, absent from ``AIOKafkaConsumer.__init__``). Anything
+collides with the value the config derives from the ack policy) — per-subscriber knobs
+the stock builder deliberately does not expose. Anything
 else — the stock builder's structural/spec params or plain unknowns — raises ``SetupError``
 naming the key: never a bare ``TypeError`` at registration, never a silent drop, never an
 unvalidated fall-through that explodes at connect time. Omitted connection kwargs fall
@@ -35,6 +35,7 @@ from ._factory import create_key_ordered_subscriber
 from ._subscriber import KeyOrderedSubscriber
 
 if TYPE_CHECKING:
+    from fast_depends.dependencies import Dependant
     from faststream.kafka.configs import KafkaBrokerConfig
 
 # The stock KafkaRegistrator.subscriber's per-subscriber connection_args surface
@@ -73,7 +74,11 @@ class KeyOrderedRegistratorMixin:
     """
 
     if TYPE_CHECKING:
-        # Provided by the KafkaBroker the mixin is composed with.
+        # Provided by the KafkaBroker the mixin is composed with. Deliberately Any, not
+        # KafkaBrokerConfig: Registrator declares this attribute as its ConfigComposition
+        # proxy, so a narrower annotation here is base-incompatible at composition time —
+        # the cast at the factory call below mirrors the stock registrator's own idiom
+        # (kafka/broker/registrator.py casts the same attribute).
         config: Any
 
     def key_ordered_subscriber(
@@ -83,7 +88,7 @@ class KeyOrderedRegistratorMixin:
         max_workers: int,
         parser: Callable[..., Any] | None = None,
         decoder: Callable[..., Any] | None = None,
-        dependencies: Iterable[Any] = (),
+        dependencies: Iterable[Dependant] = (),
         codec: Any = None,
         **connection_kwargs: Any,
     ) -> KeyOrderedSubscriber:
