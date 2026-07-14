@@ -27,6 +27,7 @@ from calfkit.models import ReturnCall, SessionRunContext, State
 from calfkit.nodes import NodeDef
 from calfkit.worker import Worker
 from tests.integration._fault_kafka import ensure_topic
+from tests.utils import wait_until
 
 pytestmark = pytest.mark.kafka
 
@@ -59,14 +60,7 @@ class KeyTracker:
             self.progressed.set()
 
     async def wait_for(self, predicate, timeout: float = 30.0) -> None:
-        async def _wait() -> None:
-            while not predicate():
-                self.progressed.clear()
-                if predicate():
-                    return
-                await self.progressed.wait()
-
-        await asyncio.wait_for(_wait(), timeout=timeout)
+        await wait_until(predicate, timeout=timeout, wake=self.progressed)
 
 
 def _assert_per_key_order_and_uniqueness(done: list[tuple[str, int, str]], published: dict[str, list[int]]) -> None:

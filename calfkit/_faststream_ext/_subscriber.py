@@ -14,9 +14,9 @@ Dispatch model (see the package docstring for why upstream has no equivalent):
   ``getone()`` — backpressure, never message drops). Lane buffers are sized equal to the
   bound, so the post-acquire ``send_nowait`` provably cannot raise ``WouldBlock``: at most
   ``bound`` permits are un-released, and a lane buffer holds that many. The bound is
-  computed once per run into ``self._bound`` — the limiter capacity, every lane's buffer
-  size, and the drain's acquire count all read that single field, because their equality
-  IS the invariant. ``max_value`` on the semaphore turns any double-release accounting
+  computed once at construction into ``self._bound`` (``max_workers`` is immutable) — the
+  limiter capacity, every lane's buffer size, and the drain's acquire count all read that
+  single field, because their equality IS the invariant. ``max_value`` on the semaphore turns any double-release accounting
   bug into an error at the bug site (guarded and logged in the lane, so it can neither
   mask an unwinding exception nor silently loop through supervisor restarts).
 - A ``Semaphore``, not a ``CapacityLimiter``: the permit is released by a different task
@@ -127,6 +127,7 @@ class KeyOrderedSubscriber(DefaultSubscriber):
         # untouched semaphore so the never-started drain succeeds trivially; lanes stay
         # empty until start() so a never-started subscriber allocates no streams.
         self._lanes: list[_Lane] = []
+        self._bound = _DISPATCH_BOUND_FACTOR * max_workers
         self._reset_run_state()
 
     # -- per-run dispatch state (test seams; see module docstring) -------------------
@@ -134,7 +135,6 @@ class KeyOrderedSubscriber(DefaultSubscriber):
     def _reset_run_state(self) -> None:
         """The single enumeration of the per-run control fields (called from both
         ``__init__`` and ``_allocate_dispatch_state`` — never let the two drift)."""
-        self._bound = _DISPATCH_BOUND_FACTOR * self.max_workers
         self._limiter = anyio.Semaphore(self._bound, max_value=self._bound)
         self._round_robin = itertools.count()
         self._warned_keyless = False
@@ -238,17 +238,10 @@ class KeyOrderedSubscriber(DefaultSubscriber):
         """
         if not timeout:
             return False
-        limiter = self._limiter
-
-        async def _acquire_all() -> None:
+        with anyio.move_on_after(timeout) as scope:
             for _ in range(self._bound):
-                await limiter.acquire()
-
-        try:
-            await asyncio.wait_for(_acquire_all(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return False
-        return True
+                await self._limiter.acquire()
+        return not scope.cancelled_caught
 
     def _log_stop_failure(self, task: asyncio.Task[None]) -> None:
         try:
@@ -295,20 +288,21 @@ class KeyOrderedSubscriber(DefaultSubscriber):
             "key. (Warned once per run; the total count is reported at stop.)",
         )
 
+    def _drop_after_stop(self) -> None:
+        """Post-stop dispatch (racing intake, or a supervisor-restarted read loop): the
+        message is dropped — documented at-most-once — with a trace, and the read loop
+        exits via cancellation (supervisor-ignored)."""
+        self._log(logging.DEBUG, "key-ordered subscriber dropped a message fetched after stop initiation")
+        raise asyncio.CancelledError
+
     async def consume_one(self, msg: ConsumerRecord) -> None:
         if self._stop_initiated:
-            # Post-stop dispatch (racing intake, or a supervisor-restarted read loop):
-            # the lanes are closed and — after a successful drain — every permit is
-            # held, so exit the read loop via cancellation (supervisor-ignored). The
-            # message is dropped (documented at-most-once); leave a trace.
-            self._log(logging.DEBUG, "key-ordered subscriber dropped a message fetched after stop initiation")
-            raise asyncio.CancelledError
+            # The lanes are closed and — after a successful drain — every permit is held.
+            self._drop_after_stop()
         await self._limiter.acquire()  # the ONLY wait point: at the bound, block
         if self._stop_initiated:
-            self._limiter.release()  # raced stop mid-acquire: hand the permit back to
-            # the drain and bow out (same documented at-most-once drop as above)
-            self._log(logging.DEBUG, "key-ordered subscriber dropped a message fetched after stop initiation")
-            raise asyncio.CancelledError
+            self._limiter.release()  # raced stop mid-acquire: hand the permit back to the drain
+            self._drop_after_stop()
         try:
             self._lanes[self._lane_for(msg.key)].send.send_nowait(msg)  # never blocks:
             # lane buffer == bound

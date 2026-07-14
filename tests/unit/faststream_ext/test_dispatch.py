@@ -18,34 +18,19 @@ import pytest
 
 from tests.unit.faststream_ext.conftest import (
     ConsumeRecorder,
+    feed,
     keys_on_distinct_lanes,
     make_key_ordered_subscriber,
     make_record,
+    start_dispatch,
+    stop_lanes,
     wait_until,
 )
 
 
-def _bound(sub) -> int:
-    from calfkit._faststream_ext._subscriber import _DISPATCH_BOUND_FACTOR
-
-    return _DISPATCH_BOUND_FACTOR * sub.max_workers
-
-
-async def _stop_lanes(sub) -> None:
-    """Test-side teardown: close lanes and let workers exit via close+drain."""
-    for send_stream, _ in sub._lanes:
-        send_stream.close()
-    await asyncio.wait_for(
-        asyncio.gather(*(t for t in sub.tasks), return_exceptions=True),
-        timeout=5.0,
-    )
-
-
 async def test_same_key_messages_serialize_strictly_in_order(recorder: ConsumeRecorder) -> None:
     sub = make_key_ordered_subscriber(max_workers=4)
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
+    start_dispatch(sub, recorder)
 
     key = b"hot-key"
     recorder.latency = 0.001
@@ -55,15 +40,13 @@ async def test_same_key_messages_serialize_strictly_in_order(recorder: ConsumeRe
     await wait_until(lambda: recorder.done_count() == 20, recorder=recorder)
 
     recorder.assert_strict_per_key_order({key: [r.offset for r in records]})
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_same_key_across_different_topics_serializes(recorder: ConsumeRecorder) -> None:
     """Calfkit's real traffic shape: one key arriving on entry + return topics."""
     sub = make_key_ordered_subscriber(max_workers=4, topics=("topic-a", "topic-b"))
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
+    start_dispatch(sub, recorder)
 
     key = b"cross-topic-key"
     recorder.latency = 0.001
@@ -74,14 +57,12 @@ async def test_same_key_across_different_topics_serializes(recorder: ConsumeReco
 
     recorder.assert_strict_per_key_order({key: [r.offset for r in records]})
     assert {topic for _, _, _, topic in recorder.events} == {"topic-a", "topic-b"}
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_distinct_keys_execute_concurrently(recorder: ConsumeRecorder) -> None:
     sub = make_key_ordered_subscriber(max_workers=4)
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
+    start_dispatch(sub, recorder)
 
     key_blocked, key_free = keys_on_distinct_lanes(2, 4)
     blocked_record = make_record(key_blocked)
@@ -98,16 +79,14 @@ async def test_distinct_keys_execute_concurrently(recorder: ConsumeRecorder) -> 
 
     gate.set()
     await wait_until(lambda: recorder.done_count() == 2, recorder=recorder)
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_bound_admits_exactly_2x_max_workers_then_blocks(recorder: ConsumeRecorder) -> None:
     """D3/D5: the read path blocks at B = 2×max_workers in flight and resumes per completion."""
     sub = make_key_ordered_subscriber(max_workers=2)
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
-    bound = _bound(sub)
+    start_dispatch(sub, recorder)
+    bound = sub._bound
 
     key = b"hot-key"
     records = [make_record(key) for _ in range(bound + 3)]
@@ -139,22 +118,20 @@ async def test_bound_admits_exactly_2x_max_workers_then_blocks(recorder: Consume
     await asyncio.wait_for(feed_task, timeout=2.0)
     await wait_until(lambda: recorder.done_count() == len(records), recorder=recorder)
     recorder.assert_strict_per_key_order({key: [r.offset for r in records]})
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_executing_concurrency_capped_by_lane_count(recorder: ConsumeRecorder) -> None:
     """Structural cap: ≤ max_workers executing even with B admitted."""
     sub = make_key_ordered_subscriber(max_workers=3)
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
-    bound = _bound(sub)
+    start_dispatch(sub, recorder)
+    bound = sub._bound
 
     keys = keys_on_distinct_lanes(3, 3)
     records = [make_record(keys[i % 3]) for i in range(bound)]
     gates = {r.offset: recorder.gate(r) for r in records}
 
-    feed_task = asyncio.create_task(_feed(sub, records))
+    feed_task = asyncio.create_task(feed(sub, records))
     await wait_until(lambda: recorder.active_count == 3, recorder=recorder)
     await asyncio.sleep(0.02)
     assert recorder.active_count == 3
@@ -165,31 +142,24 @@ async def test_executing_concurrency_capped_by_lane_count(recorder: ConsumeRecor
     await asyncio.wait_for(feed_task, timeout=2.0)
     await wait_until(lambda: recorder.done_count() == len(records), recorder=recorder)
     assert recorder.peak_active == 3, "executing concurrency exceeded lane count"
-    await _stop_lanes(sub)
-
-
-async def _feed(sub, records) -> None:
-    for record in records:
-        await sub.consume_one(record)
+    await stop_lanes(sub)
 
 
 async def test_hot_key_flood_never_raises_wouldblock(recorder: ConsumeRecorder) -> None:
     """D3's zero-margin invariant under the worst case: one key owning every permit."""
     sub = make_key_ordered_subscriber(max_workers=4)
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
+    start_dispatch(sub, recorder)
 
     key = b"hot-key"
-    records = [make_record(key) for _ in range(10 * _bound(sub))]
+    records = [make_record(key) for _ in range(10 * sub._bound)]
     recorder.latency = 0.0005
     try:
-        await asyncio.wait_for(_feed(sub, records), timeout=10.0)
+        await asyncio.wait_for(feed(sub, records), timeout=10.0)
     except anyio.WouldBlock:  # pragma: no cover - the failure this test exists to catch
         pytest.fail("send_nowait raised WouldBlock: buffer-≥-bound invariant broken")
     await wait_until(lambda: recorder.done_count() == len(records), timeout=10.0, recorder=recorder)
     recorder.assert_strict_per_key_order({key: [r.offset for r in records]})
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_stress_many_keys_random_latency_preserves_per_key_order(recorder: ConsumeRecorder) -> None:
@@ -207,13 +177,11 @@ async def test_stress_many_keys_random_latency_preserves_per_key_order(recorder:
             await super().__call__(msg)
 
     jitter = JitterRecorder()
-    sub.consume = jitter
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
+    start_dispatch(sub, jitter)
 
     keys = [f"key-{i}".encode() for i in range(12)]
     records = [make_record(rng.choice(keys), topic=rng.choice(["topic-a", "topic-b"])) for _ in range(300)]
-    await asyncio.wait_for(_feed(sub, records), timeout=20.0)
+    await asyncio.wait_for(feed(sub, records), timeout=20.0)
     await wait_until(lambda: jitter.done_count() == 300, timeout=20.0, recorder=jitter)
 
     expected: dict[bytes, list[int]] = {}
@@ -221,7 +189,7 @@ async def test_stress_many_keys_random_latency_preserves_per_key_order(recorder:
         expected.setdefault(record.key, []).append(record.offset)
     jitter.assert_strict_per_key_order(expected)
     assert jitter.peak_active <= 4
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_keyless_records_round_robin_and_warn_once() -> None:
@@ -255,29 +223,25 @@ async def test_keyed_routing_is_crc32_mod_lanes() -> None:
 
 async def test_max_workers_1_degenerates_to_serial(recorder: ConsumeRecorder) -> None:
     sub = make_key_ordered_subscriber(max_workers=1)
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
+    start_dispatch(sub, recorder)
 
     records = [make_record(f"key-{i % 5}".encode()) for i in range(15)]
     recorder.latency = 0.0005
-    await asyncio.wait_for(_feed(sub, records), timeout=5.0)
+    await asyncio.wait_for(feed(sub, records), timeout=5.0)
     await wait_until(lambda: recorder.done_count() == 15, recorder=recorder)
     assert recorder.peak_active == 1
     # Total order (single lane): the full event stream is submission order.
     starts = [offset for phase, _, offset, _ in recorder.events if phase == "start"]
     assert starts == [r.offset for r in records]
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_permit_released_when_consume_raises(recorder: ConsumeRecorder) -> None:
     """A BaseException escaping consume() (framework bug / cancellation) must not leak the
     permit — the lane's finally releases it (spec §6.2)."""
     sub = make_key_ordered_subscriber(max_workers=2)
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
-    bound = _bound(sub)
+    start_dispatch(sub, recorder)
+    bound = sub._bound
 
     boom = make_record(b"doomed")
     recorder.raise_for.add(boom.offset)
@@ -288,9 +252,9 @@ async def test_permit_released_when_consume_raises(recorder: ConsumeRecorder) ->
     # And the system stays functional: the supervisor restarts the crashed lane worker on
     # the SAME stream (D12), so a full bound admits and processes on the same key.
     records = [make_record(b"doomed") for _ in range(bound)]
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)
     await wait_until(lambda: recorder.done_count() == 1 + bound, recorder=recorder)
-    await _stop_lanes(sub)
+    await stop_lanes(sub)
 
 
 async def test_startup_window_messages_park_until_lanes_spawn(recorder: ConsumeRecorder) -> None:
@@ -298,12 +262,12 @@ async def test_startup_window_messages_park_until_lanes_spawn(recorder: ConsumeR
     sub = make_key_ordered_subscriber(max_workers=2)
     sub.consume = recorder
     sub._allocate_dispatch_state()
-    bound = _bound(sub)
+    bound = sub._bound
 
     records = [make_record(f"key-{i}".encode()) for i in range(bound)]
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)  # no lanes yet: must not block/raise
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)  # no lanes yet: must not block/raise
     assert recorder.done_count() == 0
 
     sub._spawn_lanes()
     await wait_until(lambda: recorder.done_count() == bound, recorder=recorder)
-    await _stop_lanes(sub)
+    await stop_lanes(sub)

@@ -184,12 +184,13 @@ def test_real_registration_yields_key_ordered_subscriber_object() -> None:
 
 
 def test_is_caller_capable_matches_node_kind_taxonomy() -> None:
-    # Pin the invariant: only the observer kind ("consumer") is not caller-capable. Two
-    # independently-set ClassVars (is_caller_capable, _node_kind) must agree, so a new node
-    # kind can't silently drift (and get wrongly serialized per-key, or left on the
-    # no-affinity concurrent pool).
+    # Per-class expectations (NOT a formula binding the wire taxonomy to dispatch
+    # semantics — a future second observer kind is legitimate): ConsumerNode is the one
+    # observer today; every other current kind handles Calls/continuations and must be
+    # caller-capable, so a new caller-capable kind can't silently forget the flag.
     from calfkit.nodes import Agent, ToolNodeDef
     from calfkit.nodes.base import BaseNodeDef
 
-    for cls in (BaseNodeDef, NodeDef, Agent, ToolNodeDef, ConsumerNode):
-        assert cls.is_caller_capable == (cls._node_kind != "consumer"), cls.__name__
+    assert ConsumerNode.is_caller_capable is False
+    for cls in (BaseNodeDef, NodeDef, Agent, ToolNodeDef):
+        assert cls.is_caller_capable is True, cls.__name__

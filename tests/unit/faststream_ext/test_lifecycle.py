@@ -16,34 +16,27 @@ from aiokafka.errors import ConsumerStoppedError
 
 from tests.unit.faststream_ext.conftest import (
     ConsumeRecorder,
+    feed,
     keys_on_distinct_lanes,
     make_key_ordered_subscriber,
     make_record,
+    spy_log,
+    start_dispatch,
+    stop_lanes,
     wait_until,
 )
-
-
-def _started(sub, recorder: ConsumeRecorder) -> None:
-    sub.consume = recorder
-    sub._allocate_dispatch_state()
-    sub._spawn_lanes()
-
-
-async def _feed(sub, records) -> None:
-    for record in records:
-        await sub.consume_one(record)
 
 
 async def test_graceful_stop_drains_every_accepted_message(recorder: ConsumeRecorder) -> None:
     """D7: stop() returns only after every parked AND executing message is processed."""
     sub = make_key_ordered_subscriber(max_workers=2)
-    _started(sub, recorder)
-    bound = 4
+    start_dispatch(sub, recorder)
+    bound = sub._bound
 
     keys = keys_on_distinct_lanes(2, 2)
     records = [make_record(keys[i % 2]) for i in range(bound)]
     gates = {r.offset: recorder.gate(r) for r in records}
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)
 
     stop_task = asyncio.create_task(sub.stop())
     await asyncio.sleep(0.05)
@@ -61,7 +54,7 @@ async def test_escalation_is_bounded_by_one_graceful_timeout_plus_grace(recorder
 
     monkeypatch.setattr(mod, "_FINALIZATION_GRACE", 0.2)
     sub = make_key_ordered_subscriber(max_workers=2, graceful_timeout=0.3)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
 
     stuck = make_record(b"stuck")
     recorder.gate(stuck)  # never released
@@ -80,11 +73,11 @@ async def test_escalation_is_bounded_by_one_graceful_timeout_plus_grace(recorder
 async def test_falsy_graceful_timeout_skips_drain_and_drops_parked(recorder: ConsumeRecorder) -> None:
     """MultiLock-parity falsy semantics: no drain wait; parked messages are dropped."""
     sub = make_key_ordered_subscriber(max_workers=2, graceful_timeout=None)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
 
     records = [make_record(b"hot") for _ in range(4)]
     gates = {r.offset: recorder.gate(r) for r in records}
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)
 
     started = time.monotonic()
     await asyncio.wait_for(sub.stop(), timeout=3.0)
@@ -128,7 +121,7 @@ async def test_lane_initiated_stop_is_single_flight_and_drains_other_lanes() -> 
 
     recorder = _LaneStopRecorder({trigger_a.offset, trigger_b.offset})
     recorder.sub = sub
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
 
     do_stop_calls = 0
     real_do_stop = sub._do_stop
@@ -141,7 +134,7 @@ async def test_lane_initiated_stop_is_single_flight_and_drains_other_lanes() -> 
     sub._do_stop = counting_do_stop
 
     recorder.latency = 0.001
-    await asyncio.wait_for(_feed(sub, [trigger_a, trigger_b, *parked]), timeout=2.0)
+    await asyncio.wait_for(feed(sub, [trigger_a, trigger_b, *parked]), timeout=2.0)
     recorder.armed.set()
     await wait_until(lambda: sub._stop_task is not None, recorder=recorder)
     await asyncio.wait_for(sub._stop_task, timeout=5.0)
@@ -161,7 +154,7 @@ async def test_external_stop_joins_an_inflight_lane_initiated_stop() -> None:
 
     recorder = _LaneStopRecorder({trigger.offset})
     recorder.sub = sub
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
     gate = recorder.gate(gated)
 
     await sub.consume_one(gated)
@@ -183,12 +176,12 @@ async def test_lane_crash_restart_preserves_queue_and_stop_still_drains(recorder
     """D12 + D7 together: a crashed lane worker restarts on the same stream; a later stop
     still drains fully (the drain is permit-based, task-identity-immune)."""
     sub = make_key_ordered_subscriber(max_workers=2)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
 
     records = [make_record(b"lane-key") for _ in range(4)]
     recorder.raise_for.add(records[0].offset)  # first message kills the worker post-consume
     recorder.latency = 0.001
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)
     await wait_until(lambda: recorder.done_count() == 4, recorder=recorder)
 
     # Order survived the restart, and a graceful stop after it drains (trivially) clean.
@@ -223,7 +216,7 @@ async def test_read_loop_self_registers_and_reregisters_after_supervisor_restart
     """D12: `_intake_task` is restart-stable — the loop registers asyncio.current_task()
     on every (re)entry, so stop() cancels the LIVE loop, not a stale handle."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
     sub.running = True  # what _post_start() does inside the real start()
 
     # First incarnation dies on an uncaught (non-Kafka) error after one good record; the
@@ -249,7 +242,7 @@ async def test_racing_intake_dispatch_during_stop_exits_via_cancellation(recorde
     """The consume_one guard: after stop initiation, a racing dispatch releases its permit
     and raises CancelledError (supervisor-ignored — no restart storm on closed streams)."""
     sub = make_key_ordered_subscriber(max_workers=2)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
     await asyncio.wait_for(sub.stop(), timeout=5.0)
 
     permits_before = sub._limiter.value
@@ -265,7 +258,7 @@ async def test_restart_after_stop_gets_fresh_state_and_no_cross_run_release(reco
 
     monkeypatch.setattr(mod, "_FINALIZATION_GRACE", 0.2)
     sub = make_key_ordered_subscriber(max_workers=2, graceful_timeout=0.2)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
 
     stuck = make_record(b"stuck")
     recorder.gate(stuck)  # never released: forces escalation-cancel of run 1's worker
@@ -280,7 +273,7 @@ async def test_restart_after_stop_gets_fresh_state_and_no_cross_run_release(reco
     sub._spawn_lanes()
     records = [make_record(f"k{i}".encode()) for i in range(4)]
     recorder2.latency = 0.001
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)
     await wait_until(lambda: recorder2.done_count() == 4, recorder=recorder2)
     await asyncio.sleep(0.05)  # any straggling run-1 release would land by now
     assert sub._limiter.value == 4, "cross-run permit corruption (or leak) detected"
@@ -291,13 +284,13 @@ async def test_stop_while_read_loop_blocked_on_the_semaphore(recorder: ConsumeRe
     """Round-2 checklist: the intake can be blocked at the BOUND (not in getone) at stop
     time; shutdown must not wedge and accepted messages still drain."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    _started(sub, recorder)
-    bound = 2
+    start_dispatch(sub, recorder)
+    bound = sub._bound
 
     records = [make_record(b"hot") for _ in range(bound + 2)]
     gates = {r.offset: recorder.gate(r) for r in records}
 
-    feeder = asyncio.get_running_loop().create_task(_feed(sub, records))
+    feeder = asyncio.get_running_loop().create_task(feed(sub, records))
     await wait_until(lambda: recorder.active_count == 1)
     sub._intake_task = feeder  # what the real read loop's self-registration would hold
 
@@ -329,7 +322,7 @@ async def test_cancel_swallowing_handler_degrades_latency_but_stop_returns(
                 await zombie_released.wait()  # swallow the cancel and keep blocking
 
     swallower = Swallower()
-    _started(sub, swallower)
+    start_dispatch(sub, swallower)
     await sub.consume_one(make_record(b"zombie"))
     await wait_until(lambda: len(swallower.events) == 1)
 
@@ -351,8 +344,7 @@ async def test_lane_detached_do_stop_failure_is_logged(recorder: ConsumeRecorder
     """A lane-detached stop is never awaited; a _do_stop crash must be logged via the
     done-callback, not silently dropped."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    logged: list[tuple] = []
-    sub._log = lambda *a, **k: logged.append((a, k))
+    logged = spy_log(sub)
 
     async def exploding_do_stop() -> None:
         raise RuntimeError("stop machinery bug")
@@ -363,8 +355,8 @@ async def test_lane_detached_do_stop_failure_is_logged(recorder: ConsumeRecorder
     lane_recorder = _LaneStopRecorder({trigger.offset})
     lane_recorder.armed.set()  # no feeding to protect in this test
     lane_recorder.sub = sub
-    _started(sub, lane_recorder)
-    # _started replaced consume; re-point _do_stop AFTER state allocation reset _stop_task.
+    start_dispatch(sub, lane_recorder)
+    # start_dispatch replaced consume; re-point _do_stop AFTER state allocation reset _stop_task.
     sub._do_stop = exploding_do_stop
 
     await sub.consume_one(trigger)
@@ -381,7 +373,7 @@ async def test_lane_detached_do_stop_failure_is_logged(recorder: ConsumeRecorder
 
 async def test_external_stop_after_completed_stop_returns_immediately(recorder: ConsumeRecorder) -> None:
     sub = make_key_ordered_subscriber(max_workers=2)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
     await asyncio.wait_for(sub.stop(), timeout=5.0)
     started = time.monotonic()
     await asyncio.wait_for(sub.stop(), timeout=1.0)
@@ -412,8 +404,7 @@ async def test_start_allocates_then_super_starts_then_spawns_lanes(recorder: Con
 
 async def test_log_stop_failure_branches(recorder: ConsumeRecorder) -> None:
     sub = make_key_ordered_subscriber(max_workers=1)
-    logged: list[tuple] = []
-    sub._log = lambda *a, **k: logged.append((a, k))
+    logged = spy_log(sub)
 
     async def ok() -> None:
         return None
@@ -439,12 +430,12 @@ async def test_consume_one_racing_stop_mid_acquire_hands_permit_to_drain(recorde
     """The post-acquire guard: an intake blocked at the bound when stop initiates must
     hand its freshly-won permit back and bow out via CancelledError."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    _started(sub, recorder)
-    bound = 2
+    start_dispatch(sub, recorder)
+    bound = sub._bound
 
     records = [make_record(b"hot") for _ in range(bound)]
     gates = {r.offset: recorder.gate(r) for r in records}
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)
 
     blocked = asyncio.create_task(sub.consume_one(make_record(b"hot")))  # blocked in acquire
     await asyncio.sleep(0.02)
@@ -460,9 +451,7 @@ async def test_consume_one_racing_stop_mid_acquire_hands_permit_to_drain(recorde
     await wait_until(lambda: recorder.done_count() == bound, recorder=recorder)
     await asyncio.sleep(0.01)
     assert sub._limiter.value == bound, "the raced permit was not handed back"
-    for send_stream, _ in sub._lanes:
-        send_stream.close()
-    await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
+    await stop_lanes(sub)
 
 
 async def test_consume_one_releases_permit_when_enqueue_raises(recorder: ConsumeRecorder) -> None:
@@ -471,7 +460,7 @@ async def test_consume_one_releases_permit_when_enqueue_raises(recorder: Consume
     import anyio
 
     sub = make_key_ordered_subscriber(max_workers=1)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
 
     sub._lanes[0][0].close()  # every key maps to the single lane
     permits_before = sub._limiter.value
@@ -486,12 +475,6 @@ async def test_consume_one_releases_permit_when_enqueue_raises(recorder: Consume
 # ---------------------------------------------------------------------------
 
 
-def _spy_log(sub) -> list[tuple]:
-    logged: list[tuple] = []
-    sub._log = lambda *a, **k: logged.append((a, k))
-    return logged
-
-
 async def test_escalation_cancel_is_logged_with_count(recorder: ConsumeRecorder, monkeypatch: pytest.MonkeyPatch) -> None:
     """A drain timeout force-cancels in-flight handlers whose messages are already
     committed (ACK_FIRST) — that must leave a WARNING naming the count, never a
@@ -500,8 +483,8 @@ async def test_escalation_cancel_is_logged_with_count(recorder: ConsumeRecorder,
 
     monkeypatch.setattr(mod, "_FINALIZATION_GRACE", 0.2)
     sub = make_key_ordered_subscriber(max_workers=2, graceful_timeout=0.2)
-    logged = _spy_log(sub)
-    _started(sub, recorder)
+    logged = spy_log(sub)
+    start_dispatch(sub, recorder)
 
     stuck = make_record(b"stuck")
     recorder.gate(stuck)  # never released
@@ -517,12 +500,12 @@ async def test_escalation_cancel_is_logged_with_count(recorder: ConsumeRecorder,
 async def test_disabled_drain_drop_is_logged(recorder: ConsumeRecorder) -> None:
     """Falsy graceful_timeout drops parked messages by configuration — still loud."""
     sub = make_key_ordered_subscriber(max_workers=2, graceful_timeout=None)
-    logged = _spy_log(sub)
-    _started(sub, recorder)
+    logged = spy_log(sub)
+    start_dispatch(sub, recorder)
 
     records = [make_record(b"hot") for _ in range(4)]
     gates = {r.offset: recorder.gate(r) for r in records}
-    await asyncio.wait_for(_feed(sub, records), timeout=2.0)
+    await asyncio.wait_for(feed(sub, records), timeout=2.0)
     await asyncio.wait_for(sub.stop(), timeout=3.0)
 
     assert any(a[0] == logging.WARNING and "drain" in a[1] for a, _ in logged), f"config-disabled drain dropped messages silently; logged={logged}"
@@ -533,10 +516,10 @@ async def test_disabled_drain_drop_is_logged(recorder: ConsumeRecorder) -> None:
 async def test_clean_graceful_stop_logs_no_warning(recorder: ConsumeRecorder) -> None:
     """The escalation WARNING must not fire on a healthy drain (no log noise)."""
     sub = make_key_ordered_subscriber(max_workers=2)
-    logged = _spy_log(sub)
-    _started(sub, recorder)
+    logged = spy_log(sub)
+    start_dispatch(sub, recorder)
     recorder.latency = 0.001
-    await asyncio.wait_for(_feed(sub, [make_record(b"k") for _ in range(3)]), timeout=2.0)
+    await asyncio.wait_for(feed(sub, [make_record(b"k") for _ in range(3)]), timeout=2.0)
     await wait_until(lambda: recorder.done_count() == 3, recorder=recorder)
     await asyncio.wait_for(sub.stop(), timeout=5.0)
     assert not any(a[0] == logging.WARNING for a, _ in logged), f"spurious WARNING: {logged}"
@@ -547,7 +530,7 @@ async def test_lane_restart_mid_drain_still_drains_fully(recorder: ConsumeRecord
     still parked, the supervisor restarts it on the same stream, and a stop() issued
     while they are parked must still drain every accepted message."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    _started(sub, recorder)
+    start_dispatch(sub, recorder)
 
     crash = make_record(b"lane-key")
     recorder.raise_for.add(crash.offset)
@@ -556,7 +539,7 @@ async def test_lane_restart_mid_drain_still_drains_fully(recorder: ConsumeRecord
 
     await sub.consume_one(crash)
     await wait_until(lambda: recorder.done_count() == 1, recorder=recorder)  # crash consumed
-    await asyncio.wait_for(_feed(sub, parked), timeout=2.0)  # parked behind the restart
+    await asyncio.wait_for(feed(sub, parked), timeout=2.0)  # parked behind the restart
 
     stop_task = asyncio.create_task(sub.stop())
     await asyncio.sleep(0.05)
@@ -575,8 +558,8 @@ async def test_double_release_accounting_violation_is_logged_every_time(
     unwinding exception, not kill the lane, not launder through the supervisor's generic
     once-per-identifier message."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    logged = _spy_log(sub)
-    _started(sub, recorder)
+    logged = spy_log(sub)
+    start_dispatch(sub, recorder)
     bound = 2
 
     gated = make_record(b"k")
@@ -594,17 +577,15 @@ async def test_double_release_accounting_violation_is_logged_every_time(
 
     errors = [(a, k) for a, k in logged if a[0] == logging.ERROR and "accounting" in a[1]]
     assert errors, f"double-release invariant violation was not logged: {logged}"
-    for send_stream, _ in sub._lanes:
-        send_stream.close()
-    await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
+    await stop_lanes(sub)
 
 
 async def test_cancelled_background_stop_is_logged(recorder: ConsumeRecorder) -> None:
     """A lane-detached stop cancelled by outer teardown is an equivalent half-stopped
     state to a crashed one — it must leave a trace."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    logged = _spy_log(sub)
-    _started(sub, recorder)
+    logged = spy_log(sub)
+    start_dispatch(sub, recorder)
 
     hang = asyncio.Event()
 
@@ -625,17 +606,15 @@ async def test_cancelled_background_stop_is_logged(recorder: ConsumeRecorder) ->
     await asyncio.sleep(0.01)  # let the done-callback run
     assert any("cancel" in a[1] for a, _ in logged), f"cancelled stop left no trace: {logged}"
     hang.set()
-    for send_stream, _ in sub._lanes:
-        send_stream.close()
-    await asyncio.wait_for(asyncio.gather(*sub.tasks, return_exceptions=True), timeout=5.0)
+    await stop_lanes(sub)
 
 
 async def test_post_stop_dropped_dispatch_is_logged(recorder: ConsumeRecorder) -> None:
     """Messages a racing intake fetched after stop initiation are dropped (documented
     at-most-once) — with a DEBUG trace, not silently."""
     sub = make_key_ordered_subscriber(max_workers=1)
-    logged = _spy_log(sub)
-    _started(sub, recorder)
+    logged = spy_log(sub)
+    start_dispatch(sub, recorder)
     await asyncio.wait_for(sub.stop(), timeout=5.0)
 
     with pytest.raises(asyncio.CancelledError):
@@ -646,8 +625,8 @@ async def test_post_stop_dropped_dispatch_is_logged(recorder: ConsumeRecorder) -
 async def test_keyless_count_is_summarized_at_stop(recorder: ConsumeRecorder) -> None:
     """Once-per-run warn hides magnitude; the stop summary must carry the count."""
     sub = make_key_ordered_subscriber(max_workers=2)
-    logged = _spy_log(sub)
-    _started(sub, recorder)
+    logged = spy_log(sub)
+    start_dispatch(sub, recorder)
     for _ in range(5):
         sub._lane_for(None)
     await asyncio.wait_for(sub.stop(), timeout=5.0)

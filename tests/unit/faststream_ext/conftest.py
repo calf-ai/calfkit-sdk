@@ -2,10 +2,11 @@
 
 The extension's dispatch/lifecycle semantics are tested WITHOUT a broker connection:
 construction needs none (verified — only ``start()``'s ``super().start()`` touches Kafka),
-so tests build the subscriber directly from upstream config types (the same wiring the
-extension's factory mirrors), call the two test seams ``_allocate_dispatch_state()`` /
-``_spawn_lanes()`` instead of ``start()``, and drive ``consume_one`` with real aiokafka
-``ConsumerRecord``s while ``consume()`` is monkeypatched with an instrumented recorder.
+so tests build the subscriber through the REAL production factory against a never-connected
+broker, call the two test seams ``_allocate_dispatch_state()`` / ``_spawn_lanes()`` instead
+of ``start()`` (wrapped here as :func:`start_dispatch`), and drive ``consume_one`` with real
+aiokafka ``ConsumerRecord``s while ``consume()`` is monkeypatched with an instrumented
+recorder.
 
 ``TestKafkaBroker`` is no help here: it calls ``process_message`` directly, bypassing
 ``consume_one`` and all dispatch (verified against ``faststream/kafka/testing.py``).
@@ -20,16 +21,15 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from aiokafka import ConsumerRecord
-from faststream._internal.endpoint.subscriber.call_item import CallsCollection
 from faststream.kafka import KafkaBroker
-from faststream.kafka.subscriber.config import (
-    KafkaSubscriberConfig,
-    KafkaSubscriberSpecificationConfig,
-)
-from faststream.kafka.subscriber.specification import KafkaSubscriberSpecification
+
+from calfkit._faststream_ext._factory import create_key_ordered_subscriber
+from tests.utils import wait_until as _wait_until
 
 if TYPE_CHECKING:
     from faststream.kafka.configs import KafkaBrokerConfig
+
+    from calfkit._faststream_ext._subscriber import KeyOrderedSubscriber
 
 _OFFSETS = itertools.count()
 
@@ -54,30 +54,48 @@ def make_record(key: bytes | None, topic: str = "topic-a", value: bytes = b"v") 
 
 
 def make_key_ordered_subscriber(max_workers: int, topics: tuple[str, ...] = ("topic-a", "topic-b"), **broker_kwargs):
-    """Build a KeyOrderedSubscriber against a never-connected broker, mirroring the
-    constructor wiring of the stock ``create_subscriber`` factory."""
-    from calfkit._faststream_ext._subscriber import KeyOrderedSubscriber
-
+    """Build a KeyOrderedSubscriber through the REAL factory against a never-connected
+    broker — the tests exercise exactly what production constructs."""
     broker = KafkaBroker(**broker_kwargs)
     # What broker.connect() does at _internal/broker/broker.py:106 — without it the
     # supervisor's restart path (which logs first) raises IncorrectState in unit tests.
     broker.config.logger._setup(broker.config.fd_config.context)
-    outer = cast("KafkaBrokerConfig", broker.config)
-    config = KafkaSubscriberConfig(topics=topics, group_id="test-group", _outer_config=outer)
-    calls = CallsCollection()
-    specification = KafkaSubscriberSpecification(
-        _outer_config=outer,
-        calls=calls,
-        specification_config=KafkaSubscriberSpecificationConfig(
-            topics=topics,
-            partitions=(),
-            pattern=None,
-            title_=None,
-            description_=None,
-            include_in_schema=True,
-        ),
+    return create_key_ordered_subscriber(
+        *topics,
+        group_id="test-group",
+        max_workers=max_workers,
+        connection_args={},
+        config=cast("KafkaBrokerConfig", broker.config),
     )
-    return KeyOrderedSubscriber(config, specification, calls, max_workers=max_workers)
+
+
+def start_dispatch(sub: KeyOrderedSubscriber, recorder: ConsumeRecorder) -> None:
+    """What ``start()`` does minus the Kafka-touching ``super().start()``."""
+    sub.consume = recorder
+    sub._allocate_dispatch_state()
+    sub._spawn_lanes()
+
+
+async def feed(sub: KeyOrderedSubscriber, records) -> None:
+    for record in records:
+        await sub.consume_one(record)
+
+
+async def stop_lanes(sub: KeyOrderedSubscriber) -> None:
+    """Test-side teardown: close lanes and let workers exit via close+drain."""
+    for lane in sub._lanes:
+        lane.send.close()
+    await asyncio.wait_for(
+        asyncio.gather(*sub.tasks, return_exceptions=True),
+        timeout=5.0,
+    )
+
+
+def spy_log(sub: KeyOrderedSubscriber) -> list[tuple]:
+    """Capture the subscriber's ``_log(level, message, ...)`` calls as ``(args, kwargs)``."""
+    logged: list[tuple] = []
+    sub._log = lambda *a, **k: logged.append((a, k))
+    return logged
 
 
 def keys_on_distinct_lanes(n: int, max_workers: int) -> list[bytes]:
@@ -167,19 +185,5 @@ def recorder() -> ConsumeRecorder:
 
 
 async def wait_until(predicate, timeout: float = 2.0, recorder: ConsumeRecorder | None = None) -> None:
-    """Await a condition, waking on recorder progress (no busy polling).
-
-    ``asyncio.wait_for``, not ``asyncio.timeout``: the package floor is Python 3.10.
-    """
-
-    async def _wait() -> None:
-        while not predicate():
-            if recorder is not None:
-                recorder.progressed.clear()
-                if predicate():
-                    return
-                await recorder.progressed.wait()
-            else:
-                await asyncio.sleep(0.001)
-
-    await asyncio.wait_for(_wait(), timeout=timeout)
+    """Await a condition, waking on recorder progress (see ``tests.utils.wait_until``)."""
+    await _wait_until(predicate, timeout=timeout, wake=recorder.progressed if recorder is not None else None)

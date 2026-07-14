@@ -385,17 +385,13 @@ class Worker(LifecycleHookMixin):
                 topics,
                 node.publish_topic,
             )
-            # Caller-capable nodes need per-correlation serialization: handling a
-            # continuation is an await-spanning read-modify-write of workflow state (the
-            # agent's tool-call batch aggregation, the in-node fan-out fold) that a
-            # no-affinity concurrent pool would race. They register via the key-ordered
-            # subscriber — up to max_workers continuations in parallel across
-            # correlations, strictly serial and in-order per correlation_id (the
-            # partition key; see calfkit.keying) — the serialization the old max_workers=1
-            # pin provided across all keys within a subscriber, now scoped per key. Observers have no
-            # ordering claim and keep the stock (no-affinity) concurrent subscriber. In
-            # both branches an explicit extra_subscribe_kwargs["max_workers"] wins over
-            # the worker value and is passed exactly once.
+            # Caller-capable nodes register key-ordered: parallel across correlations,
+            # strictly serial and in-order per correlation_id, the partition key (see
+            # BaseNodeDef.is_caller_capable for WHY continuations need per-workflow
+            # serialization, and calfkit.keying for the key). Observers have no ordering
+            # claim and keep the stock concurrent subscriber. In both branches an
+            # explicit extra_subscribe_kwargs["max_workers"] wins over the worker value
+            # and is passed exactly once.
             subscribe_kwargs = dict(self._extra_subscribe_kwargs)
             if node.is_caller_capable:
                 max_workers = subscribe_kwargs.pop("max_workers", self._max_workers)
