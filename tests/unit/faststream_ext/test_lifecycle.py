@@ -462,7 +462,7 @@ async def test_consume_one_releases_permit_when_enqueue_raises(recorder: Consume
     sub = make_key_ordered_subscriber(max_workers=1)
     start_dispatch(sub, recorder)
 
-    sub._lanes[0][0].close()  # every key maps to the single lane
+    sub._lanes[0].send.close()  # every key maps to the single lane
     permits_before = sub._limiter.value
     with pytest.raises(anyio.ClosedResourceError):
         await sub.consume_one(make_record(b"any"))
@@ -650,3 +650,29 @@ async def test_log_stop_failure_survives_a_torn_down_logger(recorder: ConsumeRec
     task = asyncio.get_running_loop().create_task(boom())
     await asyncio.gather(task, return_exceptions=True)
     sub._log_stop_failure(task)  # must not raise
+
+
+async def test_double_release_log_survives_a_torn_down_logger(recorder: ConsumeRecorder) -> None:
+    """Double-fault: the accounting tripwire fires while the logger is torn down — the
+    guard must swallow the logging failure so it cannot mask the unwinding exception or
+    kill the lane."""
+    sub = make_key_ordered_subscriber(max_workers=1)
+
+    def broken_log(*a, **k) -> None:
+        raise RuntimeError("logger state torn down")
+
+    start_dispatch(sub, recorder)
+    sub._log = broken_log
+
+    gated = make_record(b"k")
+    gate = recorder.gate(gated)
+    await sub.consume_one(gated)
+    await wait_until(lambda: recorder.active_count == 1, recorder=recorder)
+
+    sub._limiter.release()  # value hits max while one message runs
+    gate.set()  # the lane's finally-release now trips ValueError AND the log raises
+
+    follow_up = make_record(b"k")
+    await sub.consume_one(follow_up)
+    await wait_until(lambda: recorder.done_count() == 2, recorder=recorder)  # lane survived
+    await stop_lanes(sub)

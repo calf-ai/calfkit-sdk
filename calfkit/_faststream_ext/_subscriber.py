@@ -199,19 +199,25 @@ class KeyOrderedSubscriber(DefaultSubscriber):
             # then their `async for` ends (anyio: EndOfStream only when the buffer is
             # empty AND no sender is open)
         timeout = self._outer_config.graceful_timeout
-        drained = await self._drain(timeout)
+        acquired = await self._drain(timeout)
+        drained = acquired == self._bound
         pending = [task for task in self.tasks if not task.done()]
         if not drained:
-            if pending:
+            # Un-released permits = messages parked or executing, exactly (the drain
+            # holds `acquired`, the limiter holds the rest of the slack) — accurate on
+            # both the timeout and the falsy-timeout path, unlike a task count, which
+            # would include idle lane workers that merely haven't seen EndOfStream yet.
+            abandoned = self._bound - acquired - self._limiter.value
+            if abandoned > 0:
                 # Under ACK_FIRST these messages are already committed: cancelling their
                 # handlers abandons them permanently. Never let that look like a clean
                 # shutdown.
                 cause = f"graceful drain timed out after {timeout}s" if timeout else "graceful drain disabled (falsy graceful_timeout)"
                 self._log(
                     logging.WARNING,
-                    f"key-ordered subscriber: {cause}; force-cancelling {len(pending)} "
-                    "worker task(s) with messages parked or in flight — their offsets "
-                    "are already committed (ACK_FIRST) and they will NOT be reprocessed",
+                    f"key-ordered subscriber: {cause}; force-cancelling with {abandoned} "
+                    "message(s) parked or in flight — their offsets are already "
+                    "committed (ACK_FIRST) and they will NOT be reprocessed",
                 )
             for task in pending:
                 task.cancel()  # escalation: cancel NOW so the stuck handlers' MultiLock
@@ -230,18 +236,23 @@ class KeyOrderedSubscriber(DefaultSubscriber):
             # timeout — a cancel-swallowing handler is abandoned, not waited on).
             await asyncio.wait(pending, timeout=_FINALIZATION_GRACE)
 
-    async def _drain(self, timeout: float | None) -> bool:
+    async def _drain(self, timeout: float | None) -> int:
         """Acquire every permit — i.e. wait until no message is parked or executing.
 
-        Falsy timeout means no drain wait at all, mirroring upstream
-        ``MultiLock.wait_release`` (and upstream's cancel-the-buffer behavior).
+        Returns the number of permits acquired (== ``self._bound`` on a full drain; the
+        caller uses the shortfall plus the limiter's remaining value to compute exactly
+        how many messages are being abandoned). Falsy timeout means no drain wait at
+        all, mirroring upstream ``MultiLock.wait_release`` (and upstream's
+        cancel-the-buffer behavior).
         """
         if not timeout:
-            return False
-        with anyio.move_on_after(timeout) as scope:
+            return 0
+        acquired = 0
+        with anyio.move_on_after(timeout):
             for _ in range(self._bound):
                 await self._limiter.acquire()
-        return not scope.cancelled_caught
+                acquired += 1
+        return acquired
 
     def _log_stop_failure(self, task: asyncio.Task[None]) -> None:
         try:
@@ -327,8 +338,13 @@ class KeyOrderedSubscriber(DefaultSubscriber):
                     # framework bug. Log it specifically EVERY time (the supervisor's
                     # generic trace dedups per exception identity) and keep the lane
                     # alive; re-raising here would also mask whatever exception this
-                    # finally is unwinding (e.g. the shutdown cancellation).
-                    self._log(
-                        logging.ERROR,
-                        "key-ordered permit accounting invariant violated (double release) — a framework bug, please report; the lane continues",
-                    )
+                    # finally is unwinding (e.g. the shutdown cancellation). The log
+                    # is guarded like _log_stop_failure's: a torn-down logger must not
+                    # convert the tripwire into a masking raise either.
+                    try:
+                        self._log(
+                            logging.ERROR,
+                            "key-ordered permit accounting invariant violated (double release) — a framework bug, please report; the lane continues",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
