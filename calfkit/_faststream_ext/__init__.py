@@ -39,3 +39,8 @@ This package exists to be deleted. Upstream feature request: (link TBD — draft
 package, filed separately). When FastStream ships an equivalent (e.g. ``ordering="key"``),
 delete this package and flip call sites to the native option.
 """
+
+from ._broker import KeyOrderedRegistratorMixin
+from ._subscriber import KeyOrderedSubscriber
+
+__all__ = ["KeyOrderedRegistratorMixin", "KeyOrderedSubscriber"]

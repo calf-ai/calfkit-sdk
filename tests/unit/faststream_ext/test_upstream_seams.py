@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import anyio
 import pytest
 from faststream._internal.broker.registrator import Registrator
+from faststream._internal.constants import EMPTY
 from faststream._internal.endpoint.subscriber import SubscriberSpecification
 from faststream._internal.endpoint.subscriber.call_item import CallsCollection
 from faststream._internal.endpoint.subscriber.mixins import TasksMixin
@@ -204,7 +205,9 @@ def test_subscriber_config_derives_auto_commit_from_ack_first() -> None:
     """The mirror MUST build a real KafkaSubscriberConfig: its __post_init__ sets
     enable_auto_commit from ack_first (ACK_FIRST resolution incl. the EMPTY default)."""
     config = KafkaSubscriberConfig(topics=("t",), _outer_config=SimpleNamespace(ack_policy=None))
-    # Default (EMPTY) resolves to ACK_FIRST when the outer config carries no policy.
+    # Default (EMPTY sentinel) resolves to ACK_FIRST when the outer config carries no
+    # policy — the resolution chain the extension's factory passes _ack_policy=EMPTY into.
+    assert KafkaSubscriberConfig.__dataclass_fields__["_ack_policy"].default_factory() is EMPTY
     config_default = KafkaSubscriberConfig(topics=("t",))
     assert config_default.ack_first is True
     assert config_default.connection_args["enable_auto_commit"] is True
