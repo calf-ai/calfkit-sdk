@@ -60,6 +60,7 @@ def test_to_topology_returns_fresh_objects_never_aliasing_the_source() -> None:
     assert topo is not ws
     assert topo.call_stack is not ws.call_stack
     assert topo.call_stack._internal_list is not ws.call_stack._internal_list
+    assert topo.call_stack._internal_list[0] is not ws.call_stack._internal_list[0]  # frames are copies, not shared
     # mutating the source stack afterward must not leak into the projection
     ws.call_stack.push(_frame(9))
     assert len(topo.call_stack) == 1

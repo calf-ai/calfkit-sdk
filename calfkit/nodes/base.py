@@ -822,7 +822,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             yield report, True  # rung 2 — lean carriage (state elided) + full report
             yield report.to_minimal(), True  # rung 3 — lean carriage + minimal report
 
-        mirror = _mirror(report, lean=False)  # bound for the exhausted-ladder floor below
         for rung_report, lean in _ladder():
             mirror = _mirror(rung_report, lean=lean)
             try:
@@ -846,13 +845,15 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 continue
             except Exception:
                 # A non-size publish failure (e.g. a dead/unreachable broker): you cannot publish your way
-                # out of it, so floor (§6.8 log-only-guarded — never re-enter the fault path). The broadcast
-                # mirror still carries this rung's fault for ops taps.
+                # out of it, so floor (§6.8 log-only-guarded — never re-enter the fault path). Log the REPORT
+                # in full: the broadcast mirror rides this same producer, so on a dead broker it cannot
+                # deliver either — this ERROR is then the only record the fault ever existed.
                 logger.exception(
-                    "[%s] fault delivery to callback_topic=%s failed node=%s; the fault still broadcasts on publish_topic",
+                    "[%s] fault delivery to callback_topic=%s failed node=%s; flooring report=%s",
                     correlation_id[:8],
                     callback_topic,
                     self.node_id,
+                    rung_report.model_dump_json(),
                 )
                 return mirror, "fault"
             # §13: each escalation hop is logged WARNING — error_type / origin / remaining stack depth
@@ -868,8 +869,10 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             return mirror, "fault"
 
         # Every rung overflowed on size → floor with the leanest mirror built (lean carriage + minimal
-        # report). This is the last silent-drop guard; after the loop ``mirror``/``rung_report`` hold the
-        # final (rung-3 lean+minimal) attempt — the ladder always yields, so both are bound.
+        # report). After the loop ``mirror``/``rung_report`` hold the final (rung-3 lean+minimal) attempt —
+        # the ladder always yields three rungs, so both are bound. This ERROR is the last silent-drop guard
+        # and, here, the ONLY record: the broadcast mirror rides the same producer that just rejected this
+        # very envelope on size, so it cannot carry the fault to ops taps either — hence the full report JSON.
         logger.error(
             "[%s] fault delivery to callback_topic=%s failed even after eliding the run state and stripping to the minimal report"
             " node=%s; flooring report=%s",
@@ -890,7 +893,8 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         if isinstance(mirror.reply, FaultMessage):
             # Stamp x-calf-error-type on the broadcast mirror too (§4.2/§13) so faults are broker-
             # filterable on the broadcast rail, matching the point-to-point publish. Source it from the
-            # SENT report (mirror.reply), which is the minimal report if _publish_fault stripped (§4.3).
+            # SENT report (mirror.reply) — the minimal report if _publish_fault degraded to the ladder's
+            # last rung (state-elision spec D1). to_minimal preserves error_type, so the header is stable.
             headers = headers | {HDR_ERROR_TYPE: mirror.reply.error.error_type}
         return Response(mirror, headers=headers)
 

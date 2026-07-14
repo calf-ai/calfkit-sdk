@@ -20,6 +20,7 @@ from calfkit._registry import handler
 from calfkit.exceptions import NodeFaultError
 from calfkit.models import CallFrame, CallFrameStack, Envelope, ReturnCall, SessionRunContext, State, TailCall, TextPart, WorkflowState
 from calfkit.models.error_report import ErrorReport
+from calfkit.models.marker import ToolCallMarker
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.state import OverridesState
@@ -55,7 +56,14 @@ class _SizeThresholdBroker:
     """Raises ``MessageSizeTooLargeError`` iff the serialized envelope exceeds ``limit`` bytes,
     else records — models aiokafka's client-side ``_serialize`` size check (the real overflow the
     §D1 ladder degrades against), unlike a fail-*count* stub. The ladder shrinks the envelope rung
-    by rung, so a lean rung's smaller envelope can slip under a limit the full one overflowed."""
+    by rung, so a lean rung's smaller envelope can slip under a limit the full one overflowed.
+
+    Fidelity boundary: this measures ``model_dump_json()`` bytes, not aiokafka's
+    ``estimate_size_in_bytes`` (which also counts key/headers/record framing), so the absolute
+    ``limit`` values below are tuned to this measure. What the ladder actually depends on is the
+    strict size ORDERING (full > lean+full-report > lean+minimal), which holds under either measure
+    because each rung strictly drops content — so no test here can pass where a real broker would
+    fail. ``test_ladder_rungs_shrink_monotonically`` pins that premise; O-2 is the real-broker guard."""
 
     def __init__(self, limit: int) -> None:
         self.published: list[tuple[str, Any, dict[str, str]]] = []
@@ -280,6 +288,75 @@ class TestPublishFault:
         assert mirror.reply.error.causes == [] and mirror.reply.error.details == {}  # the lean+minimal mirror
         assert any(r.levelno == logging.ERROR and "flooring" in r.getMessage() for r in caplog.records)
 
+    async def test_ladder_rungs_shrink_monotonically(self) -> None:
+        # The ladder's PREMISE: each rung is strictly smaller than the one above, so degrading can only
+        # ever help. Pinned independently of the tuned `limit` values the other tests use — if a future
+        # change made a lean rung no smaller (e.g. stopped clearing deps), degrading would be pointless
+        # and this fails loudly, even though the threshold-tuned tests might still pass.
+        node = _node()
+        report = ErrorReport(error_type="calf.exception", message="boom", details={"blob": "x" * 2000}, causes=[ErrorReport(error_type="calf.inner")])
+        sizes: list[int] = []
+
+        class _MeasuringBroker:
+            async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+                sizes.append(len(envelope.model_dump_json().encode()))
+                raise MessageSizeTooLargeError("force the next rung")
+
+        inbound = _big_framed_envelope(filler_bytes=4000, callback_topic="caller.return")
+        await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", _MeasuringBroker())
+
+        assert len(sizes) == 3  # all three rungs attempted
+        full, lean_full, lean_minimal = sizes
+        assert full > lean_full > lean_minimal  # eliding state shrinks it; then stripping the report shrinks it more
+
+    async def test_lean_rung_preserves_the_ancestor_routing_topology(self) -> None:
+        # The lean carriage's WHOLE POINT: it sheds call *content* but keeps the routing skeleton the NEXT
+        # escalation hop needs. With a 2-frame stack (grandparent below, answered frame on top), the lean
+        # mirror must still carry the grandparent frame with its callback_topic/frame_id/tag/marker/fanout_id
+        # intact and only payload/overrides nulled. Without this, a regression that shipped an empty stack on
+        # a lean rung would deliver THIS hop's fault but strand the next one (no callback_topic to address) —
+        # the exact silent-drop class this feature exists to kill.
+        node = _node()
+        pad = "p" * 4000
+        grandparent = CallFrame(
+            target_topic="orchestrator.in",
+            callback_topic="grandparent.return",
+            frame_id="gp-frame",
+            payload={"pad": pad},
+            overrides=OverridesState(model_settings={"temperature": 0.1}),
+            tag="gp-tag",
+            marker=ToolCallMarker(tool_name="gp_tool", tool_call_id="gp-tc", args={"q": 1}),
+            fanout_id="gp-frame",
+            caller_node_id="gp-caller",
+            caller_node_kind="agent",
+        )
+        answered = CallFrame(target_topic="callee.in", callback_topic="caller.return", payload={"pad": pad}, tag="t1")
+        stack = CallFrameStack()
+        stack.push(grandparent)
+        stack.push(answered)
+        inbound = Envelope(
+            internal_workflow_state=WorkflowState(call_stack=stack, metadata={"m": pad}),
+            context=SessionRunContext(state=State(metadata=pad), deps={"big": pad}),
+        )
+        broker = _SizeThresholdBroker(limit=2000)  # rung 1 (full, ~16 KB) overflows; the lean rung fits
+
+        mirror, _kind = await node._publish_fault(ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", broker)
+
+        assert broker.attempts == 2  # degraded to the lean rung
+        _topic, env, _headers = broker.published[0]
+        # the answered frame was popped; the grandparent survives as the next hop's return address
+        frames = env.internal_workflow_state.call_stack._internal_list
+        assert len(frames) == 1
+        gp = frames[0]
+        assert gp.callback_topic == "grandparent.return"  # the next escalation hop can still be addressed
+        assert gp.frame_id == "gp-frame" and gp.tag == "gp-tag"  # slot identity survives
+        assert gp.marker == ToolCallMarker(tool_name="gp_tool", tool_call_id="gp-tc", args={"q": 1})
+        assert gp.fanout_id == "gp-frame"  # a sibling reply still routes into the durable fold
+        assert gp.caller_node_id == "gp-caller" and gp.caller_node_kind == "agent"
+        assert gp.payload is None and gp.overrides is None  # only the CONTENT is shed
+        assert env.internal_workflow_state.metadata is None
+        assert mirror.reply.state_elided is True
+
     async def test_non_size_failure_on_a_lean_rung_floors_without_trying_lower_rungs(self, caplog: pytest.LogCaptureFixture) -> None:
         # A NON-size failure mid-ladder (size overflow at rung 1, then a dead broker at rung 2) cannot be
         # published-around → floor immediately with the CURRENT (lean) mirror; rung 3 is never attempted.
@@ -295,7 +372,10 @@ class TestPublishFault:
         assert broker.attempts == 2 and broker.published == []  # rung 1 (size) + rung 2 (non-size floor); no rung 3
         assert isinstance(mirror.reply, FaultMessage)
         assert mirror.reply.state_elided is True  # floored on the lean rung
-        assert any(r.levelno == logging.ERROR and "failed" in r.getMessage() for r in caplog.records)
+        # The floor log must carry the report: on a dead-broker floor the broadcast mirror rides the SAME
+        # producer, so it cannot deliver either — this ERROR is the only record the fault ever existed.
+        floors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and "failed" in r.getMessage()]
+        assert floors and any("calf.exception" in m for m in floors)
 
     async def test_escalating_an_inbound_elided_fault_restamps_elided_at_rung_1(self) -> None:
         # Propagation (spec D3): when the inbound fault being answered was ITSELF state-elided, a rung-1
