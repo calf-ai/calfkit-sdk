@@ -25,20 +25,9 @@ from calfkit.models import (
 )
 from calfkit.models.reply import ReturnMessage
 from calfkit.nodes.node import NodeDef
+from tests.fakes import CaptureBroker
 
 _CORR = "corr-1234"
-
-
-class _CaptureBroker:
-    """Node-side broker stub: records (topic, headers, envelope) per publish."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, str], Any]] = []
-        self.keys: list[bytes] = []
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.published.append((topic, headers, envelope))
-        self.keys.append(key)
 
 
 def _envelope(
@@ -81,27 +70,27 @@ class _TailNode(NodeDef[Any]):
         return TailCall("downstream", ctx.state)
 
 
-async def _run(node: NodeDef[Any], env: Envelope, broker: _CaptureBroker) -> Any:
+async def _run(node: NodeDef[Any], env: Envelope, broker: CaptureBroker) -> Any:
     return await node.handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "go"}, broker=cast(Any, broker))
 
 
 class TestReturnCallStamping:
     async def test_callback_publish_is_kind_return_with_reply_slot(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         node = _RetNode(node_id="n", subscribe_topics=["t"])
         await _run(node, _envelope(frame_id="F1", tag="call-7"), broker)
 
         assert len(broker.published) == 1
-        topic, headers, env = broker.published[0]
-        assert topic == "reply.topic"
-        assert headers[HDR_KIND] == "return"
-        assert isinstance(env.reply, ReturnMessage)
-        assert env.reply.in_reply_to == "F1"  # echoes the popped frame_id
-        assert env.reply.tag == "call-7"  # echoes the popped frame tag
-        assert env.reply.parts == [TextPart(text="hello")]  # value coerced to parts
+        c = broker.published[0]
+        assert c.topic == "reply.topic"
+        assert c.headers[HDR_KIND] == "return"
+        assert isinstance(c.message.reply, ReturnMessage)
+        assert c.message.reply.in_reply_to == "F1"  # echoes the popped frame_id
+        assert c.message.reply.tag == "call-7"  # echoes the popped frame tag
+        assert c.message.reply.parts == [TextPart(text="hello")]  # value coerced to parts
 
     async def test_mirror_response_carries_kind_return_and_reply(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         node = _RetNode(node_id="n", subscribe_topics=["t"])
         resp = await _run(node, _envelope(), broker)
         assert resp.headers[HDR_KIND] == "return"
@@ -110,35 +99,35 @@ class TestReturnCallStamping:
 
 class TestCallStamping:
     async def test_call_publish_is_kind_call_with_no_reply(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _run(_CallNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
-        _topic, headers, env = broker.published[0]
-        assert headers[HDR_KIND] == "call"
-        assert env.reply is None
+        c = broker.published[0]
+        assert c.headers[HDR_KIND] == "call"
+        assert c.message.reply is None
 
     async def test_mirror_response_is_kind_call(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         resp = await _run(_CallNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
         assert resp.headers[HDR_KIND] == "call"
 
 
 class TestFanOutStamping:
     async def test_each_sibling_is_kind_call_with_no_reply(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _run(_FanNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
-        assert {t for t, _, _ in broker.published} == {"a", "b"}
-        for _topic, headers, env in broker.published:
-            assert headers[HDR_KIND] == "call"
-            assert env.reply is None
+        assert {c.topic for c in broker.published} == {"a", "b"}
+        for c in broker.published:
+            assert c.headers[HDR_KIND] == "call"
+            assert c.message.reply is None
 
 
 class TestTailCallStamping:
     async def test_tailcall_publish_is_kind_call_with_no_reply(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _run(_TailNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
-        _topic, headers, env = broker.published[0]
-        assert headers[HDR_KIND] == "call"
-        assert env.reply is None
+        c = broker.published[0]
+        assert c.headers[HDR_KIND] == "call"
+        assert c.message.reply is None
 
 
 class TestCorrelationKeying:
@@ -151,22 +140,22 @@ class TestCorrelationKeying:
     """
 
     async def test_call_publish_is_correlation_keyed(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _run(_CallNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
         assert broker.keys == [_CORR.encode()]
 
     async def test_returncall_callback_publish_is_correlation_keyed(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _run(_RetNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
         assert broker.keys == [_CORR.encode()]
 
     async def test_tailcall_publish_is_correlation_keyed(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _run(_TailNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
         assert broker.keys == [_CORR.encode()]
 
     async def test_fanout_siblings_are_all_correlation_keyed(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await _run(_FanNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
         assert broker.keys == [_CORR.encode(), _CORR.encode()]
 
@@ -176,7 +165,7 @@ class TestNoReplyMirrorClearsInboundReply:
     fans out / goes silent must NOT re-broadcast the inbound reply on its mirror."""
 
     async def test_fanout_mirror_clears_inbound_reply(self) -> None:
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
         resp = await _run(_FanNode(node_id="n", subscribe_topics=["t"]), _envelope(reply=leak), broker)
         assert resp.body.reply is None
@@ -189,7 +178,7 @@ class TestNoReplyMirrorClearsInboundReply:
 
         node = _DeclineNode(node_id="n", subscribe_topics=["t"])
         leak = ReturnMessage(in_reply_to="prev", tag="t", parts=[TextPart(text="LEAK")])
-        resp = await _run(node, _envelope(reply=leak), _CaptureBroker())
+        resp = await _run(node, _envelope(reply=leak), CaptureBroker())
         assert resp.body.reply is None
         assert resp.headers[HDR_KIND] == "call"
 

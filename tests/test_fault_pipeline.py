@@ -24,46 +24,11 @@ from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.state import OverridesState
 from calfkit.nodes.base import BaseNodeDef
+from tests.fakes import CaptureBroker
 
 
 def _node(**kwargs: object) -> BaseNodeDef:
     return BaseNodeDef(node_id="orchestrator", subscribe_topics=["in"], **kwargs)
-
-
-class _CaptureBroker:
-    """Records (topic, envelope, headers) per publish."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, Any, dict[str, str]]] = []
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.published.append((topic, envelope, headers))
-
-
-class _FailThenCaptureBroker:
-    """Raises on the FIRST publish (a size-class failure), captures the rest — exercises the §4.3
-    strip-and-retry: the minimal fault must reach the caller on the retry."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, Any, dict[str, str]]] = []
-        self._calls = 0
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self._calls += 1
-        if self._calls == 1:
-            raise MessageSizeTooLargeError("simulated message-too-large on the full fault")
-        self.published.append((topic, envelope, headers))
-
-
-class _AlwaysFailBroker:
-    """Every publish raises the given error — exercises _publish_fault's floor arms (the fault
-    delivery itself fails and cannot be published-around, so it floors without silently dropping)."""
-
-    def __init__(self, exc: BaseException) -> None:
-        self._exc = exc
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        raise self._exc
 
 
 def _framed_envelope(*, payload: object = None, callback_topic: str | None = "cb") -> Envelope:
@@ -123,13 +88,14 @@ class TestPublishFault:
         inbound = _framed_envelope(callback_topic="caller.return")
         frame_id = inbound.internal_workflow_state.current_frame.frame_id
         snapshot = node._stack_snapshot(inbound)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         mirror, kind = await node._publish_fault(ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", broker)
 
         assert kind == "fault"
         assert len(broker.published) == 1
-        topic, env, headers = broker.published[0]
+        call = broker.published[0]
+        topic, env, headers = call.topic, call.message, call.headers
         assert topic == "caller.return"
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"
@@ -146,7 +112,7 @@ class TestPublishFault:
         # full report), no point-to-point publish, but the broadcast mirror still fires (§13).
         node = _node()
         inbound = _framed_envelope(callback_topic=None)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         with caplog.at_level(logging.ERROR):
             mirror, kind = await node._publish_fault(ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", broker)
         assert kind == "fault"
@@ -159,9 +125,9 @@ class TestPublishFault:
         node = _node()
         report = ErrorReport(error_type="calf.model.context_window_exceeded")
         inbound = _framed_envelope(callback_topic="ancestor.return")
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
-        published_report = broker.published[0][1].reply.error
+        published_report = broker.published[0].message.reply.error
         assert published_report.report_id == report.report_id
         assert published_report.error_type == report.error_type
         assert published_report.causes == []  # not wrapped
@@ -179,13 +145,14 @@ class TestPublishFault:
             causes=[ErrorReport(error_type="calf.inner", message="inner")],
         )
         inbound = _framed_envelope(callback_topic="caller.return")
-        broker = _FailThenCaptureBroker()
+        broker = CaptureBroker(raises=MessageSizeTooLargeError("simulated message-too-large on the full fault"), fail_on={1})
 
         mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
 
         assert kind == "fault"
         assert len(broker.published) == 1  # the retry delivered (the first, full publish raised)
-        _topic, env, headers = broker.published[0]
+        call = broker.published[0]
+        env, headers = call.message, call.headers
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"  # identity preserved
         assert env.reply.error.causes == [] and env.reply.error.details == {}  # stripped to minimal
@@ -198,7 +165,7 @@ class TestPublishFault:
         node = _node()
         report = ErrorReport(error_type="calf.model.context_window_exceeded")
         inbound = _framed_envelope(callback_topic="caller.return")
-        resp = await node._fault_response(report, node._stack_snapshot(inbound), inbound, "cid", _CaptureBroker())
+        resp = await node._fault_response(report, node._stack_snapshot(inbound), inbound, "cid", CaptureBroker())
         assert resp.headers[HDR_KIND] == "fault"
         assert resp.headers[HDR_ERROR_TYPE] == "calf.model.context_window_exceeded"
 
@@ -208,7 +175,7 @@ class TestPublishFault:
         node = _node()
         report = ErrorReport(error_type="calf.exception", message="boom", causes=[ErrorReport(error_type="calf.inner")])
         inbound = _framed_envelope(callback_topic="caller.return")
-        broker = _AlwaysFailBroker(KafkaError("broker down"))
+        broker = CaptureBroker(raises=KafkaError("broker down"))
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
             mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
         assert kind == "fault"
@@ -222,7 +189,7 @@ class TestPublishFault:
         node = _node()
         report = ErrorReport(error_type="calf.exception", message="boom", details={"big": "x" * 100}, causes=[ErrorReport(error_type="calf.inner")])
         inbound = _framed_envelope(callback_topic="caller.return")
-        broker = _AlwaysFailBroker(MessageSizeTooLargeError("too big even minimal"))
+        broker = CaptureBroker(raises=MessageSizeTooLargeError("too big even minimal"))
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
             mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
         assert kind == "fault"
@@ -251,12 +218,13 @@ class TestFaultBoundary:
         # as a typed calf.exception fault (no propagation out of the handler).
         node = _RaisingNode(node_id="n", subscribe_topics=["in"])
         inbound = _framed_envelope(callback_topic="caller.return")
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         resp = await node.handler(inbound, "cid", {}, broker)
 
         assert len(broker.published) == 1
-        topic, env, headers = broker.published[0]
+        call = broker.published[0]
+        topic, env, headers = call.topic, call.message, call.headers
         assert topic == "caller.return"
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"
@@ -270,11 +238,11 @@ class TestFaultBoundary:
         # §5.E(1): a node body `raise B from A` → the published fault carries the harvested exception
         # slot AND the __cause__ chain mapped onto causes; the class-name details breadcrumb is gone.
         node = _ChainRaisingNode(node_id="n", subscribe_topics=["in"])
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        report = broker.published[0][1].reply.error
+        report = broker.published[0].message.reply.error
         assert report.error_type == "calf.exception"
         assert report.exception is not None and report.exception.type == "RuntimeError"
         assert len(report.causes) == 1
@@ -287,11 +255,11 @@ class TestFaultBoundary:
         node = _RaisingNode(node_id="n", subscribe_topics=["in"])
         inbound = _framed_envelope(callback_topic="caller.return")
         frame = inbound.internal_workflow_state.current_frame
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node.handler(inbound, "cid", {}, broker)
 
-        report = broker.published[0][1].reply.error
+        report = broker.published[0].message.reply.error
         assert report.origin_frame_id == frame.frame_id
         assert [(f.frame_id, f.target_topic) for f in report.frame_chain] == [(frame.frame_id, frame.target_topic)]
 
@@ -306,11 +274,11 @@ class TestFaultBoundary:
             consulted.append(True)
             return "would-recover-if-consulted"
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
         assert consulted == []  # bypassed
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "billing.quota_exceeded"
 
@@ -321,10 +289,10 @@ class TestFaultBoundary:
         def recover(ctx: object, fault: ErrorReport) -> str:
             return "recovered-value"
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]  # a normal return, not a fault
+        env = broker.published[0].message  # a normal return, not a fault
         assert isinstance(env.reply, ReturnMessage)
         assert env.reply.parts == [TextPart(text="recovered-value")]
 
@@ -335,10 +303,10 @@ class TestFaultBoundary:
         def decline(ctx: object, fault: ErrorReport) -> None:
             return None
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"
 
@@ -370,7 +338,7 @@ class TestStructuredLogging:
     async def test_synthesis_logs_error_with_traceback(self, caplog: pytest.LogCaptureFixture) -> None:
         # A node-own raise synthesizes the fault AT ORIGIN with an ERROR carrying the traceback.
         node = _RaisingNode(node_id="n", subscribe_topics=["in"])
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
             await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
         synth = [r for r in caplog.records if r.levelno == logging.ERROR and r.exc_info is not None]
@@ -382,7 +350,7 @@ class TestStructuredLogging:
         # breadcrumb used to provide — sourced from the harvested slot (guarded for the build_safe
         # fallback, which leaves exception=None).
         node = _RaisingNode(node_id="n", subscribe_topics=["in"])  # body raises RuntimeError
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
             await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
         synth = [r for r in caplog.records if r.levelno == logging.ERROR and r.exc_info is not None]
@@ -399,7 +367,7 @@ class TestStructuredLogging:
         stack.push(CallFrame(target_topic="orchestrator.in", callback_topic="caller.return", payload=None, tag="t1"))
         inbound = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
         report = ErrorReport(error_type="calf.exception", message="boom", origin_node_id="origin-node")
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
             await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
         warns = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -416,7 +384,7 @@ class TestStructuredLogging:
         def recover(ctx: object, fault: ErrorReport) -> str:
             return "recovered-value"
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         with caplog.at_level(logging.INFO, logger="calfkit.nodes._seams"):
             await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
         infos = [r for r in caplog.records if r.levelno == logging.INFO]
@@ -443,11 +411,11 @@ class TestSeamPrecision:
 
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="callee-frame", tag="tc", error=inbound_report)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"  # the before_node accident
         assert inbound_report.report_id in [c.report_id for c in env.reply.error.causes]  # handled inbound chained
@@ -468,11 +436,11 @@ class TestSeamPrecision:
 
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="cf", tag="tc", error=inbound_report)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"  # the body raise
         assert env.reply.error.causes == []  # NOT the before/after-node arm → no inbound chaining
@@ -492,7 +460,7 @@ class TestSeamPrecision:
             seen.append(ctx.exception)
             return None  # keep the recovered output
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
         assert seen == [None]  # exception cleared once on_node_error recovered
@@ -517,10 +485,10 @@ class TestSeamPrecision:
         def boom_after(ctx: SeamContext[State], output: object) -> None:
             raise ValueError("after_node boom")  # the recovery-path after_node raises (exc2)
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         report = env.reply.error
         # the published fault is from the recovery-path after_node raise (exc2)
@@ -545,11 +513,11 @@ class TestSeamPrecision:
 
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="callee-frame", tag="tc", error=inbound_report)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         report = env.reply.error
         assert report.error_type == "calf.exception"
@@ -571,10 +539,10 @@ class TestSeamPrecision:
             consulted.append(True)
             return "would-recover-if-consulted"
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "billing.quota_exceeded"  # minted verbatim
         assert consulted == []  # bypassed on_node_error, even from before_node
@@ -593,10 +561,10 @@ class TestSeamPrecision:
             consulted.append(True)
             return "would-recover-if-consulted"
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "billing.quota_exceeded"  # minted verbatim
         assert consulted == []  # bypassed on_node_error, even from after_node
@@ -610,10 +578,10 @@ class TestSeamPrecision:
         def boom(ctx: SeamContext[State], output: object) -> None:
             raise RuntimeError("after_node boom")
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"
         assert env.reply.error.causes == []  # call-kind ingress: nothing to chain
@@ -632,10 +600,10 @@ class TestSeamFailureBranches:
         def mint(ctx: object, fault: ErrorReport) -> None:
             raise NodeFaultError("billing.quota_exceeded", message="minted inside the error seam")
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "billing.quota_exceeded"  # the minted fault, verbatim
         assert any(c.error_type == "calf.exception" for c in env.reply.error.causes)  # original chained (§6.5)
@@ -653,10 +621,10 @@ class TestSeamFailureBranches:
         def boom(ctx: SeamContext[State], output: object) -> None:
             raise RuntimeError("after_node on the recovery boom")
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"  # report2 — the after_node failure
         assert any("body boom" in c.message for c in env.reply.error.causes)  # the ORIGINAL chained (§6.8)
@@ -675,10 +643,10 @@ class TestSeamFailureBranches:
         def mint(ctx: SeamContext[State], output: object) -> None:
             raise NodeFaultError("billing.quota_exceeded", message="minted in the recovery-path after_node")
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "billing.quota_exceeded"  # verbatim, NOT downgraded to calf.exception
 
@@ -692,10 +660,10 @@ class TestBeforeNode:
         def short(ctx: SeamContext[State]) -> str:
             return "from-before-node"
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, ReturnMessage)
         assert env.reply.parts == [TextPart(text="from-before-node")]  # not "from-body"
 
@@ -706,10 +674,10 @@ class TestBeforeNode:
         def declines(ctx: SeamContext[State]) -> None:
             return None
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
 
-        assert broker.published[0][1].reply.parts == [TextPart(text="from-body")]  # body ran
+        assert broker.published[0].message.reply.parts == [TextPart(text="from-body")]  # body ran
 
 
 class TestAfterNodeStage:
@@ -720,10 +688,10 @@ class TestAfterNodeStage:
         def replace(ctx: SeamContext[State], output: object) -> str:
             return "replaced-by-after"
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
 
-        assert broker.published[0][1].reply.parts == [TextPart(text="replaced-by-after")]
+        assert broker.published[0].message.reply.parts == [TextPart(text="replaced-by-after")]
 
     async def test_after_node_sees_the_body_output_view_and_can_keep_it(self) -> None:
         node = _BodyNode(node_id="n", subscribe_topics=["in"])
@@ -734,25 +702,11 @@ class TestAfterNodeStage:
             seen.append(output)
             return None  # decline → keep the body's output
 
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
         await node.handler(_framed_envelope(callback_topic="caller"), "cid", {}, broker)
 
         assert seen == ["from-body"]  # the projected OutputT view of the body's ReturnCall
-        assert broker.published[0][1].reply.parts == [TextPart(text="from-body")]
-
-
-class _FailFirstBroker:
-    """Fails the first publish (the terminal ReturnCall), captures the rest (the fault)."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, Any, dict[str, str]]] = []
-        self.calls = 0
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.calls += 1
-        if self.calls == 1:
-            raise KafkaError("transient publish failure")
-        self.published.append((topic, envelope, headers))
+        assert broker.published[0].message.reply.parts == [TextPart(text="from-body")]
 
 
 class TestPublishGuard:
@@ -761,12 +715,13 @@ class TestPublishGuard:
         # addressed to the caller via the pre-mutation snapshot (the publish guard never
         # re-enters on_node_error). _publish_action no longer swallows the failure internally.
         node = _ReturningNode(node_id="n", subscribe_topics=["in"])
-        broker = _FailFirstBroker()
+        broker = CaptureBroker(raises=KafkaError("transient publish failure"), fail_on={1})
 
         resp = await node.handler(_framed_envelope(callback_topic="caller.return"), "cid", {}, broker)
 
-        assert broker.calls == 2  # the failed return publish, then the fault publish
-        topic, env, headers = broker.published[0]
+        assert broker.call_count == 2  # the failed return publish, then the fault publish
+        call = broker.published[0]
+        topic, env, headers = call.topic, call.message, call.headers
         assert topic == "caller.return"
         assert isinstance(env.reply, FaultMessage)
         assert headers[HDR_KIND] == "fault"
@@ -787,12 +742,13 @@ class TestStage0Guard:
         # and the awaiting caller never hangs.
         node = _Stage0RaisingNode(node_id="n", subscribe_topics=["in"])
         inbound = _framed_envelope(callback_topic="caller.return")  # no x-calf-kind ⇒ call
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         resp = await node.handler(inbound, "cid", {}, broker)
 
         assert len(broker.published) == 1
-        topic, env, headers = broker.published[0]
+        call = broker.published[0]
+        topic, env, headers = call.topic, call.message, call.headers
         assert topic == "caller.return"
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.exception"
@@ -806,7 +762,7 @@ class TestStage0Guard:
         node = _Stage0RaisingNode(node_id="n", subscribe_topics=["in"])
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="f", tag="t", error=ErrorReport(error_type="upstream.boom"))
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         with caplog.at_level(logging.ERROR):
             resp = await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
@@ -838,11 +794,12 @@ class TestTailCallFrameIdentity:
             )
         )
         envelope = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node._publish_action(TailCall(target_topic="next.topic", state=State()), envelope, "cid", broker)
 
-        topic, env, headers = broker.published[0]
+        call = broker.published[0]
+        topic, env, headers = call.topic, call.message, call.headers
         assert topic == "next.topic"  # retargeted
         frame = env.internal_workflow_state.current_frame
         assert frame.frame_id == "F1"  # PRESERVED — not minted fresh (escalation-correctness)
@@ -862,11 +819,11 @@ class TestTailCallFrameIdentity:
         stack = CallFrameStack()
         stack.push(CallFrame(target_topic="agent.in", callback_topic="caller.return", frame_id="F1", tag="t1", overrides=OverridesState()))
         envelope = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node._publish_action(TailCall(target_topic="next.topic", state=State(), clear_overrides=True), envelope, "cid", broker)
 
-        frame = broker.published[0][1].internal_workflow_state.current_frame
+        frame = broker.published[0].message.internal_workflow_state.current_frame
         assert frame.overrides is None  # CLEARED for the genuine handoff (C2)
         assert frame.frame_id == "F1" and frame.tag == "t1"  # identity still preserved
         assert frame.callback_topic == "caller.return"  # caller inheritance preserved
@@ -881,7 +838,7 @@ class TestUnknownKind:
         node = _ReturningNode(node_id="n", subscribe_topics=["in"])  # body WOULD publish a ReturnCall
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="f", tag="t", error=ErrorReport(error_type="upstream.boom"))
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         with caplog.at_level(logging.ERROR):
             resp = await node.handler(inbound, "cid", {HDR_KIND: "bogus"}, broker)
@@ -900,7 +857,7 @@ class TestStrayCheck:
         # invocation. The body never runs (no publish), cleared no-reply mirror returned.
         node = _ReturningNode(node_id="n", subscribe_topics=["in"])  # body WOULD publish a ReturnCall
         inbound = _framed_envelope(callback_topic="caller.return")  # reply is None
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         with caplog.at_level(logging.WARNING):
             resp = await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
@@ -917,7 +874,7 @@ class TestStrayCheck:
         node = _ReturningNode(node_id="n", subscribe_topics=["in"])
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="f", tag="t", error=ErrorReport(error_type="upstream.boom"))
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         with caplog.at_level(logging.ERROR):
             resp = await node.handler(inbound, "cid", {HDR_KIND: "return"}, broker)
@@ -938,12 +895,13 @@ class TestReceivedFaultEscalates:
         report = ErrorReport(error_type="callee.boom", message="downstream failed")
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="callee-frame", tag="tc", error=report)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         resp = await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
 
         assert len(broker.published) == 1
-        topic, env, headers = broker.published[0]
+        call = broker.published[0]
+        topic, env, headers = call.topic, call.message, call.headers
         assert topic == "caller.return"
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.report_id == report.report_id  # re-addressed, never wrapped
@@ -964,12 +922,12 @@ class TestReceivedFaultEscalates:
 
         inbound = _framed_envelope(callback_topic="caller.return")
         inbound.reply = FaultMessage(in_reply_to="cf", tag="tc", error=ErrorReport(error_type="callee.boom"))
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
 
         assert consulted == []  # on_node_error NOT consulted for a received callee fault
-        assert broker.published[0][1].reply.error.error_type == "callee.boom"  # escalated as-is
+        assert broker.published[0].message.reply.error.error_type == "callee.boom"  # escalated as-is
 
 
 class _NeedsName(BaseModel):
@@ -991,12 +949,13 @@ class TestDeclineAutoFault:
         # caller never hangs.
         node = _node()  # base run() declines (Next)
         inbound = _framed_envelope(callback_topic="caller.return")  # reply-owing (callback set)
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         resp = await node.handler(inbound, "cid", {}, broker)  # kind=call
 
         assert len(broker.published) == 1
-        topic, env, headers = broker.published[0]
+        call = broker.published[0]
+        topic, env, headers = call.topic, call.message, call.headers
         assert topic == "caller.return"
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.delivery.rejected"
@@ -1009,11 +968,11 @@ class TestDeclineAutoFault:
         # auto-faults with details.reason="schema_rejected" (the dispatcher reports WHY it declined).
         node = _SchemaNode(node_id="n", subscribe_topics=["in"])
         inbound = _framed_envelope(payload={"wrong": "shape"}, callback_topic="caller.return")
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         await node.handler(inbound, "cid", {}, broker)
 
-        env = broker.published[0][1]
+        env = broker.published[0].message
         assert isinstance(env.reply, FaultMessage)
         assert env.reply.error.error_type == "calf.delivery.rejected"
         assert env.reply.error.details["reason"] == "schema_rejected"
@@ -1024,7 +983,7 @@ class TestDeclineAutoFault:
         # reply being owed).
         node = _node()  # declines
         inbound = _framed_envelope(callback_topic=None)  # fire-and-forget: not reply-owing
-        broker = _CaptureBroker()
+        broker = CaptureBroker()
 
         resp = await node.handler(inbound, "cid", {}, broker)
 

@@ -13,6 +13,7 @@ from calfkit.exceptions import RegistryConfigError
 from calfkit.models import Call, CallFrame, CallFrameStack, Envelope, Next, ReturnCall, SessionRunContext, State, TailCall, WorkflowState
 from calfkit.nodes.base import _Declined
 from calfkit.nodes.node import NodeDef
+from tests.fakes import CaptureBroker
 
 _CORR = "corr1234"
 
@@ -337,11 +338,7 @@ async def test_handler_no_match_runs_nothing_and_returns_envelope_unchanged() ->
 
 
 async def test_call_with_route_stamps_header_and_frame_payload() -> None:
-    published: list[tuple[str, dict[str, str], Any]] = []
-
-    class StubBroker:
-        async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-            published.append((topic, headers, envelope))
+    broker = CaptureBroker()
 
     class N(NodeDef[Any]):
         @handler("trigger")
@@ -349,28 +346,18 @@ async def test_call_with_route_stamps_header_and_frame_payload() -> None:
             return Call("downstream", ctx.state, route="order.created", body={"amount": 7})
 
     node = N(node_id="n", subscribe_topics=["t"])
-    await node.handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, StubBroker()))
+    await node.handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
 
-    assert len(published) == 1
-    topic, headers, env = published[0]
-    assert topic == "downstream"
-    assert headers[HDR_ROUTE] == "order.created"
-    assert env.internal_workflow_state.current_frame.payload == {"amount": 7}
+    assert len(broker.published) == 1
+    c = broker.published[0]
+    assert c.topic == "downstream"
+    assert c.headers[HDR_ROUTE] == "order.created"
+    assert c.message.internal_workflow_state.current_frame.payload == {"amount": 7}
 
 
 # ---------------------------------------------------------------------------
 # Client ingress: route/body stamped at _publish_call; wildcard route rejected
 # ---------------------------------------------------------------------------
-
-
-class _StubConn:
-    _connection = True  # truthy -> skip start()
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, str], Any]] = []
-
-    async def publish(self, envelope: Any, *, topic: str, key: bytes | None = None, correlation_id: str, headers: dict[str, str]) -> None:
-        self.published.append((topic, headers, envelope))
 
 
 def _client(conn: Any) -> Any:
@@ -384,7 +371,7 @@ def _client(conn: Any) -> Any:
 
 
 async def test_client_publish_call_stamps_route_and_body() -> None:
-    conn = _StubConn()
+    conn = CaptureBroker()
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
@@ -395,15 +382,15 @@ async def test_client_publish_call_stamps_route_and_body() -> None:
         body={"amount": 9},
     )
     assert len(conn.published) == 1
-    topic, headers, env = conn.published[0]
-    assert topic == "orders"
-    assert headers[HDR_ROUTE] == "order.created"
-    assert env.internal_workflow_state.current_frame.payload == {"amount": 9}
+    c = conn.published[0]
+    assert c.topic == "orders"
+    assert c.headers[HDR_ROUTE] == "order.created"
+    assert c.message.internal_workflow_state.current_frame.payload == {"amount": 9}
 
 
 async def test_client_allows_body_without_route() -> None:
     # F1b: a routeless body is published (lands in CallFrame.payload), no longer rejected.
-    conn = _StubConn()
+    conn = CaptureBroker()
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
@@ -414,14 +401,14 @@ async def test_client_allows_body_without_route() -> None:
         body={"x": 1},
     )
     assert len(conn.published) == 1
-    _topic, headers, env = conn.published[0]
-    assert HDR_ROUTE not in headers
-    assert env.internal_workflow_state.current_frame.payload == {"x": 1}
+    c = conn.published[0]
+    assert HDR_ROUTE not in c.headers
+    assert c.message.internal_workflow_state.current_frame.payload == {"x": 1}
 
 
 @pytest.mark.parametrize("bad_route", ["order.*", "order.", "a..b", ".order"])
 async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> None:
-    conn = _StubConn()
+    conn = CaptureBroker()
     with pytest.raises(ValueError):
         await _client(conn)._publish_call(
             topic="orders",
@@ -442,16 +429,6 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
 # ---------------------------------------------------------------------------
 # Deep-review coverage additions (round 1)
 # ---------------------------------------------------------------------------
-
-
-class _CaptureBroker:
-    """Node-side broker stub: records (topic, headers, envelope) per publish."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, str], Any]] = []
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self.published.append((topic, headers, envelope))
 
 
 async def test_explicit_star_handler_on_agent_raises() -> None:
@@ -570,13 +547,13 @@ async def test_parallel_fanout_stamps_per_call_route_and_body() -> None:
                 Call("b", ctx.state),  # no route
             ]
 
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
     await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
 
-    by_topic = {topic: (headers, env) for topic, headers, env in broker.published}
-    assert by_topic["a"][0][HDR_ROUTE] == "order.created"
-    assert by_topic["a"][1].internal_workflow_state.current_frame.payload == {"i": 0}
-    assert HDR_ROUTE not in by_topic["b"][0]  # plain Call carries no route
+    by_topic = {c.topic: c for c in broker.published}
+    assert by_topic["a"].headers[HDR_ROUTE] == "order.created"
+    assert by_topic["a"].message.internal_workflow_state.current_frame.payload == {"i": 0}
+    assert HDR_ROUTE not in by_topic["b"].headers  # plain Call carries no route
 
 
 async def test_tailcall_publish_carries_no_route_header() -> None:
@@ -585,11 +562,11 @@ async def test_tailcall_publish_carries_no_route_header() -> None:
         async def go(self, ctx: SessionRunContext) -> Any:
             return TailCall("downstream", ctx.state)
 
-    broker = _CaptureBroker()
+    broker = CaptureBroker()
     await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
     assert len(broker.published) == 1
-    _topic, headers, _env = broker.published[0]
-    assert HDR_ROUTE not in headers
+    c = broker.published[0]
+    assert HDR_ROUTE not in c.headers
 
 
 # NOTE: `test_start_threads_route_and_body_to_the_wire` was removed at the caller-surface cutover —
