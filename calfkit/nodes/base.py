@@ -1,6 +1,6 @@
 import inspect
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, TypeVar, cast
@@ -815,14 +815,17 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             )
             return mirror, "fault"
 
-        # The §D1 degradation ladder. Rung 3's ``to_minimal()`` and the lean topology are both built
-        # lazily (only when a lower rung is reached), so a rung-1 success — the common case — pays neither.
-        def _ladder() -> Iterator[tuple[ErrorReport, bool]]:
-            yield report, False  # rung 1 — full carriage + full report
-            yield report, True  # rung 2 — lean carriage (state elided) + full report
-            yield report.to_minimal(), True  # rung 3 — lean carriage + minimal report
-
-        for rung_report, lean in _ladder():
+        # The §D1 degradation ladder — a flat, always-three-rung table, so the "the loop always runs"
+        # invariant the floor below depends on is visible right here. The expensive part (the lean
+        # topology projection) is still built lazily inside ``_mirror``, so a rung-1 success — the common
+        # case — never pays for it; ``to_minimal()`` is a small field copy with no serialization, built up
+        # front because deferring it would buy nothing and cost the reader this clarity.
+        rungs: list[tuple[ErrorReport, bool]] = [
+            (report, False),  # rung 1 — full carriage + full report
+            (report, True),  # rung 2 — lean carriage (state elided) + full report
+            (report.to_minimal(), True),  # rung 3 — lean carriage + minimal report
+        ]
+        for rung_report, lean in rungs:
             mirror = _mirror(rung_report, lean=lean)
             try:
                 await broker.publish(
@@ -870,7 +873,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
 
         # Every rung overflowed on size → floor with the leanest mirror built (lean carriage + minimal
         # report). After the loop ``mirror``/``rung_report`` hold the final (rung-3 lean+minimal) attempt —
-        # the ladder always yields three rungs, so both are bound. This ERROR is the last silent-drop guard
+        # the ladder always has three rungs, so both are bound. This ERROR is the last silent-drop guard
         # and, here, the ONLY record: the broadcast mirror rides the same producer that just rejected this
         # very envelope on size, so it cannot carry the fault to ops taps either — hence the full report JSON.
         logger.error(
