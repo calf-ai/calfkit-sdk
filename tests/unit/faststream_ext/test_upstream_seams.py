@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import anyio
 import pytest
 from faststream._internal.broker.registrator import Registrator
+from faststream._internal.endpoint.subscriber import SubscriberSpecification
 from faststream._internal.endpoint.subscriber.call_item import CallsCollection
 from faststream._internal.endpoint.subscriber.mixins import TasksMixin
 from faststream._internal.endpoint.subscriber.supervisor import TaskCallbackSupervisor
@@ -213,6 +214,7 @@ def test_subscriber_config_derives_auto_commit_from_ack_first() -> None:
 def test_specification_constructor_shape() -> None:
     params = list(inspect.signature(KafkaSubscriberSpecification.__init__).parameters)
     assert params[1:] == ["_outer_config", "specification_config", "calls"]
+    assert issubclass(KafkaSubscriberSpecification, SubscriberSpecification)  # the ctor's annotated type
     CallsCollection()  # the factory mirror constructs it with no arguments
 
 
