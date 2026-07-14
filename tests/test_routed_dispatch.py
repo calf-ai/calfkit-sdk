@@ -369,7 +369,7 @@ class _StubConn:
     def __init__(self) -> None:
         self.published: list[tuple[str, dict[str, str], Any]] = []
 
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, headers: dict[str, str]) -> None:
+    async def publish(self, envelope: Any, *, topic: str, key: bytes | None = None, correlation_id: str, headers: dict[str, str]) -> None:
         self.published.append((topic, headers, envelope))
 
 

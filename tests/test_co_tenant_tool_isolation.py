@@ -409,7 +409,8 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
     assert agent.subscribe_topics[0] == agent._return_topic
 
     broker = container.get(KafkaBroker)
-    with patch.object(broker, "subscriber", wraps=broker.subscriber) as spy:
+    # Agents are caller-capable, so registration goes through the key-ordered factory.
+    with patch.object(broker, "key_ordered_subscriber", wraps=broker.key_ordered_subscriber) as spy:
         worker.register_handlers()
 
     dedup_calls = [c for c in spy.call_args_list if c.kwargs.get("group_id") == "dedup_agent"]

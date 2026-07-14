@@ -245,10 +245,12 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
     """Whether this node type handles ``Call``s and their ``ReturnCall`` continuations over
     its own workflow state (agent, tool, MCP toolbox, custom ``BaseNodeDef`` subclasses);
     ``False`` only for observers (``ConsumerNode``), which just consume. Subclasses may
-    override it. Load-bearing for registration: such nodes are pinned to ``max_workers=1``
-    because handling a continuation is an await-spanning read-modify-write of workflow state
-    — the agent's tool-call batch aggregation today, the in-node fan-out fold next — that a
-    no-affinity ``max_workers>1`` coroutine pool would race."""
+    override it. Load-bearing for registration: such nodes register via the key-ordered
+    subscriber (parallel across correlations, strictly serial and in-order per
+    ``correlation_id`` — the partition key) because handling a continuation is an
+    await-spanning read-modify-write of per-correlation workflow state — the agent's
+    tool-call batch aggregation, the in-node fan-out fold — that a no-affinity
+    ``max_workers>1`` coroutine pool would race."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

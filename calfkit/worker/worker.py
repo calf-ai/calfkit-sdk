@@ -80,12 +80,17 @@ class Worker(LifecycleHookMixin):
         Args:
             client: The calfkit Client (Kafka connection).
             nodes: List of ``BaseNodeDef`` instances to host.
-            max_workers: FastStream subscriber concurrency cap for *observer*
-                (consumer) nodes. Caller-capable nodes (agents/tools/toolboxes)
-                are always registered with ``max_workers=1`` — handling a
-                continuation is an await-spanning read-modify-write of workflow
-                state that a no-affinity concurrent subscriber would race. A
-                request to raise it for a caller-capable node is logged and pinned.
+            max_workers: Subscriber concurrency cap for every hosted node.
+                Observer (consumer) nodes use FastStream's stock concurrent
+                subscriber (no ordering guarantees between messages).
+                Caller-capable nodes (agents/tools/toolboxes) register via the
+                key-ordered subscriber: up to ``max_workers`` continuations run
+                in parallel across correlations, while messages sharing a
+                ``correlation_id`` (the partition key) are processed strictly
+                serially, in order — the per-workflow serialization that
+                handling a continuation requires. An
+                ``extra_subscribe_kwargs["max_workers"]`` value wins over this
+                one.
             group_id: Optional Kafka consumer group override (defaults to
                 each node's name).
             extra_publish_kwargs: Forwarded to ``broker.publisher(...)``.
@@ -380,31 +385,33 @@ class Worker(LifecycleHookMixin):
                 topics,
                 node.publish_topic,
             )
-            # Caller-capable nodes MUST consume serially: handling a continuation is an
-            # await-spanning read-modify-write of workflow state (the agent's tool-call
-            # batch aggregation today; the in-node fan-out fold next) that FastStream's
-            # no-affinity max_workers>1 coroutine pool would race. The worker's max_workers
-            # knob applies to observers; caller-capable nodes are framework-pinned to 1,
-            # overriding any worker/extra value. The merge into one dict also avoids a
-            # duplicate max_workers kwarg when a user sets one in extra_subscribe_kwargs.
+            # Caller-capable nodes need per-correlation serialization: handling a
+            # continuation is an await-spanning read-modify-write of workflow state (the
+            # agent's tool-call batch aggregation, the in-node fan-out fold) that a
+            # no-affinity concurrent pool would race. They register via the key-ordered
+            # subscriber — up to max_workers continuations in parallel across
+            # correlations, strictly serial and in-order per correlation_id (the
+            # partition key; see calfkit.keying) — which is the serialization the old
+            # max_workers=1 pin provided globally, now scoped per key. Observers have no
+            # ordering claim and keep the stock (no-affinity) concurrent subscriber. In
+            # both branches an explicit extra_subscribe_kwargs["max_workers"] wins over
+            # the worker value and is passed exactly once.
             subscribe_kwargs = dict(self._extra_subscribe_kwargs)
             if node.is_caller_capable:
-                requested = subscribe_kwargs.get("max_workers", self._max_workers)
-                if requested != 1:
-                    # Don't silently discard a value the user passed to the framework.
-                    logger.info(
-                        "node=%s is caller-capable; pinning max_workers=1 (requested %s ignored — continuations must consume serially)",
-                        node.name,
-                        requested,
-                    )
-                subscribe_kwargs["max_workers"] = 1
+                max_workers = subscribe_kwargs.pop("max_workers", self._max_workers)
+                subscriber = self._client._connection.key_ordered_subscriber(
+                    *topics,
+                    group_id=group_id,
+                    max_workers=max_workers,
+                    **subscribe_kwargs,
+                )
             else:
                 subscribe_kwargs.setdefault("max_workers", self._max_workers)
-            subscriber = self._client._connection.subscriber(
-                *topics,
-                group_id=group_id,
-                **subscribe_kwargs,
-            )
+                subscriber = self._client._connection.subscriber(
+                    *topics,
+                    group_id=group_id,
+                    **subscribe_kwargs,
+                )
             handler = subscriber(node.handler, filter=wire_filter(Envelope))
             if node.publish_topic:
                 self._client._connection.publisher(node.publish_topic, **self._extra_publish_kwargs)(handler)

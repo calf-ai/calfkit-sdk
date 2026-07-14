@@ -18,8 +18,15 @@ import random
 
 import pytest
 from faststream.kafka import KafkaBroker
+from pydantic import BaseModel
 
 from calfkit._faststream_ext import KeyOrderedRegistratorMixin
+from calfkit._registry import handler
+from calfkit.client import Client
+from calfkit.models import ReturnCall, SessionRunContext, State
+from calfkit.nodes import NodeDef
+from calfkit.worker import Worker
+from tests.integration._fault_kafka import ensure_topic
 
 pytestmark = pytest.mark.kafka
 
@@ -167,3 +174,102 @@ async def test_graceful_stop_drains_accepted_messages_end_to_end(kafka_bootstrap
     await asyncio.sleep(0.1)
     assert len(tracker.done) == processed_at_stop, "processing continued after stop() returned"
     _assert_per_key_order_and_uniqueness(tracker.done, published)
+
+
+# ---------------------------------------------------------------------------
+# Calfkit-level: the worker flip end-to-end (spec §11 / plan Step 9)
+# ---------------------------------------------------------------------------
+
+_WORK_TRACKER: dict = {}
+
+
+class _WorkItem(BaseModel):
+    key: str
+    seq: int
+
+
+class _SerialWorkNode(NodeDef[State]):
+    """Caller-capable node recording per-correlation mutual exclusion at execution time.
+
+    Driven with ``correlation_id == payload.key``, so per-correlation serialization is
+    observable as per-``payload.key`` mutual exclusion inside the handler.
+    """
+
+    @handler("stress.work", schema=_WorkItem)
+    async def on_work(self, ctx: SessionRunContext, payload: _WorkItem) -> ReturnCall[State]:
+        t = _WORK_TRACKER
+        if payload.key in t["active"]:
+            t["violations"].append((payload.key, payload.seq))
+        t["active"].add(payload.key)
+        t["peak"] = max(t["peak"], len(t["active"]))
+        await asyncio.sleep(0.001 * ((payload.seq * 7) % 3))
+        t["active"].discard(payload.key)
+        t["done"].append((payload.key, payload.seq))
+        return ReturnCall(state=ctx.state, value=f"ok-{payload.key}-{payload.seq}")
+
+
+async def test_worker_flip_serializes_per_correlation_end_to_end(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """A caller-capable node under ``max_workers=4``: interleaved deliveries for multiple
+    correlations run in parallel across correlations and strictly serially, in order,
+    within one — through the real worker registration, the keyed entry publish, and a
+    real broker. (Single instance, no rebalance — spec §6.6 scope.)"""
+    _WORK_TRACKER.clear()
+    _WORK_TRACKER.update({"active": set(), "peak": 0, "done": [], "violations": []})
+
+    input_topic = f"{topic_namespace}.stress.input"
+    await ensure_topic(kafka_bootstrap, input_topic)
+    node = _SerialWorkNode(node_id=f"{topic_namespace}-serial-node", subscribe_topics=[input_topic])
+    worker = Worker(
+        Client.connect(kafka_bootstrap),
+        nodes=[node],
+        max_workers=4,
+        extra_subscribe_kwargs={"auto_offset_reset": "earliest"},
+    )
+
+    driver = Client.connect(kafka_bootstrap)
+    correlations = [f"{topic_namespace}-c{i}" for i in range(4)]
+    counters: dict[str, int] = {}
+    plan: list[tuple[str, int]] = []
+    for i in range(36):
+        key = correlations[i % 4]
+        seq = counters.get(key, 0)
+        counters[key] = seq + 1
+        plan.append((key, seq))
+
+    async with worker:
+        await driver._ensure_started()
+        for key, seq in plan:
+            _cid, state, overrides = driver._build_state_and_overrides(
+                f"work {seq}",
+                correlation_id=key,
+                temp_instructions=None,
+                message_history=None,
+                tool_overrides=None,
+                model_settings=None,
+                author=None,
+            )
+            await driver._publish_call(
+                topic=input_topic,
+                correlation_id=key,
+                state=state,
+                overrides=overrides,
+                deps=None,
+                route="stress.work",
+                body={"key": key, "seq": seq},
+            )
+
+        async def _all_done() -> None:
+            while len(_WORK_TRACKER["done"]) < 36:
+                await asyncio.sleep(0.02)
+
+        await asyncio.wait_for(_all_done(), timeout=60.0)
+    await driver.aclose()
+
+    assert _WORK_TRACKER["violations"] == [], f"same-correlation deliveries overlapped: {_WORK_TRACKER['violations']}"
+    per_key: dict[str, list[int]] = {}
+    for key, seq in _WORK_TRACKER["done"]:
+        per_key.setdefault(key, []).append(seq)
+    for key, seqs in per_key.items():
+        assert seqs == list(range(len(seqs))), f"{key}: continuations out of order: {seqs}"
+        assert len(seqs) == 9
+    assert _WORK_TRACKER["peak"] > 1, "no cross-correlation parallelism through the flipped worker"
