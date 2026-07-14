@@ -7,6 +7,8 @@ suites predate this module and keep their own ``_worker``/``_topics`` copies).
 
 from __future__ import annotations
 
+from typing import Any
+
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from aiokafka.errors import TopicAlreadyExistsError
 
@@ -18,9 +20,11 @@ EARLIEST = {"auto_offset_reset": "earliest"}
 racing (and dropping) the publish addressing it on a freshly auto-created partition."""
 
 
-def fault_worker(bootstrap: str, *, nodes: list) -> Worker:
-    """A Worker on its own broker connection, reading earliest."""
-    return Worker(Client.connect(bootstrap), nodes=nodes, extra_subscribe_kwargs=EARLIEST)
+def fault_worker(bootstrap: str, *, nodes: list, **connect_kwargs: Any) -> Worker:
+    """A Worker on its own broker connection, reading earliest. ``connect_kwargs`` pass through to
+    ``Client.connect`` (e.g. ``max_request_size=`` to constrain this worker's producer for the
+    client-side oversized-fault ladder test)."""
+    return Worker(Client.connect(bootstrap, **connect_kwargs), nodes=nodes, extra_subscribe_kwargs=EARLIEST)
 
 
 async def ensure_topic(bootstrap: str, topic: str, *, config: dict[str, str] | None = None) -> None:

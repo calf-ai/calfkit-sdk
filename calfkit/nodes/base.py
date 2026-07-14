@@ -1,6 +1,6 @@
 import inspect
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, TypeVar, cast
@@ -752,13 +752,17 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
 
         Mirrors the ``ReturnCall`` arm against the PRE-MUTATION ``snapshot``: pop the answered
         frame, mint ``FaultMessage(in_reply_to=popped.frame_id, tag=popped.tag, marker=popped.marker, error=report)``,
-        carry the inbound ``context`` UNCHANGED (handler mutations die with the faulted turn,
-        §4.2), and publish to the popped ``callback_topic`` with ``x-calf-kind=fault`` +
-        ``x-calf-error-type``. A frameless / fire-and-forget terminal (no callback) is floored
-        (ERROR + full report JSON, §13). A failed point-to-point publish strips to the minimal report
-        and retries once before flooring (§4.3 — an oversized fault must not become a new silent drop);
-        it never re-enters the fault path, and the broadcast mirror still fires. Escalation NEVER wraps
-        (§4.4): the same ``report`` is re-addressed each hop.
+        and publish to the popped ``callback_topic`` with ``x-calf-kind=fault`` + ``x-calf-error-type``.
+        The rung-1 mirror carries the inbound ``context`` UNCHANGED (handler mutations die with the
+        faulted turn, §4.2). A frameless / fire-and-forget terminal (no callback) is floored (ERROR +
+        full report JSON, §13). Escalation NEVER wraps (§4.4): the same ``report`` is re-addressed each hop.
+
+        On an oversized publish the carriage is degraded down the §D1 ladder rather than dropped:
+        full → **lean** (empty context + a topology-only stack, ``state_elided=True``, spec D2) → lean +
+        ``to_minimal()`` report → floor. So an oversized turn — the incident's shape, where the run state
+        (not the report) blows the budget — still delivers the error to the caller instead of becoming a
+        new silent drop (state-elision spec, superseding the old report-only strip). A non-size publish
+        failure (dead broker) at any rung cannot be published-around, so it floors with that rung's mirror.
         """
         frame = snapshot.current_frame_or_none
         callback_topic = frame.callback_topic if frame is not None else None
@@ -768,18 +772,40 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         if frame is not None:
             snapshot.unwind_frame()  # pop the answered frame; the remaining stack travels for the next hop
 
-        def _mirror(r: ErrorReport) -> Envelope:
-            # The inbound context is carried UNCHANGED (handler mutations die with the faulted turn, §4.2).
+        topology: WorkflowState | None = None
+        # Propagation (spec D3): if the inbound fault being answered was ITSELF state-elided, the rung-1
+        # mirror carries that inbound (already-empty) context, so its flag must stay True or it would lie
+        # on the next escalation hop. A ReturnMessage inbound (a fan-out close re-entry, state restored
+        # from the durable basestate) is NOT elided — the flag correctly does not propagate through a close.
+        inbound_elided = isinstance(inbound.reply, FaultMessage) and inbound.reply.state_elided
+
+        def _mirror(r: ErrorReport, *, lean: bool) -> Envelope:
+            # A LEAN mirror (spec D2) drops the run state that can overflow the size limit — an empty
+            # context + a topology-only stack (routing skeleton kept) — and flags the elision. A full
+            # mirror carries the inbound context UNCHANGED (handler mutations die with the turn, §4.2).
+            # TODO(state-elided-receiver-policy): a lean carriage drops the run state a registered
+            #   on_callee_error/on_tool_error recovery would read (single-call substitute-continuation),
+            #   so recovery on an elided fault can be incoherent. Whether the framework should bypass
+            #   recovery on a state-elided fault is DELIBERATELY UNDECIDED — see D4 of
+            #   docs/designs/oversized-fault-state-elision-spec.md. Receivers are behaviorally untouched
+            #   here; the flag exists so that policy can be chosen later without a wire migration.
+            nonlocal topology
+            if lean:
+                if topology is None:
+                    topology = snapshot.to_topology()  # lazy: the happy path (rung 1) never builds it
+                context, wf = SessionRunContext(state=State(), deps={}), topology
+            else:
+                context, wf = inbound.context, snapshot
             return Envelope(
-                context=inbound.context,
-                internal_workflow_state=snapshot,
-                reply=FaultMessage(in_reply_to=in_reply_to, tag=tag, marker=marker, error=r),
+                context=context,
+                internal_workflow_state=wf,
+                reply=FaultMessage(in_reply_to=in_reply_to, tag=tag, marker=marker, error=r, state_elided=lean or inbound_elided),
             )
 
-        mirror = _mirror(report)
         if callback_topic is None:
             # Frameless / fire-and-forget terminal: no caller to answer → floor (§13). The
             # broadcast mirror still fires where a publish_topic exists (the returned envelope).
+            mirror = _mirror(report, lean=False)
             logger.error(
                 "[%s] terminal fault floored (no callback_topic) node=%s error_type=%s report=%s",
                 correlation_id[:8],
@@ -788,78 +814,71 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 report.model_dump_json(),
             )
             return mirror, "fault"
-        try:
-            await broker.publish(
-                mirror,
-                topic=callback_topic,
-                correlation_id=correlation_id,
-                key=correlation_id.encode(),
-                headers=self._headers("fault") | {HDR_ERROR_TYPE: report.error_type},
-            )
+
+        # The §D1 degradation ladder. Rung 3's ``to_minimal()`` and the lean topology are both built
+        # lazily (only when a lower rung is reached), so a rung-1 success — the common case — pays neither.
+        def _ladder() -> Iterator[tuple[ErrorReport, bool]]:
+            yield report, False  # rung 1 — full carriage + full report
+            yield report, True  # rung 2 — lean carriage (state elided) + full report
+            yield report.to_minimal(), True  # rung 3 — lean carriage + minimal report
+
+        mirror = _mirror(report, lean=False)  # bound for the exhausted-ladder floor below
+        for rung_report, lean in _ladder():
+            mirror = _mirror(rung_report, lean=lean)
+            try:
+                await broker.publish(
+                    mirror,
+                    topic=callback_topic,
+                    correlation_id=correlation_id,
+                    key=correlation_id.encode(),
+                    headers=self._headers("fault") | {HDR_ERROR_TYPE: rung_report.error_type},
+                )
+            except MessageSizeTooLargeError:
+                # This rung overflowed the producer's size limit; degrade to the next, leaner rung. If
+                # this was the last rung, the loop exhausts and floors below (spec D1 — never silent).
+                logger.warning(
+                    "[%s] fault publish to callback_topic=%s exceeded the carriage budget node=%s (%s carriage); degrading (spec D1)",
+                    correlation_id[:8],
+                    callback_topic,
+                    self.node_id,
+                    "lean" if lean else "full",
+                )
+                continue
+            except Exception:
+                # A non-size publish failure (e.g. a dead/unreachable broker): you cannot publish your way
+                # out of it, so floor (§6.8 log-only-guarded — never re-enter the fault path). The broadcast
+                # mirror still carries this rung's fault for ops taps.
+                logger.exception(
+                    "[%s] fault delivery to callback_topic=%s failed node=%s; the fault still broadcasts on publish_topic",
+                    correlation_id[:8],
+                    callback_topic,
+                    self.node_id,
+                )
+                return mirror, "fault"
             # §13: each escalation hop is logged WARNING — error_type / origin / remaining stack depth
             # (after the answered frame is popped) — the teaching load for "why didn't my handler fire."
             logger.warning(
                 "[%s] fault escalated one hop node=%s error_type=%s origin=%s remaining_depth=%d",
                 correlation_id[:8],
                 self.node_id,
-                report.error_type,
-                report.origin_node_id,
+                rung_report.error_type,
+                rung_report.origin_node_id,
                 len(snapshot.call_stack._internal_list),
             )
             return mirror, "fault"
-        except MessageSizeTooLargeError:
-            # §4.3 strip-and-retry-then-floor: an OVERSIZED fault (the report exceeding the carriage
-            # budget despite build_safe's per-field bounds) must NOT become a new silent-drop class.
-            # Retry ONCE with the minimal report (identity only: no causes/details/frame_chain), and
-            # return THAT minimal mirror so the broadcast @publisher does not re-drop the oversized one;
-            # only a second failure floors. Escalation still never wraps (§4.4): to_minimal preserves
-            # report_id/error_type/origin.
-            minimal = report.to_minimal()
-            logger.warning(
-                "[%s] fault to callback_topic=%s exceeded the carriage budget node=%s; retrying with the minimal report (§4.3)",
-                correlation_id[:8],
-                callback_topic,
-                self.node_id,
-            )
-            minimal_mirror = _mirror(minimal)
-            try:
-                await broker.publish(
-                    minimal_mirror,
-                    topic=callback_topic,
-                    correlation_id=correlation_id,
-                    key=correlation_id.encode(),
-                    headers=self._headers("fault") | {HDR_ERROR_TYPE: minimal.error_type},
-                )
-                # §13: a stripped fault still escalated one hop — emit the canonical per-hop WARNING
-                # (uniform with the non-stripped success path), atop the strip notice above.
-                logger.warning(
-                    "[%s] fault escalated one hop node=%s error_type=%s origin=%s remaining_depth=%d",
-                    correlation_id[:8],
-                    self.node_id,
-                    minimal.error_type,
-                    minimal.origin_node_id,
-                    len(snapshot.call_stack._internal_list),
-                )
-            except Exception:
-                logger.exception(
-                    "[%s] fault delivery to callback_topic=%s failed even after the minimal strip node=%s; flooring report=%s",
-                    correlation_id[:8],
-                    callback_topic,
-                    self.node_id,
-                    minimal.model_dump_json(),
-                )
-            return minimal_mirror, "fault"
-        except Exception:
-            # A non-size publish failure (e.g. a dead/unreachable broker): you cannot publish your way
-            # out of it, so floor (§6.8 log-only-guarded — never re-enter the fault path). The broadcast
-            # mirror still carries the FULL fault for ops taps.
-            logger.exception(
-                "[%s] fault delivery to callback_topic=%s failed node=%s; the fault still broadcasts on publish_topic",
-                correlation_id[:8],
-                callback_topic,
-                self.node_id,
-            )
-            return mirror, "fault"
+
+        # Every rung overflowed on size → floor with the leanest mirror built (lean carriage + minimal
+        # report). This is the last silent-drop guard; after the loop ``mirror``/``rung_report`` hold the
+        # final (rung-3 lean+minimal) attempt — the ladder always yields, so both are bound.
+        logger.error(
+            "[%s] fault delivery to callback_topic=%s failed even after eliding the run state and stripping to the minimal report"
+            " node=%s; flooring report=%s",
+            correlation_id[:8],
+            callback_topic,
+            self.node_id,
+            rung_report.model_dump_json(),
+        )
+        return mirror, "fault"
 
     async def _fault_response(
         self, report: ErrorReport, snapshot: WorkflowState, inbound: Envelope, correlation_id: str, broker: BrokerAnnotation
@@ -1127,6 +1146,20 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         assert isinstance(reply, FaultMessage)  # stray-check guarantees fault ⇔ FaultMessage
         report = reply.error
         seam_ctx.failing_call = CalleeResult(frame_id=frame_id, tag=tag, target_topic=target_topic, marker=reply.marker, fault=report)
+        if reply.state_elided and self._chains[ON_CALLEE_ERROR]:
+            # TODO(state-elided-receiver-policy): the recovery chain is about to run on a fault whose run
+            #   state was elided to fit the producer's size limit (state-elision spec D2), so a single-call
+            #   substitute then continues over EMPTY state — which can be incoherent. Behavior is UNCHANGED
+            #   (the handler still runs); this WARNING only makes the deliberately-undecided corner visible
+            #   if it occurs. Whether the framework should bypass recovery on an elided fault is open — see
+            #   D4 of docs/designs/oversized-fault-state-elision-spec.md.
+            logger.warning(
+                "[%s] running on_callee_error on a state-elided fault node=%s tag=%s error_type=%s; recovery sees no run state (spec D4)",
+                seam_ctx.correlation_id[:8],
+                self.node_id,
+                tag,
+                report.error_type,
+            )
         try:
             handled = await run_chain(self._chains[ON_CALLEE_ERROR], seam_ctx, report, seam_name=ON_CALLEE_ERROR)
         except NodeFaultError as nfe:

@@ -40,21 +40,6 @@ class _CaptureBroker:
         self.published.append((topic, envelope, headers))
 
 
-class _FailThenCaptureBroker:
-    """Raises on the FIRST publish (a size-class failure), captures the rest — exercises the §4.3
-    strip-and-retry: the minimal fault must reach the caller on the retry."""
-
-    def __init__(self) -> None:
-        self.published: list[tuple[str, Any, dict[str, str]]] = []
-        self._calls = 0
-
-    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
-        self._calls += 1
-        if self._calls == 1:
-            raise MessageSizeTooLargeError("simulated message-too-large on the full fault")
-        self.published.append((topic, envelope, headers))
-
-
 class _AlwaysFailBroker:
     """Every publish raises the given error — exercises _publish_fault's floor arms (the fault
     delivery itself fails and cannot be published-around, so it floors without silently dropping)."""
@@ -64,6 +49,57 @@ class _AlwaysFailBroker:
 
     async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
         raise self._exc
+
+
+class _SizeThresholdBroker:
+    """Raises ``MessageSizeTooLargeError`` iff the serialized envelope exceeds ``limit`` bytes,
+    else records — models aiokafka's client-side ``_serialize`` size check (the real overflow the
+    §D1 ladder degrades against), unlike a fail-*count* stub. The ladder shrinks the envelope rung
+    by rung, so a lean rung's smaller envelope can slip under a limit the full one overflowed."""
+
+    def __init__(self, limit: int) -> None:
+        self.published: list[tuple[str, Any, dict[str, str]]] = []
+        self.limit = limit
+        self.attempts = 0
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        self.attempts += 1
+        size = len(envelope.model_dump_json().encode())
+        if size > self.limit:
+            raise MessageSizeTooLargeError(f"simulated: {size} bytes > {self.limit}")
+        self.published.append((topic, envelope, headers))
+
+
+class _ScriptedBroker:
+    """Raises the given exception on each successive publish (``None`` = record and succeed) —
+    for driving a specific mix of size and non-size failures across the ladder's rungs."""
+
+    def __init__(self, *outcomes: BaseException | None) -> None:
+        self.published: list[tuple[str, Any, dict[str, str]]] = []
+        self._outcomes = list(outcomes)
+        self.attempts = 0
+
+    async def publish(self, envelope: Any, *, topic: str, correlation_id: str, key: bytes, headers: dict[str, str]) -> None:
+        outcome = self._outcomes[self.attempts] if self.attempts < len(self._outcomes) else None
+        self.attempts += 1
+        if outcome is not None:
+            raise outcome
+        self.published.append((topic, envelope, headers))
+
+
+def _big_framed_envelope(*, filler_bytes: int, callback_topic: str | None = "cb") -> Envelope:
+    """A framed inbound whose run state inflates the full fault carriage past a size limit while
+    leaving the routing topology tiny. Every inflated field is one the lean carriage drops:
+    the frame ``payload`` and ``WorkflowState.metadata`` (dropped by ``to_topology``), and the
+    context ``state.metadata`` + ``deps`` (dropped by the empty lean context). So the full mirror
+    is ~4×``filler_bytes`` and the lean mirror is a few hundred bytes — the incident's shape."""
+    pad = "p" * filler_bytes
+    stack = CallFrameStack()
+    stack.push(CallFrame(target_topic="orchestrator.in", callback_topic=callback_topic, payload={"pad": pad}, tag="t1"))
+    return Envelope(
+        internal_workflow_state=WorkflowState(call_stack=stack, metadata={"m": pad}),
+        context=SessionRunContext(state=State(metadata=pad), deps={"big": pad}),
+    )
 
 
 def _framed_envelope(*, payload: object = None, callback_topic: str | None = "cb") -> Envelope:
@@ -166,31 +202,145 @@ class TestPublishFault:
         assert published_report.error_type == report.error_type
         assert published_report.causes == []  # not wrapped
 
-    async def test_oversized_fault_strips_to_minimal_and_retries(self) -> None:
-        # §4.3: a fault publish that fails (commonly the report exceeding the carriage budget) must NOT
-        # strand the caller — strip to the minimal report (identity only) and retry ONCE before flooring.
-        # Pre-fix _publish_fault log-floored the failure and the caller received nothing.
+    async def test_oversized_fault_elides_state_and_keeps_full_report(self) -> None:
+        # §D1 rung 2: when the RUN STATE overflows the size limit (the incident's shape), the ladder
+        # drops the state (lean carriage) but keeps the FULL report — the error the caller needs, minus
+        # the megabytes that sank it. Pre-fix _publish_fault only stripped the tiny report and re-attached
+        # the same oversized state, so the retry was still oversized and the caller received NOTHING.
         node = _node()
         report = ErrorReport(
             error_type="calf.exception",
             message="boom",
             origin_node_id="orchestrator",
-            details={"big": "x" * 100},  # non-empty ⇒ to_minimal() strips it
+            details={"why": "context overflowed"},
             causes=[ErrorReport(error_type="calf.inner", message="inner")],
         )
-        inbound = _framed_envelope(callback_topic="caller.return")
-        broker = _FailThenCaptureBroker()
+        inbound = _big_framed_envelope(filler_bytes=4000, callback_topic="caller.return")
+        # Limit sits between the tiny lean mirror and the ~16 KB full mirror: rung 1 overflows, rung 2 fits.
+        broker = _SizeThresholdBroker(limit=2000)
 
         mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
 
         assert kind == "fault"
-        assert len(broker.published) == 1  # the retry delivered (the first, full publish raised)
+        assert broker.attempts == 2  # rung 1 (full) overflowed, rung 2 (lean) delivered
+        assert len(broker.published) == 1
         _topic, env, headers = broker.published[0]
         assert isinstance(env.reply, FaultMessage)
+        assert env.reply.state_elided is True  # the degradation signal
+        assert env.reply.error.error_type == "calf.exception"
+        assert env.reply.error.causes != [] and env.reply.error.details != {}  # the FULL report survives
+        assert headers[HDR_ERROR_TYPE] == "calf.exception"
+        # the run state was elided; the routing topology survives
+        assert env.context.state.metadata is None and env.context.deps == {}
+        assert env.internal_workflow_state.call_stack.is_empty()  # the answered frame was popped
+        assert mirror.reply.state_elided is True  # the returned broadcast mirror is the lean one too
+
+    async def test_oversized_even_when_lean_strips_report_to_minimal(self) -> None:
+        # §D1 rung 3: if the REPORT itself is what overflows even the lean carriage (per-field bounds can
+        # compose past the limit), the last rung also strips it to identity — delivery beats fidelity.
+        node = _node()
+        report = ErrorReport(
+            error_type="calf.exception",
+            message="boom",
+            origin_node_id="orchestrator",
+            details={"blob": "x" * 8000},  # the report, not the state, dominates the size here
+            causes=[ErrorReport(error_type="calf.inner", message="inner")],
+        )
+        inbound = _framed_envelope(callback_topic="caller.return")
+        # Below the lean+full-report size (~8 KB) but above the lean+minimal size (a few hundred bytes).
+        broker = _SizeThresholdBroker(limit=2000)
+
+        mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+
+        assert kind == "fault"
+        assert broker.attempts == 3  # rung 1 (full) + rung 2 (lean+full report) overflowed, rung 3 delivered
+        assert len(broker.published) == 1
+        _topic, env, _headers = broker.published[0]
+        assert isinstance(env.reply, FaultMessage)
+        assert env.reply.state_elided is True
         assert env.reply.error.error_type == "calf.exception"  # identity preserved
         assert env.reply.error.causes == [] and env.reply.error.details == {}  # stripped to minimal
-        assert headers[HDR_ERROR_TYPE] == "calf.exception"
-        assert mirror.reply.error.causes == []  # the returned broadcast mirror is the minimal one too
+        assert mirror.reply.state_elided is True
+
+    async def test_all_rungs_oversized_floors_with_the_lean_minimal_mirror(self, caplog: pytest.LogCaptureFixture) -> None:
+        # §D1 deepest fallback: every rung overflows (a pathologically small limit) → floor (ERROR),
+        # returning the leanest mirror built (lean carriage + minimal report). The last silent-drop guard.
+        node = _node()
+        report = ErrorReport(error_type="calf.exception", message="boom", details={"blob": "x" * 100}, causes=[ErrorReport(error_type="calf.inner")])
+        inbound = _framed_envelope(callback_topic="caller.return")
+        broker = _SizeThresholdBroker(limit=1)  # nothing fits
+
+        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+
+        assert kind == "fault"
+        assert broker.attempts == 3 and broker.published == []  # all three rungs tried, none delivered
+        assert isinstance(mirror.reply, FaultMessage)
+        assert mirror.reply.state_elided is True
+        assert mirror.reply.error.causes == [] and mirror.reply.error.details == {}  # the lean+minimal mirror
+        assert any(r.levelno == logging.ERROR and "flooring" in r.getMessage() for r in caplog.records)
+
+    async def test_non_size_failure_on_a_lean_rung_floors_without_trying_lower_rungs(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A NON-size failure mid-ladder (size overflow at rung 1, then a dead broker at rung 2) cannot be
+        # published-around → floor immediately with the CURRENT (lean) mirror; rung 3 is never attempted.
+        node = _node()
+        report = ErrorReport(error_type="calf.exception", message="boom", causes=[ErrorReport(error_type="calf.inner")])
+        inbound = _big_framed_envelope(filler_bytes=4000, callback_topic="caller.return")
+        broker = _ScriptedBroker(MessageSizeTooLargeError("rung1 overflow"), KafkaError("broker down"))
+
+        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+
+        assert kind == "fault"
+        assert broker.attempts == 2 and broker.published == []  # rung 1 (size) + rung 2 (non-size floor); no rung 3
+        assert isinstance(mirror.reply, FaultMessage)
+        assert mirror.reply.state_elided is True  # floored on the lean rung
+        assert any(r.levelno == logging.ERROR and "failed" in r.getMessage() for r in caplog.records)
+
+    async def test_escalating_an_inbound_elided_fault_restamps_elided_at_rung_1(self) -> None:
+        # Propagation (spec D3): when the inbound fault being answered was ITSELF state-elided, a rung-1
+        # publish must re-stamp state_elided=True — the rung-1 mirror carries inbound.context (already the
+        # elided/empty one), so an unmarked flag would LIE on the next escalation hop. No size failure here.
+        node = _node()
+        stack = CallFrameStack()
+        stack.push(CallFrame(target_topic="orchestrator.in", callback_topic="caller.return", tag="t1"))
+        inbound = Envelope(
+            internal_workflow_state=WorkflowState(call_stack=stack),
+            context=SessionRunContext(state=State(), deps={}),
+            reply=FaultMessage(in_reply_to="up", tag="t1", error=ErrorReport(error_type="calf.exception"), state_elided=True),
+        )
+        broker = _CaptureBroker()
+        report = ErrorReport(error_type="calf.exception", message="up")
+        mirror, _ = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        assert len(broker.published) == 1  # fits at rung 1 — the re-stamp is not a degradation
+        assert broker.published[0][1].reply.state_elided is True
+        assert mirror.reply.state_elided is True
+
+    async def test_normal_fault_is_not_state_elided(self) -> None:
+        # The rung-1 default: a fault answering a call-kind delivery (no inbound fault) carries full state,
+        # so state_elided is False — the flag must not over-report.
+        node = _node()
+        inbound = _framed_envelope(callback_topic="caller.return")
+        broker = _CaptureBroker()
+        mirror, _ = await node._publish_fault(ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", broker)
+        assert broker.published[0][1].reply.state_elided is False
+        assert mirror.reply.state_elided is False
+
+    async def test_reentry_return_reply_does_not_mark_elided(self) -> None:
+        # Non-propagation through a fan-out close (spec D3): the close re-enters with a ReturnMessage reply
+        # (not a fault) and restores state from the durable basestate, so a fault-group escalating after the
+        # close carries GENUINE state — not elided. The discriminator is the inbound reply's shape.
+        node = _node()
+        stack = CallFrameStack()
+        stack.push(CallFrame(target_topic="t", callback_topic="caller.return", tag="t1"))
+        inbound = Envelope(
+            internal_workflow_state=WorkflowState(call_stack=stack),
+            context=SessionRunContext(state=State(), deps={}),
+            reply=ReturnMessage(in_reply_to="frame", tag="t1", parts=[]),
+        )
+        broker = _CaptureBroker()
+        await node._publish_fault(ErrorReport(error_type="calf.fault_group"), node._stack_snapshot(inbound), inbound, "cid", broker)
+        assert broker.published[0][1].reply.state_elided is False
 
     async def test_fault_response_mirror_carries_error_type_header(self) -> None:
         # §4.2/§13: the broadcast mirror (the handler Response) must carry x-calf-error-type so faults
@@ -216,19 +366,22 @@ class TestPublishFault:
         assert mirror.reply.error.causes != []  # the FULL mirror — a non-size failure is not stripped
         assert any(r.levelno == logging.ERROR and "failed" in r.getMessage() for r in caplog.records)  # floored, not dropped
 
-    async def test_oversized_then_minimal_also_fails_floors_with_the_minimal_mirror(self, caplog: pytest.LogCaptureFixture) -> None:
-        # §4.3 deepest fallback: the full publish fails on size → strip to minimal → the minimal ALSO fails
-        # → floor (ERROR) and return the MINIMAL mirror. The last layer of the silent-drop-prevention feature.
+    async def test_every_rung_size_fails_tries_all_three_then_floors(self, caplog: pytest.LogCaptureFixture) -> None:
+        # §D1 ladder exhaustion: an unconditional size failure exercises all three rungs (full →
+        # lean+full report → lean+minimal report) before the floor — the caller-never-stranded chain
+        # bottoms out at ERROR, returning the lean+minimal mirror. Names the rung-exhausted wording.
         node = _node()
         report = ErrorReport(error_type="calf.exception", message="boom", details={"big": "x" * 100}, causes=[ErrorReport(error_type="calf.inner")])
         inbound = _framed_envelope(callback_topic="caller.return")
-        broker = _AlwaysFailBroker(MessageSizeTooLargeError("too big even minimal"))
-        with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
+        broker = _ScriptedBroker(*[MessageSizeTooLargeError("too big at every rung")] * 3)
+        with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
             mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
         assert kind == "fault"
+        assert broker.attempts == 3  # all three rungs attempted before the floor
         assert isinstance(mirror.reply, FaultMessage)
-        assert mirror.reply.error.causes == [] and mirror.reply.error.details == {}  # the MINIMAL mirror
-        assert any(r.levelno == logging.ERROR and "even after the minimal strip" in r.getMessage() for r in caplog.records)
+        assert mirror.reply.state_elided is True
+        assert mirror.reply.error.causes == [] and mirror.reply.error.details == {}  # the lean+minimal mirror
+        assert any(r.levelno == logging.ERROR and "even after eliding the run state" in r.getMessage() for r in caplog.records)
 
 
 class _RaisingNode(BaseNodeDef):
@@ -619,6 +772,64 @@ class TestSeamPrecision:
         assert env.reply.error.causes == []  # call-kind ingress: nothing to chain
 
 
+class TestElidedFaultRecoveryObservability:
+    """State-elision spec D4: recovery on a state-elided fault is behaviorally UNCHANGED (the handler
+    still runs over the — now empty — run state), but the deliberately-undecided corner is made visible
+    with a WARNING so it can be observed if it occurs in practice. No receiver-policy decision here."""
+
+    async def test_elided_fault_still_runs_recovery_and_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        node = _node()
+        ran: list[str] = []
+
+        @node.on_callee_error
+        def handle(ctx: object, fault: ErrorReport) -> str:
+            ran.append(fault.error_type)
+            return "handled-substitute"
+
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="cf", tag="tc", error=ErrorReport(error_type="callee.boom"), state_elided=True)
+        broker = _CaptureBroker()
+
+        with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
+            await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert ran == ["callee.boom"]  # recovery STILL ran — no behavior change (D4)
+        assert any(r.levelno == logging.WARNING and "state-elided fault" in r.getMessage() for r in caplog.records)
+
+    async def test_elided_fault_without_a_recovery_handler_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
+        # No on_callee_error chain to run → the elided fault just escalates; the D4 WARNING is scoped to
+        # a recovery actually about to run, so it must not fire on the plain escalation path.
+        node = _node()
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="cf", tag="tc", error=ErrorReport(error_type="callee.boom"), state_elided=True)
+        broker = _CaptureBroker()
+
+        with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
+            await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert not any("state-elided fault" in r.getMessage() for r in caplog.records)
+
+    async def test_non_elided_fault_with_recovery_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Recovery on a NON-elided fault is the normal case — no WARNING, handler runs as always.
+        node = _node()
+        ran: list[bool] = []
+
+        @node.on_callee_error
+        def handle(ctx: object, fault: ErrorReport) -> str:
+            ran.append(True)
+            return "handled-substitute"
+
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="cf", tag="tc", error=ErrorReport(error_type="callee.boom"))  # state_elided defaults False
+        broker = _CaptureBroker()
+
+        with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
+            await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert ran == [True]
+        assert not any("state-elided fault" in r.getMessage() for r in caplog.records)
+
+
 class TestSeamFailureBranches:
     """§6.5/§6.8 stage-5 seam-failure arms: a NodeFaultError minted INSIDE on_node_error publishes
     verbatim (original chained), and a recovery value that then fails in after_node chains the original."""
@@ -950,6 +1161,21 @@ class TestReceivedFaultEscalates:
         assert env.reply.error.error_type == "callee.boom"
         assert headers[HDR_KIND] == "fault"
         assert isinstance(resp.body.reply, FaultMessage)  # broadcast mirror carries the fault
+
+    async def test_escalating_an_inbound_elided_fault_propagates_the_flag_end_to_end(self) -> None:
+        # Propagation wired through the full handler path (spec D3): a node with no on_callee_error that
+        # receives a state-elided fault escalates it re-stamped state_elided=True, so the flag survives
+        # every hop up to the client (which reads only reply.error, but ops taps discriminate on it).
+        node = _node()
+        report = ErrorReport(error_type="callee.boom", message="downstream elided")
+        inbound = _framed_envelope(callback_topic="caller.return")
+        inbound.reply = FaultMessage(in_reply_to="callee-frame", tag="tc", error=report, state_elided=True)
+        broker = _CaptureBroker()
+
+        await node.handler(inbound, "cid", {HDR_KIND: "fault"}, broker)
+
+        assert isinstance(broker.published[0][1].reply, FaultMessage)
+        assert broker.published[0][1].reply.state_elided is True
 
     async def test_escalating_callee_fault_does_not_trip_on_node_error(self) -> None:
         # R5 / §6.8: _BatchFaulted is RETURNED, never raised — escalating a callee fault must not

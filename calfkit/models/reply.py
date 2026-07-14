@@ -61,3 +61,16 @@ class FaultMessage(_ReplyBase):
 
     kind: Literal["fault"] = "fault"
     error: ErrorReport
+
+    state_elided: bool = False
+    """The oversized-fault degradation signal (state-elision spec D3): ``True`` means the run
+    state this fault would normally carry (``context.state``/``deps``, frame payloads/overrides,
+    workflow metadata) was elided at some hop so the fault could fit the producer's size limit
+    instead of being floored. Stamped ONLY by the producer chokepoint (``_publish_fault``): the
+    lean rungs stamp ``True``, and a rung-1 publish re-stamps ``True`` when the inbound delivery
+    being answered was itself a state-elided fault (the mirror carries that inbound's — elided —
+    context, so an unmarked flag would lie on multi-hop escalation). It does NOT propagate
+    through a fan-out close, where the durable basestate re-establishes genuine state. An empty
+    ``State`` is legitimate on many deliveries, so absence-of-state cannot signal elision — this
+    field is what preserves the (deliberately undecided) receiver-policy choice without a wire
+    migration. Decode-tolerant default: an old producer's fault reads as not-elided."""

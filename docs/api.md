@@ -359,6 +359,10 @@ Framework-minted `error_type` codes (all under the reserved `calf.` prefix), shi
 
 `FaultTypes` also defines `details`-key constants (e.g. `SEAM_ERRORS`, `FANOUT_TOPOLOGY`); see the source for the full set.
 
+### Oversized faults degrade, never silently drop
+
+A fault normally travels with the run state (the conversation, deps) it was produced against. If that carriage exceeds the producer's `max_request_size`, the publish would fail — so instead of dropping the fault, the framework **degrades the carriage**: it re-publishes with the run state elided (an empty context and a routing-only call stack), keeping the full `ErrorReport`; if the report itself is still too large, it strips the report to its identity too; only if even that fails is the fault floored (and always logged). The `NodeFaultError.report` a client receives is unaffected — the report is what degrades last. A `publish_topic` tap (or other wire consumer) can tell a degraded fault apart by the **`state_elided`** flag on the wire fault reply (`True` once the run state was elided at any hop). Elision is a size-driven fallback, not the norm; the common case carries the full state.
+
 ## Context objects
 
 A node's own code receives a context object as its parameter. The shape depends on the kind of node:

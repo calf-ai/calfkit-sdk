@@ -1204,3 +1204,31 @@ class TestExceptionChain:
         link = next((r for r in report.walk() if r.exception and r.exception.type == "BadRequestError"), None)
         assert link is not None and link.exception is not None
         assert link.exception.attrs["status_code"] == 400
+
+
+class TestFaultMessageStateElided:
+    """FaultMessage.state_elided — the oversized-fault degradation signal (state-elision spec D3).
+
+    Stamped only by the producer chokepoint (_publish_fault rungs 2-3, plus the rung-1
+    propagation re-stamp); receivers read it, never write it. Decode-tolerant default so an
+    old producer's fault (no field) reads as not-elided.
+    """
+
+    def test_defaults_false(self) -> None:
+        msg = FaultMessage(in_reply_to="f1", tag=None, error=ErrorReport(error_type="x"))
+        assert msg.state_elided is False
+
+    def test_explicit_true_round_trips_through_envelope(self) -> None:
+        # The flag must survive the full Envelope wire round-trip — it is what a future
+        # receiver policy (TBD) and ops taps discriminate on.
+        msg = FaultMessage(in_reply_to="f1", tag="t1", error=ErrorReport(error_type="x"), state_elided=True)
+        env = _envelope_with_reply(msg)
+        back = Envelope.model_validate_json(env.model_dump_json())
+        assert isinstance(back.reply, FaultMessage)
+        assert back.reply.state_elided is True
+
+    def test_additive_decode_missing_key_is_false(self) -> None:
+        # Old-producer compat (spec D3): a pre-feature fault JSON without the field
+        # validates to False, so mixed-version meshes never mis-read elision.
+        msg = FaultMessage.model_validate_json('{"kind":"fault","in_reply_to":"f1","tag":null,"error":{"error_type":"x"}}')
+        assert msg.state_elided is False
