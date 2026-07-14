@@ -21,7 +21,11 @@ classifiers = [
 requires-python = ">=3.10"
 
 dependencies = [
-    "faststream[kafka]>0.7",
+    # Upper-bounded: calfkit/_faststream_ext/ extends faststream._internal subscriber
+    # machinery (see that package's docstring); canary tests in
+    # tests/unit/faststream_ext/test_upstream_seams.py verify every touched seam, so a
+    # deliberate bump past 0.8 must re-run them, not discover breakage in production.
+    "faststream[kafka]>=0.7.1,<0.8",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "uuid-utils>=0.14.0",
