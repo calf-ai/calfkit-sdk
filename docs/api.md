@@ -271,6 +271,8 @@ Worker(
 
 Hosts the given `nodes` against the broker. Drive it with `await worker.run()` (blocking), the embeddable `await worker.start()` / `await worker.stop()` pair, or `async with worker:`.
 
+`max_workers` is the per-node concurrency cap. Every node consumes **key-ordered**: up to `max_workers` messages process in parallel across conversations, while messages sharing a `correlation_id` stay strictly serial, in order — so raising it never reorders a workflow's steps. The default (`1`) processes serially, one message at a time.
+
 ## Policy seams
 
 Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Each is registered as a constructor argument (`Agent`/`NodeDef`; a single callable or a list) or as a repeatable instance decorator (any node — and the only form for tool nodes); constructor entries precede decorator entries. A chain runs in registration order, resolving on the **first non-`None` return** (sync or async handlers). Observer nodes (`@consumer`) have no seams. Agents additionally expose **`on_tool_error`**, a promoted surface over `on_callee_error` with the failing tool first-class (below the table).

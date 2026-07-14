@@ -27,6 +27,7 @@ from calfkit.client.gateway import AgentGateway
 from calfkit.client.hub import _Hub
 from calfkit.client.mesh import Mesh, MeshViewConfig
 from calfkit.client.middleware import ContextInjectionMiddleware, DecodeFloorMiddleware
+from calfkit.keying import partition_key
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
@@ -53,7 +54,7 @@ class Client:
 
     def __init__(
         self,
-        broker: KafkaBroker,
+        broker: _PreStartHookBroker,
         hub: _Hub,
         inbox_topic: str,
         *,
@@ -181,7 +182,7 @@ class Client:
         broker_kwargs: dict[str, Any],
         inbox_topic: str,
         provisioning: ProvisioningConfig | None,
-    ) -> tuple[KafkaBroker, StartupTopicEnsurer, ProvisioningConfig]:
+    ) -> tuple[_PreStartHookBroker, StartupTopicEnsurer, ProvisioningConfig]:
         """EXPERIMENTAL opt-in topic provisioning (issue #180), isolated here as a **removable unit**.
 
         To drop provisioning later: delete this method, the ``provisioning=`` param, and the
@@ -208,9 +209,10 @@ class Client:
         return self._broker
 
     @property
-    def _connection(self) -> KafkaBroker:
+    def _connection(self) -> _PreStartHookBroker:
         # Worker-compat alias for the broker: the Worker reads ``client._connection`` to register node
-        # subscribers/publishers on the shared broker. (Distinct from ``broker._connection``, the
+        # subscribers/publishers on the shared broker — typed as the calfkit broker class so the
+        # key-ordered registration surface is visible. (Distinct from ``broker._connection``, the
         # broker's own started-indicator.)
         return self._broker
 
@@ -386,4 +388,14 @@ class Client:
         headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call", HDR_WIRE: Envelope.WIRE}
         if route is not None:
             headers[HDR_ROUTE] = route
-        await self._broker.publish(envelope, topic=topic, correlation_id=correlation_id, headers=headers)
+        # key= is the Kafka partition key (correlation_id= is a FastStream trace/header
+        # value only). Keyed via the seam so entry Calls share the continuations'
+        # serialization domain — a keyless entry would round-robin across the key-ordered
+        # subscriber's lanes and let two same-correlation submissions interleave.
+        await self._broker.publish(
+            envelope,
+            topic=topic,
+            key=partition_key(correlation_id),
+            correlation_id=correlation_id,
+            headers=headers,
+        )

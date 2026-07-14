@@ -65,6 +65,31 @@ skip_if_no_kafka = pytest.mark.skipif(
 )
 
 
+async def wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 2.0,
+    wake: "asyncio.Event | None" = None,
+) -> None:
+    """Await a predicate, waking on ``wake`` when given (else 1 ms polling).
+
+    The event-wake form is the shared home for test recorders that set a progress event
+    on every state change: clear-then-recheck avoids the lost-wakeup race.
+    """
+
+    async def _wait() -> None:
+        while not predicate():
+            if wake is not None:
+                wake.clear()
+                if predicate():
+                    return
+                await wake.wait()
+            else:
+                await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(_wait(), timeout=timeout)
+
+
 async def wait_for_condition(
     predicate: Callable[[], bool],
     timeout: float = 20.0,
