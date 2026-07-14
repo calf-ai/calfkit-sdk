@@ -63,11 +63,6 @@ class CaptureBroker:
         """The recorded partition keys, in publish order (some suites assert on these alone)."""
         return [call.key for call in self.published]
 
-    @property
-    def topics(self) -> list[str | None]:
-        """The recorded topics, in publish order."""
-        return [call.topic for call in self.published]
-
     async def publish(
         self,
         message: Any,
@@ -76,8 +71,9 @@ class CaptureBroker:
         correlation_id: str | None = None,
         key: bytes | None = None,
         headers: dict[str, str] | None = None,
-        **_extra: Any,
     ) -> None:
+        # No ``**extra`` catch-all: an unexpected publish kwarg should surface as a TypeError
+        # here (a miswired call site) rather than being silently dropped.
         self._calls += 1
         if self._raises is not None and (self._fail_on is None or self._calls in self._fail_on):
             raise self._raises
