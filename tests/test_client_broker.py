@@ -135,3 +135,37 @@ def test_stop_resets_one_shot_so_a_restart_reprovisions(monkeypatch) -> None:
 
     assert calls.count("hook") == 2
     assert "parent_stop" in calls
+
+
+def test_broker_gains_key_ordered_registration_via_the_extension_mixin() -> None:
+    """The calfkit broker composes the standalone extension's registration mixin (first
+    base), gaining `key_ordered_subscriber()` while the stock `subscriber()` builder and
+    the pre-start hook machinery stay untouched."""
+    from calfkit._faststream_ext import KeyOrderedRegistratorMixin, KeyOrderedSubscriber
+
+    broker = _PreStartHookBroker("localhost:9092")
+    assert isinstance(broker, KeyOrderedRegistratorMixin)
+    # The mixin sits ABOVE KafkaBroker so its additive method resolves, and nothing else.
+    mro = type(broker).__mro__
+    assert mro.index(KeyOrderedRegistratorMixin) < mro.index(KafkaBroker)
+
+    sub = broker.key_ordered_subscriber("t-in", "t-return", group_id="g", max_workers=3)
+    assert isinstance(sub, KeyOrderedSubscriber)
+    assert sub in broker.subscribers
+    stock = broker.subscriber("t-other")
+    assert not isinstance(stock, KeyOrderedSubscriber)
+
+
+def test_pre_start_hook_fires_with_key_ordered_subscribers_registered(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def hook(broker) -> None:  # noqa: ANN001
+        calls.append("hook")
+
+    broker = _PreStartHookBroker("localhost:9092", pre_start=hook)
+    broker.key_ordered_subscriber("t-in", group_id="g", max_workers=2)
+    _stub_connect(monkeypatch, broker, calls)
+    _stub_parent_start(monkeypatch, calls)
+
+    asyncio.run(broker.start())
+    assert calls == ["connect", "hook", "parent_start"]

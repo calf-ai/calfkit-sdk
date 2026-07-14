@@ -21,17 +21,22 @@ from typing import Any
 
 from faststream.kafka import KafkaBroker
 
+from calfkit._faststream_ext import KeyOrderedRegistratorMixin
 from calfkit.client._mesh_url import DEFAULT_MESH_URL
 
 PreStartHook = Callable[[KafkaBroker], Awaitable[None]]
 
 
-class _PreStartHookBroker(KafkaBroker):
+class _PreStartHookBroker(KeyOrderedRegistratorMixin, KafkaBroker):
     """``KafkaBroker`` that runs ``pre_start(self)`` once, after ``connect()`` and
     before ``super().start()`` starts the subscribers.
 
     The hook receives the broker so it can reach the broker-managed admin client
     and the registered subscribers without the broker holding any extra state.
+
+    Also composes the standalone key-ordered dispatch extension's registration mixin
+    (``key_ordered_subscriber()`` — additive; the stock ``subscriber()`` builder is
+    untouched), which the worker uses for caller-capable nodes.
     """
 
     def __init__(
