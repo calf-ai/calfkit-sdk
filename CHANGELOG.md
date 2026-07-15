@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.9](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.8...v0.12.9) (2026-07-15)
+
+
+### Features
+
+* key-ordered serialized consumption ([#344](https://github.com/calf-ai/calfkit-sdk/issues/344)) ([24063d7](https://github.com/calf-ai/calfkit-sdk/commit/24063d77931de5f6d5a2f045d78ec3accd0e370f))
+
+
+### Bug Fixes
+
+* oversized faults elide run state instead of silently dropping ([#346](https://github.com/calf-ai/calfkit-sdk/issues/346)) ([2a85101](https://github.com/calf-ai/calfkit-sdk/commit/2a8510199d0221493d65f71c5bdc1954962aeeeb))
+
 ## [0.12.8](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.7...v0.12.8) (2026-07-10)
 
 
