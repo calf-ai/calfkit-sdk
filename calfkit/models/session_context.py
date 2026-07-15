@@ -190,6 +190,21 @@ class WorkflowState(BaseModel):
         frame = self.call_stack.pop()
         self.call_stack.push(replace(frame, fanout_id=frame.frame_id))
 
+    def to_topology(self) -> "WorkflowState":
+        """A topology-only projection for the lean fault carriage (state-elision spec D2).
+
+        Keeps, per frame, the routing skeleton — ``frame_id``, ``target_topic``,
+        ``callback_topic``, ``tag``, ``marker``, ``fanout_id``, ``caller_node_id``,
+        ``caller_node_kind`` — and nulls the call *content*: ``payload``, ``overrides``, and
+        this state's ``metadata``. The kept fields are what escalation addressing, slot
+        matching, fold routing, and ``ancestor_callers`` derivation read; the dropped ones are
+        needed to run a call, not to deliver an error about one, and are what can grow past
+        the producer's size limit. Returns fresh frame objects and a fresh stack (frames are
+        frozen, so ``replace`` copies) — never aliases this state's list. The
+        ``ErrorReport.to_minimal`` precedent: the model owns its own strip target."""
+        frames = [replace(f, payload=None, overrides=None) for f in self.call_stack._internal_list]
+        return WorkflowState(call_stack=Stack(frames), metadata=None)
+
 
 class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     """Base generic context for a session — state, deps, and per-hop identity."""

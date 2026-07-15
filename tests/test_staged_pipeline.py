@@ -67,14 +67,20 @@ def _store_ctx(store: FakeFanoutBatchStore, *, state: State | None = None, deps:
 
 
 def _marked_env(
-    *, in_reply_to: str, tag: str | None = "tc1", parts: list[Any] | None = None, fault: ErrorReport | None = None, state: State | None = None
+    *,
+    in_reply_to: str,
+    tag: str | None = "tc1",
+    parts: list[Any] | None = None,
+    fault: ErrorReport | None = None,
+    state: State | None = None,
+    state_elided: bool = False,
 ) -> Envelope:
     # A marked fan-out frame (fanout_id == frame_id == "A") on top, with a reply slot. The carriage
     # switch carries a sibling's result in reply.parts (a return) or reply.error (a fault).
     frame = CallFrame(target_topic="fan", callback_topic="caller", frame_id="A", fanout_id="A")
     reply: ReturnMessage | FaultMessage
     if fault is not None:
-        reply = FaultMessage(in_reply_to=in_reply_to, tag=tag, error=fault)
+        reply = FaultMessage(in_reply_to=in_reply_to, tag=tag, error=fault, state_elided=state_elided)
     else:
         reply = ReturnMessage(in_reply_to=in_reply_to, tag=tag, parts=parts if parts is not None else [])
     return Envelope(
@@ -244,6 +250,32 @@ class TestAggregate:
         assert isinstance(result, _BatchOpen)
         state = await store.read_state("A")
         assert state is not None and state.outcomes["f1"].fault is not None and state.outcomes["f1"].fault.error_type == "callee.boom"
+
+    async def test_elided_sibling_fault_folds_and_recovery_still_runs(self, caplog: pytest.LogCaptureFixture) -> None:
+        # State-elision spec D4, the FOLD arm: `_resolve_callee` (and so the elided-fault WARNING) is
+        # shared by the single-call path and the sibling fold. A sibling whose fault arrived state-elided
+        # must still fold normally and still run recovery — recovery is SAFE here even with the reply's
+        # state gone, because the close restores the real state from the durable basestate, not the reply.
+        node = _fanout_node()
+        ran: list[str] = []
+
+        def _recover(ctx: Any, fault: ErrorReport) -> str:
+            ran.append(fault.error_type)
+            return "recovered"
+
+        node.on_callee_error(_recover)
+        store = FakeFanoutBatchStore()
+        await _open(store)
+        env = _marked_env(in_reply_to="f1", tag="tc1", fault=ErrorReport(error_type="callee.boom"), state_elided=True)
+
+        with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
+            _run_ctx, _seam, result = await _agg(node, store, env, "fault")
+
+        assert ran == ["callee.boom"]  # recovery ran on the elided fault — behavior unchanged (D4)
+        assert any("state-elided fault" in r.getMessage() for r in caplog.records)  # the corner is visible
+        assert isinstance(result, _BatchOpen)  # folded + parked, exactly like a non-elided sibling fault
+        state = await store.read_state("A")
+        assert state is not None and state.outcomes["f1"].handled is True  # the substitute resolved the slot
 
     # ── re-entry close (three-way) ───────────────────────────────────────────────
     async def test_reentry_all_resolved_restores_materializes_and_closes(self) -> None:

@@ -175,6 +175,11 @@ except ClientTimeoutError:
 fault is not raised to the caller; observe it on the `events()` firehose (a fault with
 no pending handle is also ERROR-logged, never silently dropped).
 
+A fault that grows too large to publish is **degraded, not dropped**: the framework
+re-publishes it with the run state elided (the `ErrorReport` you receive is unaffected),
+so an oversized failing turn still surfaces as a `NodeFaultError` rather than silence. See
+[Oversized faults degrade, never silently drop](api.md#oversized-faults-degrade-never-silently-drop).
+
 See also: the [Errors & faults reference](api.md#errors--faults) for the full
 `ErrorReport` fields and `FaultTypes` catalogue, and [How to guard and transform
 node invocations](policy-seams.md) for `before_node` / `after_node`.

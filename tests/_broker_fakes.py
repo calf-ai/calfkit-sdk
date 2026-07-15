@@ -63,6 +63,21 @@ class CaptureBroker:
         """The recorded partition keys, in publish order (some suites assert on these alone)."""
         return [call.key for call in self.published]
 
+    def _failure_for(self, call_number: int, message: Any) -> BaseException | None:
+        """The exception this publish should raise, or ``None`` to record it — the single
+        extension point for failure policy.
+
+        The base implements the ``raises`` / ``fail_on`` contract (by call NUMBER). Override it
+        for a policy that call-counting cannot express — e.g. failing on the serialized SIZE of
+        *message* (aiokafka's real client-side check), or raising a different exception per
+        attempt. Subclassing here rather than overriding ``publish`` is the point of this module:
+        the signature and the ``PublishCall`` record shape stay single-sourced, so the next
+        publish-signature change (cf. ``key=`` in #344) is still a one-file edit.
+        """
+        if self._raises is not None and (self._fail_on is None or call_number in self._fail_on):
+            return self._raises
+        return None
+
     async def publish(
         self,
         message: Any,
@@ -75,6 +90,7 @@ class CaptureBroker:
         # No ``**extra`` catch-all: an unexpected publish kwarg should surface as a TypeError
         # here (a miswired call site) rather than being silently dropped.
         self._calls += 1
-        if self._raises is not None and (self._fail_on is None or self._calls in self._fail_on):
-            raise self._raises
+        failure = self._failure_for(self._calls, message)
+        if failure is not None:
+            raise failure
         self.published.append(PublishCall(message, topic, correlation_id, key, headers or {}))
