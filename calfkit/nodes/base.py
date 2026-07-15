@@ -789,9 +789,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             # TODO(state-elided-receiver-policy): a lean carriage drops the run state a registered
             #   on_callee_error/on_tool_error recovery would read (single-call substitute-continuation),
             #   so recovery on an elided fault can be incoherent. Whether the framework should bypass
-            #   recovery on a state-elided fault is DELIBERATELY UNDECIDED — see D4 of
-            #   docs/designs/oversized-fault-state-elision-spec.md. Receivers are behaviorally untouched
-            #   here; the flag exists so that policy can be chosen later without a wire migration.
+            #   recovery on a state-elided fault is DELIBERATELY UNDECIDED — described in full at
+            #   docs/issues/state-elided-fault-receiver-policy-undefined.md (design rationale: D4 of
+            #   docs/designs/oversized-fault-state-elision-spec.md). Receivers are behaviorally
+            #   untouched here; the flag exists so that policy can be chosen later without a wire
+            #   migration. The other half of this TODO is the recovery-chain site in _resolve_callee.
             nonlocal topology
             if lean:
                 if topology is None:
@@ -1161,8 +1163,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             #   state was elided to fit the producer's size limit (state-elision spec D2), so a single-call
             #   substitute then continues over EMPTY state — which can be incoherent. Behavior is UNCHANGED
             #   (the handler still runs); this WARNING only makes the deliberately-undecided corner visible
-            #   if it occurs. Whether the framework should bypass recovery on an elided fault is open — see
-            #   D4 of docs/designs/oversized-fault-state-elision-spec.md.
+            #   if it occurs — it is the evidence a future policy decision should rest on. The question,
+            #   its scope, and why the fan-out arm is unaffected are described in full at
+            #   docs/issues/state-elided-fault-receiver-policy-undefined.md (rationale: spec D4).
             logger.warning(
                 "[%s] running on_callee_error on a state-elided fault node=%s tag=%s error_type=%s; recovery sees no run state (spec D4)",
                 seam_ctx.correlation_id[:8],
