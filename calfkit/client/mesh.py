@@ -28,6 +28,7 @@ from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
 from calfkit.tuning import KTableReaderTuning, PositiveFiniteFloat
 
 if TYPE_CHECKING:
+    from calfkit.client._connection import ConnectionProfile
     from calfkit.client.caller import Client
 
 logger = logging.getLogger(__name__)
@@ -271,15 +272,15 @@ class Mesh:
         return MappingProxyType(cell.project(view.snapshot()))
 
     async def _cell(self, kind: _Kind[_R, _D]) -> _Cell[_R, _D]:
-        bootstrap = self._client.server_urls
-        if not bootstrap:  # a directly-built client (no connect()) — a programming error, not retriable
+        profile = self._client._connection_profile
+        if profile is None:  # a directly-built client (no connect()) — a programming error, not retriable
             raise ValueError("client.mesh requires a connected client — build it with Client.connect(...).")
         async with self._lock:
             if self._closed:
                 raise ClientClosedError()
             cell: _Cell[_R, _D] | None = self._cells.get(kind.name)
             if cell is None:
-                cell = self._make_cell(kind, bootstrap)
+                cell = self._make_cell(kind, profile)
         try:
             await asyncio.shield(cell.task)  # a waiter's cancel is absorbed here, not propagated into the shared open
         except asyncio.CancelledError:
@@ -294,9 +295,9 @@ class Mesh:
             ) from exc
         return cell
 
-    def _make_cell(self, kind: _Kind[_R, _D], bootstrap: str) -> _Cell[_R, _D]:  # caller holds self._lock
+    def _make_cell(self, kind: _Kind[_R, _D], profile: ConnectionProfile) -> _Cell[_R, _D]:  # caller holds self._lock
         cell: _Cell[_R, _D] = _Cell(
-            task=asyncio.create_task(self._open(kind, bootstrap)),
+            task=asyncio.create_task(self._open(kind, profile)),
             project=_Projector(kind.project_one, label=kind.name),
         )
         name = kind.name
@@ -316,11 +317,11 @@ class Mesh:
         if self._cells.get(name) is cell:
             self._cells.pop(name, None)
 
-    async def _open(self, kind: _Kind[_R, _D], bootstrap_servers: str) -> ControlPlaneView[_R]:
+    async def _open(self, kind: _Kind[_R, _D], profile: ConnectionProfile) -> ControlPlaneView[_R]:
         # Naive open: ensure_topic=False, always — the observer never creates a control-plane topic and
         # never consults client._provisioning (spec §6.3 / §7.1).
         view = ControlPlaneView.open(
-            bootstrap_servers=bootstrap_servers,
+            connection=profile,
             topic=kind.topic,
             record_type=kind.record_type,
             ensure_topic=False,

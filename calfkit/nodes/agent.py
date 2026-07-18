@@ -241,14 +241,14 @@ class BaseAgentNodeDef(
         worker = self._worker
         if worker is None:
             raise RuntimeError(f"fan-out agent {self.node_id!r} has no hosting worker; cannot open its durable store")
-        bootstrap = worker._derive_bootstrap_servers()
-        if not bootstrap:
+        profile = worker._derive_connection_profile()
+        if profile is None:
             raise RuntimeError(
                 f"cannot derive Kafka bootstrap servers for fan-out agent {self.node_id!r}'s durable store (client built without connect()?)."
             )
         fcfg = worker._fanout
         store = KtablesFanoutBatchStore(
-            bootstrap_servers=bootstrap,
+            connection=profile,
             node_id=self.node_id,
             reader_tuning=fcfg.reader_tuning,
             catchup_timeout=fcfg.catchup_timeout,

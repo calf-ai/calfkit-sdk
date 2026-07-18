@@ -17,7 +17,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ktables import KafkaConnectionConfig
 
 #: The default client-wide message-size knob (bytes). The guard applies to the serialized
 #: record (payload + ~100 B protocol overhead), and it is cooperative — it binds calfkit's
@@ -66,3 +69,21 @@ class ConnectionProfile:
             "max_partition_fetch_bytes": self.max_message_bytes,
             "fetch_max_bytes": max(_AIOKAFKA_FETCH_MAX_BYTES_DEFAULT, self.max_message_bytes),
         }
+
+    def ktables_connection(self) -> KafkaConnectionConfig:
+        """The profile as a ktables ``KafkaConnectionConfig`` — Leg 4's carrier (design §5).
+
+        Security applies to ALL ktables clients (``common_opts``: readers, writers, and the
+        ``ensure_topic`` admin), the guard to its writers, the floor to its readers.
+        ``enable_idempotence`` deliberately stays OUTSIDE this mapping: it remains a
+        first-class per-writer ktables kwarg (its one home), and ktables 2.0 *reserves* it
+        in ``producer_opts`` — the two-knob collision is structurally impossible.
+        """
+        from ktables import KafkaConnectionConfig  # lazy — ktables stays off the offline import path
+
+        return KafkaConnectionConfig(
+            bootstrap_servers=self.bootstrap_servers,
+            common_opts=dict(self.security_opts),
+            producer_opts=self.producer_size_kwargs(),
+            consumer_opts=self.consumer_fetch_kwargs(),
+        )

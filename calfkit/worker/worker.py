@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -10,6 +11,7 @@ from typing_extensions import Self
 
 from calfkit._protocol import wire_filter
 from calfkit.client import Client
+from calfkit.client._connection import DEFAULT_MAX_MESSAGE_BYTES, ConnectionProfile
 from calfkit.controlplane.config import ControlPlaneConfig
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.controlplane.view import ControlPlaneView
@@ -216,14 +218,14 @@ class Worker(LifecycleHookMixin):
         live record per toolbox and owns staleness + schema-version filtering.
         """
         cfg = self._control_plane
-        bootstrap = cfg.bootstrap_servers or self._derive_bootstrap_servers()
-        if not bootstrap:
+        profile = self._derive_control_plane_profile()
+        if profile is None:
             raise RuntimeError(
                 "cannot derive Kafka bootstrap servers for the MCP Capability View "
                 "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
             )
         view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
-            bootstrap_servers=bootstrap,
+            connection=profile,
             topic=CAPABILITY_TOPIC,
             record_type=CapabilityRecord,
             catchup_timeout=cfg.catchup_timeout,
@@ -265,14 +267,14 @@ class Worker(LifecycleHookMixin):
         per agent name and owns staleness + schema-version filtering.
         """
         cfg = self._control_plane
-        bootstrap = cfg.bootstrap_servers or self._derive_bootstrap_servers()
-        if not bootstrap:
+        profile = self._derive_control_plane_profile()
+        if profile is None:
             raise RuntimeError(
                 "cannot derive Kafka bootstrap servers for the Agents View "
                 "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
             )
         view: ControlPlaneView[AgentCard] = ControlPlaneView.open(
-            bootstrap_servers=bootstrap,
+            connection=profile,
             topic=AGENTS_TOPIC,
             record_type=AgentCard,
             catchup_timeout=cfg.catchup_timeout,
@@ -285,20 +287,41 @@ class Worker(LifecycleHookMixin):
         yield view
         await view.stop()
 
-    def _derive_bootstrap_servers(self) -> str | None:
-        """The Kafka bootstrap address for this worker's client, or ``None`` if underivable.
+    def _derive_connection_profile(self) -> ConnectionProfile | None:
+        """The client's connection profile, or ``None`` if underivable (design §5 Leg 4).
 
-        Prefers the client's explicit ``server_urls`` (set by ``Client.connect``), falling back
-        to the broker's connection kwargs. A client built directly via ``__init__`` (no
-        ``connect()``) may have neither — callers raise their own contextual error on ``None``.
-        Shared by the MCP Capability View resource and each fan-out agent's durable store resource.
+        Prefers the profile ``Client.connect`` built (bootstrap + security + the
+        ``max_message_bytes`` knob — one carrier for every Kafka client calfkit builds). For a
+        directly-built client (no ``connect()``, no profile) the fallback extracts a bootstrap
+        address from the broker's connection kwargs and wraps it in a DEFAULT profile (default
+        knob, no security) — best-effort parity with the old bootstrap-only derivation. Callers
+        raise their own contextual error on ``None``. Shared by the control-plane view/writer
+        resources and each fan-out agent's durable store resource.
         """
+        profile = self._client._connection_profile
+        if profile is not None:
+            return profile
         bootstrap = self._client.server_urls
         if not bootstrap:
             kwargs = getattr(self._client.broker, "_connection_kwargs", None) or {}
             servers = kwargs.get("bootstrap_servers")
             bootstrap = servers if isinstance(servers, str) else ",".join(servers) if servers else None
-        return bootstrap
+        if not bootstrap:
+            return None
+        return ConnectionProfile(bootstrap_servers=bootstrap, security_opts={}, max_message_bytes=DEFAULT_MAX_MESSAGE_BYTES)
+
+    def _derive_control_plane_profile(self) -> ConnectionProfile | None:
+        """The control-plane's connection profile: the client's, with the split-cluster
+        ``ControlPlaneConfig.bootstrap_servers`` override replacing the *address* while
+        inheriting security + size. A direct-built client with an explicit override — the
+        exact remedy the callers' error messages advertise — gets a default profile built
+        from the override (never ``replace(None, …)``)."""
+        profile = self._derive_connection_profile()
+        override = self._control_plane.bootstrap_servers
+        if not override:
+            return profile
+        base = profile or ConnectionProfile(bootstrap_servers=override, security_opts={}, max_message_bytes=DEFAULT_MAX_MESSAGE_BYTES)
+        return dataclasses.replace(base, bootstrap_servers=override)
 
     def _maybe_register_control_plane(self) -> None:
         """Auto-register the control-plane publisher + per-topic writers (spec §7).
@@ -331,19 +354,21 @@ class Worker(LifecycleHookMixin):
         async def _resource(ctx: ResourceSetupContext["Worker"]) -> AsyncIterator[Any]:
             from ktables import GroupedKafkaTableWriter  # ktables import stays in the worker layer
 
-            bootstrap = self._control_plane.bootstrap_servers or self._derive_bootstrap_servers()
-            if not bootstrap:
+            profile = self._derive_control_plane_profile()
+            if profile is None:
                 raise RuntimeError(
                     f"cannot derive Kafka bootstrap servers for control-plane topic {topic!r} "
                     "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
                 )
             # Producer posture is the client's single knob: None => set nothing (ktables writer
             # default applies), True/False => force it. Same rule as the shared + fan-out producers.
+            # It stays a first-class ktables kwarg — ktables 2.0 RESERVES it in producer_opts,
+            # so the profile-derived connection can never carry a colliding copy.
             writer_idempotence: dict[str, Any] = (
                 {} if self._client._enable_idempotence is None else {"enable_idempotence": self._client._enable_idempotence}
             )
             writer: GroupedKafkaTableWriter[Any] = GroupedKafkaTableWriter.json(
-                bootstrap_servers=bootstrap,
+                connection=profile.ktables_connection(),
                 topic=topic,
                 # Writers ensure only in dev/CI; production topics are ops-governed.
                 ensure_topic=self._client._provisioning.enabled,
