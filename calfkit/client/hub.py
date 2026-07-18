@@ -12,9 +12,13 @@ import asyncio
 import json
 import logging
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Generic
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Annotated, Any, Generic, cast
+
+if TYPE_CHECKING:
+    from faststream.kafka.subscriber.usecase import DefaultSubscriber
 from weakref import WeakValueDictionary
 
 from faststream import Context
@@ -237,6 +241,11 @@ class InvocationHandle(Generic[OutputT]):
             self._stream_active = False
 
 
+#: Default for ``_Hub.register``'s fetch floor: no kwargs (aiokafka defaults apply). Matches the
+#: no-profile posture of a directly-built client; only ``connect()`` threads real floor kwargs.
+_NO_FETCH_KWARGS: Mapping[str, Any] = MappingProxyType({})
+
+
 class _Hub:
     """The client's single inbox reader + per-run demultiplexer (spec §5.1/§5.2).
 
@@ -266,16 +275,25 @@ class _Hub:
             raise ValueError(f"correlation_id {cid!r} already has a live in-flight handle")
         self._runs[cid] = handle
 
-    def register(self, broker: KafkaBroker, inbox_topic: str) -> None:
+    def register(self, broker: KafkaBroker, inbox_topic: str, *, consumer_fetch_kwargs: Mapping[str, Any] = _NO_FETCH_KWARGS) -> None:
         """Register the hub's groupless reply subscriber on the inbox — a **topic** subscription with
         ``group_id=None`` (no consumer group / commits / rebalance; aiokafka auto-assigns all partitions)
         and ``auto_offset_reset="latest"`` (tail). Pure bookkeeping; started by the first
-        ``broker.start()`` (spec §2.7/§5.1). Called from ``connect()``."""
+        ``broker.start()`` (spec §2.7/§5.1). Called from ``connect()``.
+
+        ``consumer_fetch_kwargs`` is the ``max_message_bytes`` fetch floor
+        (``ConnectionProfile.consumer_fetch_kwargs()``) — a >1 MiB reply must be fetchable here.
+        Defaulted to empty (no floor) for direct ``register`` callers without a profile."""
 
         # ONE groupless inbox subscriber; the envelope reply handler is its first filtered call-item.
         # The filter (x-calf-wire == "envelope") runs BEFORE body decode, so a step body never triggers
         # Envelope validation (spec §2.4). Increment E attaches the step call-item to this same `sub`.
-        sub = broker.subscriber(inbox_topic, group_id=None, auto_offset_reset="latest")
+        # The **splat defeats subscriber()'s overload resolution (mypy would type `sub` as Any and
+        # flag the decorated handlers untyped) — cast to the overload's actual return type.
+        sub = cast(
+            "DefaultSubscriber",
+            broker.subscriber(inbox_topic, group_id=None, auto_offset_reset="latest", **consumer_fetch_kwargs),
+        )
 
         @sub(filter=wire_filter(Envelope))
         async def _handle_reply(

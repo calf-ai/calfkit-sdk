@@ -1,6 +1,7 @@
 from importlib.metadata import version
 
 from calfkit.client import (
+    DEFAULT_MAX_MESSAGE_BYTES,
     AgentGateway,
     AgentInfo,
     AgentMessageEvent,
@@ -54,6 +55,7 @@ __all__ = [
     # client
     "AgentGateway",
     "Client",
+    "DEFAULT_MAX_MESSAGE_BYTES",
     "Dispatch",
     "EventStream",
     "InvocationHandle",

@@ -111,6 +111,16 @@ class Worker(LifecycleHookMixin):
             raise ValueError("id must be a non-empty string or None")
         if name is not None and not name.strip():
             raise ValueError("name must be a non-empty string or None")
+        # The size knob is authoritative (max-message-bytes design §5 Leg 2): raw fetch-cap kwargs
+        # here would let node subscribers drift from the mesh-wide floor — same posture as
+        # Client.connect's rejection of a raw max_request_size.
+        reserved_fetch = [k for k in ("max_partition_fetch_bytes", "fetch_max_bytes") if k in extra_subscribe_kwargs]
+        if reserved_fetch:
+            raise ValueError(
+                f"Worker() does not accept {reserved_fetch} in extra_subscribe_kwargs; set the client-wide "
+                "size knob with `Client.connect(max_message_bytes=...)` instead (it applies the producer "
+                "guard and the consumer fetch floor together)."
+            )
         self._client = client
         self._control_plane = control_plane if control_plane is not None else ControlPlaneConfig()
         self._fanout = fanout if fanout is not None else FanoutConfig()
@@ -393,6 +403,12 @@ class Worker(LifecycleHookMixin):
             # registration surface. An explicit extra_subscribe_kwargs["max_workers"]
             # wins over the worker value and is passed exactly once.
             subscribe_kwargs = dict(self._extra_subscribe_kwargs)
+            # Leg 2 (max-message-bytes design §5): every node subscriber gets the fetch floor so
+            # receivers can always fetch what a compliant producer was allowed to send. A
+            # direct-built client (no connect()) has no profile — no floor, today's behavior.
+            profile = getattr(self._client, "_connection_profile", None)
+            if profile is not None:
+                subscribe_kwargs.update(profile.consumer_fetch_kwargs())
             max_workers = subscribe_kwargs.pop("max_workers", self._max_workers)
             subscriber = self._client._connection.key_ordered_subscriber(
                 *topics,

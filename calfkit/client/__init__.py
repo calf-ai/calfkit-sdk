@@ -1,3 +1,4 @@
+from calfkit.client._connection import DEFAULT_MAX_MESSAGE_BYTES
 from calfkit.client.caller import Client
 from calfkit.client.events import (
     DEFAULT_FIREHOSE_BUFFER_SIZE,
@@ -14,6 +15,7 @@ from calfkit.models.step import AgentMessageEvent, HandoffEvent, ToolCallEvent, 
 
 __all__ = [
     "DEFAULT_FIREHOSE_BUFFER_SIZE",
+    "DEFAULT_MAX_MESSAGE_BYTES",
     "AgentGateway",
     "AgentInfo",
     "AgentMessageEvent",

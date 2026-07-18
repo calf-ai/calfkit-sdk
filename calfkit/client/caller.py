@@ -21,6 +21,7 @@ from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
 from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client._broker import _PreStartHookBroker
+from calfkit.client._connection import DEFAULT_MAX_MESSAGE_BYTES, ConnectionProfile
 from calfkit.client._mesh_url import resolve_mesh_url
 from calfkit.client.events import DEFAULT_FIREHOSE_BUFFER_SIZE, EventStream
 from calfkit.client.gateway import AgentGateway
@@ -66,6 +67,7 @@ class Client:
         server_urls: str | None,
         mesh_config: MeshViewConfig | None = None,
         enable_idempotence: bool | None = None,
+        connection_profile: ConnectionProfile | None = None,
     ) -> None:
         self._broker = broker
         self._hub = hub
@@ -78,6 +80,11 @@ class Client:
         # wire their control-plane / fan-out writers to the SAME posture — one knob, single source
         # (worker.py / agent.py read self._client._enable_idempotence).
         self._enable_idempotence = enable_idempotence
+        # The frozen connection carrier (design §4.2): bootstrap + security + max_message_bytes,
+        # threaded to every Kafka client calfkit builds (broker producer, node subscribers, inbox
+        # reader, ktables). None for a directly-built client (no connect()) — every consumer of the
+        # profile degrades explicitly on None rather than guessing.
+        self._connection_profile = connection_profile
         self._server_urls = server_urls
         self._mesh_config = mesh_config
         self._mesh: Mesh | None = None  # the cached client.mesh singleton (created lazily, zero-I/O)
@@ -104,6 +111,7 @@ class Client:
         provisioning: ProvisioningConfig | None = None,
         mesh_config: MeshViewConfig | None = None,
         enable_idempotence: bool | None = None,
+        max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
         **broker_kwargs: Any,
     ) -> Client:
         """Build the client — **sync, lazy, no I/O** (spec §2.1/§2.7). Registers the hub's groupless
@@ -114,6 +122,14 @@ class Client:
         (§6). Topic existence is an operational contract — the client never *boot-checks* it (§2.7).
         Security is configured the broker's way (a FastStream ``security=`` object in ``broker_kwargs``);
         raw security kwargs are rejected with an actionable error.
+
+        ``max_message_bytes`` (default 5 MiB) is the client-wide message-size knob: producers get a
+        **guard** (``max_request_size`` — an oversized publish raises ``MessageSizeTooLargeError``
+        client-side, on the serialized record), consumers get a **capacity floor**
+        (``max_partition_fetch_bytes``), so senders and receivers can never drift apart. It configures
+        calfkit's **clients**, not broker/topic config — a production broker's ``message.max.bytes``
+        must allow at least this size (an operational contract, never boot-checked). The knob is
+        authoritative: ``max_request_size`` in ``broker_kwargs`` is rejected.
 
         calfkit imposes **no** producer posture by default: with ``enable_idempotence`` left unset
         (``None``) the SDK sets neither ``acks`` nor ``enable_idempotence``, so the library defaults
@@ -139,6 +155,27 @@ class Client:
                 "`security=faststream.security.SASLPlaintext(username=..., password=...)`), applied to "
                 "the producer, consumer, and any admin client."
             )
+        # The size knob is authoritative (design §5 Leg 1): a raw max_request_size would silently
+        # bypass the mesh-wide guard/floor coordination — reject it like the raw security kwargs.
+        if "max_request_size" in broker_kwargs:
+            raise ValueError(
+                "Client.connect() does not accept a raw `max_request_size` kwarg; set the client-wide "
+                "size knob with `max_message_bytes=` instead (it applies the producer guard and the "
+                "consumer fetch floor together)."
+            )
+        if isinstance(max_message_bytes, bool) or not isinstance(max_message_bytes, int) or max_message_bytes < 1:
+            raise ValueError(f"max_message_bytes must be a positive int (bytes), got {max_message_bytes!r}")
+
+        # Derive the aiokafka security kwargs from the SAME security= object the broker gets, using
+        # FastStream's own translator — so every non-broker client (ktables readers/writers/admin)
+        # is configured byte-identically to the broker (design §4.3). None -> {}.
+        from faststream.kafka.security import parse_security  # function-local: semi-public module (design §10)
+
+        connection_profile = ConnectionProfile(
+            bootstrap_servers=",".join(server_list),
+            security_opts=parse_security(broker_kwargs.get("security")),
+            max_message_bytes=max_message_bytes,
+        )
 
         client_id = uuid_utils.uuid7().hex
         if inbox_topic is None:
@@ -156,10 +193,17 @@ class Client:
         # registry {inbox -> hub.fail_run} (spec §5.8); ContextInjection populates correlation_id.
         producer_posture: dict[str, Any] = {} if enable_idempotence is None else {"enable_idempotence": enable_idempotence}
         middlewares = [DecodeFloorMiddleware.builder({inbox_topic: hub.fail_run}), ContextInjectionMiddleware]
+        # Leg 1 (design §5): the producer guard rides the broker kwargs. No collision possible —
+        # max_request_size was rejected from broker_kwargs above.
         broker, ensurer, provisioning = cls._make_provisioned_broker(
-            server_list, middlewares, {**producer_posture, **broker_kwargs}, inbox_topic, provisioning
+            server_list,
+            middlewares,
+            {**producer_posture, **connection_profile.producer_size_kwargs(), **broker_kwargs},
+            inbox_topic,
+            provisioning,
         )
-        hub.register(broker, inbox_topic)
+        # Leg 3 (design §5): the inbox reader gets the fetch floor — a >1 MiB reply must be fetchable.
+        hub.register(broker, inbox_topic, consumer_fetch_kwargs=connection_profile.consumer_fetch_kwargs())
 
         return cls(
             broker,
@@ -173,6 +217,7 @@ class Client:
             startup_ensurer=ensurer,
             server_urls=",".join(server_list),
             mesh_config=mesh_config,
+            connection_profile=connection_profile,
         )
 
     @staticmethod
