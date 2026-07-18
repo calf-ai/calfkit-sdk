@@ -82,9 +82,14 @@ def fake_ktables(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _store(**kwargs: object):
+    from calfkit.client._connection import ConnectionProfile
     from calfkit.nodes._fanout_store import KtablesFanoutBatchStore
 
-    return KtablesFanoutBatchStore(bootstrap_servers="kafka:9092", node_id="agent1", **kwargs)
+    return KtablesFanoutBatchStore(
+        connection=ConnectionProfile(bootstrap_servers="kafka:9092", security_opts={}, max_message_bytes=5 * 1024 * 1024),
+        node_id="agent1",
+        **kwargs,
+    )
 
 
 # ── Worker(fanout=) storage ───────────────────────────────────────────────────

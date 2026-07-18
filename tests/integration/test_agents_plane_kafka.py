@@ -30,7 +30,7 @@ from calfkit.nodes.agent import Agent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.worker.worker import Worker
-from tests.integration._kafka_helpers import fast_control_plane
+from tests.integration._kafka_helpers import fast_control_plane, profile_for
 
 pytestmark = pytest.mark.kafka
 
@@ -68,9 +68,7 @@ async def _poll(refresh: Callable[[], Awaitable[object]], predicate: Callable[[]
 async def _start_publisher(
     bootstrap: str, node: Agent, worker_id: str, *, ensure_topic: bool
 ) -> tuple[GroupedKafkaTableWriter[AgentCard], ControlPlanePublisher, SimpleNamespace]:
-    writer: GroupedKafkaTableWriter[AgentCard] = GroupedKafkaTableWriter.json(
-        bootstrap_servers=bootstrap, topic=AGENTS_TOPIC, ensure_topic=ensure_topic
-    )
+    writer: GroupedKafkaTableWriter[AgentCard] = GroupedKafkaTableWriter.json(connection=bootstrap, topic=AGENTS_TOPIC, ensure_topic=ensure_topic)
     await writer.start()
     pub = ControlPlanePublisher(worker_id=worker_id, adverts=[(node, _only_advert(node))], config=fast_control_plane(bootstrap))
     ctx = SimpleNamespace(resources={control_plane_writer_key(AGENTS_TOPIC): writer})
@@ -79,7 +77,7 @@ async def _start_publisher(
 
 
 def _open_view(bootstrap: str) -> ControlPlaneView[AgentCard]:
-    return ControlPlaneView.open(bootstrap_servers=bootstrap, topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False)
+    return ControlPlaneView.open(connection=profile_for(bootstrap), topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False)
 
 
 @pytest.mark.parametrize("description", ["Plans the work", None])

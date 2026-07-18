@@ -35,7 +35,7 @@ from calfkit.nodes import Agent
 from calfkit.peers import Handoff, Messaging
 from calfkit.providers import OpenAIResponsesModelClient
 from calfkit.worker import Worker
-from tests.integration._kafka_helpers import fast_control_plane
+from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.utils import skip_if_no_live_llm
 
 # Real broker (kafka lane) + real model (live lane). The kafka_bootstrap fixture self-skips without
@@ -67,7 +67,7 @@ async def _await_agents_view(bootstrap: str, predicate: Callable[[ControlPlaneVi
     """Open a transient agents view, wait for ``predicate``, then close it — so triage's own view
     catch-up (started after) includes whatever the predicate confirmed is live."""
     view: ControlPlaneView[AgentCard] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
+        connection=profile_for(bootstrap), topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
     )
     try:
         await view.start()

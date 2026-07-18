@@ -70,6 +70,38 @@ def test_security_opts_is_defensively_copied() -> None:
     assert profile.security_opts["sasl_plain_username"] == "svc"
 
 
+def test_ktables_connection_maps_the_profile_onto_the_config() -> None:
+    # §8.4: security → common_opts (all three client types), the guard → producer_opts,
+    # the floor → consumer_opts; bootstrap carried verbatim.
+    security = {"security_protocol": "SASL_PLAINTEXT", "sasl_mechanism": "PLAIN", "sasl_plain_username": "svc", "sasl_plain_password": "pw"}
+    profile = _profile(security_opts=security, bootstrap_servers="a:9092,b:9092")
+    conn = profile.ktables_connection()
+
+    from ktables import KafkaConnectionConfig
+
+    assert isinstance(conn, KafkaConnectionConfig)
+    assert conn.bootstrap_servers == "a:9092,b:9092"
+    assert dict(conn.common_opts) == security
+    assert dict(conn.producer_opts) == profile.producer_size_kwargs()
+    assert dict(conn.consumer_opts) == profile.consumer_fetch_kwargs()
+    assert dict(conn.admin_opts) == {}
+
+
+def test_ktables_connection_import_is_lazy() -> None:
+    # The profile module must not eagerly import ktables (design §5 Leg 4: the config
+    # materializes only inside the lazy blocks). Subprocess avoids sys.modules pollution.
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, calfkit.client._connection\n"
+        "leaked = sorted(m for m in sys.modules if m == 'ktables' or m.startswith('ktables.'))\n"
+        "assert not leaked, leaked\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_repr_redacts_security_values() -> None:
     profile = _profile(security_opts={"sasl_plain_password": "hunter2", "sasl_plain_username": "svc"})
     rendered = repr(profile)

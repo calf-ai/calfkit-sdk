@@ -22,6 +22,7 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, Control
 from calfkit.controlplane.advert import AdvertInfo, advertises
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.nodes import BaseNodeDef
+from tests.integration._kafka_helpers import profile_for
 
 pytestmark = pytest.mark.kafka
 
@@ -38,7 +39,7 @@ def _only_advert(node: BaseNodeDef) -> AdvertInfo:
 async def _start_publisher(
     bootstrap: str, topic: str, node: BaseNodeDef, worker_id: str, *, ensure_topic: bool
 ) -> tuple[GroupedKafkaTableWriter[_Rec], ControlPlanePublisher, SimpleNamespace]:
-    writer: GroupedKafkaTableWriter[_Rec] = GroupedKafkaTableWriter.json(bootstrap_servers=bootstrap, topic=topic, ensure_topic=ensure_topic)
+    writer: GroupedKafkaTableWriter[_Rec] = GroupedKafkaTableWriter.json(connection=bootstrap, topic=topic, ensure_topic=ensure_topic)
     await writer.start()
     pub = ControlPlanePublisher(
         worker_id=worker_id,
@@ -69,7 +70,7 @@ async def test_advertise_roundtrip_and_clean_tombstone(kafka_bootstrap: str, top
 
     node = _Node(node_id="agent-1", subscribe_topics=["agent-1.in"])
     writer, pub, ctx = await _start_publisher(kafka_bootstrap, topic, node, "w1", ensure_topic=True)
-    view: ControlPlaneView[_Rec] = ControlPlaneView.open(bootstrap_servers=kafka_bootstrap, topic=topic, record_type=_Rec, ensure_topic=False)
+    view: ControlPlaneView[_Rec] = ControlPlaneView.open(connection=profile_for(kafka_bootstrap), topic=topic, record_type=_Rec, ensure_topic=False)
     await view.start()
     try:
         # round-trip: the advertised node shows up, collapsed, with its content
@@ -105,8 +106,8 @@ async def test_two_worker_same_node_replica_regression(kafka_bootstrap: str, top
     writer_a, pub_a, ctx_a = await _start_publisher(kafka_bootstrap, topic, node_a, "w-a", ensure_topic=True)
     writer_b, pub_b, ctx_b = await _start_publisher(kafka_bootstrap, topic, node_b, "w-b", ensure_topic=False)
 
-    raw: GroupedKafkaTable[_Rec] = GroupedKafkaTable.json(bootstrap_servers=kafka_bootstrap, topic=topic, model=_Rec, ensure_topic=False)
-    view: ControlPlaneView[_Rec] = ControlPlaneView.open(bootstrap_servers=kafka_bootstrap, topic=topic, record_type=_Rec, ensure_topic=False)
+    raw: GroupedKafkaTable[_Rec] = GroupedKafkaTable.json(connection=kafka_bootstrap, topic=topic, model=_Rec, ensure_topic=False)
+    view: ControlPlaneView[_Rec] = ControlPlaneView.open(connection=profile_for(kafka_bootstrap), topic=topic, record_type=_Rec, ensure_topic=False)
     await raw.start()
     await view.start()
     try:
@@ -142,7 +143,7 @@ async def test_unreachable_view_fails_loud(topic_namespace: str) -> None:
     passthrough for a *connected-but-failing* reader is unit-tested separately —
     ktables raises on an unreachable broker rather than serving degraded.)"""
     view: ControlPlaneView[_Rec] = ControlPlaneView.open(
-        bootstrap_servers="127.0.0.1:1",  # nothing listening
+        connection=profile_for("127.0.0.1:1"),  # nothing listening
         topic=f"{topic_namespace}.presence",
         record_type=_Rec,
         catchup_timeout=3.0,
@@ -186,7 +187,7 @@ async def test_worker_wiring_round_trip(kafka_bootstrap: str, topic_namespace: s
     pub = worker._control_plane_publisher
     assert pub is not None
     ctx = SimpleNamespace(resources={key: writer})  # the bag the publisher reads under the same key
-    view: ControlPlaneView[_Rec] = ControlPlaneView.open(bootstrap_servers=kafka_bootstrap, topic=topic, record_type=_Rec, ensure_topic=False)
+    view: ControlPlaneView[_Rec] = ControlPlaneView.open(connection=profile_for(kafka_bootstrap), topic=topic, record_type=_Rec, ensure_topic=False)
     await view.start()
     try:
         await pub.start(ctx)  # looks up the writer under control_plane_writer_key — the key the worker registered

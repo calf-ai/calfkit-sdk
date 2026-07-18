@@ -204,11 +204,12 @@ class TestAgentsViewResource:
     async def test_bootstrap_derives_from_client(self, fake_table: type[FakeGroupedTable]) -> None:
         worker = Worker(Client.connect(["kafka-a:9092", "kafka-b:9092"]))
         gen, _ = await drive(worker)
-        assert fake_table.instances[0].kwargs["bootstrap_servers"] == "kafka-a:9092,kafka-b:9092"
+        assert fake_table.instances[0].kwargs["connection"].bootstrap_servers == "kafka-a:9092,kafka-b:9092"
         await close(gen)
 
     async def test_underivable_bootstrap_raises_actionable_error(self, fake_table: type[FakeGroupedTable]) -> None:
         client = Client.connect("kafka:9092")
+        client._connection_profile = None  # the direct-built posture: no profile to derive from
         client._server_urls = None
         client.broker._connection_kwargs = {}
         worker = Worker(client)

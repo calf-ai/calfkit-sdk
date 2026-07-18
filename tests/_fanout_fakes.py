@@ -79,7 +79,7 @@ class OfflineFanoutBatchStore(FakeFanoutBatchStore):
     def __init__(
         self,
         *,
-        bootstrap_servers: str,
+        connection: object,
         node_id: str,
         reader_tuning: object | None = None,
         catchup_timeout: float | None = None,

@@ -34,7 +34,7 @@ from calfkit.nodes import Agent, ToolNodeDef, agent_tool
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
 from tests.integration._fault_kafka import ensure_topic
-from tests.integration._kafka_helpers import fast_control_plane
+from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import final_model, scripted_model
 
 pytestmark = pytest.mark.kafka
@@ -69,7 +69,7 @@ async def _collect_stream(handle: InvocationHandle, *, timeout: float) -> list:
 
 async def _await_card(bootstrap: str, name: str, *, timeout: float) -> None:
     view: ControlPlaneView[AgentCard] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
+        connection=profile_for(bootstrap), topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
     )
     try:
         await view.start()

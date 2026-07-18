@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from calfkit.client._connection import DEFAULT_MAX_MESSAGE_BYTES, ConnectionProfile
 from calfkit.controlplane import ControlPlaneConfig
 from calfkit.tuning import KTableReaderTuning
 
@@ -27,3 +28,9 @@ def fast_control_plane(bootstrap: str, **overrides: Any) -> ControlPlaneConfig:
         bootstrap_servers=bootstrap,
         **overrides,
     )
+
+
+def profile_for(bootstrap: str) -> ConnectionProfile:
+    """A default ConnectionProfile for tests that drive calfkit's ktables seams directly
+    (ControlPlaneView.open / KtablesFanoutBatchStore take the calfkit profile, not a string)."""
+    return ConnectionProfile(bootstrap_servers=bootstrap, security_opts={}, max_message_bytes=DEFAULT_MAX_MESSAGE_BYTES)

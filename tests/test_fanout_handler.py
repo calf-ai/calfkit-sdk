@@ -570,7 +570,7 @@ async def test_fanout_open_missing_store_faults_caller_not_escape() -> None:
 class _NoBootstrapWorker:
     """Minimal worker stub whose bootstrap address is underivable (client built without connect())."""
 
-    def _derive_bootstrap_servers(self) -> str | None:
+    def _derive_connection_profile(self) -> object | None:
         return None
 
 

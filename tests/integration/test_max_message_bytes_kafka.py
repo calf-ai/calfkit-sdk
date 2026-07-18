@@ -149,6 +149,29 @@ async def test_client_legs_round_trip_on_a_permissive_cluster(big_limit_bootstra
         await worker._client.aclose()
 
 
+async def test_oversized_fanout_state_write_is_guarded(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """M-4 (design §8.13): the guard rides the ktables leg too — a fanout-state write whose
+    serialized record exceeds the knob raises ``MessageSizeTooLargeError`` out of the store
+    write, client-side (the store's ``KafkaError`` failure contract; the fold maps it to abort)."""
+    from calfkit.client._connection import ConnectionProfile
+    from calfkit.models.fanout import FanoutOpen, FanoutOutcome, FanoutState, SlotRef
+    from calfkit.models.payload import TextPart
+    from calfkit.nodes._fanout_store import KtablesFanoutBatchStore
+
+    # A small knob (64 KiB) so an oversized state is cheap to build; node_id-namespaced topics.
+    profile = ConnectionProfile(bootstrap_servers=kafka_bootstrap, security_opts={}, max_message_bytes=65536)
+    store = KtablesFanoutBatchStore(connection=profile, node_id=f"{topic_namespace}-m4", barrier_timeout=10.0)
+    await store.start()
+    try:
+        registration = FanoutOpen(fanout_id="A", node_id=f"{topic_namespace}-m4", expected=[SlotRef(frame_id="f1", tag="tc1", target_topic="tool.a")])
+        big_outcome = FanoutOutcome(slot="f1", tag="tc1", target_topic="tool.a", handled=False, parts=[TextPart(text="x" * 262144)])
+        big = FanoutState(open=registration, outcomes={"f1": big_outcome})  # ~256 KiB record > the 64 KiB knob
+        with pytest.raises(MessageSizeTooLargeError):
+            await store._state_writer.set("A", big)
+    finally:
+        await store.stop()
+
+
 async def test_oversized_dispatch_raises_client_side(kafka_bootstrap: str, topic_namespace: str) -> None:
     """M-3 (design §8.12): a dispatch whose serialized envelope exceeds the (default 5 MiB)
     knob raises ``MessageSizeTooLargeError`` at the send — client-side, pre-wire, so the

@@ -40,7 +40,7 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
 from calfkit.nodes import Agent, ToolNodeDef, Tools, agent_tool
 from calfkit.worker import Worker
-from tests.integration._kafka_helpers import fast_control_plane
+from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import (
     FINAL_OUTPUT,
     capturing_model,
@@ -103,7 +103,7 @@ async def _wait(predicate: Callable[[], bool], *, timeout: float, what: str) -> 
 async def _await_view(bootstrap: str, predicate: Callable[[ControlPlaneView[CapabilityRecord]], bool], *, timeout: float, what: str) -> None:
     """Open a transient capability view, wait for ``predicate`` over it, then close it."""
     view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
+        connection=profile_for(bootstrap), topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
     )
     try:
         await view.start()

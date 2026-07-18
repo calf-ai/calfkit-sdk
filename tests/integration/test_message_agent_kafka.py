@@ -36,7 +36,7 @@ from calfkit.nodes import Agent, ToolNodeDef, agent_tool
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
 from tests.integration._fault_tools import boom
-from tests.integration._kafka_helpers import fast_control_plane
+from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, final_model, retry_prompt_texts, returns_by_call_id, scripted_model
 
 # Every test here needs a real broker. FunctionModel is offline, but pydantic-ai still gates "model
@@ -69,7 +69,7 @@ async def _await_agents_view(bootstrap: str, predicate: Callable[[ControlPlaneVi
     """Open a transient agents view, wait for ``predicate`` over it, then close it — so a messaging
     agent's own view catch-up (started after) will include whatever the predicate confirmed is live."""
     view: ControlPlaneView[AgentCard] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
+        connection=profile_for(bootstrap), topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
     )
     try:
         await view.start()

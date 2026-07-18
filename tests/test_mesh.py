@@ -319,10 +319,16 @@ def test_projector_dedupes_the_skip_log_across_repeated_projections(caplog: pyte
 
 
 class _StubClient:
-    """A minimal stand-in for Client — the Mesh reads only ``server_urls`` (spec §7.3)."""
+    """A minimal stand-in for Client — the Mesh reads only ``_connection_profile`` (spec §7.3;
+    ``None`` = the directly-built, unconnected posture)."""
 
     def __init__(self, server_urls: str | None = "localhost:9092") -> None:
+        from calfkit.client._connection import ConnectionProfile
+
         self.server_urls = server_urls
+        self._connection_profile = (
+            None if server_urls is None else ConnectionProfile(bootstrap_servers=server_urls, security_opts={}, max_message_bytes=5 * 1024 * 1024)
+        )
 
 
 def _make_mesh(*, server_urls: str | None = "localhost:9092", config: MeshViewConfig | None = None) -> Mesh:
@@ -457,7 +463,7 @@ async def test_concurrent_first_calls_of_one_kind_open_once(monkeypatch: pytest.
     calls = _install_opener(monkeypatch, lambda **kw: view)
     mesh = _make_mesh()
     waiters = asyncio.gather(mesh.get_agents(), mesh.get_agents(), mesh.get_agents())
-    await view.entered.wait()  # the single shared open is in-flight
+    await asyncio.wait_for(view.entered.wait(), timeout=1.0)  # the single shared open is in-flight
     gate.set()
     results = await waiters
     assert results == [{}, {}, {}]
@@ -505,7 +511,7 @@ async def test_aclose_cancels_an_in_flight_open_and_tears_it_down(monkeypatch: p
     _install_opener(monkeypatch, lambda **kw: view)
     mesh = _make_mesh()
     waiter = asyncio.ensure_future(mesh.get_agents())
-    await view.entered.wait()
+    await asyncio.wait_for(view.entered.wait(), timeout=1.0)
     await mesh.aclose()  # cancels the in-flight open
     assert view.stopped  # the teardown-guard stopped the half-built view (no leaked consumer)
     with pytest.raises(ClientClosedError):
@@ -748,7 +754,7 @@ async def test_a_waiter_cancel_does_not_poison_a_co_waiter(monkeypatch: pytest.M
     mesh = _make_mesh()
     victim = asyncio.ensure_future(asyncio.wait_for(mesh.get_agents(), timeout=0.05))
     survivor = asyncio.ensure_future(mesh.get_agents())
-    await view.entered.wait()  # the single shared open is in-flight; both waiters are on it
+    await asyncio.wait_for(view.entered.wait(), timeout=1.0)  # the single shared open is in-flight; both waiters are on it
     with pytest.raises(asyncio.TimeoutError):
         await victim  # the victim's wait_for cancels its waiter
     gate.set()  # release the shared open

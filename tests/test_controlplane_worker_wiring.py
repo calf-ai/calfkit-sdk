@@ -162,7 +162,7 @@ async def test_writer_opens_with_config_and_lifecycle(fake_writer: type[_FakeWri
     gen, writer = await _drive(worker, "calf.a")
     assert writer.started and not writer.stopped
     assert writer.kwargs["topic"] == "calf.a"
-    assert writer.kwargs["bootstrap_servers"] == "kafka:9092"
+    assert writer.kwargs["connection"].bootstrap_servers == "kafka:9092"
     assert writer.kwargs["ensure_topic"] is False  # provisioning disabled by default
     await _close(gen)
     assert writer.stopped
@@ -172,12 +172,13 @@ async def test_writer_bootstrap_override_wins(fake_writer: type[_FakeWriter]) ->
     client = Client.connect("kafka:9092")
     worker = Worker(client, control_plane=ControlPlaneConfig(bootstrap_servers="cp-kafka:9092"))
     gen, writer = await _drive(worker, "calf.a")
-    assert writer.kwargs["bootstrap_servers"] == "cp-kafka:9092"
+    assert writer.kwargs["connection"].bootstrap_servers == "cp-kafka:9092"
     await _close(gen)
 
 
 async def test_writer_underivable_bootstrap_raises(fake_writer: type[_FakeWriter]) -> None:
     client = Client.connect("kafka:9092")
+    client._connection_profile = None  # the direct-built posture: no profile to derive from
     client._server_urls = None
     client.broker._connection_kwargs = {}
     worker = Worker(client)

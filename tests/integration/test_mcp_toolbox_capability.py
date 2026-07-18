@@ -32,6 +32,7 @@ from calfkit.nodes.agent import Agent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.worker.worker import Worker
+from tests.integration._kafka_helpers import profile_for
 
 # Every test here needs a real broker.
 pytestmark = pytest.mark.kafka
@@ -86,7 +87,7 @@ async def _host_toolbox(bootstrap: str, toolbox: MCPToolboxNode, *, heartbeat: f
 
 async def _open_view(bootstrap: str) -> ControlPlaneView[CapabilityRecord]:
     view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
+        connection=profile_for(bootstrap), topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
     )
     await view.start()
     return view

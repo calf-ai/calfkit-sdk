@@ -153,6 +153,63 @@ def test_no_profile_means_no_fetch_floor_on_node_subscribers() -> None:
     assert "fetch_max_bytes" not in args
 
 
+# ── §8.9 Leg 4: Worker._derive_connection_profile (+ the control-plane override arm) ─────
+
+
+class TestDeriveConnectionProfile:
+    def _worker(self, client, **worker_kwargs):  # noqa: ANN001, ANN202
+        from calfkit import Worker
+
+        return Worker(client, **worker_kwargs)
+
+    def test_connect_built_client_yields_the_clients_profile(self) -> None:
+        client = Client.connect("kafka:9092", max_message_bytes=2 * 1024 * 1024)
+        worker = self._worker(client)
+        assert worker._derive_connection_profile() is client._connection_profile
+
+    def test_direct_built_fallback_wraps_broker_bootstrap_with_defaults(self) -> None:
+        # No profile (direct-built posture): the fallback extracts the broker's bootstrap
+        # and wraps it in a DEFAULT profile (default knob, no security) — best-effort parity
+        # with the old _derive_bootstrap_servers.
+        client = Client.connect("kafka:9092")
+        client._connection_profile = None
+        client._server_urls = None
+        worker = self._worker(client)
+        profile = worker._derive_connection_profile()
+        assert profile is not None
+        assert profile.bootstrap_servers == "kafka:9092"
+        assert profile.max_message_bytes == DEFAULT_MAX_MESSAGE_BYTES
+        assert dict(profile.security_opts) == {}
+
+    def test_control_plane_override_replaces_address_and_inherits_the_rest(self) -> None:
+        from faststream.security import SASLPlaintext
+
+        from calfkit.controlplane import ControlPlaneConfig
+
+        client = Client.connect("kafka:9092", max_message_bytes=2 * 1024 * 1024, security=SASLPlaintext(username="svc", password="pw"))
+        worker = self._worker(client, control_plane=ControlPlaneConfig(bootstrap_servers="cp-kafka:9092"))
+        profile = worker._derive_control_plane_profile()
+        assert profile is not None
+        assert profile.bootstrap_servers == "cp-kafka:9092"  # the split-cluster address
+        assert profile.max_message_bytes == 2 * 1024 * 1024  # knob inherited
+        assert profile.security_opts["sasl_plain_username"] == "svc"  # security inherited
+
+    def test_control_plane_override_with_no_profile_builds_a_default(self) -> None:
+        # Direct-built client + explicit override — the exact remedy the error messages
+        # advertise. Must build a default profile from the override, never replace(None, …).
+        from calfkit.controlplane import ControlPlaneConfig
+
+        client = Client.connect("kafka:9092")
+        client._connection_profile = None
+        client._server_urls = None
+        client.broker._connection_kwargs = {}
+        worker = self._worker(client, control_plane=ControlPlaneConfig(bootstrap_servers="cp-kafka:9092"))
+        profile = worker._derive_control_plane_profile()
+        assert profile is not None
+        assert profile.bootstrap_servers == "cp-kafka:9092"
+        assert profile.max_message_bytes == DEFAULT_MAX_MESSAGE_BYTES
+
+
 # ── §8.6 the broker producer actually receives the guard ─────────────────────────────────
 
 
