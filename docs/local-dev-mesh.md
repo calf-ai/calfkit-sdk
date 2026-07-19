@@ -191,6 +191,22 @@ ck dev: reusing broker at broker.staging.internal:9092 — not managed by calfki
 `--host` follows the same precedence as the rest of the CLI: flag >
 `$CALFKIT_MESH_URL` > `localhost`.
 
+## Message sizes: dev vs. production
+
+The bundled dev broker (Tansu) enforces **no message-size limit** — it accepts
+records of any size, and a topic-level `max.message.bytes` is stored but not
+enforced. In `ck dev`, the only size limit is therefore calfkit's own
+client-side knob, `Client.connect(max_message_bytes=...)` (default 5 MiB): an
+oversized publish is rejected client-side, before the wire.
+
+A real Kafka/Redpanda is different: it enforces its own limits
+(`message.max.bytes` at the broker/topic level, ~1 MiB by default, plus
+`replica.fetch.max.bytes` for replication). Running a mesh there with a raised
+`max_message_bytes` requires the broker/topic to permit at least that size —
+an **operational contract**: calfkit documents it and never boot-checks it. A
+mismatch surfaces as the broker's own `MESSAGE_TOO_LARGE` produce error. See
+`Client.connect` in the [API reference](api.md) for the knob's exact semantics.
+
 ## Using your own broker binary
 
 Set `CALF_TANSU_BIN` to an executable to bypass the bundled binary entirely —

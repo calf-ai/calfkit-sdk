@@ -26,6 +26,8 @@ from calfkit.tuning import KTableReaderTuning
 if TYPE_CHECKING:
     from ktables import KafkaTable, KafkaTableWriter
 
+    from calfkit.client._connection import ConnectionProfile
+
 logger = logging.getLogger(__name__)
 
 FANOUT_STORE_KEY = "calfkit.fanout.store"
@@ -271,7 +273,7 @@ class KtablesFanoutBatchStore:
     def __init__(
         self,
         *,
-        bootstrap_servers: str,
+        connection: "ConnectionProfile",
         node_id: str,
         reader_tuning: KTableReaderTuning | None = None,
         catchup_timeout: float | None = None,
@@ -283,23 +285,27 @@ class KtablesFanoutBatchStore:
         self._barrier_timeout = barrier_timeout
         state_topic = f"calf.fanout.{node_id}.state"
         basestate_topic = f"calf.fanout.{node_id}.basestate"
+        # ONE ktables connection for all four clients (design §5 Leg 4): security everywhere,
+        # the max_message_bytes guard on the writers, the fetch floor on the readers.
+        ktables_conn = connection.ktables_connection()
         reader_kwargs: dict[str, Any] = {"ensure_topic": True, **(reader_tuning.as_kwargs() if reader_tuning else {})}
         if catchup_timeout is not None:
             reader_kwargs["catchup_timeout"] = catchup_timeout
         # Producer posture is the client's single knob (threaded via agent.py): None => set nothing
-        # (the ktables writer default applies), True/False => force it on both writers.
+        # (the ktables writer default applies), True/False => force it on both writers. Stays a
+        # first-class ktables kwarg — ktables 2.0 reserves it in producer_opts, no dual source.
         writer_idempotence: dict[str, Any] = {} if enable_idempotence is None else {"enable_idempotence": enable_idempotence}
         self._state_reader: KafkaTable[FanoutState] = ktables.KafkaTable.json(
-            bootstrap_servers=bootstrap_servers, topic=state_topic, model=FanoutState, **reader_kwargs
+            connection=ktables_conn, topic=state_topic, model=FanoutState, **reader_kwargs
         )
         self._state_writer: KafkaTableWriter[FanoutState] = ktables.KafkaTableWriter.json(
-            bootstrap_servers=bootstrap_servers, topic=state_topic, model=FanoutState, ensure_topic=True, **writer_idempotence
+            connection=ktables_conn, topic=state_topic, model=FanoutState, ensure_topic=True, **writer_idempotence
         )
         self._base_reader: KafkaTable[FanoutBaseState] = ktables.KafkaTable.json(
-            bootstrap_servers=bootstrap_servers, topic=basestate_topic, model=FanoutBaseState, **reader_kwargs
+            connection=ktables_conn, topic=basestate_topic, model=FanoutBaseState, **reader_kwargs
         )
         self._base_writer: KafkaTableWriter[FanoutBaseState] = ktables.KafkaTableWriter.json(
-            bootstrap_servers=bootstrap_servers, topic=basestate_topic, model=FanoutBaseState, ensure_topic=True, **writer_idempotence
+            connection=ktables_conn, topic=basestate_topic, model=FanoutBaseState, ensure_topic=True, **writer_idempotence
         )
 
     async def start(self) -> None:

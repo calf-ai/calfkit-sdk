@@ -25,6 +25,7 @@ from calfkit.nodes._fanout_store import (
     close_batch,
     record_outcome,
 )
+from tests.integration._kafka_helpers import profile_for
 
 pytestmark = pytest.mark.kafka
 
@@ -48,7 +49,7 @@ def _resolved(slot: str, tag: str, value: str) -> FanoutOutcome:
 
 async def test_open_then_read_is_read_your_own_writes(kafka_bootstrap: str, topic_namespace: str) -> None:
     """After OPEN, a barriered read sees the just-written state + basestate (RYOW)."""
-    store = KtablesFanoutBatchStore(bootstrap_servers=kafka_bootstrap, node_id=f"{topic_namespace}-n")
+    store = KtablesFanoutBatchStore(connection=profile_for(kafka_bootstrap), node_id=f"{topic_namespace}-n")
     await store.start()
     try:
         await store.open("A", _reg(), _snapshot())
@@ -66,7 +67,7 @@ async def test_record_across_folds_then_close_and_tombstone(kafka_bootstrap: str
     """The classify/record/close machine runs over the wire: each record's barrier sees the prior
     fold (RYOW), completion closes, and the tombstone is visible on re-read. The resolved ``parts``
     survive the real ktables JSON round-trip."""
-    store = KtablesFanoutBatchStore(bootstrap_servers=kafka_bootstrap, node_id=f"{topic_namespace}-n")
+    store = KtablesFanoutBatchStore(connection=profile_for(kafka_bootstrap), node_id=f"{topic_namespace}-n")
     await store.start()
     try:
         await store.open("A", _reg(), _snapshot())
@@ -93,7 +94,7 @@ async def test_fault_outcome_folds_and_survives_real_broker_round_trip(kafka_boo
     close: the failed slot rides as ``FanoutOutcome.fault`` (the rail carriage), partitioned out at the
     closing fault group. Without this, the durable carriage of the FAILURE path is untested over Kafka.
     """
-    store = KtablesFanoutBatchStore(bootstrap_servers=kafka_bootstrap, node_id=f"{topic_namespace}-n")
+    store = KtablesFanoutBatchStore(connection=profile_for(kafka_bootstrap), node_id=f"{topic_namespace}-n")
     await store.start()
     try:
         await store.open("A", _reg(), _snapshot())

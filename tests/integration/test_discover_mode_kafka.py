@@ -37,7 +37,7 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
 from calfkit.nodes import Agent, ToolNodeDef, Tools, agent_tool
 from calfkit.worker import Worker
-from tests.integration._kafka_helpers import fast_control_plane
+from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, capturing_model, tool_returns
 
 # Every test here needs a real broker. FunctionModel is offline, but pydantic-ai still
@@ -89,7 +89,7 @@ async def _await_view(bootstrap: str, predicate: Callable[[ControlPlaneView[Capa
     """Open a transient capability view, wait for ``predicate`` over it, then close it — so the
     agent's view catch-up will include whatever the predicate confirmed is live."""
     view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
+        connection=profile_for(bootstrap), topic=CAPABILITY_TOPIC, record_type=CapabilityRecord, ensure_topic=False
     )
     try:
         await view.start()

@@ -27,6 +27,7 @@ from calfkit.exceptions import RegistryConfigError
 if TYPE_CHECKING:
     from ktables import TableStatus
 
+    from calfkit.client._connection import ConnectionProfile
     from calfkit.tuning import KTableReaderTuning
 
 logger = logging.getLogger(__name__)
@@ -205,7 +206,7 @@ class ControlPlaneView(Generic[R]):
     def open(
         cls,
         *,
-        bootstrap_servers: str,
+        connection: ConnectionProfile,
         topic: str,
         record_type: type[R],
         catchup_timeout: float = 30.0,
@@ -213,11 +214,16 @@ class ControlPlaneView(Generic[R]):
         stale_after: float | None = None,
         reader_tuning: KTableReaderTuning | None = None,
     ) -> ControlPlaneView[R]:  # pragma: no cover - exercised in the kafka lane
-        """Open a view over a real ``GroupedKafkaTable``. The caller still awaits ``start()``."""
+        """Open a view over a real ``GroupedKafkaTable``. The caller still awaits ``start()``.
+
+        ``connection`` is the client's :class:`~calfkit.client._connection.ConnectionProfile`
+        (design §5 Leg 4): the ktables ``KafkaConnectionConfig`` — security for all clients,
+        the fetch floor for this reader — materializes here, inside the lazy-import block.
+        """
         from ktables import GroupedKafkaTable
 
         table: GroupedTableReader = GroupedKafkaTable.json(
-            bootstrap_servers=bootstrap_servers,
+            connection=connection.ktables_connection(),
             topic=topic,
             model=record_type,
             catchup_timeout=catchup_timeout,

@@ -33,7 +33,7 @@ from calfkit.peers import Messaging
 from calfkit.worker import Worker
 from tests.integration._fault_kafka import fault_worker
 from tests.integration._fault_tools import boom, ok_a, quota
-from tests.integration._kafka_helpers import fast_control_plane
+from tests.integration._kafka_helpers import fast_control_plane, profile_for
 
 pytestmark = pytest.mark.kafka
 models.ALLOW_MODEL_REQUESTS = True
@@ -65,7 +65,7 @@ def _worker(bootstrap: str, *, nodes: list, control_plane: ControlPlaneConfig) -
 
 async def _await_agents_view(bootstrap: str, predicate: Callable[[ControlPlaneView[AgentCard]], bool], *, timeout: float, what: str) -> None:
     view: ControlPlaneView[AgentCard] = ControlPlaneView.open(
-        bootstrap_servers=bootstrap, topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
+        connection=profile_for(bootstrap), topic=AGENTS_TOPIC, record_type=AgentCard, ensure_topic=False
     )
     try:
         await view.start()

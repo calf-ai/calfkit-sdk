@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -10,6 +11,7 @@ from typing_extensions import Self
 
 from calfkit._protocol import wire_filter
 from calfkit.client import Client
+from calfkit.client._connection import DEFAULT_MAX_MESSAGE_BYTES, ConnectionProfile
 from calfkit.controlplane.config import ControlPlaneConfig
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.controlplane.view import ControlPlaneView
@@ -111,6 +113,16 @@ class Worker(LifecycleHookMixin):
             raise ValueError("id must be a non-empty string or None")
         if name is not None and not name.strip():
             raise ValueError("name must be a non-empty string or None")
+        # The size knob is authoritative (max-message-bytes design §5 Leg 2): raw fetch-cap kwargs
+        # here would let node subscribers drift from the mesh-wide floor — same posture as
+        # Client.connect's rejection of a raw max_request_size.
+        reserved_fetch = [k for k in ("max_partition_fetch_bytes", "fetch_max_bytes") if k in extra_subscribe_kwargs]
+        if reserved_fetch:
+            raise ValueError(
+                f"Worker() does not accept {reserved_fetch} in extra_subscribe_kwargs; set the client-wide "
+                "size knob with `Client.connect(max_message_bytes=...)` instead (it applies the producer "
+                "guard and the consumer fetch floor together)."
+            )
         self._client = client
         self._control_plane = control_plane if control_plane is not None else ControlPlaneConfig()
         self._fanout = fanout if fanout is not None else FanoutConfig()
@@ -206,14 +218,14 @@ class Worker(LifecycleHookMixin):
         live record per toolbox and owns staleness + schema-version filtering.
         """
         cfg = self._control_plane
-        bootstrap = cfg.bootstrap_servers or self._derive_bootstrap_servers()
-        if not bootstrap:
+        profile = self._derive_control_plane_profile()
+        if profile is None:
             raise RuntimeError(
                 "cannot derive Kafka bootstrap servers for the MCP Capability View "
                 "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
             )
         view: ControlPlaneView[CapabilityRecord] = ControlPlaneView.open(
-            bootstrap_servers=bootstrap,
+            connection=profile,
             topic=CAPABILITY_TOPIC,
             record_type=CapabilityRecord,
             catchup_timeout=cfg.catchup_timeout,
@@ -255,14 +267,14 @@ class Worker(LifecycleHookMixin):
         per agent name and owns staleness + schema-version filtering.
         """
         cfg = self._control_plane
-        bootstrap = cfg.bootstrap_servers or self._derive_bootstrap_servers()
-        if not bootstrap:
+        profile = self._derive_control_plane_profile()
+        if profile is None:
             raise RuntimeError(
                 "cannot derive Kafka bootstrap servers for the Agents View "
                 "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
             )
         view: ControlPlaneView[AgentCard] = ControlPlaneView.open(
-            bootstrap_servers=bootstrap,
+            connection=profile,
             topic=AGENTS_TOPIC,
             record_type=AgentCard,
             catchup_timeout=cfg.catchup_timeout,
@@ -275,20 +287,43 @@ class Worker(LifecycleHookMixin):
         yield view
         await view.stop()
 
-    def _derive_bootstrap_servers(self) -> str | None:
-        """The Kafka bootstrap address for this worker's client, or ``None`` if underivable.
+    def _derive_connection_profile(self) -> ConnectionProfile | None:
+        """The client's connection profile, or ``None`` if underivable (design §5 Leg 4).
 
-        Prefers the client's explicit ``server_urls`` (set by ``Client.connect``), falling back
-        to the broker's connection kwargs. A client built directly via ``__init__`` (no
-        ``connect()``) may have neither — callers raise their own contextual error on ``None``.
-        Shared by the MCP Capability View resource and each fan-out agent's durable store resource.
+        Prefers the profile ``Client.connect`` built (bootstrap + security + the
+        ``max_message_bytes`` knob — one carrier for every Kafka client calfkit builds). For a
+        directly-built client (no ``connect()``, no profile) the fallback extracts a bootstrap
+        address — the client's ``server_urls`` first, else the broker's connection kwargs — and
+        wraps it in a DEFAULT profile (default knob, **no security**: only the ``connect()``
+        path can derive security, so a direct-built client's ktables clients run unsecured and
+        fail loudly against a secured broker). Callers raise their own contextual error on
+        ``None``. Shared by the control-plane view/writer resources and each fan-out agent's
+        durable store resource.
         """
+        profile = self._client._connection_profile
+        if profile is not None:
+            return profile
         bootstrap = self._client.server_urls
         if not bootstrap:
             kwargs = getattr(self._client.broker, "_connection_kwargs", None) or {}
             servers = kwargs.get("bootstrap_servers")
             bootstrap = servers if isinstance(servers, str) else ",".join(servers) if servers else None
-        return bootstrap
+        if not bootstrap:
+            return None
+        return ConnectionProfile(bootstrap_servers=bootstrap, security_opts={}, max_message_bytes=DEFAULT_MAX_MESSAGE_BYTES)
+
+    def _derive_control_plane_profile(self) -> ConnectionProfile | None:
+        """The control-plane's connection profile: the client's, with the split-cluster
+        ``ControlPlaneConfig.bootstrap_servers`` override replacing the *address* while
+        inheriting security + size. A direct-built client with an explicit override — the
+        exact remedy the callers' error messages advertise — gets a default profile built
+        from the override (never ``replace(None, …)``)."""
+        profile = self._derive_connection_profile()
+        override = self._control_plane.bootstrap_servers
+        if not override:
+            return profile
+        base = profile or ConnectionProfile(bootstrap_servers=override, security_opts={}, max_message_bytes=DEFAULT_MAX_MESSAGE_BYTES)
+        return dataclasses.replace(base, bootstrap_servers=override)
 
     def _maybe_register_control_plane(self) -> None:
         """Auto-register the control-plane publisher + per-topic writers (spec §7).
@@ -321,19 +356,21 @@ class Worker(LifecycleHookMixin):
         async def _resource(ctx: ResourceSetupContext["Worker"]) -> AsyncIterator[Any]:
             from ktables import GroupedKafkaTableWriter  # ktables import stays in the worker layer
 
-            bootstrap = self._control_plane.bootstrap_servers or self._derive_bootstrap_servers()
-            if not bootstrap:
+            profile = self._derive_control_plane_profile()
+            if profile is None:
                 raise RuntimeError(
                     f"cannot derive Kafka bootstrap servers for control-plane topic {topic!r} "
                     "(client built without connect()?); set ControlPlaneConfig(bootstrap_servers=...)."
                 )
             # Producer posture is the client's single knob: None => set nothing (ktables writer
             # default applies), True/False => force it. Same rule as the shared + fan-out producers.
+            # It stays a first-class ktables kwarg — ktables 2.0 RESERVES it in producer_opts,
+            # so the profile-derived connection can never carry a colliding copy.
             writer_idempotence: dict[str, Any] = (
                 {} if self._client._enable_idempotence is None else {"enable_idempotence": self._client._enable_idempotence}
             )
             writer: GroupedKafkaTableWriter[Any] = GroupedKafkaTableWriter.json(
-                bootstrap_servers=bootstrap,
+                connection=profile.ktables_connection(),
                 topic=topic,
                 # Writers ensure only in dev/CI; production topics are ops-governed.
                 ensure_topic=self._client._provisioning.enabled,
@@ -393,6 +430,12 @@ class Worker(LifecycleHookMixin):
             # registration surface. An explicit extra_subscribe_kwargs["max_workers"]
             # wins over the worker value and is passed exactly once.
             subscribe_kwargs = dict(self._extra_subscribe_kwargs)
+            # Leg 2 (max-message-bytes design §5): every node subscriber gets the fetch floor so
+            # receivers can always fetch what a compliant producer was allowed to send. A
+            # direct-built client (no connect()) has no profile — no floor, today's behavior.
+            profile = self._client._connection_profile
+            if profile is not None:
+                subscribe_kwargs.update(profile.consumer_fetch_kwargs())
             max_workers = subscribe_kwargs.pop("max_workers", self._max_workers)
             subscriber = self._client._connection.key_ordered_subscriber(
                 *topics,

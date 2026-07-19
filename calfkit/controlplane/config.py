@@ -33,6 +33,9 @@ class ControlPlaneConfig(BaseModel):
         bootstrap_servers: Override for the control-plane Kafka cluster. ``None``
             (default) derives from the connected client; set only for the
             split-cluster case (control plane on different brokers than data).
+            The override replaces the *address* only — the client's security and
+            ``max_message_bytes`` posture are inherited by the control-plane
+            clients (a split cluster shares the client's connection profile).
         reader_tuning: Cadence for the capability-view reader (reader-only). Lower
             both knobs to cut idle ``barrier()`` latency; see
             :class:`~calfkit.tuning.KTableReaderTuning`.

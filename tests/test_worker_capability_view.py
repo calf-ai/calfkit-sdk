@@ -160,17 +160,33 @@ class TestCapabilityViewResource:
     async def test_bootstrap_explicit_override_wins(self, fake_table: type[FakeGroupedTable]) -> None:
         worker = Worker(Client.connect("kafka:9092"), control_plane=ControlPlaneConfig(bootstrap_servers="cp-kafka:9092"))
         gen, _ = await drive(worker)
-        assert fake_table.instances[0].kwargs["bootstrap_servers"] == "cp-kafka:9092"
+        assert fake_table.instances[0].kwargs["connection"].bootstrap_servers == "cp-kafka:9092"
         await close(gen)
 
     async def test_bootstrap_derives_from_client(self, fake_table: type[FakeGroupedTable]) -> None:
         worker = Worker(Client.connect(["kafka-a:9092", "kafka-b:9092"]))
         gen, _ = await drive(worker)
-        assert fake_table.instances[0].kwargs["bootstrap_servers"] == "kafka-a:9092,kafka-b:9092"
+        assert fake_table.instances[0].kwargs["connection"].bootstrap_servers == "kafka-a:9092,kafka-b:9092"
+        await close(gen)
+
+    async def test_security_and_size_thread_through_to_the_ktables_connection(self, fake_table: type[FakeGroupedTable]) -> None:
+        # Design §8.10 / the folded security fix: the client's security= object reaches the
+        # ktables reader as common_opts (byte-identical to the broker's parse_security), and
+        # the max_message_bytes floor rides consumer_opts — one profile, every client.
+        from faststream.kafka.security import parse_security
+        from faststream.security import SASLPlaintext
+
+        security = SASLPlaintext(username="svc", password="pw")
+        worker = Worker(Client.connect("kafka:9092", security=security, max_message_bytes=2 * 1024 * 1024))
+        gen, _ = await drive(worker)
+        conn = fake_table.instances[0].kwargs["connection"]
+        assert dict(conn.common_opts) == parse_security(security)
+        assert conn.consumer_opts["max_partition_fetch_bytes"] == 2 * 1024 * 1024
         await close(gen)
 
     async def test_underivable_bootstrap_raises_actionable_error(self, fake_table: type[FakeGroupedTable]) -> None:
         client = Client.connect("kafka:9092")
+        client._connection_profile = None  # the direct-built posture: no profile to derive from
         client._server_urls = None
         client.broker._connection_kwargs = {}
         worker = Worker(client)
