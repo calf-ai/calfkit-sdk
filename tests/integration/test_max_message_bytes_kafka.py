@@ -2,20 +2,23 @@
 
 The lane's shared Redpanda enforces its ~1 MiB cluster default (``kafka_batch_max_bytes``),
 so a >1 MiB flow needs the broker's permission — which is exactly the documented operational
-contract ("a production broker must allow at least ``max_message_bytes``"). Both permission
-paths are exercised:
+contract ("a production broker must allow at least ``max_message_bytes``"). Two permission
+paths and two guard legs are exercised:
 
-* **M-1 (topic override):** the test topics are created with a per-topic
+* **M-1 (permission via topic override):** the test topics are created with a per-topic
   ``max.message.bytes`` override (the ops-contract knob), and a >1 MiB payload round-trips
   through an agent end-to-end — proving the client legs (producer guard permits, node
   consumer + inbox reader floors deliver) AND that the per-topic size config actually
   gates the flow (a negative control publishes the same payload to a default topic and is
   rejected server-side).
-* **M-2 (cluster override):** a dedicated Redpanda booted with a raised
+* **M-2 (permission via cluster override):** a dedicated Redpanda booted with a raised
   ``kafka_batch_max_bytes`` runs the same round-trip with NO topic config — the pure
   client-leg proof, unconfounded by per-topic overrides.
-* **M-3 (the guard):** a dispatch over the knob raises ``MessageSizeTooLargeError``
-  client-side, before the wire — broker config irrelevant by construction.
+* **M-4 (the guard, ktables leg):** an oversized fanout-state write through the store's
+  public op raises ``MessageSizeTooLargeError`` client-side out of the ktables writer.
+* **M-3 (the guard, dispatch leg):** a dispatch over the knob raises
+  ``MessageSizeTooLargeError`` client-side, before the wire — broker config irrelevant
+  by construction.
 
 Opt-in (``-m kafka`` / ``make test-kafka``); skips cleanly without Docker.
 """
@@ -41,8 +44,11 @@ models.ALLOW_MODEL_REQUESTS = True
 
 _ONE_MIB = 1024 * 1024
 #: Each rail's payload: > Redpanda's ~1 MiB default (the thing being proven), while keeping the
-#: REPLY envelope — which carries the output PLUS the message history (the inbound text rides
-#: along) — under the worker's own 5 MiB guard. ~1.2 MiB in + ~1.2 MiB out ≈ a <3 MiB reply.
+#: REPLY envelope under the worker's own 5 MiB guard. The reply carries the output TWICE — once
+#: as the reply parts (base.py builds reply.parts from ReturnCall.value) and once inside
+#: message_history (the agent appends its finalizing ModelResponse) — plus the inbound text in
+#: history: ~3 × 1.2 MiB ≈ 3.6 MiB serialized, leaving ~1.4 MiB of headroom. Raising the rails
+#: past ~1.6 MiB would trip the worker's reply guard even though "in + out" naively looks fine.
 _BIG_IN = "x" * (_ONE_MIB + 200 * 1024)
 _BIG_OUT = "y" * (_ONE_MIB + 200 * 1024)
 #: Per-topic / cluster permission used by M-1/M-2 — must be >= the largest envelope.
@@ -77,6 +83,8 @@ async def test_topic_override_permits_a_large_round_trip(kafka_bootstrap: str, t
 
     # Negative control: the same payload to a NON-overridden (auto-created, cluster-default)
     # topic is refused by the broker — server-side, since the client cap here (5 MiB) permits it.
+    # Assumes the shared broker keeps Redpanda's ~1 MiB kafka_batch_max_bytes default (the
+    # conftest sets no override); an image/config bump that raises it would false-green this arm.
     control = AIOKafkaProducer(bootstrap_servers=kafka_bootstrap, max_request_size=5 * _ONE_MIB)
     await control.start()
     try:

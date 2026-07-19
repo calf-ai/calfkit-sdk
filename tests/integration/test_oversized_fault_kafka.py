@@ -62,7 +62,7 @@ async def test_oversized_fault_elides_state_and_reaches_the_caller(kafka_bootstr
 
     node = _RaisingNode(node_id=f"{topic_namespace}-o2", subscribe_topics=[node_in])
     driver = Client.connect(kafka_bootstrap, inbox_topic=reply_topic)
-    # 64 KB size knob (→ producer max_request_size); ~256 KB of deps rides the full fault carriage
+    # 64 KiB size knob (→ producer max_request_size); ~256 KB of deps rides the full fault carriage
     # but is dropped by the lean rung. (Spelled max_message_bytes= since the knob landed: connect()
     # rejects a raw max_request_size kwarg.)
     worker = fault_worker(kafka_bootstrap, nodes=[node], max_message_bytes=65536)

@@ -109,6 +109,18 @@ def test_worker_fanout_defaults_when_omitted() -> None:
 # ── KtablesFanoutBatchStore construction ──────────────────────────────────────
 
 
+def test_store_threads_the_profile_connection_to_all_four_clients(fake_ktables: None) -> None:
+    # §8.10: the profile-derived ktables connection (guard on writers, floor on readers,
+    # security everywhere) must actually reach every client the store builds — a dropped
+    # connection here would pass the rest of the offline suite silently.
+    _store()
+    for client in (*FakeKafkaTable.instances, *FakeKafkaTableWriter.instances):
+        conn = client.kwargs["connection"]
+        assert conn.bootstrap_servers == "kafka:9092"
+        assert conn.producer_opts["max_request_size"] == 5 * 1024 * 1024
+        assert conn.consumer_opts["max_partition_fetch_bytes"] == 5 * 1024 * 1024
+
+
 def test_store_forwards_reader_tuning_to_both_readers(fake_ktables: None) -> None:
     _store(reader_tuning=KTableReaderTuning(poll_timeout_ms=20, fetch_max_wait_ms=10))
     assert len(FakeKafkaTable.instances) == 2  # state + basestate readers

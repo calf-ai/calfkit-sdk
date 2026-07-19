@@ -8,8 +8,11 @@ draws from this one carrier, so the guard (producer ``max_request_size``) and th
 
 The two derivation methods encode the knob's asymmetry: producers get a **guard** (an
 oversized publish raises ``MessageSizeTooLargeError`` client-side), consumers get a
-**capacity floor** (aiokafka consumers cannot reject on size — the floor just guarantees
-receivers can fetch what a compliant producer was allowed to send).
+**capacity floor** — aiokafka documents that ``max_partition_fetch_bytes`` "must be at
+least as large as the maximum message size the server allows or else the consumer can
+get stuck" fetching a large record, so the floor keeps receivers able to fetch exactly
+what the guard permits senders to produce. There is no consumer-side *guard* (rejection
+on size is not a consumer capability), which is why one knob must set both sides.
 """
 
 from __future__ import annotations
@@ -46,7 +49,20 @@ class ConnectionProfile:
     max_message_bytes: int
     """The client-wide size knob: producer guard + consumer floor (design §1)."""
 
+    # Mapping fields make hash() raise; declaring __hash__ = None ALSO makes the type honest
+    # at the protocol level (isinstance(profile, Hashable) is False), so a hashability guard
+    # can never be misled into a call-time TypeError. Equality stays value-based.
+    __hash__ = None  # type: ignore[assignment]
+
     def __post_init__(self) -> None:
+        # Validation backstop at the freeze point: connect() validates first with a richer,
+        # user-facing error, but the profile is a long-lived carrier and dataclasses.replace()
+        # re-enters here while bypassing connect() entirely — the type must not be able to
+        # hold a value its consumers would silently mis-apply.
+        if not self.bootstrap_servers:
+            raise ValueError("ConnectionProfile.bootstrap_servers must be non-empty")
+        if isinstance(self.max_message_bytes, bool) or not isinstance(self.max_message_bytes, int) or self.max_message_bytes < 1:
+            raise ValueError(f"ConnectionProfile.max_message_bytes must be a positive int (bytes), got {self.max_message_bytes!r}")
         # Defensive copy + read-only view: a caller mutating the dict they passed in must
         # not mutate the profile (frozen= alone is a shallow freeze over a live mapping).
         object.__setattr__(self, "security_opts", MappingProxyType(dict(self.security_opts)))
@@ -64,7 +80,12 @@ class ConnectionProfile:
         return {"max_request_size": self.max_message_bytes}
 
     def consumer_fetch_kwargs(self) -> dict[str, Any]:
-        """The consumer-side **floor**: splat into any consumer/subscriber calfkit configures."""
+        """The consumer-side **floor**: splat into any consumer/subscriber calfkit configures.
+
+        Not a guard — aiokafka requires the per-partition cap to be at least the largest
+        message the server allows (a too-small value is a documented stuck-consumer hazard);
+        deriving it from the same knob as the guard keeps that requirement true by construction.
+        """
         return {
             "max_partition_fetch_bytes": self.max_message_bytes,
             "fetch_max_bytes": max(_AIOKAFKA_FETCH_MAX_BYTES_DEFAULT, self.max_message_bytes),

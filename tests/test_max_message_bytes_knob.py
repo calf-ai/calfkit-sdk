@@ -83,6 +83,20 @@ def test_security_object_lands_on_the_profile_as_aiokafka_kwargs() -> None:
     assert dict(client._connection_profile.security_opts) == parse_security(security)
 
 
+def test_parse_security_contract_is_pinned() -> None:
+    # The §10 canary, non-tautological: pin FastStream's translation LITERALLY so a renamed
+    # key (which would silently break SASL on every ktables client while code and test shift
+    # together) fails the suite. If this breaks on a FastStream upgrade, re-verify the shape
+    # and update both this pin and any key-dependent consumer.
+    assert parse_security(SASLPlaintext(username="u", password="p")) == {
+        "security_protocol": "SASL_PLAINTEXT",
+        "ssl_context": None,
+        "sasl_mechanism": "PLAIN",
+        "sasl_plain_username": "u",
+        "sasl_plain_password": "p",
+    }
+
+
 def test_no_security_means_empty_security_opts() -> None:
     client = Client.connect("localhost:9092")
     assert client._connection_profile is not None
@@ -136,6 +150,20 @@ def test_node_subscribers_receive_the_fetch_floor() -> None:
     args = node_subs[0]._connection_args
     assert args["max_partition_fetch_bytes"] == 3 * 1024 * 1024
     assert args["fetch_max_bytes"] == 52_428_800
+
+
+def test_fetch_floor_coexists_with_max_workers_passthrough() -> None:
+    # The choke point updates subscribe_kwargs with the floor THEN pops max_workers —
+    # both must land: the floor on the consumer args, max_workers on the lane pool.
+    from calfkit import Worker
+    from calfkit.nodes import NodeDef
+
+    client = Client.connect("localhost:9092", max_message_bytes=3 * 1024 * 1024)
+    worker = Worker(client, nodes=[NodeDef(node_id="both", subscribe_topics=["both.in"])], max_workers=4)
+    worker.register_handlers()
+    sub = next(s for s in client.broker.subscribers if "both.in" in getattr(s, "topics", []))
+    assert sub._connection_args["max_partition_fetch_bytes"] == 3 * 1024 * 1024
+    assert sub.max_workers == 4
 
 
 def test_no_profile_means_no_fetch_floor_on_node_subscribers() -> None:

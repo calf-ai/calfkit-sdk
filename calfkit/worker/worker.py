@@ -293,10 +293,12 @@ class Worker(LifecycleHookMixin):
         Prefers the profile ``Client.connect`` built (bootstrap + security + the
         ``max_message_bytes`` knob — one carrier for every Kafka client calfkit builds). For a
         directly-built client (no ``connect()``, no profile) the fallback extracts a bootstrap
-        address from the broker's connection kwargs and wraps it in a DEFAULT profile (default
-        knob, no security) — best-effort parity with the old bootstrap-only derivation. Callers
-        raise their own contextual error on ``None``. Shared by the control-plane view/writer
-        resources and each fan-out agent's durable store resource.
+        address — the client's ``server_urls`` first, else the broker's connection kwargs — and
+        wraps it in a DEFAULT profile (default knob, **no security**: only the ``connect()``
+        path can derive security, so a direct-built client's ktables clients run unsecured and
+        fail loudly against a secured broker). Callers raise their own contextual error on
+        ``None``. Shared by the control-plane view/writer resources and each fan-out agent's
+        durable store resource.
         """
         profile = self._client._connection_profile
         if profile is not None:
@@ -431,7 +433,7 @@ class Worker(LifecycleHookMixin):
             # Leg 2 (max-message-bytes design §5): every node subscriber gets the fetch floor so
             # receivers can always fetch what a compliant producer was allowed to send. A
             # direct-built client (no connect()) has no profile — no floor, today's behavior.
-            profile = getattr(self._client, "_connection_profile", None)
+            profile = self._client._connection_profile
             if profile is not None:
                 subscribe_kwargs.update(profile.consumer_fetch_kwargs())
             max_workers = subscribe_kwargs.pop("max_workers", self._max_workers)

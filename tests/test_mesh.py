@@ -451,6 +451,10 @@ async def test_config_is_threaded_into_the_open(monkeypatch: pytest.MonkeyPatch)
     assert calls[0]["catchup_timeout"] == 7.0
     assert calls[0]["stale_after"] == 12.0
     assert calls[0]["reader_tuning"] is tuning
+    # §8.10: the observer passes the CLIENT's profile by identity — security and the
+    # fetch floor reach the client-side ktables reader through this one kwarg.
+    assert calls[0]["connection"] is mesh._client._connection_profile
+    assert calls[0]["connection"].bootstrap_servers == "localhost:9092"
     await mesh.aclose()
 
 

@@ -52,6 +52,31 @@ def test_fetch_max_bytes_raised_when_knob_exceeds_aiokafka_default() -> None:
     assert _profile(max_message_bytes=knob).consumer_fetch_kwargs()["fetch_max_bytes"] == knob
 
 
+def test_type_backstop_rejects_invalid_values_at_construction() -> None:
+    # connect() validates first with a richer error, but the TYPE must also refuse —
+    # dataclasses.replace() re-enters __post_init__ while bypassing connect() entirely.
+    import dataclasses as dc
+
+    for bad in (0, -5, True, False):
+        with pytest.raises(ValueError, match="max_message_bytes"):
+            ConnectionProfile(bootstrap_servers="a:9092", security_opts={}, max_message_bytes=bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="bootstrap_servers"):
+        ConnectionProfile(bootstrap_servers="", security_opts={}, max_message_bytes=1)
+    with pytest.raises(ValueError, match="bootstrap_servers"):
+        dc.replace(_profile(), bootstrap_servers="")  # the replace() door is guarded too
+
+
+def test_unhashable_at_the_protocol_level() -> None:
+    # __hash__ = None: an isinstance(…, Hashable) guard must not be misled into a
+    # call-time TypeError (mapping field). Equality stays value-based.
+    from collections.abc import Hashable
+
+    assert not isinstance(_profile(), Hashable)
+    with pytest.raises(TypeError):
+        hash(_profile())
+    assert _profile() == _profile()
+
+
 def test_profile_is_frozen() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         _profile().max_message_bytes = 1  # type: ignore[misc]
