@@ -1,4 +1,5 @@
 from importlib.metadata import version
+from typing import TYPE_CHECKING, Any
 
 from calfkit.client import (
     DEFAULT_MAX_MESSAGE_BYTES,
@@ -27,27 +28,30 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, Control
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, MeshUnavailableError, NodeFaultError
 from calfkit.models import ErrorReport, ExceptionInfo, FaultTypes, ToolContext
 from calfkit.models.payload import retry_text_part
-from calfkit.nodes import (
-    Agent,
-    AgentSeamContext,
-    BaseNodeDef,
-    ConsumerFn,
-    ConsumerNode,
-    NodeDef,
-    ToolCall,
-    ToolErrorHandler,
-    ToolNodeDef,
-    Tools,
-    agent_tool,
-    consumer,
-    render_fault_for_model,
-    surface_to_model,
-)
 from calfkit.peers import Handoff, Messaging
-from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.tuning import FanoutConfig, KTableReaderTuning
-from calfkit.worker import LifecycleContext, ResourceSetupContext, ServingContext, Worker
+from calfkit.worker import LifecycleContext, ResourceSetupContext, ServingContext
+
+if TYPE_CHECKING:
+    from calfkit.nodes import (
+        Agent,
+        AgentSeamContext,
+        BaseNodeDef,
+        ConsumerFn,
+        ConsumerNode,
+        NodeDef,
+        ToolCall,
+        ToolErrorHandler,
+        ToolNodeDef,
+        Tools,
+        agent_tool,
+        consumer,
+        render_fault_for_model,
+        surface_to_model,
+    )
+    from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
+    from calfkit.worker import Worker
 
 __version__ = version("calfkit")
 __all__ = [
@@ -131,3 +135,39 @@ __all__ = [
     "MeshUnavailableError",
     "NodeFaultError",
 ]
+
+_LAZY_EXPORTS = {
+    **{
+        name: "calfkit.nodes"
+        for name in (
+            "Agent",
+            "AgentSeamContext",
+            "BaseNodeDef",
+            "ConsumerFn",
+            "ConsumerNode",
+            "NodeDef",
+            "ToolCall",
+            "ToolErrorHandler",
+            "ToolNodeDef",
+            "Tools",
+            "agent_tool",
+            "consumer",
+            "render_fault_for_model",
+            "surface_to_model",
+        )
+    },
+    **{name: "calfkit.providers" for name in ("AnthropicModelClient", "OpenAIModelClient", "OpenAIResponsesModelClient")},
+    "Worker": "calfkit.worker",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value

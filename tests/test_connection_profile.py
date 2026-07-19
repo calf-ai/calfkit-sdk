@@ -127,6 +127,24 @@ def test_ktables_connection_import_is_lazy() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_client_import_does_not_load_agent_worker_or_provider_stacks() -> None:
+    # Importing any submodule executes calfkit's package initializer first. A caller that only
+    # needs Client must not pay for the agent, worker, and model-provider stacks as a side effect.
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "from calfkit.client import Client\n"
+        "assert Client is not None\n"
+        "blocked = ('calfkit.nodes.agent', 'calfkit.providers.pydantic_ai', 'calfkit.worker.worker')\n"
+        "loaded = [name for name in blocked if name in sys.modules]\n"
+        "assert not loaded, loaded\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_repr_redacts_security_values() -> None:
     profile = _profile(security_opts={"sasl_plain_password": "hunter2", "sasl_plain_username": "svc"})
     rendered = repr(profile)
