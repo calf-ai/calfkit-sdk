@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.10](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.9...v0.12.10) (2026-07-19)
+
+
+### Features
+
+* client-wide max_message_bytes knob with connection-profile fan-out ([#352](https://github.com/calf-ai/calfkit-sdk/issues/352)) ([ae9a358](https://github.com/calf-ai/calfkit-sdk/commit/ae9a35845dce140a755e19269cc0709cdc0b82c8))
+
 ## [0.12.9](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.8...v0.12.9) (2026-07-15)
 
 
