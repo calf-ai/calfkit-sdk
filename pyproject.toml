@@ -41,7 +41,7 @@ dependencies = [
     "genai-prices>=0.0.48",
     # Capped to <2: the vendored pydantic-ai imports `pydantic_graph.beta`,
     # which 2.0.0 removed (makes calfkit unimportable).
-    "pydantic-graph>=1.47.0,<2",
+    "pydantic-graph>=1.47.0,<3",
     "exceptiongroup>=1.2.2; python_version < '3.11'",
     # Provider SDKs
     "openai>=1.0.0",
