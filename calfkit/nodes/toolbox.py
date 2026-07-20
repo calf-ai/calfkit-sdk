@@ -43,6 +43,8 @@ class Toolbox:
     # field annotation and wrongly reject ``include=["a"]`` under type checking (family pattern:
     # ``Tools``/``Toolboxes`` also hand-write their ``__init__``).
     def __init__(self, name: str, include: Sequence[str] | None = None) -> None:
+        if isinstance(include, str):
+            raise ValueError("Toolbox include= must be a sequence of tool names, not a bare string")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "include", tuple(include) if include is not None else None)
         if not self.name:

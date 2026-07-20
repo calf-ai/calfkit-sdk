@@ -407,3 +407,16 @@ class TestFiveChannelAggregation:
         with caplog.at_level(logging.WARNING, logger="calfkit.nodes.agent"):
             agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: _FakeView()}, registry)
         assert any("partially unresolved" in r.getMessage() for r in caplog.records)
+
+
+class TestBareStringGuard:
+    """Family-wide decision (post-review, 2026-07-19): a bare string where a sequence is
+    expected raises instead of silently iterating character-wise."""
+
+    def test_entries_kwarg_rejects_bare_string(self) -> None:
+        with pytest.raises(ValueError, match="not a bare string"):
+            Toolboxes(entries="jira")
+
+    def test_include_rejects_bare_string(self) -> None:
+        with pytest.raises(ValueError, match="not a bare string"):
+            Toolbox("github", include="search")

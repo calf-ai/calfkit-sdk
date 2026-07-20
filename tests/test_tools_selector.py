@@ -383,3 +383,9 @@ class TestToolsExport:
 
         assert TopLevel is FromModule is FromNodes
         assert "Tools" in calfkit.__all__
+
+
+class TestBareStringGuard:
+    def test_names_kwarg_rejects_bare_string(self) -> None:
+        with pytest.raises(ValueError, match="not a bare string"):
+            Tools(names="abc")

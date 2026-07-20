@@ -36,6 +36,10 @@ def _selection_grammar(
     empty-raises. ``kwarg_label`` is threaded so each family's error names its *own* kwarg
     (``names=`` for the name handles, ``entries=`` for ``Toolboxes``).
     """
+    # A bare string satisfies Sequence[str] and would silently iterate character-wise —
+    # reject it for the whole family (decided 2026-07-19, post-review).
+    if isinstance(alt, str):
+        raise ValueError(f"{label}: {kwarg_label}= must be a sequence of {item_plural}, not a bare string")
     # ``discover`` IS the absence of items, so pairing it with items is contradictory.
     if discover and (positional or alt is not None):
         raise ValueError(f"{label}(discover=True) takes no {noun} {item_plural}")
