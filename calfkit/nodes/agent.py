@@ -1007,7 +1007,9 @@ class BaseAgentNodeDef(
         # (3)+(4) the toolbox surface — ``Toolboxes`` handles plus eager toolbox nodes. An eager
         # toolbox node is a ``ToolSelector`` (not a ``BaseToolNodeDef``), so the split keeps it
         # TYPED in ``selectors``; it is sniffed by its ``_node_kind`` ClassVar rather than
-        # ``isinstance`` so this module never imports from ``calfkit.mcp``.
+        # ``isinstance`` so this module never imports from ``calfkit.mcp``. Only
+        # ``MCPToolboxNode`` satisfies the sniff today; a future toolbox-kind selector MUST set
+        # ``_node_kind = "toolbox"`` or it silently escapes rules 3 and 4.
         tb_handles = [s for s in selectors_all if isinstance(s, Toolboxes)]
         tb_nodes = [s for s in selectors_all if getattr(s, "_node_kind", None) == "toolbox"]
         if any(h.discover for h in tb_handles) and (len(tb_handles) + len(tb_nodes)) > 1:

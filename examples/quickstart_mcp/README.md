@@ -2,7 +2,7 @@
 
 Give an agent tools served by an [MCP](https://modelcontextprotocol.io) server —
 deployed as its own node and used by a **separately-deployed agent that
-references it by name**. This is the end-to-end version of the
+selects it by name**. This is the end-to-end version of the
 [How to give agents MCP tools](../../docs/mcp-tool-discovery.md) guide.
 
 The toolbox here fronts the official **`fetch`** reference server, giving the
@@ -30,7 +30,7 @@ agent one tool — `fetch` (URL → markdown) — so it can read the live web.
 # 1) the toolbox node (spawns the MCP fetch server)
 $ ck run fetch_toolbox:fetcher
 
-# 2) the agent — references the toolbox by name
+# 2) the agent — selects the toolbox by name
 $ ck run research_agent:agent
 
 # 3) ask it something that needs the web

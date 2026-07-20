@@ -38,11 +38,15 @@ class Toolbox:
     name: str
     include: tuple[str, ...] | None = None
 
-    def __post_init__(self) -> None:
+    # Hand-written so the advertised parameter type is ``Sequence`` (spec D3) while the stored
+    # field stays a tuple — the dataclass-generated ``__init__`` would bind the parameter to the
+    # field annotation and wrongly reject ``include=["a"]`` under type checking (family pattern:
+    # ``Tools``/``Toolboxes`` also hand-write their ``__init__``).
+    def __init__(self, name: str, include: Sequence[str] | None = None) -> None:
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "include", tuple(include) if include is not None else None)
         if not self.name:
             raise ValueError("Toolbox name must be non-empty")
-        if self.include is not None and not isinstance(self.include, tuple):
-            object.__setattr__(self, "include", tuple(self.include))
 
 
 def _desugar(entry: object) -> Toolbox:
@@ -90,8 +94,8 @@ class Toolboxes:
 
         Discover mode binds every live toolbox (``resolve_all_capabilities``); named mode
         resolves each entry (``resolve_capability`` with the entry's ``include``), concatenating
-        all five ``SelectorResult`` fields — ``missing_tools`` is the channel ``Tools`` named
-        mode has no ``include=`` to populate.
+        all five ``SelectorResult`` fields — including ``missing_tools``, which named ``Tools``
+        can never populate (it has no ``include=``) but a ``Toolbox`` entry's ``include=`` can.
         """
         if self.discover:
             return resolve_all_capabilities(view, node_kind="toolbox")

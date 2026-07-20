@@ -53,7 +53,8 @@ worker = Worker(client, nodes=[agent])
 ```
 
 `Toolboxes` is an identity-only selector: it carries no connection config, and
-deploying its entries fails immediately with a pointer to the hosting form. A
+deploying a `Toolboxes` selector — or a bare `Toolbox` entry — fails immediately
+with a pointer to the hosting form. A
 toolbox that comes up later — or changes its tools — is picked up automatically
 on the agent's next turn. No restarts, no bring-up order. Several boxes go in
 one selector: `Toolboxes("docs_server", "github")`.

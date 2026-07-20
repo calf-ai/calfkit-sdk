@@ -206,7 +206,7 @@ class TestToolboxesDiscoverDebugLog:
         view = _FakeView(github=make_toolbox_record("github", ("search", "create_issue")))
         with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.agent"):
             agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
-        assert any("discover mode resolved" in r.message for r in caplog.records)
+        assert any("discover mode resolved 2 toolbox tool(s)" in r.getMessage() for r in caplog.records)
         assert set(registry) == {"github__search", "github__create_issue"}
 
 
@@ -350,3 +350,60 @@ class TestWorkerTeachingGate:
     def test_rejects_garbage_entry_types(self) -> None:
         with pytest.raises(TypeError, match="toolbox names or Toolbox specs"):
             Toolboxes(123)  # type: ignore[arg-type]
+
+
+class TestAddToolsIncremental:
+    """The rules re-validate accumulated state on every add_tools call, each raise
+    leaving the committed surface unchanged (validate-before-commit, all raise types)."""
+
+    def test_add_discover_onto_named_raises_surface_unchanged(self) -> None:
+        agent = make_agent(Toolboxes("github"))
+        with pytest.raises(ValueError, match="exclusive author"):
+            agent.add_tools(Toolboxes(discover=True))
+        assert agent._tool_selectors == [Toolboxes("github")]
+        assert agent.tools == [] and agent._eager_tool_nodes == []
+
+    def test_add_named_onto_discover_raises_surface_unchanged(self) -> None:
+        agent = make_agent(Toolboxes(discover=True))
+        with pytest.raises(ValueError, match="exclusive author"):
+            agent.add_tools(Toolboxes("github"))
+        assert agent._tool_selectors == [Toolboxes(discover=True)]
+
+    def test_add_eager_node_onto_discover_raises_surface_unchanged(self) -> None:
+        agent = make_agent(Toolboxes(discover=True))
+        with pytest.raises(ValueError, match="exclusive author"):
+            agent.add_tools(make_toolbox("github"))
+        assert agent._tool_selectors == [Toolboxes(discover=True)]
+
+    def test_add_bare_toolbox_raises_teaching_surface_unchanged(self) -> None:
+        agent = make_agent(Toolboxes("github"))
+        with pytest.raises(ValueError, match=r"Toolboxes\("):
+            agent.add_tools(Toolbox("slack"))
+        assert agent._tool_selectors == [Toolboxes("github")]
+
+
+class TestFiveChannelAggregation:
+    def test_all_five_channels_aggregate_across_entries_in_one_handle(self) -> None:
+        # One handle tripping every channel at once — proves per-channel extend
+        # (not overwrite) across entries, independent of the shared loop body.
+        view = _FakeView(
+            gh=make_toolbox_record("gh", ("ok", "other")),
+            add=make_tool_record("add"),
+            poisoned=make_toolbox_record("poisoned", ("x",), dispatch_topic=""),
+        )
+        result = Toolboxes(Toolbox("gh", include=("ok", "miss")), "ghost", "add", "poisoned").resolve_tools(view)
+        assert [b.name for b in result.bindings] == ["gh__ok"]
+        assert result.missing_tools == ("miss",)
+        assert result.missing_targets == ("ghost",)
+        assert result.wrong_kind_targets == ("add",)
+        assert result.invalid_targets == ("poisoned",)
+        assert result.unresolved
+
+    def test_unresolved_named_selection_warns_at_agent_level(self, caplog: Any) -> None:
+        import logging
+
+        agent = make_agent(Toolboxes("ghost"))
+        registry: dict[str, Any] = {}
+        with caplog.at_level(logging.WARNING, logger="calfkit.nodes.agent"):
+            agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: _FakeView()}, registry)
+        assert any("partially unresolved" in r.getMessage() for r in caplog.records)
