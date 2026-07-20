@@ -41,6 +41,7 @@ from calfkit.nodes._steps import DeniedCall, HandedOff, Observed, Said, StepFact
 from calfkit.nodes._tool_error import AgentSeamContext, ToolErrorHandler, _adapt_tool_error, _as_list, resolve_tool_call
 from calfkit.nodes.base import BaseNodeDef, _SeamArg, _SlotFailed, _SlotResolved
 from calfkit.nodes.tool import BaseToolNodeDef, Tools
+from calfkit.nodes.toolbox import Toolbox, Toolboxes
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import render_peer_directory, resolve_live_peers
 from calfkit.peers.handoff import (
@@ -603,6 +604,8 @@ class BaseAgentNodeDef(
                 # (a legitimate empty cluster, not a misconfiguration). A DEBUG count aids the
                 # "why does my agent have no tools?" case without crying wolf.
                 logger.debug("agent=%s discover mode resolved %d tool node(s)", self.name, len(result.bindings))
+            if isinstance(selector, Toolboxes) and selector.discover:
+                logger.debug("agent=%s discover mode resolved %d toolbox tool(s)", self.name, len(result.bindings))
             if result.unresolved:
                 logger.warning(
                     "agent=%s tool selection partially unresolved by %r (missing_targets=%s "
@@ -953,16 +956,32 @@ class BaseAgentNodeDef(
     def _add_tools(self, raw_tools: Sequence[ToolProvider | ToolBinding | ToolSelector] | None) -> None:
         """Validate the prospective tool surface against the contract, then commit.
 
-        Shared by ``__init__`` and :meth:`add_tools`. The tool-surface contract (spec §15.3) is
-        checked over the RAW entries — types intact before ``split_tool_declarations`` flattens a
-        tool node into a bare :class:`ToolBinding`:
+        Shared by ``__init__`` and :meth:`add_tools`. The tool-surface contract (spec §15.3 +
+        toolbox-discovery spec D3/D5/D6) is checked over the RAW entries — types intact before
+        ``split_tool_declarations`` flattens a tool node into a bare :class:`ToolBinding`:
 
           1. **No duplicate tool names** across eager bindings + named ``Tools``.
           2. **``Tools(discover=True)`` owns the tool-node surface** — no eager tool node and no
-             named ``Tools(...)`` may accompany it (an ``MCPToolbox``, a different node kind, may).
+             named ``Tools(...)`` may accompany it (a ``Toolboxes``/eager toolbox node — a
+             different node kind — may).
+          3. **``Toolboxes(discover=True)`` is the exclusive author of the toolbox surface** —
+             no other ``Toolboxes`` handle (a redundant second discover included) and no eager
+             toolbox node may accompany it (Messaging-strength, checked before rule 4).
+          4. **One policy per toolbox per agent** — the same toolbox name declared twice, across
+             ``Toolboxes`` handles and eager toolbox nodes alike, is a conflict.
+
+        A bare :class:`Toolbox` entry is caught FIRST — before the split would raise its generic
+        ``TypeError`` — so the mistake teaches its own fix (wrap it in ``Toolboxes(...)``; a
+        deliberate divergence from the ``Messaging``/``Handoff`` fall-through, which stays
+        generic because those handles are not tool-flavored).
 
         Validate-before-commit: a raised ``ValueError`` leaves the existing surface unchanged.
         """
+        for t in raw_tools or ():
+            if isinstance(t, Toolbox):
+                raise ValueError(
+                    f"Toolbox({t.name!r}) is an entry spec, not a selector — wrap it in Toolboxes(...): tools=[Toolboxes(Toolbox({t.name!r}, ...))]"
+                )
         bindings, selectors = split_tool_declarations(raw_tools)
         # The eager tool nodes, kept TYPED — read off the raw ``BaseToolNodeDef`` entries (which the
         # split flattens into bindings). The discover-exclusivity check needs to know which
@@ -977,7 +996,7 @@ class BaseAgentNodeDef(
         if discover and (eager_nodes or named):
             raise ValueError(
                 "Tools(discover=True) owns the agent's tool-node surface: no eager tool node "
-                "or named Tools(...) may accompany it (an MCPToolbox may)."
+                "or named Tools(...) may accompany it (a Toolboxes(...) or eager toolbox node may)."
             )
         # (1) no duplicate tool names across the statically-named sources
         static_names = [b.name for b in self.tools + bindings] + [n for s in named for n in s.names]
@@ -985,7 +1004,25 @@ class BaseAgentNodeDef(
         if dupes:
             raise ValueError(f"duplicate tool name(s) in tools=: {dupes}; each tool may be referenced once")
 
-        self.tools += bindings  # commit only after both checks pass
+        # (3)+(4) the toolbox surface — ``Toolboxes`` handles plus eager toolbox nodes. An eager
+        # toolbox node is a ``ToolSelector`` (not a ``BaseToolNodeDef``), so the split keeps it
+        # TYPED in ``selectors``; it is sniffed by its ``_node_kind`` ClassVar rather than
+        # ``isinstance`` so this module never imports from ``calfkit.mcp``. Only
+        # ``MCPToolboxNode`` satisfies the sniff today; a future toolbox-kind selector MUST set
+        # ``_node_kind = "toolbox"`` or it silently escapes rules 3 and 4.
+        tb_handles = [s for s in selectors_all if isinstance(s, Toolboxes)]
+        tb_nodes = [s for s in selectors_all if getattr(s, "_node_kind", None) == "toolbox"]
+        if any(h.discover for h in tb_handles) and (len(tb_handles) + len(tb_nodes)) > 1:
+            raise ValueError(
+                "Toolboxes(discover=True) is the exclusive author of the toolbox surface — "
+                "no other Toolboxes handle or eager toolbox node may accompany it"
+            )
+        box_names = [e.name for h in tb_handles for e in h.entries] + [str(getattr(s, "node_id")) for s in tb_nodes]
+        box_dupes = sorted({n for n in box_names if box_names.count(n) > 1})
+        if box_dupes:
+            raise ValueError(f"duplicate toolbox declaration(s) in tools=: {box_dupes}; one policy per toolbox per agent")
+
+        self.tools += bindings  # commit only after every check passes
         self._tool_selectors += selectors
         self._eager_tool_nodes = eager_nodes
 

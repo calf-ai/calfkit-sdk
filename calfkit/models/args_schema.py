@@ -1,7 +1,7 @@
 """Caller-side JSON-schema arg-validator factory (issue: discovered tools get no caller-side arg
 validation).
 
-A discovered tool (capability-plane ``Tools``/``MCPToolbox`` discovery, wire-deserialized per-run
+A discovered tool (capability-plane ``Tools``/``Toolboxes`` discovery, wire-deserialized per-run
 overrides, hand-rolled bindings) carries no process-local validator — only its advertised
 ``parameters_json_schema``. :func:`schema_args_validator` compiles that schema into an
 :data:`~calfkit.models.tool_dispatch.ArgsValidator` the agent consults at the dispatch chokepoint,

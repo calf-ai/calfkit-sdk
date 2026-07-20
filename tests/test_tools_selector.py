@@ -1,6 +1,6 @@
 """``Tools`` — the identity-only handle to one or more function tool nodes.
 
-The call-side counterpart to a deployed tool node (mirrors ``MCPToolbox``): an agent
+The call-side counterpart to a deployed tool node (mirrors ``Toolboxes``): an agent
 holds ``Tools("add", "subtract")`` and the schemas are discovered per turn from the
 shared capability view. Resolution reuses ``resolve_capability`` with
 ``expected_kind="tool"`` (the over-pull guard), so ``Tools`` can never bind a toolbox
@@ -214,7 +214,7 @@ class TestToolSurfaceContract:
     ``Agent(tools=...)`` and ``add_tools``:
       (1) no duplicate tool names across eager bindings + named ``Tools``;
       (2) ``Tools(discover=True)`` owns the tool-node surface (no eager tool node or named
-          ``Tools`` alongside it; an ``MCPToolbox`` — a different kind — may).
+          ``Tools`` alongside it; a ``Toolboxes``/eager toolbox node — a different kind — may).
     """
 
     # --- (1) no duplicate tool names ------------------------------------------------
@@ -244,12 +244,12 @@ class TestToolSurfaceContract:
         agent = make_agent(Tools(discover=True))
         assert agent._tool_selectors == [Tools(discover=True)]
 
-    def test_discover_composes_with_mcp_toolbox(self) -> None:
-        from calfkit.mcp import MCPToolbox
+    def test_discover_composes_with_toolboxes(self) -> None:
+        from calfkit.nodes.toolbox import Toolboxes
 
-        agent = make_agent(Tools(discover=True), MCPToolbox("fs"))
+        agent = make_agent(Tools(discover=True), Toolboxes("fs"))
         assert Tools(discover=True) in agent._tool_selectors
-        assert MCPToolbox("fs") in agent._tool_selectors
+        assert Toolboxes("fs") in agent._tool_selectors
 
     def test_distinct_named_handles_are_legal(self) -> None:
         agent = make_agent(Tools("add"), Tools("sub"))
@@ -383,3 +383,9 @@ class TestToolsExport:
 
         assert TopLevel is FromModule is FromNodes
         assert "Tools" in calfkit.__all__
+
+
+class TestBareStringGuard:
+    def test_names_kwarg_rejects_bare_string(self) -> None:
+        with pytest.raises(ValueError, match="not a bare string"):
+            Tools(names="abc")

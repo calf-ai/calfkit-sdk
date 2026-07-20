@@ -41,6 +41,8 @@ if TYPE_CHECKING:
         ConsumerFn,
         ConsumerNode,
         NodeDef,
+        Toolbox,
+        Toolboxes,
         ToolCall,
         ToolErrorHandler,
         ToolNodeDef,
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
         render_fault_for_model,
         surface_to_model,
     )
+    from calfkit.nodes import Toolbox as MCPToolbox
     from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
     from calfkit.worker import Worker
 
@@ -91,6 +94,9 @@ __all__ = [
     "ConsumerFn",
     "ConsumerNode",
     "NodeDef",
+    "MCPToolbox",
+    "Toolbox",
+    "Toolboxes",
     "ToolNodeDef",
     "Tools",
     "agent_tool",
@@ -136,9 +142,11 @@ __all__ = [
     "NodeFaultError",
 ]
 
-_LAZY_EXPORTS = {
+# Maps each deferred export to (module, attribute). The attribute usually matches the export
+# name; ``MCPToolbox`` is the one rename (a root-level compatibility alias for ``Toolbox``).
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     **{
-        name: "calfkit.nodes"
+        name: ("calfkit.nodes", name)
         for name in (
             "Agent",
             "AgentSeamContext",
@@ -146,6 +154,8 @@ _LAZY_EXPORTS = {
             "ConsumerFn",
             "ConsumerNode",
             "NodeDef",
+            "Toolbox",
+            "Toolboxes",
             "ToolCall",
             "ToolErrorHandler",
             "ToolNodeDef",
@@ -156,8 +166,9 @@ _LAZY_EXPORTS = {
             "surface_to_model",
         )
     },
-    **{name: "calfkit.providers" for name in ("AnthropicModelClient", "OpenAIModelClient", "OpenAIResponsesModelClient")},
-    "Worker": "calfkit.worker",
+    "MCPToolbox": ("calfkit.nodes", "Toolbox"),
+    **{name: ("calfkit.providers", name) for name in ("AnthropicModelClient", "OpenAIModelClient", "OpenAIResponsesModelClient")},
+    "Worker": ("calfkit.worker", "Worker"),
 }
 
 _LAZY_SUBMODULES = {"nodes", "providers"}
@@ -171,11 +182,12 @@ def __getattr__(name: str) -> Any:
         # for it again — no need to cache in globals() here.
         return import_module(f"calfkit.{name}")
 
-    module_name = _LAZY_EXPORTS.get(name)
-    if module_name is None:
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-    value = getattr(import_module(module_name), name)
+    module_name, attr_name = target
+    value = getattr(import_module(module_name), attr_name)
     globals()[name] = value
     return value
 

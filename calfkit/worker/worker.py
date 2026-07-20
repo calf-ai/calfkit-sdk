@@ -19,7 +19,7 @@ from calfkit.models.agents import AGENTS_TOPIC, AGENTS_VIEW_RESOURCE_KEY, AgentC
 from calfkit.models.capability import CAPABILITY_TOPIC, CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
 from calfkit.models.envelope import Envelope
 from calfkit.models.tool_dispatch import ToolSelector
-from calfkit.nodes import BaseNodeDef
+from calfkit.nodes import BaseNodeDef, Toolbox
 from calfkit.provisioning import framework_topics_for_nodes, topics_for_nodes
 from calfkit.tuning import FanoutConfig
 from calfkit.worker.lifecycle import (
@@ -174,7 +174,9 @@ class Worker(LifecycleHookMixin):
     def _add_node(self, node: BaseNodeDef) -> None:
         """Internal: register a node for hosting."""
         if not isinstance(node, BaseNodeDef):
-            if isinstance(node, ToolSelector):
+            # ``Toolbox`` is deliberately NOT a ToolSelector (it is an entry spec), but a
+            # misplaced one deserves the same reference-not-host teaching as a selector.
+            if isinstance(node, (ToolSelector, Toolbox)):
                 raise TypeError(
                     f"{type(node).__name__} is a name-only reference and can't host — construct the "
                     "hosting node instead (e.g. MCPToolboxNode(name, connection_params=...)) to deploy. "
