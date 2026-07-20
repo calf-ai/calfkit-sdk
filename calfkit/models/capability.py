@@ -144,7 +144,7 @@ def resolve_capability(
 ) -> SelectorResult:
     """Resolve ``target_id`` (optionally filtered) against the capability view.
 
-    Public API: this is the resolution kernel behind ``MCPToolbox`` and ``Tools``;
+    Public API: this is the resolution kernel behind ``Toolboxes`` and ``Tools``;
     custom ``ToolSelector`` implementations may call it directly. The view owns
     staleness + schema-version filtering, so this only maps a present record to bindings.
 
@@ -187,7 +187,7 @@ class EnumerableCapabilityView(CapabilityLookup, Protocol):
 
     The discover-mode read surface. Satisfied by a ``ControlPlaneView[CapabilityRecord]``
     (which already exposes ``snapshot()``) and by the tests' ``_FakeView``. The
-    single-target path (:func:`resolve_capability`, ``MCPToolbox``) keeps the narrower
+    single-target path (:func:`resolve_capability`, a named ``Toolboxes`` entry) keeps the narrower
     :class:`CapabilityLookup` — it never enumerates (Interface Segregation): point-lookup
     clients must not depend on a ``snapshot()`` they never call.
     """

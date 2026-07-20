@@ -79,9 +79,9 @@ agent = Agent(
 
 Discover mode takes no names and **owns the agent's tool-node surface**: you cannot
 pair `Tools(discover=True)` with an eager tool node or a named `Tools(...)` — that
-raises at construction, so pick one or the other. It still composes with an
-`MCPToolbox` (a different kind of provider), and it binds only function tool nodes,
-never an MCP toolbox's tools.
+raises at construction, so pick one or the other. It still composes with a
+`Toolboxes` selector (a different kind of provider), and it binds only function
+tool nodes, never a toolbox's tools.
 
 ## Names are cluster-wide identities
 

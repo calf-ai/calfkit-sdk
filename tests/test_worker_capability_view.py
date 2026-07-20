@@ -65,7 +65,9 @@ class TestCapabilityViewRegistration:
         assert worker_resource_names(worker).count(CAPABILITY_VIEW_RESOURCE_KEY) == 1
 
     def test_scoped_selectors_also_trigger_registration(self) -> None:
-        worker = Worker(Client.connect("kafka:9092"), nodes=[make_agent(make_toolbox().select(include=["search"]))])
+        from calfkit.nodes.toolbox import Toolbox, Toolboxes
+
+        worker = Worker(Client.connect("kafka:9092"), nodes=[make_agent(Toolboxes(Toolbox("github", include=("search",))))])
         worker._maybe_register_capability_view()
         assert CAPABILITY_VIEW_RESOURCE_KEY in worker_resource_names(worker)
 

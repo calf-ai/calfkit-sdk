@@ -4,6 +4,7 @@ from calfkit.nodes.base import BaseNodeDef
 from calfkit.nodes.consumer import ConsumerFn, ConsumerNode, consumer
 from calfkit.nodes.node import NodeDef
 from calfkit.nodes.tool import BaseToolNodeDef, ToolNodeDef, Tools, agent_tool
+from calfkit.nodes.toolbox import Toolbox, Toolboxes
 
 __all__ = [
     "Agent",
@@ -14,6 +15,8 @@ __all__ = [
     "ConsumerNode",
     "NodeDef",
     "ToolNodeDef",
+    "Toolbox",
+    "Toolboxes",
     "Tools",
     "agent_tool",
     "consumer",

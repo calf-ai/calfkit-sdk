@@ -34,6 +34,8 @@ from calfkit.nodes import (
     ConsumerFn,
     ConsumerNode,
     NodeDef,
+    Toolbox,
+    Toolboxes,
     ToolCall,
     ToolErrorHandler,
     ToolNodeDef,
@@ -43,6 +45,7 @@ from calfkit.nodes import (
     render_fault_for_model,
     surface_to_model,
 )
+from calfkit.nodes import Toolbox as MCPToolbox
 from calfkit.peers import Handoff, Messaging
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
@@ -87,6 +90,9 @@ __all__ = [
     "ConsumerFn",
     "ConsumerNode",
     "NodeDef",
+    "MCPToolbox",
+    "Toolbox",
+    "Toolboxes",
     "ToolNodeDef",
     "Tools",
     "agent_tool",

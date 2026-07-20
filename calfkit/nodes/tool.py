@@ -207,7 +207,7 @@ def agent_tool(func: Callable[..., Any] | None = None, *, name: str | None = Non
 class Tools:
     """Identity-only handle to function tool nodes, resolved per agent turn.
 
-    The call-side counterpart to deployed tool nodes (mirrors :class:`~calfkit.mcp.MCPToolbox`):
+    The call-side counterpart to deployed tool nodes (mirrors :class:`~calfkit.nodes.toolbox.Toolboxes`):
     constructible anywhere with just the tool names — no schema, no import of the tool's code.
     Two modes, mutually exclusive on one handle:
 

@@ -108,9 +108,9 @@ class SelectorResult:
 class ToolSelector(Protocol):
     """Deferred tool declaration, resolved per turn against the Capability View.
 
-    Implemented by :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` (the handle
-    agents hold, including ``select()`` results) and the hosting
-    :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode` that delegates to it, and by
+    Implemented by :class:`~calfkit.nodes.toolbox.Toolboxes` (the family selector agents
+    hold for toolboxes), the hosting :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode`
+    (which calls the same kernel), and by
     :class:`~calfkit.nodes.tool.Tools` for function tool nodes: passing any of them
     to an agent extracts only a lookup key — no session contact, no deployment. The
     ``view`` is an :class:`~calfkit.models.capability.EnumerableCapabilityView` (``get``

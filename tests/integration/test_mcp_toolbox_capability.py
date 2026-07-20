@@ -29,6 +29,7 @@ from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
 from calfkit.models.capability import CAPABILITY_TOPIC, CAPABILITY_VIEW_RESOURCE_KEY, CapabilityRecord
 from calfkit.nodes.agent import Agent
+from calfkit.nodes.toolbox import Toolbox, Toolboxes
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.worker.worker import Worker
@@ -100,7 +101,9 @@ async def test_capability_parity_toolbox_to_agent(kafka_bootstrap: str) -> None:
     name = f"docs-{uuid.uuid4().hex[:8]}"
     toolbox = MCPToolboxNode(name, connection_params=StreamableHttpParameters(url="http://unused.local/mcp"))
     await toolbox._refresh_tools(FakeSession(("search",)))  # prime cache (no real MCP server)
-    agent = Agent("researcher", subscribe_topics="researcher.in", model_client=FakeModel(), tools=[toolbox.select(include=["search"])])
+    agent = Agent(
+        "researcher", subscribe_topics="researcher.in", model_client=FakeModel(), tools=[Toolboxes(Toolbox(toolbox.node_id, include=["search"]))]
+    )
 
     pub, ctx, writer_gen = await _host_toolbox(kafka_bootstrap, toolbox)
     view = await _open_view(kafka_bootstrap)

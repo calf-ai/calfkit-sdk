@@ -25,6 +25,7 @@ from calfkit.models.capability import (
     SelectorResult,
 )
 from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, ToolSelector, split_tool_declarations
+from calfkit.nodes.toolbox import Toolbox, Toolboxes
 from tests.test_controlplane_view import _FakeTable  # the substrate's dict-backed GroupedTableReader fake
 
 
@@ -82,8 +83,7 @@ class TestResolveTools:
         assert result.unresolved
 
     def test_include_filter_and_missing_tools(self) -> None:
-        toolbox = make_toolbox()
-        selector = toolbox.select(include=["search", "nonexistent"])  # include = BARE names (C5)
+        selector = Toolboxes(Toolbox("docs_server", include=("search", "nonexistent")))  # include = BARE names (C5)
         result = selector.resolve_tools({"docs_server": make_record()})
         assert [b.name for b in result.bindings] == ["docs_server__search"]
         assert result.missing_tools == ("nonexistent",)  # missing_tools reported bare too
@@ -93,26 +93,26 @@ class TestResolveTools:
         # expand to docs_server__a__b AND stay pinnable by its bare name `a__b` — the include
         # strip must recover `a__b`, not mangle it (removeprefix, not split("__")).
         record = make_record(tools=[CapabilityToolDef(name="a__b", parameters_json_schema={"type": "object", "properties": {}})])
-        result = make_toolbox().select(include=["a__b"]).resolve_tools({"docs_server": record})
+        result = Toolboxes(Toolbox("docs_server", include=("a__b",))).resolve_tools({"docs_server": record})
         assert [b.name for b in result.bindings] == ["docs_server__a__b"]
         assert result.missing_tools == ()
 
     def test_empty_include_pins_nothing(self) -> None:
         # include=() pins ZERO tools — distinct from include=None (all tools).
-        result = make_toolbox().select(include=[]).resolve_tools({"docs_server": make_record()})
+        result = Toolboxes(Toolbox("docs_server", include=())).resolve_tools({"docs_server": make_record()})
         assert result.bindings == ()
         assert result.missing_tools == ()
 
     def test_empty_toolbox_record_resolves_to_no_bindings(self) -> None:
         # A toolbox advertising zero tools expands to zero bindings; an include miss is bare.
-        result = make_toolbox().select(include=["search"]).resolve_tools({"docs_server": make_record(tools=[])})
+        result = Toolboxes(Toolbox("docs_server", include=("search",))).resolve_tools({"docs_server": make_record(tools=[])})
         assert result.bindings == ()
         assert result.missing_tools == ("search",)
 
-    def test_scoped_selector_is_frozen(self) -> None:
-        selector = make_toolbox().select(include=["search"])
+    def test_scoped_spec_is_frozen(self) -> None:
+        spec = Toolbox("docs_server", include=("search",))
         with pytest.raises(Exception):
-            selector.include = ("other",)  # type: ignore[misc]
+            spec.include = ("other",)  # type: ignore[misc]
 
     def test_malformed_record_is_skipped_with_diagnostic(self) -> None:
         # Tolerant reader admits an empty dispatch_topic; binding expansion
@@ -164,7 +164,7 @@ class TestSplitToolDeclarations:
 
         tool_node = agent_tool(get_weather)
         toolbox = make_toolbox()
-        scoped = toolbox.select(include=["search"])
+        scoped = Toolboxes(Toolbox("docs_server", include=("search",)))
         raw = tool_node.tool_bindings()[0]
 
         bindings, selectors = split_tool_declarations([tool_node, toolbox, scoped, raw])
@@ -279,12 +279,13 @@ class TestAgentResolution:
 class TestNoStrictSurface:
     """D5: the strict knob and its exception are gone from the public surface."""
 
-    def test_select_has_no_strict_parameter(self) -> None:
+    def test_selection_surface_has_no_strict_parameter(self) -> None:
         import inspect
 
-        params = inspect.signature(MCPToolboxNode.select).parameters
-        assert "strict" not in params
-        assert "include" in params
+        toolboxes_params = inspect.signature(Toolboxes.__init__).parameters
+        toolbox_params = inspect.signature(Toolbox.__init__).parameters
+        assert "strict" not in toolboxes_params and "strict" not in toolbox_params
+        assert "include" in toolbox_params
 
     def test_selector_result_has_no_strict_or_filtering_diagnostics(self) -> None:
         fields = set(SelectorResult.__dataclass_fields__)
