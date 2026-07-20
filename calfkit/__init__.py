@@ -1,4 +1,5 @@
 from importlib.metadata import version
+from typing import TYPE_CHECKING, Any
 
 from calfkit.client import (
     DEFAULT_MAX_MESSAGE_BYTES,
@@ -27,30 +28,33 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneRecord, Control
 from calfkit.exceptions import ClientClosedError, ClientTimeoutError, DeserializationError, LifecycleConfigError, MeshUnavailableError, NodeFaultError
 from calfkit.models import ErrorReport, ExceptionInfo, FaultTypes, ToolContext
 from calfkit.models.payload import retry_text_part
-from calfkit.nodes import (
-    Agent,
-    AgentSeamContext,
-    BaseNodeDef,
-    ConsumerFn,
-    ConsumerNode,
-    NodeDef,
-    Toolbox,
-    Toolboxes,
-    ToolCall,
-    ToolErrorHandler,
-    ToolNodeDef,
-    Tools,
-    agent_tool,
-    consumer,
-    render_fault_for_model,
-    surface_to_model,
-)
-from calfkit.nodes import Toolbox as MCPToolbox
 from calfkit.peers import Handoff, Messaging
-from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.tuning import FanoutConfig, KTableReaderTuning
-from calfkit.worker import LifecycleContext, ResourceSetupContext, ServingContext, Worker
+from calfkit.worker import LifecycleContext, ResourceSetupContext, ServingContext
+
+if TYPE_CHECKING:
+    from calfkit.nodes import (
+        Agent,
+        AgentSeamContext,
+        BaseNodeDef,
+        ConsumerFn,
+        ConsumerNode,
+        NodeDef,
+        Toolbox,
+        Toolboxes,
+        ToolCall,
+        ToolErrorHandler,
+        ToolNodeDef,
+        Tools,
+        agent_tool,
+        consumer,
+        render_fault_for_model,
+        surface_to_model,
+    )
+    from calfkit.nodes import Toolbox as MCPToolbox
+    from calfkit.providers import AnthropicModelClient, OpenAIModelClient, OpenAIResponsesModelClient
+    from calfkit.worker import Worker
 
 __version__ = version("calfkit")
 __all__ = [
@@ -137,3 +141,56 @@ __all__ = [
     "MeshUnavailableError",
     "NodeFaultError",
 ]
+
+# Maps each deferred export to (module, attribute). The attribute usually matches the export
+# name; ``MCPToolbox`` is the one rename (a root-level compatibility alias for ``Toolbox``).
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    **{
+        name: ("calfkit.nodes", name)
+        for name in (
+            "Agent",
+            "AgentSeamContext",
+            "BaseNodeDef",
+            "ConsumerFn",
+            "ConsumerNode",
+            "NodeDef",
+            "Toolbox",
+            "Toolboxes",
+            "ToolCall",
+            "ToolErrorHandler",
+            "ToolNodeDef",
+            "Tools",
+            "agent_tool",
+            "consumer",
+            "render_fault_for_model",
+            "surface_to_model",
+        )
+    },
+    "MCPToolbox": ("calfkit.nodes", "Toolbox"),
+    **{name: ("calfkit.providers", name) for name in ("AnthropicModelClient", "OpenAIModelClient", "OpenAIResponsesModelClient")},
+    "Worker": ("calfkit.worker", "Worker"),
+}
+
+_LAZY_SUBMODULES = {"nodes", "providers"}
+
+
+def __getattr__(name: str) -> Any:
+    from importlib import import_module
+
+    if name in _LAZY_SUBMODULES:
+        # The import system sets the submodule on the package, so __getattr__ won't fire
+        # for it again — no need to cache in globals() here.
+        return import_module(f"calfkit.{name}")
+
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module_name, attr_name = target
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _LAZY_SUBMODULES)
