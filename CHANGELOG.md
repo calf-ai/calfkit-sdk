@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.13.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.10...v0.13.0) (2026-07-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* dual-mode Toolboxes selector replaces the MCPToolbox handle ([#355](https://github.com/calf-ai/calfkit-sdk/issues/355))
+
+### Features
+
+* dual-mode Toolboxes selector replaces the MCPToolbox handle ([#355](https://github.com/calf-ai/calfkit-sdk/issues/355)) ([90fc5c7](https://github.com/calf-ai/calfkit-sdk/commit/90fc5c7d3b6c7a6767326c5d79109bee76955fe7))
+
+
+### Performance Improvements
+
+* defer agent imports from client-only usage ([#354](https://github.com/calf-ai/calfkit-sdk/issues/354)) ([fb71447](https://github.com/calf-ai/calfkit-sdk/commit/fb71447d161065073fa5ebbe4b31b8883641ed1d))
+
 ## [0.12.10](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.9...v0.12.10) (2026-07-19)
 
 
