@@ -145,6 +145,17 @@ def test_client_import_does_not_load_agent_worker_or_provider_stacks() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_every_root_export_resolves() -> None:
+    # Each lazy name lives in three places (TYPE_CHECKING block, __all__, _LAZY_EXPORTS); a typo in
+    # _LAZY_EXPORTS would stay silent until someone imports that name. Resolve every export eagerly.
+    import calfkit
+
+    for name in calfkit.__all__:
+        getattr(calfkit, name)
+    with pytest.raises(AttributeError):
+        calfkit.not_a_real_export
+
+
 def test_repr_redacts_security_values() -> None:
     profile = _profile(security_opts={"sasl_plain_password": "hunter2", "sasl_plain_username": "svc"})
     rendered = repr(profile)

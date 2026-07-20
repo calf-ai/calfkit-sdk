@@ -160,14 +160,25 @@ _LAZY_EXPORTS = {
     "Worker": "calfkit.worker",
 }
 
+_LAZY_SUBMODULES = {"nodes", "providers"}
+
 
 def __getattr__(name: str) -> Any:
+    from importlib import import_module
+
+    if name in _LAZY_SUBMODULES:
+        # The import system sets the submodule on the package, so __getattr__ won't fire
+        # for it again — no need to cache in globals() here.
+        return import_module(f"calfkit.{name}")
+
     module_name = _LAZY_EXPORTS.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-    from importlib import import_module
-
     value = getattr(import_module(module_name), name)
     globals()[name] = value
     return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _LAZY_SUBMODULES)
