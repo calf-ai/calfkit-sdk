@@ -256,7 +256,7 @@ agent = Agent("researcher", subscribe_topics="researcher.input", model_client=mo
               tools=[Tools(discover=True)])         # discover: every live tool node
 ```
 
-A frozen, identity-only handle to deployed function tool nodes, resolved per turn from the capability control plane (the agent discovers schemas at runtime instead of importing the tool's code). Two mutually exclusive modes: **named** — `Tools("add", "subtract")` / `Tools(names=[...])` references specific tool nodes; **discover** — `Tools(discover=True)` selects every live tool node (`node_kind == "tool"`; never an MCP toolbox's tools), carrying no names. Exactly one of {non-empty names, `discover=True`} holds — both, or the empty handle, raise. An unresolved selection warns and degrades. The agent's tool surface admits no duplicate tool names, and `Tools(discover=True)` owns the tool-node surface (no eager tool node or named `Tools` alongside it — an `MCPToolbox` may); a violation raises at construction. See [discoverable tool nodes](tool-discovery.md).
+A frozen, identity-only handle to deployed function tool nodes, resolved per turn from the capability control plane (the agent discovers schemas at runtime instead of importing the tool's code). Two mutually exclusive modes: **named** — `Tools("add", "subtract")` / `Tools(names=[...])` references specific tool nodes; **discover** — `Tools(discover=True)` selects every live tool node (`node_kind == "tool"`; never an MCP toolbox's tools), carrying no names. Exactly one of {non-empty names, `discover=True`} holds — both, or the empty handle, raise. An unresolved selection warns and degrades. The agent's tool surface admits no duplicate tool names, and `Tools(discover=True)` owns the tool-node surface (no eager tool node or named `Tools` alongside it — a `Toolboxes(...)` or directly-passed toolbox node may); a violation raises at construction. See [discoverable tool nodes](tool-discovery.md).
 
 ### `@consumer`
 
@@ -450,12 +450,13 @@ See [Worker lifecycle & embedding](worker-lifecycle.md) for the full lifecycle h
 
 ## MCP toolboxes
 
-Host an MCP server's tools as a deployable node and reference them from agents. The toolbox types are imported from `calfkit.mcp`.
+Host an MCP server's tools as a deployable node and select them from agents by name. The deploy-side types are imported from `calfkit.mcp`; the call-side selector types (`Toolboxes`, `Toolbox`) are imported from `calfkit` (the `MCPToolbox` alias is also available from `calfkit.mcp`).
 
 | Symbol | Purpose |
 | --- | --- |
 | `MCPToolboxNode` | The deployable host — one per MCP server, placed in `Worker(nodes=[...])`. |
-| `MCPToolbox` | A frozen, identity-only handle to a toolbox by name, placed in an agent's `tools=[...]`. |
+| `Toolboxes` | The dual-mode selector declaring an agent's toolbox surface, placed in `tools=[...]`. |
+| `Toolbox` (alias `MCPToolbox`) | A frozen entry spec naming one toolbox inside `Toolboxes(...)`, with optional `include=` scoping. |
 | `StdioServerParameters` | Connection params for a local stdio (subprocess) MCP server. |
 | `StreamableHttpParameters` | Connection params for a Streamable HTTP MCP server. |
 
@@ -468,15 +469,23 @@ MCPToolboxNode(
 )
 ```
 
-Hosts the tools of one MCP server; `name` is the toolbox identity agents reference. `node.select(*, include: Sequence[str] | None = None) -> MCPToolbox` returns a handle to this toolbox, optionally scoped to `include` tool names.
+Hosts the tools of one MCP server; `name` is the toolbox identity agents select. Passing the node directly in an agent's `tools=[...]` resolves identically to `Toolboxes(name)`.
 
-### `MCPToolbox`
+### `Toolboxes`
 
 ```python
-MCPToolbox(name: str, include: tuple[str, ...] | None = None)
+Toolboxes(*positional: str | Toolbox, entries: Sequence[str | Toolbox] | None = None, discover: bool = False)
 ```
 
-A frozen, identity-only handle to a toolbox. `name` must match the hosting `MCPToolboxNode`. `include` pins the tool names the agent may use **by their bare server-side name** (`search`, not `docs_server__search`); `None` exposes all of the toolbox's tools. The LLM-facing name of each tool is namespaced `<name>__<tool>` (e.g. `docs_server__search`) and stripped back to the bare name before dispatch to the MCP server (ADR-0018); the combined name must fit the provider's tool-name charset (`[a-zA-Z0-9_-]`) and length limit. The handle carries no connection params — passing connection details, or deploying a handle as a node, raises.
+The frozen, dual-mode family selector for toolboxes (the toolbox counterpart of `Tools`). Two mutually exclusive modes: **named** — `Toolboxes("docs_server", "github")` or mixed entries `Toolboxes(Toolbox("docs_server", include=("search",)), "github")` (bare names desugar to `Toolbox` entries); **discover** — `Toolboxes(discover=True)` selects every live toolbox, carrying no entries. Exactly one of {non-empty entries, `discover=True`} holds — both, or the empty selector, raise. Duplicate toolbox names across an agent's declarations (directly-passed nodes included) raise at construction, and `Toolboxes(discover=True)` is the exclusive author of the toolbox surface — no other `Toolboxes` selector or directly-passed `MCPToolboxNode` alongside it. An unresolved selection warns and degrades.
+
+### `Toolbox`
+
+```python
+Toolbox(name: str, include: Sequence[str] | None = None)   # MCPToolbox is an alias of this class
+```
+
+A frozen, identity-only entry spec naming one toolbox inside a `Toolboxes` selector — not itself a selector (placing one directly in `tools=[...]` raises with a pointer to the wrapped form). `name` must match the hosting `MCPToolboxNode`. `include` pins the tool names the agent may use **by their bare server-side name** (`search`, not `docs_server__search`); `None` exposes all of the toolbox's tools, and `include=()` deliberately exposes none (explicit exclusion). The LLM-facing name of each tool is namespaced `<name>__<tool>` (e.g. `docs_server__search`) and stripped back to the bare name before dispatch to the MCP server (ADR-0018); the combined name must fit the provider's tool-name charset (`[a-zA-Z0-9_-]`) and length limit. The entry carries no connection params — deploying one as a node raises.
 
 ### Connection params
 

@@ -1,15 +1,52 @@
-"""Shared name-normalization for the capability handles (:class:`~calfkit.nodes.tool.Tools`,
-:class:`~calfkit.peers.messaging.Messaging`, :class:`~calfkit.peers.handoff.Handoff`).
+"""Shared construction rails for the capability handles (:class:`~calfkit.nodes.tool.Tools`,
+:class:`~calfkit.peers.messaging.Messaging`, :class:`~calfkit.peers.handoff.Handoff`,
+:class:`~calfkit.nodes.toolbox.Toolboxes`).
 
-All three are frozen, identity-only handles with the *same* curated-XOR-discover varargs constructor; this
+All four are frozen, identity-only handles with the *same* curated-XOR-discover varargs constructor; this
 is the single home for that fail-loud rail (an accidental empty splat must never silently become an implicit
-"everything"). The three classes stay distinct — they discriminate by **type** (``isinstance``) for dispatch
-and for ``tools=``/``peers=`` routing — but the construction logic lives here so the rail is defined once.
+"everything"). The classes stay distinct — they discriminate by **type** (``isinstance``) for dispatch
+and for ``tools=``/``peers=`` routing — but the construction grammar lives here so the rail is defined once.
+
+The grammar (:func:`_selection_grammar`) is shared; the **collection policy** is per-family:
+name handles dedupe by value (a repeated name is repetition), toolbox entries raise on a repeated
+name (an entry carries policy — ``include=`` — so a duplicate is a conflict, never collapsed).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Protocol, TypeVar
+
+
+def _selection_grammar(
+    label: str,
+    noun: str,
+    *,
+    positional: tuple[object, ...],
+    alt: Sequence[object] | None,
+    discover: bool,
+    item_singular: str,
+    item_plural: str,
+    kwarg_label: str,
+) -> tuple[object, ...] | None:
+    """The discover-XOR-items grammar shared by every family handle.
+
+    Returns ``None`` for discover mode, else the raw ordered item tuple (pre-collection).
+    Owns the three fail-loud branches: discover-takes-no-items, varargs-XOR-kwarg, and
+    empty-raises. ``kwarg_label`` is threaded so each family's error names its *own* kwarg
+    (``names=`` for the name handles, ``entries=`` for ``Toolboxes``).
+    """
+    # ``discover`` IS the absence of items, so pairing it with items is contradictory.
+    if discover and (positional or alt is not None):
+        raise ValueError(f"{label}(discover=True) takes no {noun} {item_plural}")
+    if discover:
+        return None
+    if positional and alt is not None:
+        raise ValueError(f"{label}: pass {noun} {item_plural} positionally or via {kwarg_label}=, not both")
+    collected = positional if positional else tuple(alt or ())
+    if not collected:
+        raise ValueError(f"{label} requires at least one {noun} {item_singular}, or discover=True")
+    return collected
 
 
 def normalize_handle_names(label: str, noun: str, *, positional: tuple[str, ...], names: Sequence[str] | None, discover: bool) -> tuple[str, ...]:
@@ -23,16 +60,64 @@ def normalize_handle_names(label: str, noun: str, *, positional: tuple[str, ...]
     Both, or neither, of {non-empty names, ``discover=True``} raise — never an implicit "everything" (the
     fail-loud rail: an accidental empty splat ``Handle(*[])`` must not silently open the full scope).
     """
-    # ``discover`` IS the absence of names, so pairing it with names is contradictory.
-    if discover and (positional or names is not None):
-        raise ValueError(f"{label}(discover=True) takes no {noun} names")
-    if discover:
+    raw = _selection_grammar(
+        label,
+        noun,
+        positional=positional,
+        alt=names,
+        discover=discover,
+        item_singular="name",
+        item_plural="names",
+        kwarg_label="names",
+    )
+    if raw is None:
         return ()
-    if positional and names is not None:
-        raise ValueError(f"{label}: pass {noun} names positionally or via names=, not both")
-    collected = tuple(dict.fromkeys(positional if positional else tuple(names or ())))  # order-preserving dedupe
-    if not collected:
-        raise ValueError(f"{label} requires at least one {noun} name, or discover=True")
+    collected = tuple(dict.fromkeys(raw))  # order-preserving dedupe: a repeated name is repetition, not conflict
     if any(not n for n in collected):
         raise ValueError(f"{label} names must be non-empty")
-    return collected
+    return collected  # type: ignore[return-value]  # grammar preserves the str elements it was given
+
+
+class _NamedEntry(Protocol):
+    @property
+    def name(self) -> str: ...
+
+
+_EntryT = TypeVar("_EntryT", bound=_NamedEntry)
+
+
+def normalize_toolbox_entries(
+    label: str,
+    *,
+    positional: tuple[object, ...],
+    entries: Sequence[object] | None,
+    discover: bool,
+    desugar: Callable[[object], _EntryT],
+) -> tuple[_EntryT, ...]:
+    """The entry tuple for a toolbox-family selector: grammar + desugar + by-name duplicate-raise.
+
+    Returns ``()`` for discover mode, else the desugared, order-preserving tuple of entries.
+    ``desugar`` is the family's element constructor (bare name → entry spec; specs pass through) —
+    injected so this leaf module never imports from ``calfkit.nodes``. Duplicates raise **by
+    name**, byte-identical entries included: an entry carries per-box policy, so a repeat is a
+    conflict — never the silent value-dedupe of the name rail.
+    """
+    raw = _selection_grammar(
+        label,
+        "toolbox",
+        positional=positional,
+        alt=entries,
+        discover=discover,
+        item_singular="entry",
+        item_plural="entries",
+        kwarg_label="entries",
+    )
+    if raw is None:
+        return ()
+    desugared = tuple(desugar(e) for e in raw)
+    seen: set[str] = set()
+    for entry in desugared:
+        if entry.name in seen:
+            raise ValueError(f"{label}: duplicate toolbox {entry.name!r} — one policy per toolbox per handle")
+        seen.add(entry.name)
+    return desugared

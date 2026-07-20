@@ -1,10 +1,10 @@
-"""#212: MCPToolbox — the public, identity-only handle to an MCP toolbox.
+"""`calfkit.mcp`'s call-side surface after ADR-0045: the `MCPToolbox` alias and the node rewire.
 
-Distributed agent hosts reference a toolbox by name with zero deployment
-knowledge (no connection params, no secrets). The handle is the call-side
-counterpart to the hosting MCPToolboxNode (peer-node pattern); `select()` mints
-one from a node instance; the node's own selector behavior delegates to its
-handle so both resolve identically.
+Distributed agent hosts reference a toolbox by name with zero deployment knowledge
+(no connection params, no secrets) — spelled `Toolboxes(...)`, with `MCPToolbox` a
+code-level alias of the `Toolbox` entry spec for MCP-flavored call sites. The node's
+own selector behavior calls the resolution kernel directly, so passing the node
+eagerly and naming its Toolbox resolve identically.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from calfkit.models.capability import CapabilityRecord, CapabilityToolDef
-from calfkit.models.tool_dispatch import ToolSelector, split_tool_declarations
+from calfkit.models.tool_dispatch import ToolSelector
 
 
 def make_record(toolbox_id: str = "github", tool_names: tuple[str, ...] = ("search", "create_issue")) -> CapabilityRecord:
@@ -43,17 +43,18 @@ class TestDirectConstruction:
 
     def test_resolves_by_name_only(self) -> None:
         from calfkit.mcp import MCPToolbox
+        from calfkit.nodes.toolbox import Toolboxes
 
-        ref = MCPToolbox("github")
-        result = ref.resolve_tools({"github": make_record()})
+        result = Toolboxes(MCPToolbox("github")).resolve_tools({"github": make_record()})
         # C1: toolbox tools are namespaced <node_id>__<tool> for the LLM.
         assert [b.name for b in result.bindings] == ["github__search", "github__create_issue"]
 
     def test_include_kwarg_filters(self) -> None:
         from calfkit.mcp import MCPToolbox
+        from calfkit.nodes.toolbox import Toolboxes
 
-        ref = MCPToolbox("github", include=("search",))  # include uses BARE names (C5)
-        result = ref.resolve_tools({"github": make_record()})
+        entry = MCPToolbox("github", include=("search",))  # include uses BARE names (C5)
+        result = Toolboxes(entry).resolve_tools({"github": make_record()})
         assert [b.name for b in result.bindings] == ["github__search"]
 
     def test_include_accepts_any_sequence_normalized_to_tuple(self) -> None:
@@ -70,31 +71,30 @@ class TestDirectConstruction:
             ref.include = ("other",)  # type: ignore[misc]
         assert len({ref, MCPToolbox("github", include=("search",))}) == 1  # value semantics
 
-    def test_satisfies_tool_selector_and_splits_as_selector(self) -> None:
+    def test_is_not_a_tool_selector(self) -> None:
+        # INVERTED post-ADR-0045: the alias is an entry spec, not a selector — the old
+        # `tools=[MCPToolbox("gh")]` idiom fails loud with the wrap-it teaching error.
         from calfkit.mcp import MCPToolbox
 
-        ref = MCPToolbox("github")
-        assert isinstance(ref, ToolSelector)
-        bindings, selectors = split_tool_declarations([ref])
-        assert bindings == [] and selectors == [ref]
+        assert not isinstance(MCPToolbox("github"), ToolSelector)
 
 
-class TestMintingAndParity:
-    def test_select_returns_the_public_ref_type(self) -> None:
+class TestNodeParity:
+    def test_select_is_gone_scoping_is_direct_construction(self) -> None:
         from calfkit.mcp import MCPToolbox
 
-        ref = make_toolbox().select(include=["search"])
-        assert isinstance(ref, MCPToolbox)
-        assert ref.name == "github" and ref.include == ("search",)
+        assert not hasattr(make_toolbox(), "select")
+        entry = MCPToolbox("github", include=("search",))
+        assert entry.name == "github" and entry.include == ("search",)
 
-    def test_toolbox_resolution_delegates_to_its_ref(self) -> None:
-        from calfkit.mcp import MCPToolbox
+    def test_toolbox_resolution_matches_naming_its_toolbox(self) -> None:
+        from calfkit.nodes.toolbox import Toolboxes
 
         view: dict[str, Any] = {"github": make_record()}
         via_toolbox = make_toolbox().resolve_tools(view)
-        via_ref = MCPToolbox("github").resolve_tools(view)
-        assert [b.name for b in via_toolbox.bindings] == [b.name for b in via_ref.bindings]
-        assert via_toolbox == via_ref  # identical SelectorResult (frozen value): toolbox and ref resolve the same
+        via_selector = Toolboxes("github").resolve_tools(view)
+        assert [b.name for b in via_toolbox.bindings] == [b.name for b in via_selector.bindings]
+        assert via_toolbox == via_selector  # identical SelectorResult (frozen value): node and selector resolve the same
 
     def test_scoped_selector_is_gone(self) -> None:
         import calfkit.mcp.mcp_toolbox as mod

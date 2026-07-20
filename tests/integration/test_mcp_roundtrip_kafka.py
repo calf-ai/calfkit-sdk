@@ -49,7 +49,7 @@ from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.mcp import MCPToolboxNode, StdioServerParameters
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
-from calfkit.nodes import Agent
+from calfkit.nodes import Agent, Toolbox, Toolboxes
 from calfkit.worker import Worker
 from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import (
@@ -201,7 +201,7 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
         system_prompt="call the add tool",
         subscribe_topics=agent_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="call-add")]),
-        tools=[toolbox.select(include=_TOOLS)],  # include uses BARE names (C5)
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=_TOOLS))],  # include uses BARE names (C5)
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -239,7 +239,7 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
         system_prompt="call domain_error",
         subscribe_topics=agent_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "domain_error"), {}, tool_call_id="call-err")]),
-        tools=[toolbox.select(include=["domain_error"])],  # include = BARE (C5)
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=["domain_error"]))],  # include = BARE (C5)
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -284,7 +284,7 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
                 ToolCallPart(_ns(server_name, "echo"), {"text": "hi"}, tool_call_id="call-echo"),
             ]
         ),
-        tools=[toolbox.select(include=_TOOLS)],
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=_TOOLS))],
     )
     assert agent._is_fanout_capable
 
@@ -333,7 +333,7 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
                 ToolCallPart(_ns(server_name, "add"), {"a": 10, "b": 20}, tool_call_id="call-b"),
             ]
         ),
-        tools=[toolbox.select(include=_TOOLS)],
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=_TOOLS))],
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -377,7 +377,7 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
                 ToolCallPart(_ns(server_b_name, "mul"), {"a": 4, "b": 5}, tool_call_id="call-mul"),
             ]
         ),
-        tools=[box_a.select(include=["add"]), box_b.select(include=["mul"])],  # each include is BARE
+        tools=[Toolboxes(Toolbox(box_a.node_id, include=["add"])), Toolboxes(Toolbox(box_b.node_id, include=["mul"]))],  # each include is BARE
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -420,14 +420,14 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
         system_prompt="add",
         subscribe_topics=a1_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="c1")]),
-        tools=[toolbox.select(include=["add"])],
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=["add"]))],
     )
     agent2 = Agent(
         a2_id,
         system_prompt="add",
         subscribe_topics=a2_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "add"), {"a": 10, "b": 20}, tool_call_id="c2")]),
-        tools=[toolbox.select(include=["add"])],
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=["add"]))],
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -471,7 +471,7 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
         system_prompt="try to call danger",
         subscribe_topics=agent_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "danger"), {}, tool_call_id="call-danger")]),
-        tools=[toolbox.select(include=["add"])],  # danger is advertised but NOT included (include is BARE)
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=["add"]))],  # danger is advertised but NOT included (include is BARE)
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -513,14 +513,14 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
         system_prompt="enable the bonus tool",
         subscribe_topics=enable_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "enable_bonus"), {}, tool_call_id="call-enable")]),
-        tools=[toolbox.select(include=["enable_bonus"])],
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=["enable_bonus"]))],
     )
     bonus_agent = Agent(
         bonus_id,
         system_prompt="use the bonus tool",
         subscribe_topics=bonus_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "bonus"), {}, tool_call_id="call-bonus")]),
-        tools=[toolbox.select(include=["bonus"])],
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=["bonus"]))],
     )
 
     driver = Client.connect(kafka_bootstrap)
@@ -695,7 +695,7 @@ async def test_mcp_bad_args_rejected_before_dispatch_then_corrected(
             [ToolCallPart(tool, {"a": "not-an-int", "b": 3}, tool_call_id="bad")],
             [ToolCallPart(tool, {"a": 2, "b": 3}, tool_call_id="good")],
         ),
-        tools=[toolbox.select(include=["add"])],  # include = BARE (C5)
+        tools=[Toolboxes(Toolbox(toolbox.node_id, include=["add"]))],  # include = BARE (C5)
     )
 
     driver = Client.connect(kafka_bootstrap)

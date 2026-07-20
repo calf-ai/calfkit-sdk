@@ -13,7 +13,7 @@ agent one tool — `fetch` (URL → markdown) — so it can read the live web.
 | File | Role |
 | --- | --- |
 | `fetch_toolbox.py` | The toolbox node — spawns `uvx mcp-server-fetch` and advertises its tools on the control plane. |
-| `research_agent.py` | An agent that references the toolbox **by name** (`MCPToolbox("fetcher")`) — no shared import, no connection config. |
+| `research_agent.py` | An agent that selects the toolbox **by name** (`Toolboxes("fetcher")`) — no shared import, no connection config. |
 | `ask.py` | Sends the agent a question that needs a web fetch. |
 
 ## Prerequisites

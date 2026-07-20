@@ -1,9 +1,8 @@
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
@@ -88,23 +87,10 @@ class MCPToolboxNode(BaseNodeDef):
     def resolve_tools(self, view: CapabilityLookup) -> SelectorResult:
         """All advertised tools, resolved against the Capability View.
 
-        Implements ``ToolSelector`` by delegating to this node's handle —
-        passing the node in ``tools=[...]`` and passing ``MCPToolbox(name)``
-        resolve identically; the handle is the canonical resolution path.
+        Implements ``ToolSelector`` via the resolution kernel directly — passing the node in
+        ``tools=[...]`` and naming its Toolbox with ``Toolboxes(name)`` resolve identically.
         """
-        return MCPToolbox(self.node_id).resolve_tools(view)
-
-    def select(self, *, include: Sequence[str] | None = None) -> "MCPToolbox":
-        """A scoped selector for this toolbox's tools.
-
-        ``include`` pins the exact tool names the agent may see (the trust
-        boundary: a server suddenly advertising new tools cannot enlarge the
-        agent's surface). An unresolved selection degrades with a warning.
-        """
-        return MCPToolbox(
-            name=self.node_id,
-            include=tuple(include) if include is not None else None,
-        )
+        return resolve_capability(view, self.node_id, expected_kind="toolbox")
 
     # -- capability advertisement (control-plane substrate) -------------------
 
@@ -223,32 +209,3 @@ class MCPToolboxNode(BaseNodeDef):
         tool_result: MCPCallToolResult = await session.call_tool(name=server_tool_name, arguments=payload.args)
         pydantic_core.to_json(tool_result)
         return ReturnCall[State](state=ctx.state, value=tool_result)
-
-
-@dataclass(frozen=True)
-class MCPToolbox:
-    """The identity-only, deployment-free handle to an MCP toolbox (#212).
-
-    The call-side counterpart to the hosting :class:`MCPToolboxNode` (the
-    peer-node pattern's reference/servant split): constructible anywhere with
-    just the toolbox's name — no connection params, no secrets — and resolved
-    per agent turn against the Capability View. At the MCP protocol layer the
-    toolbox is the cluster's MCP client; agents never speak MCP at all — they
-    hold one of these.
-
-    ``include`` pins the exact tool names the agent may see (the trust boundary);
-    an unresolved selection degrades with a warning. Frozen with value semantics:
-    equal handles compare and hash equal.
-    """
-
-    name: str
-    include: tuple[str, ...] | None = None
-
-    def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("name must be non-empty")
-        if self.include is not None and not isinstance(self.include, tuple):
-            object.__setattr__(self, "include", tuple(self.include))
-
-    def resolve_tools(self, view: CapabilityLookup) -> SelectorResult:
-        return resolve_capability(view, self.name, include=self.include, expected_kind="toolbox")
