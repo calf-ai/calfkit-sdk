@@ -34,7 +34,7 @@ from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
 from calfkit.nodes import Agent
 
-# Reuse the proven helpers from the override-mode tests rather than
+# Reuse the proven helpers from the wire-form tool tests rather than
 # re-implementing. If these helpers move or rename, the import is a
 # fail-fast signal to update both tests together.
 from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap

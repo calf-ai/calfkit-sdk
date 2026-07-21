@@ -9,12 +9,12 @@ never touches it, and the two products retarget differently (peer topic vs own r
 inbox). PR-1's engagement seam test supersedes this pin with a stronger data-level assert.
 
 Pin 2 (overrides-removal impl-plan Step 1.2): the publish chokepoint's TailCall retarget
-(§4.2/§15) — byte-for-byte on the published envelope, minus the fields the overrides
-removal deletes (every dict key named ``overrides``: the frame carriage and the state
-field), so the pin survives the removal unchanged and proves the retarget ``replace``
-kept every OTHER field: frame identity (``frame_id``/``tag``/``callback_topic``/
-``marker``/``caller_node_id``/``caller_node_kind``) preserved, ``payload``/``fanout_id``
-cleared, workflow metadata + carried state/deps intact, no reply.
+(§4.2/§15) — byte-for-byte on the FULL published envelope, proving the retarget
+``replace`` keeps every non-cleared field: frame identity (``frame_id``/``tag``/
+``callback_topic``/``marker``/``caller_node_id``/``caller_node_kind``) preserved,
+``payload``/``fanout_id`` cleared, workflow metadata + carried state/deps intact, no
+reply. Exercised for both retarget targets the two mint sites produce — a peer topic
+and the node's own return inbox.
 """
 
 from __future__ import annotations
@@ -73,19 +73,8 @@ async def test_handoff_and_self_retry_tailcalls_mint_from_distinct_paths() -> No
 
 
 # --------------------------------------------------------------------------- #
-# Pin 2 — retarget chokepoint, byte-for-byte minus the removed fields          #
+# Pin 2 — retarget chokepoint, byte-for-byte on the full published envelope    #
 # --------------------------------------------------------------------------- #
-
-
-def _strip_removed(node: Any) -> Any:
-    """Recursively drop every dict key named ``overrides`` from a ``model_dump`` tree —
-    exactly the fields the overrides removal deletes (``CallFrame.overrides`` per frame
-    and ``State.overrides``), so the byte-for-byte comparison survives the removal."""
-    if isinstance(node, dict):
-        return {k: _strip_removed(v) for k, v in node.items() if k != "overrides"}
-    if isinstance(node, list):
-        return [_strip_removed(v) for v in node]
-    return node
 
 
 def _inbound_frame() -> CallFrame:
@@ -121,8 +110,11 @@ def _expected_envelope(frame: CallFrame, target_topic: str, carried_state: State
     )
 
 
-async def _publish_and_compare(tail_call: TailCall[State], target_topic: str) -> None:
-    node = BaseNodeDef(node_id="orchestrator", subscribe_topics=["in"])
+def _orchestrator() -> BaseNodeDef:
+    return BaseNodeDef(node_id="orchestrator", subscribe_topics=["in"])
+
+
+async def _publish_and_compare(node: BaseNodeDef, tail_call: TailCall[State]) -> None:
     frame = _inbound_frame()
     envelope = _inbound_envelope(frame)
     broker = CaptureBroker()
@@ -130,20 +122,18 @@ async def _publish_and_compare(tail_call: TailCall[State], target_topic: str) ->
     await node._publish_action(tail_call, envelope, "cid", broker)
 
     published = broker.published[0]
-    assert published.topic == target_topic
+    assert published.topic == tail_call.target_topic
     assert published.key == b"cid"
     assert published.correlation_id == "cid"
     assert published.headers[HDR_KIND] == "call"
-    expected = _expected_envelope(frame, target_topic, tail_call.state)
-    assert _strip_removed(published.message.model_dump(mode="json")) == _strip_removed(expected.model_dump(mode="json"))
+    expected = _expected_envelope(frame, tail_call.target_topic, tail_call.state)
+    assert published.message.model_dump(mode="json") == expected.model_dump(mode="json")
 
 
-async def test_handoff_shaped_tailcall_retargets_to_receiver_byte_for_byte() -> None:
-    carried = State(temp_instructions="carried")
-    await _publish_and_compare(TailCall[State](target_topic="billing.in", state=carried), "billing.in")
+async def test_tailcall_retargets_to_a_peer_topic_byte_for_byte() -> None:
+    await _publish_and_compare(_orchestrator(), TailCall[State](target_topic="billing.in", state=State(temp_instructions="carried")))
 
 
-async def test_self_retry_shaped_tailcall_retargets_to_return_topic_byte_for_byte() -> None:
-    node = BaseNodeDef(node_id="orchestrator", subscribe_topics=["in"])
-    carried = State(temp_instructions="carried")
-    await _publish_and_compare(TailCall[State](target_topic=node._return_topic, state=carried), node._return_topic)
+async def test_tailcall_retargets_to_own_return_topic_byte_for_byte() -> None:
+    node = _orchestrator()
+    await _publish_and_compare(node, TailCall[State](target_topic=node._return_topic, state=State(temp_instructions="carried")))

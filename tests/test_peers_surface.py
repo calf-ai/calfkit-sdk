@@ -103,8 +103,8 @@ def test_messaging_in_tools_raises() -> None:
 
 def test_every_agent_registers_fanout_store() -> None:
     # Uniform store rule: every agent registers the durable-batch store @resource unconditionally —
-    # plain, Messaging, and Handoff-only alike. No agent is statically fan-out-free (override tools
-    # arrive over the wire; Tools selectors resolve at runtime). The messaging-vs-handoff
+    # plain, Messaging, and Handoff-only alike. No agent is statically fan-out-free (Tools
+    # selectors resolve tools at runtime). The messaging-vs-handoff
     # `_needs_durable_batch` distinction is no longer observable on agents; its non-agent form is
     # pinned by test_fanout_handler.py::test_needs_durable_batch_decouples_from_fanout_capability.
     from calfkit.nodes._fanout_store import FANOUT_STORE_KEY

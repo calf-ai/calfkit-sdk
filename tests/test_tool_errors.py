@@ -446,14 +446,14 @@ async def test_agent_validates_schema_only_wire_form_tools():
         dispatch_topic=full_tool_node.subscribe_topics[0],
     )
 
-    tool_call_id = "tc-override"
+    tool_call_id = "tc-wire-form"
     bad_call = ToolCallPart(tool_name="typed_tool", args={"x": "not-a-number"}, tool_call_id=tool_call_id)
 
     agent = Agent(
-        "agent_override_validate",
+        "agent_wire_form_validate",
         system_prompt="x",
-        subscribe_topics="agent_override_validate.input",
-        publish_topic="agent_override_validate.output",
+        subscribe_topics="agent_wire_form_validate.input",
+        publish_topic="agent_wire_form_validate.output",
         model_client=_model_emits_tool_calls([bad_call]),
         tools=[schema_only],
     )
@@ -712,13 +712,13 @@ def test_validate_call_args_raises_on_missing_required_arg():
 
 
 # ---------------------------------------------------------------------------
-# Override (schema-only) dispatch path: malformed JSON args become RetryPromptPart
+# Wire-form (schema-only) dispatch path: malformed JSON args become RetryPromptPart
 # ---------------------------------------------------------------------------
 
 
-async def test_agent_override_path_malformed_args_become_retry_prompt():
+async def test_agent_wire_form_path_malformed_args_become_retry_prompt():
     # Regression: previously the dispatch loop only ran args_as_dict() inside
-    # the BaseToolNodeDef branch, so override (schema-only) tools dispatched
+    # the BaseToolNodeDef branch, so wire-form (schema-only) tools dispatched
     # raw malformed JSON to the worker, where it surfaced as a hard
     # FailedToolCall instead of an LLM-retryable RetryPromptPart. The
     # refactored loop parses args on all dispatch paths.
@@ -739,14 +739,14 @@ async def test_agent_override_path_malformed_args_become_retry_prompt():
     bad_call = ToolCallPart(
         tool_name="typed_tool",
         args="not-valid-json",
-        tool_call_id="tc-override-malformed",
+        tool_call_id="tc-wire-form-malformed",
     )
 
     agent = Agent(
-        "agent_override_malformed",
+        "agent_wire_form_malformed",
         system_prompt="x",
-        subscribe_topics="agent_override_malformed.input",
-        publish_topic="agent_override_malformed.output",
+        subscribe_topics="agent_wire_form_malformed.input",
+        publish_topic="agent_wire_form_malformed.output",
         model_client=_model_emits_tool_calls([bad_call]),
         tools=[schema_only_binding],
     )
@@ -756,7 +756,7 @@ async def test_agent_override_path_malformed_args_become_retry_prompt():
 
     assert isinstance(result, TailCall), f"expected TailCall (all calls invalid), got {type(result).__name__}"
 
-    stored = ctx.state.tool_results.get("tc-override-malformed")
+    stored = ctx.state.tool_results.get("tc-wire-form-malformed")
     assert isinstance(stored, RetryPromptPart)
     assert "Malformed tool arguments" in str(stored.content)
 

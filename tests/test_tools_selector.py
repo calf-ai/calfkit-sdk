@@ -150,7 +150,7 @@ class TestToolsThroughAgent:
 
     def test_eager_static_tool_wins_on_collision(self, caplog: pytest.LogCaptureFixture) -> None:
         # The per-turn registry merge: when a discovered binding's name is already in the
-        # registry (e.g. a pre-seeded static/override binding), the existing one wins and the
+        # registry (e.g. a pre-seeded static binding), the existing one wins and the
         # collision is error-logged. The construction-time contract forbids pairing an eager
         # tool node with a same-named Tools handle — that combination raises before any turn
         # (see TestToolSurfaceContract); this exercises the residual runtime merge path.
@@ -303,7 +303,7 @@ class TestToolSurfaceContract:
 
 class TestDiscoverDiagnostics:
     """Discover-mode diagnostics (spec §15.4): a per-turn DEBUG count; healthy-empty is
-    silent by design; a degraded view still warns; per-run overrides skip discover."""
+    silent by design; a degraded view still warns."""
 
     def test_discover_binds_all_tool_nodes_and_logs_count(self, caplog: pytest.LogCaptureFixture) -> None:
         agent = make_agent(Tools(discover=True))

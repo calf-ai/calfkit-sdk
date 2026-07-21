@@ -616,9 +616,7 @@ class BaseAgentNodeDef(
                 tools_registry[binding.name] = binding
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Observed[State]:
-        tools_registry = dict[str, ToolBinding]()
-        if self.tools:
-            tools_registry = {binding.name: binding for binding in self.tools}
+        tools_registry = {binding.name: binding for binding in self.tools}
 
         self._maybe_resolve_selectors(ctx, tools_registry)
 

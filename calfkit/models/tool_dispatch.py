@@ -144,27 +144,6 @@ def split_tool_declarations(
     return bindings, selectors
 
 
-def normalize_tool_bindings(tools: Sequence[ToolProvider | ToolBinding] | None) -> list[ToolBinding]:
-    """Flatten a mix of raw bindings and providers into a binding list.
-
-    Raw :class:`ToolBinding` entries pass through verbatim (tests,
-    hand-rolled bindings with no node object in hand); anything satisfying
-    :class:`ToolProvider` contributes ``tool_bindings()``, so one provider may
-    yield many bindings (a native toolbox, an MCP toolbox). The ``isinstance`` protocol check
-    is structural — it only proves a ``tool_bindings`` attribute exists — which
-    is why the unmatched arm is a hard ``TypeError`` rather than a skip.
-    """
-    out: list[ToolBinding] = []
-    for t in tools or ():
-        if isinstance(t, ToolBinding):
-            out.append(t)
-        elif isinstance(t, ToolProvider):
-            out.extend(t.tool_bindings())
-        else:
-            raise TypeError(f"tools must be ToolBinding or ToolProvider instances, got {type(t).__name__}: {t!r}")
-    return out
-
-
 class ToolCallRef(BaseModel):
     """The per-invocation reference handed to a tool node: which tool call it must service.
 

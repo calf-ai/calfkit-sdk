@@ -55,8 +55,8 @@ class TestToolBinding:
 
 
 class TestToolBindingWireForm:
-    """ToolBinding doubles as the wire model for per-run tool overrides: the
-    ``validator`` callable is process-local and must never serialize, so a
+    """ToolBinding doubles as the wire model for cross-process bindings (discovered,
+    MCP): the ``validator`` callable is process-local and must never serialize, so a
     deserialized binding always carries ``validator=None`` (the agent then
     validates its args against the advertised schema at dispatch, not here)."""
 
