@@ -129,7 +129,7 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
                 emitter_kind,
             )
         envelope.reply = None  # observers never produce on the workflow's rails (§6.6)
-        return Response(envelope, headers=self._headers("call"))
+        return Response(envelope, headers=self._headers("call", task_id=task_id))
 
 
 def consumer(

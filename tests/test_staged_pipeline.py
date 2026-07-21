@@ -182,7 +182,7 @@ async def _agg(
     """Drive ``_aggregate`` with a freshly built run_ctx + seam_ctx (sharing state); return all three."""
     run_ctx = _store_ctx(store, state=state, deps=deps)
     seam = _seam(node, run_ctx, env, kind)
-    result = await node._aggregate(run_ctx, seam, kind, env, HopStepLedger(), "corr-1", broker or CaptureBroker())
+    result = await node._aggregate(run_ctx, seam, kind, env, HopStepLedger(), "corr-1", "task-under-test", broker or CaptureBroker())
     return run_ctx, seam, result
 
 
@@ -467,7 +467,17 @@ class TestExecute:
         env = _plain_env()
         seam = node._build_seam_context(ctx, env, {}, "call")
         result = await node._execute(
-            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
+            ctx,
+            seam,
+            "call",
+            env,
+            None,
+            None,
+            HopStepLedger(),
+            awaiting_reply=False,
+            correlation_id="corr-1",
+            task_id="task-under-test",
+            broker=CaptureBroker(),
         )
         assert isinstance(result, ReturnCall) and result.value == "done"
 
@@ -478,7 +488,17 @@ class TestExecute:
         env = _plain_env(reply=ReturnMessage(in_reply_to="A", tag="tc1", parts=[]))  # unmarked → _BatchClosed
         seam = node._build_seam_context(ctx, env, {}, "return")
         result = await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
+            ctx,
+            seam,
+            "return",
+            env,
+            None,
+            None,
+            HopStepLedger(),
+            awaiting_reply=False,
+            correlation_id="corr-1",
+            task_id="task-under-test",
+            broker=CaptureBroker(),
         )
         assert isinstance(result, ReturnCall)
 
@@ -490,7 +510,17 @@ class TestExecute:
         env = _marked_env(in_reply_to="f1", tag="tc1", parts=[TextPart(text="r1")])  # 1 of 2 → parks
         seam = node._build_seam_context(ctx, env, {}, "return")
         result = await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
+            ctx,
+            seam,
+            "return",
+            env,
+            None,
+            None,
+            HopStepLedger(),
+            awaiting_reply=False,
+            correlation_id="corr-1",
+            task_id="task-under-test",
+            broker=CaptureBroker(),
         )
         assert result is _CONSUMED  # parked fold — the body never runs
 
@@ -501,7 +531,17 @@ class TestExecute:
         env = _plain_env()
         seam = node._build_seam_context(ctx, env, {}, "call")
         result = await node._execute(
-            ctx, seam, "call", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
+            ctx,
+            seam,
+            "call",
+            env,
+            None,
+            None,
+            HopStepLedger(),
+            awaiting_reply=False,
+            correlation_id="corr-1",
+            task_id="task-under-test",
+            broker=CaptureBroker(),
         )
         assert isinstance(result, _Declined) and result.reason == "all_declined"
 
@@ -536,7 +576,17 @@ class TestClosureSeams:
         seam = node._build_seam_context(ctx, env, {}, "return")
 
         await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
+            ctx,
+            seam,
+            "return",
+            env,
+            None,
+            None,
+            HopStepLedger(),
+            awaiting_reply=False,
+            correlation_id="corr-1",
+            task_id="task-under-test",
+            broker=CaptureBroker(),
         )
 
         assert before_states == [{"marker": "restored"}]  # fired ONCE, observing the RESTORED snapshot state
@@ -558,7 +608,17 @@ class TestClosureSeams:
         seam = node._build_seam_context(ctx, env, {}, "return")
 
         result = await node._execute(
-            ctx, seam, "return", env, None, None, HopStepLedger(), awaiting_reply=False, correlation_id="corr-1", broker=CaptureBroker()
+            ctx,
+            seam,
+            "return",
+            env,
+            None,
+            None,
+            HopStepLedger(),
+            awaiting_reply=False,
+            correlation_id="corr-1",
+            task_id="task-under-test",
+            broker=CaptureBroker(),
         )
 
         assert result is _CONSUMED  # the fold parked (incomplete batch)

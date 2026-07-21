@@ -357,7 +357,7 @@ async def test_tailcall_self_retry_targets_private_return_topic():
     broker = MagicMock()
     broker.publish = AsyncMock()
 
-    await agent._publish_action(result, envelope, "cid", broker)
+    await agent._publish_action(result, envelope, "cid", "task-under-test", broker)
 
     assert broker.publish.call_count == 1, f"expected one TailCall publish; got {broker.publish.call_count}"
     published_topic = broker.publish.call_args.kwargs["topic"]

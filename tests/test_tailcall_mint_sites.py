@@ -119,7 +119,7 @@ async def _publish_and_compare(node: BaseNodeDef, tail_call: TailCall[State]) ->
     envelope = _inbound_envelope(frame)
     broker = CaptureBroker()
 
-    await node._publish_action(tail_call, envelope, "cid", broker)
+    await node._publish_action(tail_call, envelope, "cid", "task-under-test", broker)
 
     published = broker.published[0]
     assert published.topic == tail_call.target_topic

@@ -169,7 +169,7 @@ async def test_handle_fanout_open_writes_open_and_publishes_marked_siblings() ->
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
     async with TestKafkaBroker(broker):
-        await agent._handle_fanout_open(ctx, calls, env, "corr-1", broker)
+        await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", broker)
 
     state = await fake.read_state("A")
     assert state is not None
@@ -477,7 +477,7 @@ async def test_handle_fanout_open_sibling_publish_failure_aborts_and_escalates()
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
     broker = CaptureBroker(raises=KafkaError("simulated sibling publish failure"))
-    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the KafkaError
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -503,7 +503,7 @@ async def test_handle_fanout_open_store_failure_aborts_and_escalates(caplog: pyt
     broker = CaptureBroker()
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-        resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
+        resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated, did not propagate
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -538,7 +538,7 @@ async def test_handle_fanout_open_non_kafka_publish_failure_aborts_and_escalates
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
     broker = CaptureBroker(raises=ValueError("simulated non-Kafka sibling publish failure"))
-    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the ValueError
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED

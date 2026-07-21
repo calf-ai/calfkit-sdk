@@ -150,7 +150,9 @@ class TestEchoMints:
 
         node = BaseNodeDef(node_id="n", subscribe_topics=["n.in"])
         async with TestKafkaBroker(broker):
-            pub, kind = await node._publish_action(ReturnCall(state=State(), value="ok"), _framed_env(marker=_MARKER), "cid", broker)
+            pub, kind = await node._publish_action(
+                ReturnCall(state=State(), value="ok"), _framed_env(marker=_MARKER), "cid", "task-under-test", broker
+            )
         assert kind == "return"
         assert isinstance(pub.reply, ReturnMessage)
         assert pub.reply.marker == _MARKER
@@ -166,7 +168,9 @@ class TestEchoMints:
         inbound = _framed_env(marker=_MARKER)
         snapshot = node._stack_snapshot(inbound)  # captured BEFORE the pop — the marker rides with it
         async with TestKafkaBroker(broker):
-            mirror, kind = await node._publish_fault(ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", broker)
+            mirror, kind = await node._publish_fault(
+                ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", "task-under-test", broker
+            )
         assert kind == "fault"
         assert isinstance(mirror.reply, FaultMessage)
         assert mirror.reply.marker == _MARKER
@@ -178,7 +182,9 @@ class TestEchoMints:
         snapshot = node._stack_snapshot(frameless)
         broker = KafkaBroker("localhost")
         async with TestKafkaBroker(broker):
-            mirror, _ = await node._publish_fault(ErrorReport(error_type="calf.exception", message="boom"), snapshot, frameless, "cid", broker)
+            mirror, _ = await node._publish_fault(
+                ErrorReport(error_type="calf.exception", message="boom"), snapshot, frameless, "cid", "task-under-test", broker
+            )
         assert isinstance(mirror.reply, FaultMessage)
         assert mirror.reply.marker is None
 
@@ -195,7 +201,9 @@ class TestEchoMints:
         inbound = _framed_env(marker=None)  # a present-but-unstamped frame (the escalation-hop shape)
         snapshot = node._stack_snapshot(inbound)
         async with TestKafkaBroker(broker):
-            mirror, _ = await node._publish_fault(ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", broker)
+            mirror, _ = await node._publish_fault(
+                ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", "task-under-test", broker
+            )
         assert isinstance(mirror.reply, FaultMessage)
         assert mirror.reply.marker is None
 
@@ -212,7 +220,7 @@ class TestEchoMints:
         frame = CallFrame(target_topic="n", callback_topic="caller", frame_id="A", fanout_id="A", tag="t", marker=_MARKER)
         env = Envelope(context=SessionRunContext(state=State(), deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([frame])))
         async with TestKafkaBroker(broker):
-            await node._publish_reentry(env, "cid", broker)
+            await node._publish_reentry(env, "cid", "task-under-test", broker)
         assert captured["e"].reply is not None
         assert captured["e"].reply.marker is None
 
@@ -230,7 +238,7 @@ class TestMarkerThreading:
 
         node = BaseNodeDef(node_id="n", subscribe_topics=["n.in"])
         async with TestKafkaBroker(broker):
-            pub, kind = await node._publish_action(Call("callee", State(), marker=_M2), _framed_env(), "cid", broker)
+            pub, kind = await node._publish_action(Call("callee", State(), marker=_M2), _framed_env(), "cid", "task-under-test", broker)
         assert kind == "call"
         assert pub.internal_workflow_state.current_frame.marker == _M2
 
@@ -245,7 +253,7 @@ class TestMarkerThreading:
 
         node = BaseNodeDef(node_id="n", subscribe_topics=["n.in"])
         async with TestKafkaBroker(broker):
-            pub, _ = await node._publish_action(TailCall("newtarget", State()), _framed_env(marker=_MARKER), "cid", broker)
+            pub, _ = await node._publish_action(TailCall("newtarget", State()), _framed_env(marker=_MARKER), "cid", "task-under-test", broker)
         assert pub.internal_workflow_state.current_frame.target_topic == "newtarget"
         assert pub.internal_workflow_state.current_frame.marker == _MARKER
 
@@ -265,7 +273,7 @@ class TestMarkerThreading:
         node = BaseNodeDef(node_id="n", subscribe_topics=["n.in"])
         calls = [Call("s.a", State(), marker=_MARKER), Call("s.b", State(), marker=_M2)]
         async with TestKafkaBroker(broker):
-            await node._publish_action(calls, _framed_env(), "cid", broker)
+            await node._publish_action(calls, _framed_env(), "cid", "task-under-test", broker)
         assert captured["s.a"].internal_workflow_state.current_frame.marker == _MARKER
         assert captured["s.b"].internal_workflow_state.current_frame.marker == _M2
 
@@ -289,7 +297,7 @@ class TestMarkerThreading:
         env = Envelope(context=SessionRunContext(state=State(), deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([own])))
         calls = [Call("s.a", State(), tag="t1", marker=_MARKER), Call("s.b", State(), tag="t2", marker=_M2)]
         async with TestKafkaBroker(broker):
-            await agent._handle_fanout_open(ctx, calls, env, "cid", broker)
+            await agent._handle_fanout_open(ctx, calls, env, "cid", "task-under-test", broker)
         assert captured["s.a"].internal_workflow_state.current_frame.marker == _MARKER
         assert captured["s.b"].internal_workflow_state.current_frame.marker == _M2
 

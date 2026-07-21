@@ -151,7 +151,9 @@ class TestPublishFault:
         snapshot = node._stack_snapshot(inbound)
         broker = CaptureBroker()
 
-        mirror, kind = await node._publish_fault(ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", broker)
+        mirror, kind = await node._publish_fault(
+            ErrorReport(error_type="calf.exception", message="boom"), snapshot, inbound, "cid", "task-under-test", broker
+        )
 
         assert kind == "fault"
         assert len(broker.published) == 1
@@ -175,7 +177,9 @@ class TestPublishFault:
         inbound = _framed_envelope(callback_topic=None)
         broker = CaptureBroker()
         with caplog.at_level(logging.ERROR):
-            mirror, kind = await node._publish_fault(ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", broker)
+            mirror, kind = await node._publish_fault(
+                ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker
+            )
         assert kind == "fault"
         assert broker.published == []  # nothing delivered point-to-point
         assert isinstance(mirror.reply, FaultMessage)  # still returned for the publish_topic mirror
@@ -187,7 +191,7 @@ class TestPublishFault:
         report = ErrorReport(error_type="calf.model.context_window_exceeded")
         inbound = _framed_envelope(callback_topic="ancestor.return")
         broker = CaptureBroker()
-        await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
         published_report = broker.published[0].message.reply.error
         assert published_report.report_id == report.report_id
         assert published_report.error_type == report.error_type
@@ -210,7 +214,7 @@ class TestPublishFault:
         # Limit sits between the tiny lean mirror and the ~16 KB full mirror: rung 1 overflows, rung 2 fits.
         broker = _SizeThresholdBroker(limit=2000)
 
-        mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
 
         assert kind == "fault"
         assert broker.call_count == 2  # rung 1 (full) overflowed, rung 2 (lean) delivered
@@ -242,7 +246,7 @@ class TestPublishFault:
         # Below the lean+full-report size (~8 KB) but above the lean+minimal size (a few hundred bytes).
         broker = _SizeThresholdBroker(limit=2000)
 
-        mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
 
         assert kind == "fault"
         assert broker.call_count == 3  # rung 1 (full) + rung 2 (lean+full report) overflowed, rung 3 delivered
@@ -263,7 +267,7 @@ class TestPublishFault:
         broker = _SizeThresholdBroker(limit=1)  # nothing fits
 
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
 
         assert kind == "fault"
         assert broker.call_count == 3 and broker.published == []  # all three rungs tried, none delivered
@@ -282,7 +286,7 @@ class TestPublishFault:
         inbound = _big_framed_envelope(filler_bytes=4000, callback_topic="caller.return")
         broker = _SizeThresholdBroker(limit=1)  # nothing fits ⇒ every rung is attempted and measured
 
-        await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
 
         assert len(broker.sizes) == 3  # all three rungs attempted
         full, lean_full, lean_minimal = broker.sizes
@@ -318,7 +322,9 @@ class TestPublishFault:
         )
         broker = _SizeThresholdBroker(limit=2000)  # rung 1 (full, ~16 KB) overflows; the lean rung fits
 
-        mirror, _kind = await node._publish_fault(ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", broker)
+        mirror, _kind = await node._publish_fault(
+            ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker
+        )
 
         assert broker.call_count == 2  # degraded to the lean rung
         env = broker.published[0].message
@@ -344,7 +350,7 @@ class TestPublishFault:
         broker = _ScriptedBroker(MessageSizeTooLargeError("rung1 overflow"), KafkaError("broker down"))
 
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
 
         assert kind == "fault"
         assert broker.call_count == 2 and broker.published == []  # rung 1 (size) + rung 2 (non-size floor); no rung 3
@@ -369,7 +375,7 @@ class TestPublishFault:
         )
         broker = CaptureBroker()
         report = ErrorReport(error_type="calf.exception", message="up")
-        mirror, _ = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+        mirror, _ = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
         assert len(broker.published) == 1  # fits at rung 1 — the re-stamp is not a degradation
         assert broker.published[0].message.reply.state_elided is True
         assert mirror.reply.state_elided is True
@@ -380,7 +386,9 @@ class TestPublishFault:
         node = _node()
         inbound = _framed_envelope(callback_topic="caller.return")
         broker = CaptureBroker()
-        mirror, _ = await node._publish_fault(ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", broker)
+        mirror, _ = await node._publish_fault(
+            ErrorReport(error_type="calf.exception"), node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker
+        )
         assert broker.published[0].message.reply.state_elided is False
         assert mirror.reply.state_elided is False
 
@@ -397,7 +405,9 @@ class TestPublishFault:
             reply=ReturnMessage(in_reply_to="frame", tag="t1", parts=[]),
         )
         broker = CaptureBroker()
-        await node._publish_fault(ErrorReport(error_type="calf.fault_group"), node._stack_snapshot(inbound), inbound, "cid", broker)
+        await node._publish_fault(
+            ErrorReport(error_type="calf.fault_group"), node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker
+        )
         assert broker.published[0].message.reply.state_elided is False
 
     async def test_fault_response_mirror_carries_error_type_header(self) -> None:
@@ -406,7 +416,7 @@ class TestPublishFault:
         node = _node()
         report = ErrorReport(error_type="calf.model.context_window_exceeded")
         inbound = _framed_envelope(callback_topic="caller.return")
-        resp = await node._fault_response(report, node._stack_snapshot(inbound), inbound, "cid", CaptureBroker())
+        resp = await node._fault_response(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", CaptureBroker())
         assert resp.headers[HDR_KIND] == "fault"
         assert resp.headers[HDR_ERROR_TYPE] == "calf.model.context_window_exceeded"
 
@@ -418,7 +428,7 @@ class TestPublishFault:
         inbound = _framed_envelope(callback_topic="caller.return")
         broker = CaptureBroker(raises=KafkaError("broker down"))
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
         assert kind == "fault"
         assert isinstance(mirror.reply, FaultMessage)
         assert mirror.reply.error.causes != []  # the FULL mirror — a non-size failure is not stripped
@@ -433,7 +443,7 @@ class TestPublishFault:
         inbound = _framed_envelope(callback_topic="caller.return")
         broker = CaptureBroker(raises=MessageSizeTooLargeError("too big at every rung"))  # every rung overflows
         with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+            mirror, kind = await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
         assert kind == "fault"
         assert broker.call_count == 3  # all three rungs attempted before the floor
         assert isinstance(mirror.reply, FaultMessage)
@@ -613,7 +623,7 @@ class TestStructuredLogging:
         report = ErrorReport(error_type="calf.exception", message="boom", origin_node_id="origin-node")
         broker = CaptureBroker()
         with caplog.at_level(logging.WARNING, logger="calfkit.nodes.base"):
-            await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", broker)
+            await node._publish_fault(report, node._stack_snapshot(inbound), inbound, "cid", "task-under-test", broker)
         warns = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warns, "expected a per-hop escalation WARNING"
         msg = warns[0].getMessage()
@@ -1096,7 +1106,7 @@ class TestTailCallFrameIdentity:
         envelope = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
         broker = CaptureBroker()
 
-        await node._publish_action(TailCall(target_topic="next.topic", state=State()), envelope, "cid", broker)
+        await node._publish_action(TailCall(target_topic="next.topic", state=State()), envelope, "cid", "task-under-test", broker)
 
         call = broker.published[0]
         topic, env, headers = call.topic, call.message, call.headers
