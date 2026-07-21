@@ -32,7 +32,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.nodes import Agent, ToolNodeDef, agent_tool
+from calfkit.nodes import StatelessAgent, ToolNodeDef, agent_tool
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
 from tests.integration._fault_tools import boom
@@ -91,14 +91,14 @@ async def test_agent_messages_peer_and_resumes_on_own_history(kafka_bootstrap: s
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="you are triage",
         subscribe_topics=a_in,
         model_client=scripted_model([_msg_call(b_name, "what is the balance?", tool_call_id="m1")]),
         peers=[Messaging(b_name)],
     )
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         system_prompt="you are billing",
         subscribe_topics=f"{topic_namespace}.B.input",  # B's PUBLIC topic; messaging uses the DERIVED private topic
@@ -178,14 +178,14 @@ async def test_public_entry_ring_is_rejected(kafka_bootstrap: str, topic_namespa
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="x",
         subscribe_topics=a_in,
         model_client=scripted_model([_msg_call(b_name, "hi", tool_call_id="m1")]),
         peers=[Messaging(b_name)],
     )
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         system_prompt="x",
         subscribe_topics=f"{topic_namespace}.B.input",
@@ -236,7 +236,7 @@ async def test_parallel_mixed_batch_folds_message_agent_and_tool_per_kind(kafka_
     control_plane = fast_control_plane(kafka_bootstrap)
     tool = _echo_tool(tool_name)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="x",
         subscribe_topics=a_in,
@@ -244,7 +244,7 @@ async def test_parallel_mixed_batch_folds_message_agent_and_tool_per_kind(kafka_
         peers=[Messaging(b_name)],
         tools=[tool],
     )
-    agent_b = Agent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("B reply"))
+    agent_b = StatelessAgent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("B reply"))
 
     driver = Client.connect(kafka_bootstrap)
     b_worker = _worker(kafka_bootstrap, nodes=[agent_b], control_plane=control_plane)
@@ -275,14 +275,14 @@ async def test_non_live_curated_peer_is_excluded_and_retried(kafka_bootstrap: st
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="x",
         subscribe_topics=a_in,
         model_client=scripted_model([_msg_call(ghost, "hi", tool_call_id="m1")]),
         peers=[Messaging(b_name, ghost)],
     )
-    agent_b = Agent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("hi"))
+    agent_b = StatelessAgent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("hi"))
 
     driver = Client.connect(kafka_bootstrap)
     b_worker = _worker(kafka_bootstrap, nodes=[agent_b], control_plane=control_plane)
@@ -314,7 +314,7 @@ async def test_peer_fault_runs_callers_on_callee_error(kafka_bootstrap: str, top
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="x",
         subscribe_topics=a_in,
@@ -323,7 +323,7 @@ async def test_peer_fault_runs_callers_on_callee_error(kafka_bootstrap: str, top
         on_callee_error=lambda ctx, fault: "PEER_FAULT_HANDLED",
     )
     # B calls a raising tool with no on_callee_error of its own, so its fault escalates to A.
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         system_prompt="x",
         subscribe_topics=f"{topic_namespace}.B.input",

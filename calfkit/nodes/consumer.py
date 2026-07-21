@@ -98,7 +98,9 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
         if inspect.isawaitable(ret):
             await ret
 
-    async def _handle_delivery(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any], broker: BrokerAnnotation) -> Response:
+    async def _handle_delivery(
+        self, envelope: Envelope, correlation_id: str, task_id: str, headers: dict[str, Any], broker: BrokerAnnotation
+    ) -> Response:
         """The observer delivery path (§6.6 / §6.7), overriding the caller-capable fault pipeline.
 
         Every kind reaches the consume body as an observation — there are **no** seams, no
@@ -114,7 +116,9 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
         """
         emitter, emitter_kind = self._decode_emitter(headers, correlation_id)
         try:
-            ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
+            ctx = await self.prepare_context(
+                envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id, task_id=task_id
+            )
             await self.run(ctx)
         except Exception:
             logger.exception(
@@ -125,7 +129,7 @@ class ConsumerNode(Generic[OutputT], BaseNodeDef):
                 emitter_kind,
             )
         envelope.reply = None  # observers never produce on the workflow's rails (§6.6)
-        return Response(envelope, headers=self._headers("call"))
+        return Response(envelope, headers=self._headers("call", task_id=task_id))
 
 
 def consumer(

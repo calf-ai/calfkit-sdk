@@ -21,7 +21,7 @@ from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.payload import retry_text_part
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.nodes._tool_error import surface_to_model
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
@@ -58,7 +58,7 @@ def _react_model(tool_calls: list[ToolCallPart], capture: dict[str, list[str]]) 
     return FunctionModel(_fn)
 
 
-async def _run(container: Any, agent: Agent[str], *tools: Any, message: str = "go") -> Any:
+async def _run(container: Any, agent: StatelessAgent[str], *tools: Any, message: str = "go") -> Any:
     """Deploy ``agent`` + ``tools`` and drive one execute() round trip, tolerating an escalated fault."""
     worker = container.get(Worker)
     worker.add_nodes(agent, *tools)
@@ -69,8 +69,8 @@ async def _run(container: Any, agent: Agent[str], *tools: Any, message: str = "g
         return await client.agent(topic=agent.subscribe_topics[0]).execute(message, timeout=10)
 
 
-def _agent(name: str, model: FunctionModel, *, tools: list[Any], **seams: Any) -> Agent[str]:
-    return Agent(name, subscribe_topics=f"{name}.in", model_client=model, tools=tools, **seams)
+def _agent(name: str, model: FunctionModel, *, tools: list[Any], **seams: Any) -> StatelessAgent[str]:
+    return StatelessAgent(name, subscribe_topics=f"{name}.in", model_client=model, tools=tools, **seams)
 
 
 # ── conversion: the model sees the level-A is_error result ─────────────────────

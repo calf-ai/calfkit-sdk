@@ -35,7 +35,7 @@ from aiokafka.errors import MessageSizeTooLargeError  # type: ignore[import-unty
 
 from calfkit._vendor.pydantic_ai import models
 from calfkit.client import Client
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._roundtrip_helpers import final_model
 
@@ -55,10 +55,10 @@ _BIG_OUT = "y" * (_ONE_MIB + 200 * 1024)
 _PERMITTED_BYTES = 8 * _ONE_MIB
 
 
-def _echo_agent(node_id: str, agent_in: str) -> Agent:
+def _echo_agent(node_id: str, agent_in: str) -> StatelessAgent:
     """An agent whose scripted model finalizes immediately with a >1 MiB output — so the
     round-trip carries a >1 MiB payload on BOTH rails (call in, reply out)."""
-    return Agent(node_id, system_prompt="respond", subscribe_topics=agent_in, model_client=final_model(_BIG_OUT))
+    return StatelessAgent(node_id, system_prompt="respond", subscribe_topics=agent_in, model_client=final_model(_BIG_OUT))
 
 
 async def test_topic_override_permits_a_large_round_trip(kafka_bootstrap: str, topic_namespace: str) -> None:

@@ -1,8 +1,8 @@
-"""Schema-only tool dispatch via the ``Agent(tools=[...])`` kwarg path.
+"""Schema-only tool dispatch via the ``StatelessAgent(tools=[...])`` kwarg path.
 
 Pins the load-bearing properties of the agent loop for tools registered as
 validator-less ``ToolBinding`` instances passed through the
-``Agent(tools=[...])`` kwarg:
+``StatelessAgent(tools=[...])`` kwarg:
 
   1. A call whose args CONFORM to the binding's advertised
      ``parameters_json_schema`` dispatches. The binding carries no process-local
@@ -18,7 +18,7 @@ validator-less ``ToolBinding`` instances passed through the
      validation step.
 
 ``test_tool_errors.py`` covers the same properties on further wire-form binding
-shapes; this suite exercises the schema-only ``Agent(tools=[...])`` branch.
+shapes; this suite exercises the schema-only ``StatelessAgent(tools=[...])`` branch.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.models.actions import Call, TailCall
 from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 
 # Reuse the proven helpers from the wire-form tool tests rather than
 # re-implementing. If these helpers move or rename, the import is a
@@ -72,7 +72,7 @@ def _make_schema_only_tool(
 
 
 async def test_schema_only_tool_via_tools_kwarg_dispatches_conforming_args() -> None:
-    """Property 1: ``Agent(tools=[ToolBinding(...)])`` dispatches a schema-CONFORMING call.
+    """Property 1: ``StatelessAgent(tools=[ToolBinding(...)])`` dispatches a schema-CONFORMING call.
 
     The schema fallback validator passes, and the result is a ``Call`` to the binding's
     dispatch topic.
@@ -82,7 +82,7 @@ async def test_schema_only_tool_via_tools_kwarg_dispatches_conforming_args() -> 
     tool_call_id = "tc-schema-only-01"
     call = ToolCallPart(tool_name="search", args={"q": "hello"}, tool_call_id=tool_call_id)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_schema_only",
         system_prompt="x",
         subscribe_topics="agent_schema_only.input",
@@ -122,7 +122,7 @@ async def test_schema_only_tool_schema_violating_args_become_retry_prompt(args, 
     tcid = "tc-schema-violation"
     bad_call = ToolCallPart(tool_name="search", args=args, tool_call_id=tcid)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_schema_only_violation",
         system_prompt="x",
         subscribe_topics="agent_schema_only_violation.input",
@@ -156,7 +156,7 @@ async def test_schema_only_tool_rejects_coercible_but_off_spec_args() -> None:
     tcid = "tc-coercible-off-spec"
     call = ToolCallPart(tool_name="counter", args={"n": "3"}, tool_call_id=tcid)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_schema_only_strict",
         system_prompt="x",
         subscribe_topics="agent_schema_only_strict.input",
@@ -189,7 +189,7 @@ async def test_schema_only_tool_malformed_args_become_retry_prompt() -> None:
         tool_call_id="tc-schema-only-malformed",
     )
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_schema_only_malformed",
         system_prompt="x",
         subscribe_topics="agent_schema_only_malformed.input",
@@ -232,7 +232,7 @@ async def test_schema_only_tool_handles_various_bad_arg_shapes(args: str) -> Non
     tcid = f"tc-schema-only-bad-{abs(hash(args))}"
     bad_call = ToolCallPart(tool_name="search", args=args, tool_call_id=tcid)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_schema_only_param",
         system_prompt="x",
         subscribe_topics="agent_schema_only_param.input",

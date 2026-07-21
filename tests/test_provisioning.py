@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from calfkit.nodes.agent import Agent
+from calfkit.nodes.agent import StatelessAgent
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.provisioning import (
@@ -24,7 +24,7 @@ from calfkit.provisioning import provisioner as provisioner_mod
 
 
 class _FakeModel(PydanticModelClient):
-    """Minimal pydantic-ai ``Model`` so a real ``Agent`` node can be built
+    """Minimal pydantic-ai ``Model`` so a real ``StatelessAgent`` node can be built
     without any network / API key. Never actually invoked by these tests."""
 
     @property
@@ -109,7 +109,7 @@ def test_topics_for_nodes_plain_node_includes_subscribe_publish_and_return() -> 
 
 def test_topics_for_nodes_includes_agent_tool_subscribe_topics() -> None:
     tool = _tool_node("weather_lookup", sub="weather_lookup.in", pub="weather_lookup.out")
-    agent = Agent(
+    agent = StatelessAgent(
         "weather",
         subscribe_topics="weather.in",
         publish_topic="weather.out",
@@ -523,7 +523,7 @@ def test_topic_configs_applied_to_data_topics_not_framework_topics(monkeypatch) 
     by_name = {nt.name: nt for nt in created[0].create_calls[0]}
     assert by_name["data.topic"].topic_configs == {"retention.ms": "604800000"}
     # Framework topic must NOT carry the data topic_configs (None -> {} in
-    # aiokafka). cleanup.policy/retention on correlation-keyed reply inboxes is
+    # aiokafka). cleanup.policy/retention on task-keyed reply inboxes is
     # semantically wrong.
     assert by_name["reply.private.return"].topic_configs == {}
 

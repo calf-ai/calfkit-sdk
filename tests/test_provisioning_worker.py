@@ -17,7 +17,7 @@ import asyncio
 from typing import Any
 
 from calfkit.client import Client
-from calfkit.nodes.agent import Agent
+from calfkit.nodes.agent import StatelessAgent
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.provisioning import ProvisioningConfig
@@ -31,7 +31,7 @@ from tests._provisioning_fakes import EnsurerBroker, FakeResponse
 
 
 class _FakeModel(PydanticModelClient):
-    """Minimal pydantic-ai ``Model`` so a real ``Agent`` node can be built
+    """Minimal pydantic-ai ``Model`` so a real ``StatelessAgent`` node can be built
     without any network / API key. Never actually invoked by these tests."""
 
     @property
@@ -127,7 +127,7 @@ def test_enabled_declares_agent_tool_input_topics() -> None:
     to it (regression guard for the missing-tool-topics blocker)."""
     client = _make_client(ProvisioningConfig(enabled=True))
     tool = _tool_node("weather_lookup", "weather_lookup.in", "weather_lookup.out")
-    agent = Agent(
+    agent = StatelessAgent(
         "weather",
         subscribe_topics="weather.in",
         publish_topic="weather.out",
@@ -214,7 +214,7 @@ def test_bare_agent_is_reachable_via_its_private_input_topic() -> None:
     # contributes its name-derived private input inbox (ADR-0017), the topic every
     # caller (client gateway, message_agent, handoff) addresses it by.
     client = _make_client()
-    agent = Agent("bare", model_client=_FakeModel())
+    agent = StatelessAgent("bare", model_client=_FakeModel())
     assert agent.subscribe_topics == []  # no public inbox declared
     worker = Worker(client, nodes=[agent])
 

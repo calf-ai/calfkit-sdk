@@ -38,7 +38,7 @@ from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
-from calfkit.nodes import Agent, ToolNodeDef, Tools, agent_tool
+from calfkit.nodes import StatelessAgent, ToolNodeDef, Tools, agent_tool
 from calfkit.worker import Worker
 from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import (
@@ -128,7 +128,7 @@ async def test_discovered_tool_node_roundtrips_over_the_wire(kafka_bootstrap: st
     control_plane = fast_control_plane(kafka_bootstrap)
 
     tool = _add_tool(tool_name)
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add two numbers",
         subscribe_topics=agent_in,
@@ -170,7 +170,7 @@ async def test_model_pov_matches_the_advertised_tool(kafka_bootstrap: str, topic
 
     tool = _add_tool(tool_name)
     pov: dict[str, Any] = {}  # name -> ToolDefinition the agent resolved from the view and presented to the model
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add two numbers",
         subscribe_topics=agent_in,
@@ -231,7 +231,7 @@ async def test_discovered_bad_args_rejected_before_dispatch(kafka_bootstrap: str
     control_plane = fast_control_plane(kafka_bootstrap)
 
     tool, calls = _counting_add_tool(tool_name)
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add with bad args",
         subscribe_topics=agent_in,
@@ -273,7 +273,7 @@ async def test_discovered_bad_args_retry_loop_self_corrects(kafka_bootstrap: str
     control_plane = fast_control_plane(kafka_bootstrap)
 
     tool, calls = _counting_add_tool(tool_name)
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add two numbers",
         subscribe_topics=agent_in,

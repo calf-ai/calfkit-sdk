@@ -31,7 +31,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.nodes import Agent, ToolNodeDef, agent_tool
+from calfkit.nodes import StatelessAgent, ToolNodeDef, agent_tool
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import _NONE_REACHABLE
 from calfkit.peers.handoff import _STUB_TOOL_NOT_EXECUTED, HANDOFF_TOOL
@@ -95,10 +95,10 @@ async def test_handoff_transfers_to_peer_who_answers_original_caller(kafka_boots
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name, system_prompt="triage", subscribe_topics=a_in, model_client=_emit_handoff(b_name, "please handle the refund"), peers=[Handoff(b_name)]
     )
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name, system_prompt="billing", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("the refund is approved")
     )
 
@@ -130,11 +130,11 @@ async def test_chained_handoff_reaches_original_caller(kafka_bootstrap: str, top
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=_emit_handoff(b_name, "to B"), peers=[Handoff(b_name)])
-    agent_b = Agent(
+    agent_a = StatelessAgent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=_emit_handoff(b_name, "to B"), peers=[Handoff(b_name)])
+    agent_b = StatelessAgent(
         b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=_emit_handoff(c_name, "to C"), peers=[Handoff(c_name)]
     )
-    agent_c = Agent(c_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.C.input", model_client=final_model("C handled it"))
+    agent_c = StatelessAgent(c_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.C.input", model_client=final_model("C handled it"))
 
     driver = Client.connect(kafka_bootstrap)
     c_worker = _worker(kafka_bootstrap, nodes=[agent_c], control_plane=control_plane)
@@ -164,21 +164,21 @@ async def test_handoff_inside_peer_message_folds_to_messaging_caller(kafka_boots
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="x",
         subscribe_topics=a_in,
         model_client=scripted_model([_msg_call(b_name, "consult", tool_call_id="m1")]),
         peers=[Messaging(b_name)],
     )
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         system_prompt="x",
         subscribe_topics=f"{topic_namespace}.B.input",
         model_client=_emit_handoff(c_name, "you take it"),
         peers=[Handoff(c_name)],
     )
-    agent_c = Agent(c_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.C.input", model_client=final_model("C consulted answer"))
+    agent_c = StatelessAgent(c_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.C.input", model_client=final_model("C consulted answer"))
 
     driver = Client.connect(kafka_bootstrap)
     c_worker = _worker(kafka_bootstrap, nodes=[agent_c], control_plane=control_plane)
@@ -217,7 +217,7 @@ async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstra
         assert tool.description.endswith(_NONE_REACHABLE)
         return ModelResponse(parts=[TextPart("I'll handle it myself")])
 
-    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=FunctionModel(_answers_directly), peers=[Handoff(ghost)])
+    agent_a = StatelessAgent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=FunctionModel(_answers_directly), peers=[Handoff(ghost)])
 
     driver = Client.connect(kafka_bootstrap)
     a_worker = _worker(kafka_bootstrap, nodes=[agent_a], control_plane=control_plane)
@@ -243,8 +243,10 @@ async def test_handoff_target_runs_its_own_tools(kafka_bootstrap: str, topic_nam
         return "B_OWN_TOOL_OK"
 
     b_tool: ToolNodeDef = agent_tool(_btool, name=b_tool_name)
-    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=_emit_handoff(b_name, "over to you"), peers=[Handoff(b_name)])
-    agent_b = Agent(
+    agent_a = StatelessAgent(
+        a_name, system_prompt="x", subscribe_topics=a_in, model_client=_emit_handoff(b_name, "over to you"), peers=[Handoff(b_name)]
+    )
+    agent_b = StatelessAgent(
         b_name,
         system_prompt="x",
         subscribe_topics=f"{topic_namespace}.B.input",
@@ -284,7 +286,7 @@ async def test_winning_handoff_stubs_parallel_sibling_over_the_wire(kafka_bootst
         return "SIBLING_TOOL_RAN"  # must never appear anywhere
 
     a_tool: ToolNodeDef = agent_tool(_atool, name=a_tool_name)
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="x",
         subscribe_topics=a_in,
@@ -292,7 +294,7 @@ async def test_winning_handoff_stubs_parallel_sibling_over_the_wire(kafka_bootst
         tools=[a_tool],
         peers=[Handoff(b_name)],
     )
-    agent_b = Agent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("B finished it"))
+    agent_b = StatelessAgent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("B finished it"))
 
     driver = Client.connect(kafka_bootstrap)
     b_worker = _worker(kafka_bootstrap, nodes=[agent_b], control_plane=control_plane)
@@ -326,8 +328,8 @@ async def test_briefing_reaches_the_peer_over_the_wire(kafka_bootstrap: str, top
         briefed = briefing in flat and f"<{a_name}>" in flat  # attributed to A, carrying the message
         return ModelResponse(parts=[TextPart(f"BRIEFED={briefed}")])
 
-    agent_a = Agent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=_emit_handoff(b_name, briefing), peers=[Handoff(b_name)])
-    agent_b = Agent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=FunctionModel(_b_fn))
+    agent_a = StatelessAgent(a_name, system_prompt="x", subscribe_topics=a_in, model_client=_emit_handoff(b_name, briefing), peers=[Handoff(b_name)])
+    agent_b = StatelessAgent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=FunctionModel(_b_fn))
 
     driver = Client.connect(kafka_bootstrap)
     b_worker = _worker(kafka_bootstrap, nodes=[agent_b], control_plane=control_plane)

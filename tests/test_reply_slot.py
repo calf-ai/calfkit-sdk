@@ -205,7 +205,7 @@ def _reply_env(parts: list) -> Envelope:
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
         reply=ReturnMessage(in_reply_to=None, tag=None, parts=parts),
     )
-    env.context._stamp_transport(correlation_id="cid", emitter_node_id=None, emitter_node_kind=None)
+    env.context._stamp_transport(correlation_id="cid", task_id="t-under-test", emitter_node_id=None, emitter_node_kind=None)
     env.context._reply = env.reply
     return env
 
@@ -291,7 +291,7 @@ def _fault_env(report: ErrorReport) -> Envelope:
         internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
         reply=FaultMessage(in_reply_to=None, tag=None, error=report),
     )
-    env.context._stamp_transport(correlation_id="cid", emitter_node_id=None, emitter_node_kind=None)
+    env.context._stamp_transport(correlation_id="cid", task_id="t-under-test", emitter_node_id=None, emitter_node_kind=None)
     env.context._reply = env.reply
     return env
 

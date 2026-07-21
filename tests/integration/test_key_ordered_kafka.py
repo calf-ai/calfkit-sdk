@@ -233,16 +233,19 @@ async def test_worker_flip_serializes_per_correlation_end_to_end(kafka_bootstrap
     async with worker:
         await driver._ensure_started()
         for key, seq in plan:
-            _cid, state = driver._build_state(
+            _cid, _minted_task, state = driver._build_state(
                 f"work {seq}",
                 correlation_id=key,
                 temp_instructions=None,
                 message_history=None,
                 author=None,
             )
+            # task_id=key (not the per-call mint): messages of one key group must share a
+            # task so they co-locate on one lane — the partition key rides task_id.
             await driver._publish_call(
                 topic=input_topic,
                 correlation_id=key,
+                task_id=key,
                 state=state,
                 deps=None,
                 route="stress.work",

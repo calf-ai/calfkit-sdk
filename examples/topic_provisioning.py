@@ -43,7 +43,7 @@ The same one-off provisioning is available from the CLI (no Python)::
 import asyncio
 
 from calfkit.client import InvocationResult
-from calfkit.nodes import Agent, agent_tool, consumer
+from calfkit.nodes import StatelessAgent, agent_tool, consumer
 from calfkit.providers import OpenAIResponsesModelClient
 from calfkit.provisioning import (
     ProvisioningConfig,
@@ -62,7 +62,7 @@ def get_weather(location: str) -> str:
     return f"It's sunny in {location}"
 
 
-agent = Agent(
+agent = StatelessAgent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
     subscribe_topics="weather_agent.input",

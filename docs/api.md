@@ -7,7 +7,7 @@ from calfkit import (
     Client, AgentGateway, InvocationHandle, InvocationResult,   # client
     Dispatch, EventStream, RunEvent, RunCompleted, RunFailed,   # client — fire token + firehose events
     AgentMessageEvent, ToolCallEvent, ToolResultEvent, HandoffEvent,  # intermediate step events (RunEvent members)
-    Agent, agent_tool, consumer,                         # node authoring
+    StatelessAgent, agent_tool, consumer,                         # node authoring
     Tools,                                               # reference deployed tool nodes by name
     Messaging, Handoff,                                  # agent-to-agent peers
     BaseNodeDef, NodeDef, ToolNodeDef, ConsumerNode,     # node types
@@ -55,9 +55,9 @@ Each is a **frozen** model discriminated on its `kind` literal, and also carries
 
 | Symbol | Purpose |
 | --- | --- |
-| `Agent` | An agent node — an LLM-backed node that consumes prompts, calls tools, and publishes output. |
+| `StatelessAgent` | An agent node — an LLM-backed node that consumes prompts, calls tools, and publishes output. |
 | `agent_tool` | Decorator that turns a function into a deployable tool node (`@agent_tool(name=...)` or `agent_tool(func, name=...)` overrides its name). |
-| `Tools` | Identity-only handle that references deployed tool nodes — by name, or every live one with `discover=True`; pass in `Agent(tools=[...])` to discover their schemas at runtime. |
+| `Tools` | Identity-only handle that references deployed tool nodes — by name, or every live one with `discover=True`; pass in `StatelessAgent(tools=[...])` to discover their schemas at runtime. |
 | `consumer` | Decorator that turns a function into a deployable consumer node (a terminal sink on a topic). |
 
 ### Agent tool-error reception
@@ -66,7 +66,7 @@ The agent-only `on_tool_error` surface for converting a faulting tool result int
 
 | Symbol | Purpose |
 | --- | --- |
-| `surface_to_model` | Zero-argument prebuilt `on_tool_error` handler: converts *every* tool failure into a model-visible error result (level-A text). Pass as `Agent(on_tool_error=[surface_to_model()])`. |
+| `surface_to_model` | Zero-argument prebuilt `on_tool_error` handler: converts *every* tool failure into a model-visible error result (level-A text). Pass as `StatelessAgent(on_tool_error=[surface_to_model()])`. |
 | `ToolCall` | calfkit's name for the vendored model-request tool-call type (`.tool_name` / `.args`) an `on_tool_error` handler receives — distinct from the wire `ToolCallPart` (`.kwargs`). |
 | `render_fault_for_model` | `render_fault_for_model(report) -> str` — the level-A renderer: the top exception line (`exception.type: message`, or `message` alone for a framework fault). |
 | `retry_text_part` | Build a `calf.retry`-marked text part; return it from a seam handler to show the model an error (the result streams as `outcome="failed"`). |
@@ -77,8 +77,8 @@ The agent-only `on_tool_error` surface for converting a faulting tool result int
 
 | Symbol | Purpose |
 | --- | --- |
-| `Messaging` | Identity-only handle declaring peers an agent may **message** — consult and keep control — by name, or every live agent with `discover=True`; pass in `Agent(peers=[...])`. |
-| `Handoff` | Identity-only handle declaring peers an agent may **hand off** to — transfer control — by name, or every live agent with `discover=True`; pass in `Agent(peers=[...])`. |
+| `Messaging` | Identity-only handle declaring peers an agent may **message** — consult and keep control — by name, or every live agent with `discover=True`; pass in `StatelessAgent(peers=[...])`. |
+| `Handoff` | Identity-only handle declaring peers an agent may **hand off** to — transfer control — by name, or every live agent with `discover=True`; pass in `StatelessAgent(peers=[...])`. |
 
 ### Node types
 
@@ -215,10 +215,10 @@ client.events(*, terminal_only: bool = False) -> EventStream
 
 The cross-run firehose over the client's one inbox — every reply while open, demuxed by the caller. Best-effort (bounded drop-oldest, signaled by `EventStream.dropped`); for guaranteed delivery hold the handle (`start`/`execute`) or run a [`@consumer` node](consumer-nodes.md).
 
-### `Agent`
+### `StatelessAgent`
 
 ```python
-Agent(
+StatelessAgent(
     name: str,
     *,
     system_prompt: str = "You are a helpful AI assistant.",
@@ -249,10 +249,10 @@ Turns a function into a tool node. The function's parameters and type annotation
 ### `Tools`
 
 ```python
-agent = Agent("researcher", subscribe_topics="researcher.input", model_client=model,
+agent = StatelessAgent("researcher", subscribe_topics="researcher.input", model_client=model,
               tools=[Tools("add", "subtract")])    # named: reference specific tool nodes
 # or
-agent = Agent("researcher", subscribe_topics="researcher.input", model_client=model,
+agent = StatelessAgent("researcher", subscribe_topics="researcher.input", model_client=model,
               tools=[Tools(discover=True)])         # discover: every live tool node
 ```
 
@@ -281,11 +281,11 @@ Worker(
 
 Hosts the given `nodes` against the broker. Drive it with `await worker.run()` (blocking), the embeddable `await worker.start()` / `await worker.stop()` pair, or `async with worker:`.
 
-`max_workers` is the per-node concurrency cap. Every node consumes **key-ordered**: up to `max_workers` messages process in parallel across conversations, while messages sharing a `correlation_id` stay strictly serial, in order — so raising it never reorders a workflow's steps. The default (`1`) processes serially, one message at a time.
+`max_workers` is the per-node concurrency cap. Every node consumes **key-ordered**: up to `max_workers` messages process in parallel across tasks, while messages sharing a `task_id` (the partition key — one task per run today) stay strictly serial, in order — so raising it never reorders a workflow's steps. The default (`1`) processes serially, one message at a time.
 
 ## Policy seams
 
-Caller-capable nodes (`Agent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Each is registered as a constructor argument (`Agent`/`NodeDef`; a single callable or a list) or as a repeatable instance decorator (any node — and the only form for tool nodes); constructor entries precede decorator entries. A chain runs in registration order, resolving on the **first non-`None` return** (sync or async handlers). Observer nodes (`@consumer`) have no seams. Agents additionally expose **`on_tool_error`**, a promoted surface over `on_callee_error` with the failing tool first-class (below the table).
+Caller-capable nodes (`StatelessAgent`, `NodeDef`, tool nodes) expose four **policy seams** — callbacks that run inside the message flow to guard input, reshape output, and handle failures. Each is registered as a constructor argument (`StatelessAgent`/`NodeDef`; a single callable or a list) or as a repeatable instance decorator (any node — and the only form for tool nodes); constructor entries precede decorator entries. A chain runs in registration order, resolving on the **first non-`None` return** (sync or async handlers). Observer nodes (`@consumer`) have no seams. Agents additionally expose **`on_tool_error`**, a promoted surface over `on_callee_error` with the failing tool first-class (below the table).
 
 | Seam | Handler signature | A `None` return… | A non-`None` return… |
 | --- | --- | --- | --- |
@@ -509,7 +509,7 @@ See also: [How to give agents MCP tools](mcp-tool-discovery.md).
 
 ## Agent-to-agent messaging & handoff
 
-Let an agent reach other agents discovered at runtime by name. Both handles are re-exported from the top-level `calfkit` package and passed in `Agent(peers=[...])`.
+Let an agent reach other agents discovered at runtime by name. Both handles are re-exported from the top-level `calfkit` package and passed in `StatelessAgent(peers=[...])`.
 
 | Symbol | Purpose |
 | --- | --- |
@@ -519,10 +519,10 @@ Let an agent reach other agents discovered at runtime by name. Both handles are 
 ### `Messaging`
 
 ```python
-agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+agent = StatelessAgent("triage", subscribe_topics="triage.input", model_client=model,
               peers=[Messaging("billing", "support")])   # named: consult specific peers
 # or
-agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+agent = StatelessAgent("triage", subscribe_topics="triage.input", model_client=model,
               peers=[Messaging(discover=True)])           # discover: any live agent
 ```
 
@@ -531,14 +531,14 @@ A frozen, identity-only handle to peer agents, resolved per turn from the `calf.
 ### `Handoff`
 
 ```python
-agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+agent = StatelessAgent("triage", subscribe_topics="triage.input", model_client=model,
               peers=[Handoff("refunds")])                 # named: transfer to specific peers
 # or
-agent = Agent("triage", subscribe_topics="triage.input", model_client=model,
+agent = StatelessAgent("triage", subscribe_topics="triage.input", model_client=model,
               peers=[Handoff(discover=True)])             # discover: any live agent
 ```
 
-A frozen, identity-only handle to peer agents, with the same construction rules as `Messaging` (named XOR `discover=True`; both, or the empty handle, raise `ValueError`). Names the peers an agent may transfer control to: the handle injects the reserved built-in `handoff_to_agent(name, message)` tool (its description carries the live peer directory, re-rendered every turn; an empty directory renders a "none reachable" sentinel). When the model calls it with a valid live target, the handoff wins the turn (unless the same response carries a validated structured final answer, which outranks it) — sibling tool calls in the same response are not executed and are closed with stub results — control moves to the named peer, and the handing agent does not regain it. An invalid or offline target is rejected with model-visible feedback (the standard tool-rejection path). The tool name is reserved against user tools whenever a `Handoff` handle is present. Handles are independent across capabilities, and a `discover=True` handle is the sole author of its own capability's scope (no named handle of the same kind alongside it). Naming the agent's own name in either handle raises `ValueError` at `Agent` construction.
+A frozen, identity-only handle to peer agents, with the same construction rules as `Messaging` (named XOR `discover=True`; both, or the empty handle, raise `ValueError`). Names the peers an agent may transfer control to: the handle injects the reserved built-in `handoff_to_agent(name, message)` tool (its description carries the live peer directory, re-rendered every turn; an empty directory renders a "none reachable" sentinel). When the model calls it with a valid live target, the handoff wins the turn (unless the same response carries a validated structured final answer, which outranks it) — sibling tool calls in the same response are not executed and are closed with stub results — control moves to the named peer, and the handing agent does not regain it. An invalid or offline target is rejected with model-visible feedback (the standard tool-rejection path). The tool name is reserved against user tools whenever a `Handoff` handle is present. Handles are independent across capabilities, and a `discover=True` handle is the sole author of its own capability's scope (no named handle of the same kind alongside it). Naming the agent's own name in either handle raises `ValueError` at `StatelessAgent` construction.
 
 See also: [How to let agents find and reach each other at runtime](agent-peers.md).
 

@@ -29,7 +29,7 @@ from calfkit.models.fanout import FanoutOpen, SlotRef
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.nodes.node import NodeDef
@@ -49,8 +49,8 @@ def _model(_messages: object, _info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart("ok")])
 
 
-def _agent() -> Agent[str]:
-    return Agent(
+def _agent() -> StatelessAgent[str]:
+    return StatelessAgent(
         name="a",
         subscribe_topics=["a.in"],
         model_client=FunctionModel(_model),
@@ -169,7 +169,7 @@ async def test_handle_fanout_open_writes_open_and_publishes_marked_siblings() ->
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
     async with TestKafkaBroker(broker):
-        await agent._handle_fanout_open(ctx, calls, env, "corr-1", broker)
+        await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", broker)
 
     state = await fake.read_state("A")
     assert state is not None
@@ -263,7 +263,7 @@ async def test_single_call_list_does_not_open_durable_batch() -> None:
     )
     broker = CaptureBroker()
 
-    await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    await node.handler(env, correlation_id="corr-1", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
     # The durable store was never opened — no batch registered for the single call.
     assert await fake.read_state("A") is None
@@ -306,7 +306,7 @@ async def _drive_open(node: NodeDef[Any]) -> tuple[FakeFanoutBatchStore, Capture
         internal_workflow_state=WorkflowState(call_stack=Stack([own])),
     )
     broker = CaptureBroker()
-    await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    await node.handler(env, correlation_id="corr-1", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
     return fake, broker
 
 
@@ -353,7 +353,7 @@ async def test_degenerate_batch_snapshots_the_caller_state_not_the_seed() -> Non
     own = CallFrame(target_topic="fan.in", callback_topic="caller", frame_id="A")
     env = Envelope(context=SessionRunContext(state=caller_state, deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([own])))
     broker = CaptureBroker()
-    await node.handler(env, correlation_id="c", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    await node.handler(env, correlation_id="c", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
     base = await fake.read_basestate("A")
     assert base is not None
@@ -477,7 +477,7 @@ async def test_handle_fanout_open_sibling_publish_failure_aborts_and_escalates()
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
     broker = CaptureBroker(raises=KafkaError("simulated sibling publish failure"))
-    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the KafkaError
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -503,7 +503,7 @@ async def test_handle_fanout_open_store_failure_aborts_and_escalates(caplog: pyt
     broker = CaptureBroker()
 
     with caplog.at_level(logging.ERROR, logger="calfkit.nodes.base"):
-        resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
+        resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated, did not propagate
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -538,7 +538,7 @@ async def test_handle_fanout_open_non_kafka_publish_failure_aborts_and_escalates
     calls = [Call(target_topic="tool.a", state=State(), tag="tc1"), Call(target_topic="tool.b", state=State(), tag="tc2")]
 
     broker = CaptureBroker(raises=ValueError("simulated non-Kafka sibling publish failure"))
-    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", cast(Any, broker))
+    resp = await agent._handle_fanout_open(ctx, calls, env, "corr-1", "task-under-test", cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # escalated — did NOT propagate the ValueError
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -558,7 +558,7 @@ async def test_fanout_open_missing_store_faults_caller_not_escape() -> None:
     )
     broker = CaptureBroker()
 
-    resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    resp = await node.handler(env, correlation_id="corr-1", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # faulted the caller, did NOT escape to FastStream
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED
@@ -603,7 +603,7 @@ async def test_run_on_incomplete_batch_raises_runtime_error() -> None:
     # every outcome first). A ctx whose latest tool-call set is incomplete (one call has no result)
     # is the lost-batch/rebalance signal — run() raises a diagnostic RuntimeError rather than
     # silently proceeding.
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_incomplete_batch",
         system_prompt="x",
         subscribe_topics="agent_incomplete_batch.input",

@@ -15,7 +15,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, Mod
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.nodes._steps import HopStepLedger
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
@@ -47,7 +47,7 @@ async def test_step_emission_failure_does_not_break_the_run(container, monkeypat
     monkeypatch.setattr(HopStepLedger, "flush", _boom)
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "guard_agent",
         system_prompt="x",
         subscribe_topics="guard_agent.input",
@@ -69,7 +69,7 @@ async def test_stream_yields_intermediate_steps_then_terminal(container) -> None
     # answer) — the held handle's stream() yields the intermediate step events (AgentMessageEvent +
     # ToolCallEvent from the agent hop, ToolResultEvent from the tool) then the RunCompleted terminal.
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "stream_agent",
         system_prompt="x",
         subscribe_topics="stream_agent.input",

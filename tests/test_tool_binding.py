@@ -219,7 +219,7 @@ from calfkit.providers.pydantic_ai.model_client import PydanticModelClient  # no
 
 
 class _FakeModel(PydanticModelClient):
-    """Minimal pydantic-ai Model so a real Agent can be built without any
+    """Minimal pydantic-ai Model so a real StatelessAgent can be built without any
     network / API key; never invoked by these ctor tests."""
 
     @property
@@ -235,9 +235,9 @@ class _FakeModel(PydanticModelClient):
 
 
 def make_agent(tools=None):
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
 
-    return Agent(
+    return StatelessAgent(
         "test_agent",
         subscribe_topics="test_agent.input",
         model_client=_FakeModel(),

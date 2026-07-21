@@ -30,13 +30,15 @@ _M2 = ToolCallMarker(tool_name="lookup", tool_call_id="c2", args={"id": 7})
 
 
 async def _flush(ledger: HopStepLedger, broker: Any, *, disposition: Any = None, root_callback: str | None = "client.return") -> None:
-    """Flush with default identity args — tests override only what they assert on."""
+    """Flush with default identity args — tests override only what they assert on. The
+    task value is DISTINCT from the correlation id (§5-G): the key must ride task_id."""
     await ledger.flush(
         broker,
         disposition=disposition,
         depth=1,
         frame_id="F1",
         correlation_id="cid-1",
+        task_id="task-1",
         emitter="agent-a",
         emitter_kind="agent",
         root_callback=root_callback,
@@ -251,7 +253,7 @@ class TestFlush:
         assert (message.correlation_id, message.emitter, message.depth, message.frame_id) == ("cid-1", "agent-a", 1, "F1")
         assert [type(e) for e in message.events] == [ToolResultStep, AgentMessageStep, ToolCallStep]
         assert pub.topic == "client.return"
-        assert pub.key == b"cid-1"
+        assert pub.key == b"task-1"  # keyed by task_id (co-partitions with the terminal), not the correlation
         assert pub.headers == {HDR_WIRE: StepMessage.WIRE, HDR_EMITTER: "agent-a", HDR_EMITTER_KIND: "agent"}
 
     async def test_terminal_gate_drops_agent_message_on_return_call_disposition(self) -> None:

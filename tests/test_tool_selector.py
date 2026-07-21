@@ -180,7 +180,7 @@ class TestAgentResolution:
     """Drives the agent's per-turn selector resolution."""
 
     def make_agent(self, *tools: Any):
-        from calfkit.nodes.agent import Agent
+        from calfkit.nodes.agent import StatelessAgent
         from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
         class FakeModel(PydanticModelClient):
@@ -195,7 +195,7 @@ class TestAgentResolution:
             async def request(self, *args: object, **kwargs: object) -> object:
                 raise NotImplementedError
 
-        return Agent("a", subscribe_topics="a.in", model_client=FakeModel(), tools=list(tools))
+        return StatelessAgent("a", subscribe_topics="a.in", model_client=FakeModel(), tools=list(tools))
 
     def test_ctor_sets_aside_selectors(self) -> None:
         toolbox = make_toolbox()

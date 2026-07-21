@@ -299,11 +299,14 @@ class _Hub:
         async def _handle_reply(
             envelope: Envelope,
             correlation_id: Annotated[str, Context()],
+            task_id: Annotated[str, Context()],
             headers: Annotated[dict[str, Any], Context("message.headers")],
         ) -> None:
             # The subscriber binds only transport-sourced values and forwards to _on_reply, which holds
-            # the classify/demux logic so it is unit-testable without driving the broker.
-            self._on_reply(envelope, correlation_id, headers)
+            # the classify/demux logic so it is unit-testable without driving the broker. task_id is the
+            # identity middleware's scoped value — the inbox is an ingress like any other (envelope-wire,
+            # mint-if-absent), so the value is always present.
+            self._on_reply(envelope, correlation_id, headers, task_id=task_id)
 
         @sub(filter=wire_filter(StepMessage), decoder=lenient_step_decoder)
         async def _handle_step(step: StepMessage | None) -> None:
@@ -312,17 +315,17 @@ class _Hub:
             # a 2nd ValidationError → the decode floor → fail_run, faulting a healthy run, §3.4).
             self._on_step(step)
 
-    def _on_reply(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any]) -> None:
+    def _on_reply(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any], *, task_id: str) -> None:
         """Classify an inbound reply by ``x-calf-kind`` and demux it into the owning run's channel.
 
         Split out of the FastStream subscriber closure for unit-testability. Stamps the transport
-        identity + the per-delivery reply slot onto the context before building the terminal, so
-        ``result()``'s ``from_envelope`` projects correctly.
+        identity (correlation, task, emitter) + the per-delivery reply slot onto the context before
+        building the terminal, so ``result()``'s ``from_envelope`` projects correctly.
         """
         kind = decode_header_str(headers.get(HDR_KIND))
         emitter = decode_header_str(headers.get(HDR_EMITTER))
         emitter_kind = decode_header_str(headers.get(HDR_EMITTER_KIND))
-        envelope.context._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter, emitter_node_kind=emitter_kind)
+        envelope.context._stamp_transport(correlation_id=correlation_id, task_id=task_id, emitter_node_id=emitter, emitter_node_kind=emitter_kind)
         envelope.context._reply = envelope.reply
         if kind == "return":
             self._dispatch(correlation_id, self._completed(envelope, correlation_id, emitter))

@@ -35,7 +35,7 @@ from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, WorkflowState
 from calfkit.models.error_report import FaultTypes
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._fault_tap import fault_tap
 from tests.integration._fault_tools import CalleeErrorRecorder, boom, ok_a, quota
@@ -47,8 +47,8 @@ pytestmark = pytest.mark.kafka
 models.ALLOW_MODEL_REQUESTS = True
 
 
-def _agent(node_id: str, *, agent_in: str, agent_pub: str, tool, call: ToolCallPart, **seams) -> Agent:
-    return Agent(
+def _agent(node_id: str, *, agent_in: str, agent_pub: str, tool, call: ToolCallPart, **seams) -> StatelessAgent:
+    return StatelessAgent(
         node_id,
         system_prompt=f"call the {tool.name} tool",
         subscribe_topics=agent_in,

@@ -3,7 +3,7 @@
 Like the function tool node (``test_tool_node_advert.py``), an agent is a content
 contributor: it declares one ``@advertises`` factory that the worker-owned
 ``ControlPlanePublisher`` pulls each heartbeat tick. Its content is static — the
-optional ``Agent(description=…)`` blurb — so the factory reads ``self._description``
+optional ``StatelessAgent(description=…)`` blurb — so the factory reads ``self._description``
 directly (no session, no cache, nothing that can fail at publish time). Advertising is
 **always-on, no opt-out** (spec §7 / L7). The heartbeat loop + tombstone live in the
 substrate's publisher (tested in ``test_controlplane_publisher.py``), not here.
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from calfkit.controlplane import ControlPlaneStamp
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.nodes.agent import Agent
+from calfkit.nodes.agent import StatelessAgent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
@@ -32,8 +32,8 @@ class _FakeModel(PydanticModelClient):
         raise NotImplementedError
 
 
-def make_agent(name: str = "planner", description: str | None = "A helpful planner") -> Agent:
-    return Agent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel(), description=description)
+def make_agent(name: str = "planner", description: str | None = "A helpful planner") -> StatelessAgent:
+    return StatelessAgent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel(), description=description)
 
 
 def make_stamp(*, node_kind: str = "agent") -> ControlPlaneStamp:
@@ -81,7 +81,7 @@ class TestDescriptionCtorParam:
         assert make_agent("planner", description="Plans things")._description == "Plans things"
 
     def test_description_defaults_to_none(self) -> None:
-        agent = Agent("noblurb", subscribe_topics="noblurb.in", model_client=_FakeModel())
+        agent = StatelessAgent("noblurb", subscribe_topics="noblurb.in", model_client=_FakeModel())
         assert agent._description is None
 
 

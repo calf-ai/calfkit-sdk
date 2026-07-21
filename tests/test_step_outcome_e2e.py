@@ -41,7 +41,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY, derive_input_topic
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.nodes._tool_error import surface_to_model
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.handoff import HANDOFF_TOOL
@@ -92,7 +92,7 @@ def _final_text(text: str) -> FunctionModel:
     return FunctionModel(_fn)
 
 
-async def _run_streaming(container: Any, agent: Agent, *nodes: Any) -> list[Any]:
+async def _run_streaming(container: Any, agent: StatelessAgent, *nodes: Any) -> list[Any]:
     worker = container.get(Worker)
     worker.add_nodes(agent, *nodes)
     prepare_worker(container)
@@ -113,7 +113,9 @@ def _events_of(events: list[Any], kind: str) -> list[Any]:
 
 
 async def test_model_retry_streams_failed_with_the_retry_text(container) -> None:
-    agent = Agent("oc_a1", system_prompt="x", subscribe_topics="oc_a1.in", model_client=_react([ToolCallPart("oc_retry", {})]), tools=[oc_retry])
+    agent = StatelessAgent(
+        "oc_a1", system_prompt="x", subscribe_topics="oc_a1.in", model_client=_react([ToolCallPart("oc_retry", {})]), tools=[oc_retry]
+    )
     events = await _run_streaming(container, agent, oc_retry)
     assert type(events[-1]).__name__ == "RunCompleted"
     (result,) = _events_of(events, "ToolResultEvent")
@@ -127,7 +129,7 @@ async def test_plain_value_substitute_streams_success(container) -> None:
     def on_error(tool_call: Any, ctx: Any, report: Any) -> Any:
         return "cached-value"
 
-    agent = Agent(
+    agent = StatelessAgent(
         "oc_a2",
         system_prompt="x",
         subscribe_topics="oc_a2.in",
@@ -146,7 +148,7 @@ async def test_schema_rejection_streams_a_born_closed_denied_pair(container) -> 
     # The caller refused to dispatch: ONE fact expands into BOTH halves — the call step (raw args)
     # and the denied result with the rejection text the model sees (§3.1a/§5.1).
     bad = ToolCallPart("oc_typed", {"x": "not-a-number"}, tool_call_id="d1")
-    agent = Agent("oc_a3", system_prompt="x", subscribe_topics="oc_a3.in", model_client=_react([bad]), tools=[oc_typed])
+    agent = StatelessAgent("oc_a3", system_prompt="x", subscribe_topics="oc_a3.in", model_client=_react([bad]), tools=[oc_typed])
     events = await _run_streaming(container, agent, oc_typed)
     assert type(events[-1]).__name__ == "RunCompleted"
     (call,) = [c for c in _events_of(events, "ToolCallEvent") if c.tool_call_id == "d1"]
@@ -159,7 +161,7 @@ async def test_schema_rejection_streams_a_born_closed_denied_pair(container) -> 
 async def test_surface_to_model_regression_streams_failed_with_the_substitute(container) -> None:
     # THE v1 bug (§1): a surface_to_model()-handled hard fault left a dangling ToolCallEvent —
     # no paired result, ever — while the run continued. Now the caller's fold mints the closure.
-    agent = Agent(
+    agent = StatelessAgent(
         "oc_a4",
         system_prompt="x",
         subscribe_topics="oc_a4.in",
@@ -183,11 +185,11 @@ async def test_handoff_winner_stubs_and_rejections_stream_denied(container) -> N
         ToolCallPart(HANDOFF_TOOL, {"name": "oc_billing", "message": "take over"}, tool_call_id="h2"),  # the winner
         ToolCallPart("oc_plain", {}, tool_call_id="t1"),  # stubbed sibling
     ]
-    caller = Agent(
+    caller = StatelessAgent(
         "oc_a5", system_prompt="x", subscribe_topics="oc_a5.in", model_client=_react(calls), tools=[oc_plain], peers=[Handoff("oc_billing", "ghost")]
     )
     caller.resources[AGENTS_VIEW_RESOURCE_KEY] = agents_view({"oc_billing": None})
-    billing = Agent("oc_billing", subscribe_topics=derive_input_topic("oc_billing"), model_client=_final_text("billing answer"))
+    billing = StatelessAgent("oc_billing", subscribe_topics=derive_input_topic("oc_billing"), model_client=_final_text("billing answer"))
     events = await _run_streaming(container, caller, oc_plain, billing)
     assert type(events[-1]).__name__ == "RunCompleted"
 
@@ -210,7 +212,7 @@ async def test_handoff_winner_stubs_and_rejections_stream_denied(container) -> N
 
 async def test_terminal_gate_depth1_final_hop_streams_no_agent_message(container) -> None:
     model = _react([ToolCallPart("oc_plain", {})], final="all done")
-    agent = Agent("oc_a6", system_prompt="x", subscribe_topics="oc_a6.in", model_client=model, tools=[oc_plain])
+    agent = StatelessAgent("oc_a6", system_prompt="x", subscribe_topics="oc_a6.in", model_client=model, tools=[oc_plain])
     events = await _run_streaming(container, agent, oc_plain)
     assert type(events[-1]).__name__ == "RunCompleted"
     messages = _events_of(events, "AgentMessageEvent")
@@ -237,7 +239,7 @@ async def test_terminal_gate_depth2_peer_answer_is_the_callers_fold_result(conta
         await real_flush(self, broker, **kwargs)
 
     monkeypatch.setattr(HopStepLedger, "flush", spy)
-    caller = Agent(
+    caller = StatelessAgent(
         "oc_a7",
         system_prompt="x",
         subscribe_topics="oc_a7.in",
@@ -245,7 +247,7 @@ async def test_terminal_gate_depth2_peer_answer_is_the_callers_fold_result(conta
         peers=[Messaging("oc_peer")],
     )
     caller.resources[AGENTS_VIEW_RESOURCE_KEY] = agents_view({"oc_peer": None})
-    peer = Agent("oc_peer", subscribe_topics=derive_input_topic("oc_peer"), model_client=_final_text("peer answer"))
+    peer = StatelessAgent("oc_peer", subscribe_topics=derive_input_topic("oc_peer"), model_client=_final_text("peer answer"))
     events = await _run_streaming(container, caller, peer)
     assert type(events[-1]).__name__ == "RunCompleted"
     # The peer's answer is the CALLER's fold result: name = marker.tool_name (= "message_agent" —

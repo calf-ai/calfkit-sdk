@@ -26,7 +26,7 @@ from calfkit.models.payload import FilePart
 from calfkit.models.payload import ToolCallPart as PayloadToolCallPart
 from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes.agent import _serialize_message_reply
 from calfkit.peers import Handoff, Messaging
 from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap
@@ -55,14 +55,14 @@ async def test_message_agent_injected_as_real_toolset_member_with_directory() ->
         captured["tools"] = {t.name: t.description for t in info.function_tools}
         return ModelResponse(parts=[ModelTextPart("done")])
 
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_capture), peers=[Messaging("billing")])
+    agent = StatelessAgent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_capture), peers=[Messaging("billing")])
     await agent.run(_ctx_with_view(_view({"billing": "Billing questions."})))
     assert "message_agent" in captured["tools"]
     assert "billing" in (captured["tools"]["message_agent"] or "")
 
 
 async def test_message_agent_dispatches_isolate_state_peer_call() -> None:
-    agent = Agent(
+    agent = StatelessAgent(
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing", "balance?")]), peers=[Messaging("billing")]
     )
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
@@ -77,7 +77,7 @@ async def test_message_agent_dispatches_isolate_state_peer_call() -> None:
 
 
 async def test_message_agent_offline_target_retries() -> None:
-    agent = Agent(
+    agent = StatelessAgent(
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("ghost")]), peers=[Messaging(discover=True)]
     )
     ctx = _ctx_with_view(_view({"billing": None}))  # ghost not live
@@ -87,7 +87,7 @@ async def test_message_agent_offline_target_retries() -> None:
 
 
 async def test_message_agent_self_target_retries() -> None:
-    agent = Agent(
+    agent = StatelessAgent(
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("triage")]), peers=[Messaging(discover=True)]
     )
     ctx = _ctx_with_view(_view({"triage": None, "billing": None}))  # self present but never messageable
@@ -96,7 +96,9 @@ async def test_message_agent_self_target_retries() -> None:
 
 
 async def test_message_agent_cycle_target_retries() -> None:
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing")]), peers=[Messaging("billing")])
+    agent = StatelessAgent(
+        "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing")]), peers=[Messaging("billing")]
+    )
     ctx = _ctx_with_view(_view({"billing": None}), ancestors=frozenset({("billing", "agent")}))  # billing awaits us (a ring)
     await agent.run(ctx)
     assert isinstance(ctx.state.tool_results.get("tc1"), RetryPromptPart)
@@ -108,7 +110,7 @@ def test_message_agent_name_reserved_against_user_tool() -> None:
         tool_def=ToolDefinition(name="message_agent", description="x", parameters_json_schema={"type": "object", "properties": {}}),
     )
     with pytest.raises(ValueError):
-        Agent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[bad], peers=[Messaging("billing")])
+        StatelessAgent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[bad], peers=[Messaging("billing")])
 
 
 def test_message_agent_name_not_reserved_for_handoff_only_agent() -> None:
@@ -118,7 +120,7 @@ def test_message_agent_name_not_reserved_for_handoff_only_agent() -> None:
         dispatch_topic="t.in",
         tool_def=ToolDefinition(name="message_agent", description="x", parameters_json_schema={"type": "object", "properties": {}}),
     )
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[user_tool], peers=[Handoff("refunds")])
+    agent = StatelessAgent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[user_tool], peers=[Handoff("refunds")])
     assert agent._handoff_handles == [Handoff("refunds")]
     assert "message_agent" in {b.name for b in agent.tools}  # the user tool survives, unreserved
 
@@ -134,7 +136,7 @@ async def test_message_agent_parallel_mixed_batch_dispatches_per_kind() -> None:
     )
     msg = _msg_call("billing", "balance?", tool_call_id="m1")
     add = ToolCallPart(tool_name="add", args={}, tool_call_id="a1")
-    agent = Agent(
+    agent = StatelessAgent(
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([msg, add]), tools=[tool], peers=[Messaging("billing")]
     )
     result = _unwrap(await agent.run(_ctx_with_view(_view({"billing": "Billing."}))))
@@ -160,7 +162,7 @@ async def test_message_agent_is_never_looked_up_in_tools_registry() -> None:
         dispatch_topic="adder.in",
         tool_def=ToolDefinition(name="add", description="add", parameters_json_schema={"type": "object", "properties": {}}),
     )
-    agent = Agent(
+    agent = StatelessAgent(
         "triage",
         subscribe_topics="triage.in",
         model_client=_model_emits_tool_calls([_msg_call("billing")]),
@@ -198,7 +200,7 @@ def test_serialize_message_reply_other_part_is_json_encoded() -> None:
 
 async def test_message_agent_malformed_args_retries() -> None:
     bad = ToolCallPart(tool_name="message_agent", args="{not valid json", tool_call_id="tc1")
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([bad]), peers=[Messaging("billing")])
+    agent = StatelessAgent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([bad]), peers=[Messaging("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
     await agent.run(ctx)
     result = ctx.state.tool_results.get("tc1")
@@ -208,7 +210,7 @@ async def test_message_agent_malformed_args_retries() -> None:
 
 async def test_message_agent_empty_name_retries() -> None:
     bad = ToolCallPart(tool_name="message_agent", args={"name": "", "message": "hi"}, tool_call_id="tc1")
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([bad]), peers=[Messaging("billing")])
+    agent = StatelessAgent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([bad]), peers=[Messaging("billing")])
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
     await agent.run(ctx)
     result = ctx.state.tool_results.get("tc1")
@@ -219,7 +221,9 @@ async def test_message_agent_empty_name_retries() -> None:
 async def test_message_agent_non_ancestor_target_is_allowed() -> None:
     # The cycle guard rejects only the TARGET being an ancestor — a legitimate diamond (a DIFFERENT agent
     # suspended in the chain) must still dispatch. `other` is an ancestor, `billing` is the target.
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing")]), peers=[Messaging("billing")])
+    agent = StatelessAgent(
+        "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([_msg_call("billing")]), peers=[Messaging("billing")]
+    )
     ctx = _ctx_with_view(_view({"billing": None}), ancestors=frozenset({("other", "agent")}))
     result = _unwrap(await agent.run(ctx))
     assert isinstance(result, Call)
@@ -238,7 +242,7 @@ async def test_message_agent_invalid_sibling_excluded_from_batch() -> None:
     bad = _msg_call("ghost", tool_call_id="bad1")
     good = _msg_call("billing", tool_call_id="good1")
     add = ToolCallPart(tool_name="add", args={}, tool_call_id="t1")
-    agent = Agent(
+    agent = StatelessAgent(
         "triage", subscribe_topics="triage.in", model_client=_model_emits_tool_calls([bad, good, add]), tools=[tool], peers=[Messaging(discover=True)]
     )
     ctx = _ctx_with_view(_view({"billing": None}))  # billing live, ghost offline
@@ -258,7 +262,7 @@ async def test_message_agent_absent_without_a_messaging_handle() -> None:
         captured["tools"] = {t.name for t in info.function_tools}
         return ModelResponse(parts=[ModelTextPart("done")])
 
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_capture))  # NO peers=
+    agent = StatelessAgent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_capture))  # NO peers=
     await agent.run(_make_ctx(State()))
     assert "message_agent" not in captured["tools"]
 
@@ -272,4 +276,4 @@ def test_handoff_name_reserved_for_handoff_only_agent() -> None:
         tool_def=ToolDefinition(name="handoff_to_agent", description="x", parameters_json_schema={"type": "object", "properties": {}}),
     )
     with pytest.raises(ValueError, match="reserved"):
-        Agent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[user_tool], peers=[Handoff("refunds")])
+        StatelessAgent("triage", subscribe_topics="triage.in", model_client=TestModel(), tools=[user_tool], peers=[Handoff("refunds")])

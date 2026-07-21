@@ -43,7 +43,7 @@ toolbox's connection config — secrets stay on the toolbox host.
 ```python
 from calfkit import Toolboxes
 
-agent = Agent(
+agent = StatelessAgent(
     "researcher",
     subscribe_topics="researcher.input",
     model_client=model,
@@ -79,7 +79,7 @@ If the agent's process already imports the toolbox definition — the same codeb
 ```python
 from my_service.toolboxes import docs   # shared module; deployed elsewhere
 
-agent = Agent(
+agent = StatelessAgent(
     "researcher",
     subscribe_topics="researcher.input",
     model_client=model,

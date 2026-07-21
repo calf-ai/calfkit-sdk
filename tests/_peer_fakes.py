@@ -14,7 +14,7 @@ from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.models.agents import AGENTS_VIEW_RESOURCE_KEY
 from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.peers.handoff import HANDOFF_TOOL
 from tests.test_tool_errors import _make_ctx
 
@@ -44,8 +44,8 @@ def ctx_with_view(view: object, state: State | None = None) -> Any:
     return ctx
 
 
-def triage_agent(model: Any, **kw: Any) -> Agent[Any]:
-    return Agent("triage", subscribe_topics="triage.in", model_client=model, **kw)
+def triage_agent(model: Any, **kw: Any) -> StatelessAgent[Any]:
+    return StatelessAgent("triage", subscribe_topics="triage.in", model_client=model, **kw)
 
 
 def user_tool(name: str) -> ToolBinding:

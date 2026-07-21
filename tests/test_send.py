@@ -46,7 +46,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import State
-from calfkit.nodes import Agent, agent_tool, consumer
+from calfkit.nodes import StatelessAgent, agent_tool, consumer
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
@@ -89,7 +89,7 @@ async def test_return_call_with_null_callback_publishes_no_callback():
     broker.publish = AsyncMock()
 
     final_state = State()
-    result, _kind = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-ff", broker)
+    result, _kind = await node._publish_action(ReturnCall(state=final_state), envelope, "cid-ff", "task-under-test", broker)
 
     assert broker.publish.call_count == 0, f"expected no callback publish for null-callback terminal; got {broker.publish.call_count}"
     # The terminal envelope must still be returned so the worker's @publisher
@@ -107,7 +107,7 @@ async def test_return_call_with_non_null_callback_publishes_to_callback():
     broker = MagicMock()
     broker.publish = AsyncMock()
 
-    result, _kind = await node._publish_action(ReturnCall(state=State()), envelope, "cid-cb", broker)
+    result, _kind = await node._publish_action(ReturnCall(state=State()), envelope, "cid-cb", "task-under-test", broker)
 
     assert broker.publish.call_count == 1, f"expected exactly one callback publish for non-null callback; got {broker.publish.call_count}"
     assert broker.publish.call_args.kwargs["topic"] == "client.reply.inbox"
@@ -131,7 +131,7 @@ async def test_send_allocates_no_client_state(container):
     empty) and each call returns a ``Dispatch`` carrying a fresh uuid-hex
     correlation_id."""
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "send_no_state_agent",
         system_prompt="x",
         subscribe_topics="send_no_state_agent.input",
@@ -177,7 +177,7 @@ async def test_send_traceable_via_publish_topic_but_no_reply(container, caplog):
         received.append(ctx)
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "send_trace_agent",
         system_prompt="x",
         subscribe_topics="send_trace_agent.input",
@@ -333,7 +333,7 @@ async def test_send_multi_hop_tool_call_still_terminates_traceably(container, ca
         received.append(ctx)
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "send_tool_agent",
         system_prompt="x",
         subscribe_topics="send_tool_agent.input",
@@ -451,7 +451,7 @@ async def test_return_call_callback_publish_failure_propagates_to_the_publish_gu
     broker.publish = AsyncMock(side_effect=UnknownTopicOrPartitionError())
 
     with pytest.raises(UnknownTopicOrPartitionError):
-        await node._publish_action(ReturnCall(state=State()), envelope, "cid-fail", broker)
+        await node._publish_action(ReturnCall(state=State()), envelope, "cid-fail", "task-under-test", broker)
 
 
 async def test_tail_call_preserves_reply_to_callback():
@@ -465,7 +465,7 @@ async def test_tail_call_preserves_reply_to_callback():
     broker = MagicMock()
     broker.publish = AsyncMock()
 
-    await node._publish_action(TailCall(target_topic="terminal_node.input", state=State()), envelope, "cid-tail", broker)
+    await node._publish_action(TailCall(target_topic="terminal_node.input", state=State()), envelope, "cid-tail", "task-under-test", broker)
 
     frame = envelope.internal_workflow_state.current_frame
     assert frame.callback_topic == "sink.topic", f"TailCall dropped the reply_to callback; got {frame.callback_topic!r}"

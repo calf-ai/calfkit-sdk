@@ -32,7 +32,7 @@ from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.payload import TextPart, is_retry
 from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
-from calfkit.nodes import Agent, ToolNodeDef, Tools
+from calfkit.nodes import StatelessAgent, ToolNodeDef, Tools
 from calfkit.nodes._steps import DeniedCall, Observed
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ async def test_tool_success_returns_value():
 
 
 # ---------------------------------------------------------------------------
-# Agent-side: the happy path (a materialized tool result → the run completes)
+# StatelessAgent-side: the happy path (a materialized tool result → the run completes)
 # ---------------------------------------------------------------------------
 # The old FailedToolCall-scan → ToolExecutionError is deleted (4.4): a faulting tool now escalates
 # via the rail (handler stage-1 / closing fault group), so a FailedToolCall never reaches the agent's
@@ -178,7 +178,7 @@ async def test_tool_success_returns_value():
 
 
 async def test_agent_success_path_unchanged():
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_success",
         system_prompt="x",
         subscribe_topics="agent_success.input",
@@ -283,7 +283,7 @@ async def test_tool_base_exceptions_propagate(exc_factory):
 
 
 # ---------------------------------------------------------------------------
-# Agent-side arg validation: malformed LLM tool args become RetryPromptParts
+# StatelessAgent-side arg validation: malformed LLM tool args become RetryPromptParts
 # before any Kafka dispatch, preserving pydantic-ai's fix-and-retry semantics.
 # ---------------------------------------------------------------------------
 
@@ -304,7 +304,7 @@ async def test_agent_validates_args_and_adds_retry_prompt_on_bad_args():
     tool_call_id = "tc-bad"
     bad_call = ToolCallPart(tool_name="typed_tool", args={"x": "not-a-number"}, tool_call_id=tool_call_id)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_validate_bad",
         system_prompt="x",
         subscribe_topics="agent_validate_bad.input",
@@ -345,7 +345,7 @@ async def test_agent_dispatches_valid_args_unchanged():
     tool_call_id = "tc-good"
     good_call = ToolCallPart(tool_name="typed_tool", args={"x": 5}, tool_call_id=tool_call_id)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_validate_good",
         system_prompt="x",
         subscribe_topics="agent_validate_good.input",
@@ -389,7 +389,7 @@ async def test_agent_partial_validation_failure_dispatches_valid_calls():
     # y is typed str but the LLM emitted an int → pydantic rejects.
     invalid_call = ToolCallPart(tool_name="tool_b", args={"y": 42}, tool_call_id=invalid_id)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_partial",
         system_prompt="x",
         subscribe_topics="agent_partial.input",
@@ -449,7 +449,7 @@ async def test_agent_validates_schema_only_wire_form_tools():
     tool_call_id = "tc-wire-form"
     bad_call = ToolCallPart(tool_name="typed_tool", args={"x": "not-a-number"}, tool_call_id=tool_call_id)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_wire_form_validate",
         system_prompt="x",
         subscribe_topics="agent_wire_form_validate.input",
@@ -492,7 +492,7 @@ async def test_agent_local_tool_keeps_its_signature_validator_not_the_schema_fal
     tool_call_id = "tc-coerce"
     coercible_call = ToolCallPart(tool_name="typed_tool", args={"x": "3"}, tool_call_id=tool_call_id)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_local_coerce",
         system_prompt="x",
         subscribe_topics="agent_local_coerce.input",
@@ -528,7 +528,7 @@ async def test_agent_validates_discovered_tool_args():
     tool_call_id = "tc-discovered"
     bad_call = ToolCallPart(tool_name="add", args={"x": "not-a-number"}, tool_call_id=tool_call_id)
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_discovered_validate",
         system_prompt="x",
         subscribe_topics="agent_discovered_validate.input",
@@ -567,7 +567,7 @@ async def test_agent_mixed_batch_validator_less_dispatches_valid_rejects_invalid
     valid_call = ToolCallPart(tool_name="tool_a", args={"x": 5}, tool_call_id=valid_id)
     invalid_call = ToolCallPart(tool_name="tool_b", args={"y": 123}, tool_call_id=invalid_id)  # int for a string schema
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_mixed_validator_less",
         system_prompt="x",
         subscribe_topics="agent_mixed_validator_less.input",
@@ -607,7 +607,7 @@ async def test_agent_handles_malformed_json_args_as_retry_prompt():
         tool_call_id="tc-malformed",
     )
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_malformed",
         system_prompt="x",
         subscribe_topics="agent_malformed.input",
@@ -645,7 +645,7 @@ async def test_agent_handles_non_dict_json_args_as_retry_prompt():
         tool_call_id="tc-array",
     )
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_nondict",
         system_prompt="x",
         subscribe_topics="agent_nondict.input",
@@ -742,7 +742,7 @@ async def test_agent_wire_form_path_malformed_args_become_retry_prompt():
         tool_call_id="tc-wire-form-malformed",
     )
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_wire_form_malformed",
         system_prompt="x",
         subscribe_topics="agent_wire_form_malformed.input",
@@ -792,7 +792,7 @@ async def test_agent_validator_raising_runtime_error_becomes_retry_prompt():
         tool_call_id="tc-angry-001",
     )
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_angry_validator",
         system_prompt="x",
         subscribe_topics="agent_angry_validator.input",
@@ -831,7 +831,7 @@ async def test_agent_validator_failure_branch_continues_loop():
     bad_call = ToolCallPart(tool_name="typed_tool", args={"x": "nope"}, tool_call_id="tc-bad-002")
     good_call = ToolCallPart(tool_name="typed_tool", args={"x": 7}, tool_call_id="tc-good-002")
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_continue",
         system_prompt="x",
         subscribe_topics="agent_continue.input",
@@ -875,7 +875,7 @@ async def test_agent_handles_typeerror_args_as_retry_prompt():
     # args is an int, not a dict or JSON string — args_as_dict() raises TypeError.
     bad_call = ToolCallPart(tool_name="typed_tool", args=123, tool_call_id="tc-typeerr")
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_typeerr",
         system_prompt="x",
         subscribe_topics="agent_typeerr.input",
@@ -942,7 +942,7 @@ def test_prepare_context_populates_frame_id_from_envelope():
     from calfkit.models.envelope import Envelope
     from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_prep_ctx",
         system_prompt="x",
         subscribe_topics="agent_prep_ctx.input",
@@ -973,7 +973,7 @@ def test_prepare_context_stamps_correlation_id_from_transport():
     from calfkit.models.envelope import Envelope
     from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
 
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_prep_cid",
         system_prompt="x",
         subscribe_topics="agent_prep_cid.input",

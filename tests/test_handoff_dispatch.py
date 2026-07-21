@@ -30,7 +30,7 @@ from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.state import State
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._steps import DeniedCall, HandedOff, Observed, Said
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.handoff import (
@@ -342,7 +342,7 @@ async def test_peer_re_enters_cleanly_on_the_inherited_state() -> None:
         b_calls["n"] += 1
         return ModelResponse(parts=[ModelTextPart("on it")])
 
-    b = Agent("billing", subscribe_topics="billing.in", model_client=FunctionModel(_b_model))
+    b = StatelessAgent("billing", subscribe_topics="billing.in", model_client=FunctionModel(_b_model))
     b_ctx = _ctx_with_view(_view({}), state=ctx.state)  # B inherits A's carried state
     b_result = await b.run(b_ctx)
     assert b_calls["n"] == 1
@@ -375,7 +375,7 @@ async def test_returning_handoff_a_to_b_to_a_re_enters_cleanly() -> None:
     assert isinstance(_unwrap(await a.run(ctx)), TailCall)
 
     b_model = _emit_once_then_text(_handoff_part("triage", "back to you", call_id="h2"))
-    b = Agent("billing", subscribe_topics="billing.in", model_client=b_model, peers=[Handoff("triage")])
+    b = StatelessAgent("billing", subscribe_topics="billing.in", model_client=b_model, peers=[Handoff("triage")])
     b_ctx = _ctx_with_view(_view({"triage": None}), state=ctx.state)
     assert isinstance(_unwrap(await b.run(b_ctx)), TailCall)  # billing hands BACK to triage
 

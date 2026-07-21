@@ -17,7 +17,7 @@ from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCall
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
 from calfkit.models.state import State
-from calfkit.nodes import Agent, ToolNodeDef
+from calfkit.nodes import StatelessAgent, ToolNodeDef
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.worker import Worker
 from tests._fanout_fakes import OfflineFanoutBatchStore
@@ -94,10 +94,10 @@ def deploy_agent(agent_constructor_args_model_client, container) -> SimpleAgent:
 
 
 @pytest.fixture
-def deploy_function_agent(container) -> Agent:
+def deploy_function_agent(container) -> StatelessAgent:
     worker = container.get(Worker)
     model = container.get(FunctionModel)
-    agent = Agent(
+    agent = StatelessAgent(
         "test_function_agent",
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="test_function_agent.input",
@@ -109,12 +109,12 @@ def deploy_function_agent(container) -> Agent:
 
 
 @pytest.fixture
-def deploy_gated_function_agent(container) -> Callable[..., Agent]:
+def deploy_gated_function_agent(container) -> Callable[..., StatelessAgent]:
     worker = container.get(Worker)
     model = container.get(FunctionModel)
 
-    def _factory(*, before_node: list | None = None) -> Agent:
-        agent = Agent(
+    def _factory(*, before_node: list | None = None) -> StatelessAgent:
+        agent = StatelessAgent(
             "test_gated_agent",
             system_prompt="You are a helpful AI assistant.",
             subscribe_topics="test_gated_agent.input",
@@ -144,11 +144,11 @@ def deploy_structured_agent(agent_constructor_args_model_client, container) -> S
 
 
 @pytest.fixture
-def deploy_structured_agent_factory(agent_constructor_args_model_client, container) -> Callable[..., Agent[OutputT]]:
+def deploy_structured_agent_factory(agent_constructor_args_model_client, container) -> Callable[..., StatelessAgent[OutputT]]:
     worker = container.get(Worker)
 
-    def agent_factory(output_type: type[OutputT]) -> Agent[OutputT]:
-        agent = Agent[output_type](
+    def agent_factory(output_type: type[OutputT]) -> StatelessAgent[OutputT]:
+        agent = StatelessAgent[output_type](
             "test_custom_structured_agent",
             system_prompt=f"You are a helpful AI assistant. Your name is {agent_name}. Help the user with their questions as much as possible.",
             subscribe_topics="test_agent.input",
@@ -195,10 +195,10 @@ def deploy_caller_id_agent_tool(container) -> ToolNodeDef:
 
 
 @pytest.fixture
-def deploy_instructions_agent(container) -> Agent:
+def deploy_instructions_agent(container) -> StatelessAgent:
     worker = container.get(Worker)
     model = FunctionModel(echo_instructions)
-    agent = Agent(
+    agent = StatelessAgent(
         "test_instructions_agent",
         system_prompt=INSTRUCTIONS_TEST_SYSTEM_PROMPT,
         subscribe_topics="test_instructions_agent.input",

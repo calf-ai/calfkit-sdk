@@ -23,7 +23,7 @@ from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from tests.integration._fault_kafka import fault_worker
 from tests.integration._fault_tools import boom, ok_a, ok_b
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, returns_by_call_id, scripted_model
@@ -32,8 +32,8 @@ pytestmark = pytest.mark.kafka
 models.ALLOW_MODEL_REQUESTS = True
 
 
-def _fanout_agent(node_id: str, *, agent_in: str, calls: list[ToolCallPart], tools: list, **seams) -> Agent:
-    return Agent(
+def _fanout_agent(node_id: str, *, agent_in: str, calls: list[ToolCallPart], tools: list, **seams) -> StatelessAgent:
+    return StatelessAgent(
         node_id,
         system_prompt="fan out the tools",
         subscribe_topics=agent_in,

@@ -34,7 +34,7 @@ from calfkit.models.payload import TextPart as _WireTextPart
 from calfkit.models.state import State
 from calfkit.models.step import AgentMessageEvent, HandoffEvent
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -259,7 +259,7 @@ def _preamble_call_then_final(messages: list[ModelMessage], _info: _FnAgentInfo)
 async def test_chat_loop_renders_transcript_and_threads_history(container: object, capsys: pytest.CaptureFixture[str]) -> None:
     _seen.clear()
     worker = container.get(Worker)  # type: ignore[attr-defined]
-    agent = Agent(
+    agent = StatelessAgent(
         "helpbot",
         system_prompt="x",
         subscribe_topics="agent.helpbot.private.input",  # == derive_input_topic("helpbot")

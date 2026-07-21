@@ -38,7 +38,7 @@ from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.seam_context import SeamContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -92,7 +92,7 @@ async def test_gate_a_single_tool_fault_resolves_via_state_with_args(container) 
     # .args) — the state provenance that remains the resolver's marker-absent fallback (spec D3).
     recorder = _ToolCallProbe()
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "gatea_agent",
         system_prompt="call the boom_tool tool",
         subscribe_topics="gatea_agent.input",
@@ -126,7 +126,7 @@ async def test_gate_b1_fanout_sibling_fault_resolves_via_state_with_args(contain
     # (the slot-first plan bug caught in review round 2 would strip .args here).
     recorder = _ToolCallProbe()
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "gateb1_agent",
         system_prompt="call the tools",
         subscribe_topics="gateb1_agent.input",

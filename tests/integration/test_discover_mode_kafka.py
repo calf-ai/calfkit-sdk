@@ -35,7 +35,7 @@ from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
-from calfkit.nodes import Agent, ToolNodeDef, Tools, agent_tool
+from calfkit.nodes import StatelessAgent, ToolNodeDef, Tools, agent_tool
 from calfkit.worker import Worker
 from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, capturing_model, tool_returns
@@ -110,7 +110,7 @@ async def test_discover_finds_all_separately_deployed_tool_nodes(kafka_bootstrap
     control_plane = fast_control_plane(kafka_bootstrap)
 
     pov: dict[str, Any] = {}  # name -> ToolDefinition the agent resolved from the view and presented to the model
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="use the available tools",
         subscribe_topics=agent_in,

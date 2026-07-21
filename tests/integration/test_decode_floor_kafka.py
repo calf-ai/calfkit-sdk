@@ -27,7 +27,7 @@ from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
 from calfkit.exceptions import ClientTimeoutError
 from calfkit.models.error_report import FaultTypes
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._fault_tools import ok_a
 from tests.integration._roundtrip_helpers import FINAL_OUTPUT, scripted_model
@@ -42,7 +42,7 @@ async def test_undecodable_body_floored_and_worker_survives(kafka_bootstrap: str
     """D-1: a malformed body on an agent's input topic floors ``calf.delivery.undecodable``
     (ERROR) and is dropped; the worker keeps consuming and a valid invocation completes."""
     agent_in = f"{topic_namespace}.d1.input"
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-d1",
         system_prompt="call ok_a",
         subscribe_topics=agent_in,

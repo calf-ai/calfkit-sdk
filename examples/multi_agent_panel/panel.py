@@ -11,14 +11,14 @@ This module just defines the agents; ``service.py`` deploys them and ``run.py``
 drives the discussion.
 """
 
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.providers import OpenAIResponsesModelClient
 
 MODEL = "gpt-5.4-nano"
 
 
-def _panelist(name: str, persona: str) -> Agent:
-    return Agent(
+def _panelist(name: str, persona: str) -> StatelessAgent:
+    return StatelessAgent(
         name,
         system_prompt=(
             f"You are {name}, one panelist in a group discussion. {persona} "

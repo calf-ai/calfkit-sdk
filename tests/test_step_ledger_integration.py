@@ -24,7 +24,7 @@ from calfkit._vendor.pydantic_ai.messages import TextPart as VTextPart
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, WorkflowState
 from calfkit.models.step import StepMessage
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, ToolNodeDef, agent_tool
+from calfkit.nodes import StatelessAgent, ToolNodeDef, agent_tool
 from calfkit.nodes._projection import step_preamble
 from calfkit.nodes._steps import DeniedCall, Observed
 from calfkit.peers import Messaging
@@ -74,9 +74,9 @@ def _denied(observed: object) -> list[DeniedCall]:
     return [f for f in observed.facts if isinstance(f, DeniedCall)]
 
 
-def _agent_emitting(calls: list[ToolCallPart], *, name: str = "a", topics: str = "a.in", **kw: object) -> Agent:
+def _agent_emitting(calls: list[ToolCallPart], *, name: str = "a", topics: str = "a.in", **kw: object) -> StatelessAgent:
     """An agent whose model deterministically emits ``calls`` — for driving the dispatch loop's arms."""
-    return Agent(name, system_prompt="x", subscribe_topics=topics, model_client=_model_emits_tool_calls(calls), **kw)
+    return StatelessAgent(name, system_prompt="x", subscribe_topics=topics, model_client=_model_emits_tool_calls(calls), **kw)
 
 
 class TestRejectionArmsDeclareDeniedFacts:
@@ -153,12 +153,14 @@ class TestStepPublishWireShape:
         # (co-partitions with the terminal) — through the REAL _handle_delivery.
         agent = _agent_emitting([ToolCallPart(tool_name="_echo_tool", args={}, tool_call_id="c1")], name="disp", topics="node.in", tools=[_echo_tool])
         broker = AsyncMock()
-        await agent._handle_delivery(_delivery_envelope(State()), correlation_id="cid-hdr", headers=_HEADERS, broker=broker)
+        await agent._handle_delivery(
+            _delivery_envelope(State()), correlation_id="cid-hdr", task_id="task-under-test", headers=_HEADERS, broker=broker
+        )
         steps = _published_steps(broker)
         assert len(steps) == 1
         call = steps[0]
         assert call.kwargs["topic"] == "caller.inbox"  # the root frame's callback_topic
-        assert call.kwargs["key"] == b"cid-hdr"  # co-partitions with the terminal
+        assert call.kwargs["key"] == b"task-under-test"  # keyed by the threaded task_id — co-partitions with the terminal
         headers = call.kwargs["headers"]
         assert headers[HDR_WIRE] == StepMessage.WIRE and HDR_KIND not in headers  # a step has no business kind
         assert headers[HDR_EMITTER] == "disp" and headers[HDR_EMITTER_KIND] == agent._node_kind

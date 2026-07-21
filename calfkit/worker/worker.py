@@ -85,7 +85,7 @@ class Worker(LifecycleHookMixin):
             max_workers: Subscriber concurrency cap for every hosted node.
                 All nodes register via the key-ordered subscriber: up to
                 ``max_workers`` messages run in parallel across keys, while
-                messages sharing a ``correlation_id`` (the partition key) are
+                messages sharing a ``task_id`` (the partition key) are
                 processed strictly serially, in order — the per-workflow
                 serialization that handling a continuation requires, harmlessly
                 stronger than observers need. An
@@ -423,7 +423,7 @@ class Worker(LifecycleHookMixin):
                 node.publish_topic,
             )
             # ONE consumption model for every node kind (ADR-0042): key-ordered —
-            # parallel across keys, strictly serial and in-order per correlation_id, the
+            # parallel across keys, strictly serial and in-order per task_id, the
             # partition key (see BaseNodeDef.is_caller_capable for why continuations
             # need per-workflow serialization, and calfkit.keying for the key).
             # Observers have no continuation state, so per-key ordering is harmlessly
@@ -469,7 +469,7 @@ class Worker(LifecycleHookMixin):
         re-declared ``framework=True`` via
         :func:`~calfkit.provisioning.framework_topics_for_nodes` (the single
         framework-topic authority) so user ``topic_configs`` (retention / compaction)
-        are never applied to those correlation-keyed / name-scoped inboxes.
+        are never applied to those task-keyed / name-scoped inboxes.
         """
         ensurer = self._client._startup_ensurer
         ensurer.declare(topics_for_nodes(self._registered_nodes))

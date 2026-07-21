@@ -55,9 +55,9 @@ async def _publish_routed(driver: Client, topic: str, prompt: str, *, route: str
     """Send a reply-owing routed call via the internal lower-level path: route/body are NOT on the
     public gateway verbs (spec §9.2), so a routed client dispatch goes through ``_publish_call``
     directly. ``callback_topic`` is the client's inbox, so the delivery is reply-owing."""
-    cid, state = driver._build_state(prompt, correlation_id=None, temp_instructions=None, message_history=None, author=None)
+    cid, task_id, state = driver._build_state(prompt, correlation_id=None, temp_instructions=None, message_history=None, author=None)
     await driver._ensure_started()
-    await driver._publish_call(topic=topic, correlation_id=cid, state=state, deps=None, route=route, body=body)
+    await driver._publish_call(topic=topic, correlation_id=cid, task_id=task_id, state=state, deps=None, route=route, body=body)
 
 
 async def test_reply_owing_all_declined_auto_faults(kafka_bootstrap: str, topic_namespace: str) -> None:

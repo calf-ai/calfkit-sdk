@@ -30,7 +30,7 @@ from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.seam_context import SeamContext
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._fault_tap import fault_tap
 from tests.integration._fault_tools import boom, ok_a, ok_b
@@ -53,10 +53,10 @@ def reject_failed_callee(ctx: SeamContext[Any], fault: ErrorReport) -> str:
     raise NodeFaultError("seam.reject", message="rejecting this slot")
 
 
-def _fanout_agent(node_id: str, *, agent_in: str, agent_pub: str, calls: list[ToolCallPart], tools: list, **seams) -> Agent:
+def _fanout_agent(node_id: str, *, agent_in: str, agent_pub: str, calls: list[ToolCallPart], tools: list, **seams) -> StatelessAgent:
     """A fan-out-capable agent (durable store opens at worker start) that emits *calls* as
     one fan-out turn, then finalizes once it has acted."""
-    return Agent(
+    return StatelessAgent(
         node_id,
         system_prompt="fan out the tools",
         subscribe_topics=agent_in,

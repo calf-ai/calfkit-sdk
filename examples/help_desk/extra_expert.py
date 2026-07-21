@@ -5,9 +5,9 @@ desk a legal question. The help desk discovers `legal` on the next turn and rout
 to it, with no change to the help desk's code or restart. That is `discover=True`.
 """
 
-from calfkit import Agent, OpenAIResponsesModelClient
+from calfkit import OpenAIResponsesModelClient, StatelessAgent
 
-legal = Agent(
+legal = StatelessAgent(
     "legal",
     description="Legal: contracts, NDAs, and policy questions.",
     system_prompt=(

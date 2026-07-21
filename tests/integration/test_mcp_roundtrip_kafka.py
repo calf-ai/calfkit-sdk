@@ -49,7 +49,7 @@ from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.mcp import MCPToolboxNode, StdioServerParameters
 from calfkit.models.capability import CAPABILITY_TOPIC, CapabilityRecord
-from calfkit.nodes import Agent, Toolbox, Toolboxes
+from calfkit.nodes import StatelessAgent, Toolbox, Toolboxes
 from calfkit.worker import Worker
 from tests.integration._kafka_helpers import fast_control_plane, profile_for
 from tests.integration._roundtrip_helpers import (
@@ -196,7 +196,7 @@ async def test_single_tool_call_roundtrips_over_the_wire(kafka_bootstrap: str, t
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="call the add tool",
         subscribe_topics=agent_in,
@@ -234,7 +234,7 @@ async def test_mcp_iserror_result_passes_through_transparently(kafka_bootstrap: 
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="call domain_error",
         subscribe_topics=agent_in,
@@ -274,7 +274,7 @@ async def test_concurrent_tool_calls_roundtrip_via_fanout(kafka_bootstrap: str, 
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="call both tools",
         subscribe_topics=agent_in,
@@ -323,7 +323,7 @@ async def test_duplicate_tool_concurrent_slots_route_by_call_id(kafka_bootstrap:
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add two pairs",
         subscribe_topics=agent_in,
@@ -367,7 +367,7 @@ async def test_two_mcp_servers_route_each_call_to_its_server(kafka_bootstrap: st
 
     box_a = MCPToolboxNode(server_a_name, connection_params=_server_params(_SERVER_SCRIPT))
     box_b = MCPToolboxNode(server_b_name, connection_params=_server_params(_SERVER_B_SCRIPT))
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="use a tool from each server",
         subscribe_topics=agent_in,
@@ -415,14 +415,14 @@ async def test_two_agents_share_one_toolbox_replies_route_per_caller(kafka_boots
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    agent1 = Agent(
+    agent1 = StatelessAgent(
         a1_id,
         system_prompt="add",
         subscribe_topics=a1_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "add"), {"a": 2, "b": 3}, tool_call_id="c1")]),
         tools=[Toolboxes(Toolbox(toolbox.node_id, include=["add"]))],
     )
-    agent2 = Agent(
+    agent2 = StatelessAgent(
         a2_id,
         system_prompt="add",
         subscribe_topics=a2_in,
@@ -466,7 +466,7 @@ async def test_include_pinning_blocks_unselected_tool(kafka_bootstrap: str, topi
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="try to call danger",
         subscribe_topics=agent_in,
@@ -508,14 +508,14 @@ async def test_tools_list_changed_grows_the_toolset(kafka_bootstrap: str, topic_
     server_name = _server_name(topic_namespace)
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
-    enable_agent = Agent(
+    enable_agent = StatelessAgent(
         enable_id,
         system_prompt="enable the bonus tool",
         subscribe_topics=enable_in,
         model_client=scripted_model([ToolCallPart(_ns(server_name, "enable_bonus"), {}, tool_call_id="call-enable")]),
         tools=[Toolboxes(Toolbox(toolbox.node_id, include=["enable_bonus"]))],
     )
-    bonus_agent = Agent(
+    bonus_agent = StatelessAgent(
         bonus_id,
         system_prompt="use the bonus tool",
         subscribe_topics=bonus_in,
@@ -591,7 +591,7 @@ async def test_agent_pov_is_namespaced_and_strips_to_bare_on_dispatch(
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     pov: dict[str, Any] = {}  # namespaced name -> ToolDefinition the agent presented to the model
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="call add and echo",
         subscribe_topics=agent_in,
@@ -687,7 +687,7 @@ async def test_mcp_bad_args_rejected_before_dispatch_then_corrected(
 
     toolbox = MCPToolboxNode(server_name, connection_params=_server_params(_SERVER_SCRIPT))
     tool = _ns(server_name, "add")  # `add(a: int, b: int)` — the server advertises typed integer args
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add two numbers",
         subscribe_topics=agent_in,

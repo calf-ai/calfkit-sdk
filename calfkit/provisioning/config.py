@@ -37,7 +37,7 @@ class ProvisioningConfig:
             ``{"retention.ms": "604800000"}``) applied to **data topics only**.
             Framework topics (reply topics, ``*.private.return`` inboxes) are
             deliberately excluded — settings like ``cleanup.policy=compact`` or
-            short retention are semantically wrong for correlation-keyed
+            short retention are semantically wrong for task-keyed
             request/reply traffic.
         create_timeout_ms: Budget for topic creation. The create/classify/retry
             loop is bounded by it (the ``asyncio.wait_for`` inside

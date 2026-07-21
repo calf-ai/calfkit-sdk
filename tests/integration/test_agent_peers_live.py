@@ -31,7 +31,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelResponse, ToolCallPart
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.peers import Handoff, Messaging
 from calfkit.providers import OpenAIResponsesModelClient
 from calfkit.worker import Worker
@@ -86,7 +86,7 @@ async def test_triage_messages_billing_and_hands_off_to_refunds(kafka_bootstrap:
     triage_in = f"{topic_namespace}.triage.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    triage_agent = Agent(
+    triage_agent = StatelessAgent(
         triage,
         description="Front desk that routes customer requests.",
         system_prompt=(
@@ -98,14 +98,14 @@ async def test_triage_messages_billing_and_hands_off_to_refunds(kafka_bootstrap:
         model_client=_live_model(),
         peers=[Messaging(billing), Handoff(refunds)],
     )
-    billing_agent = Agent(
+    billing_agent = StatelessAgent(
         billing,
         description="Answers account balance and billing questions.",
         system_prompt="You are the billing department. Answer account balance and billing questions concisely.",
         subscribe_topics=f"{topic_namespace}.billing.input",
         model_client=_live_model(),
     )
-    refunds_agent = Agent(
+    refunds_agent = StatelessAgent(
         refunds,
         description="Handles refund requests.",
         system_prompt="You are the refunds department. Approve a reasonable refund request and state the decision concisely.",

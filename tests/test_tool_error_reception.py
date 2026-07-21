@@ -20,7 +20,7 @@ from calfkit.models.marker import ToolCallMarker
 from calfkit.models.payload import TextPart, is_retry, retry_text_part
 from calfkit.models.seam_context import CalleeResult
 from calfkit.models.state import State
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._seams import ON_CALLEE_ERROR, run_chain
 from calfkit.nodes._tool_error import (
     AgentSeamContext,
@@ -318,11 +318,11 @@ class TestAdaptToolError:
 
 
 class TestOnToolErrorSurface:
-    """The agent surface (spec D5/D6): ``Agent(on_tool_error=)`` + ``@agent.on_tool_error``, arity-3
+    """The agent surface (spec D5/D6): ``StatelessAgent(on_tool_error=)`` + ``@agent.on_tool_error``, arity-3
     validated on both paths, merged onto the base ``on_callee_error`` chain (``on_tool_error`` first)."""
 
-    def _agent(self, **kwargs: Any) -> Agent[str]:
-        return Agent("a", subscribe_topics="a.in", model_client=TestModel(), **kwargs)
+    def _agent(self, **kwargs: Any) -> StatelessAgent[str]:
+        return StatelessAgent("a", subscribe_topics="a.in", model_client=TestModel(), **kwargs)
 
     def test_ctor_registers_wrapped_on_the_callee_error_chain(self) -> None:
         def handler(tool_call: Any, ctx: Any, report: Any) -> None:

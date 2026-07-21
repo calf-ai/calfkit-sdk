@@ -71,7 +71,7 @@ class _TailNode(NodeDef[Any]):
 
 
 async def _run(node: NodeDef[Any], env: Envelope, broker: CaptureBroker) -> Any:
-    return await node.handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "go"}, broker=cast(Any, broker))
+    return await node.handler(env, correlation_id=_CORR, task_id="task-under-test", headers={HDR_ROUTE: "go"}, broker=cast(Any, broker))
 
 
 class TestReturnCallStamping:
@@ -130,34 +130,36 @@ class TestTailCallStamping:
         assert c.message.reply is None
 
 
-class TestCorrelationKeying:
-    """Every point-to-point publish is partition-keyed by ``correlation_id``.
+class TestTaskKeying:
+    """Every point-to-point publish is partition-keyed by ``task_id`` (the cutover).
 
     This is the single-writer affinity the durable fan-out fold and tool-return ordering
     rest on (one batch's siblings/returns all land on one partition, one owner, serial).
     A safety-net pin for the staged-handler restructure: a publish that drops or mis-sets
-    the key would fork a batch across partitions and was previously unguarded.
+    the key would fork a batch across partitions and was previously unguarded. The
+    threaded task value is DISTINCT from ``_CORR`` (§5-G): a correlation-keyed publish
+    fails here.
     """
 
-    async def test_call_publish_is_correlation_keyed(self) -> None:
+    async def test_call_publish_is_task_keyed(self) -> None:
         broker = CaptureBroker()
         await _run(_CallNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
-        assert broker.keys == [_CORR.encode()]
+        assert broker.keys == [b"task-under-test"]
 
-    async def test_returncall_callback_publish_is_correlation_keyed(self) -> None:
+    async def test_returncall_callback_publish_is_task_keyed(self) -> None:
         broker = CaptureBroker()
         await _run(_RetNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
-        assert broker.keys == [_CORR.encode()]
+        assert broker.keys == [b"task-under-test"]
 
-    async def test_tailcall_publish_is_correlation_keyed(self) -> None:
+    async def test_tailcall_publish_is_task_keyed(self) -> None:
         broker = CaptureBroker()
         await _run(_TailNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
-        assert broker.keys == [_CORR.encode()]
+        assert broker.keys == [b"task-under-test"]
 
-    async def test_fanout_siblings_are_all_correlation_keyed(self) -> None:
+    async def test_fanout_siblings_are_all_task_keyed(self) -> None:
         broker = CaptureBroker()
         await _run(_FanNode(node_id="n", subscribe_topics=["t"]), _envelope(), broker)
-        assert broker.keys == [_CORR.encode(), _CORR.encode()]
+        assert broker.keys == [b"task-under-test", b"task-under-test"]
 
 
 class TestNoReplyMirrorClearsInboundReply:

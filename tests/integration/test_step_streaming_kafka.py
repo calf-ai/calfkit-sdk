@@ -30,7 +30,7 @@ from calfkit.client import Client
 from calfkit.client.hub import InvocationHandle
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.nodes import Agent, ToolNodeDef, agent_tool
+from calfkit.nodes import StatelessAgent, ToolNodeDef, agent_tool
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
 from tests.integration._fault_kafka import ensure_topic
@@ -88,7 +88,7 @@ async def test_node_survives_unmatched_message_and_subsequent_routes(kafka_boots
     # SubscriberNotFound and SWALLOWED by consume() — the consumer SURVIVES, and a subsequent stamped run
     # routes normally. TestKafkaBroker can't reproduce this (its publish bypasses the consume() swallow).
     a_in = f"{topic_namespace}.A.input"
-    agent = Agent(f"{topic_namespace}-A", system_prompt="x", subscribe_topics=a_in, model_client=final_model("answer"))
+    agent = StatelessAgent(f"{topic_namespace}-A", system_prompt="x", subscribe_topics=a_in, model_client=final_model("answer"))
     await ensure_topic(kafka_bootstrap, a_in)  # the worker + the foreign producer share an already-existing topic
     driver = Client.connect(kafka_bootstrap)
     worker = _worker(kafka_bootstrap, nodes=[agent], control_plane=fast_control_plane(kafka_bootstrap))
@@ -112,7 +112,7 @@ async def test_single_agent_stream_yields_steps_then_terminal(kafka_bootstrap: s
     a_in = f"{topic_namespace}.A.input"
     tool_name = f"{topic_namespace}-tool"
     tool = _tool(tool_name)
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-A",
         system_prompt="x",
         subscribe_topics=a_in,
@@ -143,7 +143,7 @@ async def test_fanout_sibling_folds_trickle_over_the_wire(kafka_bootstrap: str, 
     # broker reorders the completing fold's trickle past the terminal; here the real wire preserves it).
     a_in = f"{topic_namespace}.A.input"
     t1, t2 = _tool(f"{topic_namespace}-t1"), _tool(f"{topic_namespace}-t2")
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-A",
         system_prompt="x",
         subscribe_topics=a_in,
@@ -177,14 +177,14 @@ async def test_all_depths_peer_consult_reply_reaches_original_caller(kafka_boots
     b_name = f"{topic_namespace}-B"
     a_in = f"{topic_namespace}.A.input"
     cp = fast_control_plane(kafka_bootstrap)
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="x",
         subscribe_topics=a_in,
         model_client=scripted_model([ToolCallPart("message_agent", {"name": b_name, "message": "balance?"}, tool_call_id="m1")]),
         peers=[Messaging(b_name)],
     )
-    agent_b = Agent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("the balance is 42"))
+    agent_b = StatelessAgent(b_name, system_prompt="x", subscribe_topics=f"{topic_namespace}.B.input", model_client=final_model("the balance is 42"))
     driver = Client.connect(kafka_bootstrap)
     b_worker = _worker(kafka_bootstrap, nodes=[agent_b], control_plane=cp)
     a_worker = _worker(kafka_bootstrap, nodes=[agent_a], control_plane=cp)

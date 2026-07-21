@@ -34,7 +34,7 @@ from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.step import StepMessage
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.nodes._steps import HopStepLedger
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
@@ -72,7 +72,7 @@ def _react(tool_calls: list[ToolCallPart], *, raise_on_reaction: bool = False) -
     return FunctionModel(_fn)
 
 
-async def _run_streaming(container: Any, agent: Agent, *tools: Any) -> list[Any]:
+async def _run_streaming(container: Any, agent: StatelessAgent, *tools: Any) -> list[Any]:
     """Deploy + drive one run, returning the full event stream (terminal last); tolerates a fault."""
     worker = container.get(Worker)
     worker.add_nodes(agent, *tools)
@@ -84,8 +84,8 @@ async def _run_streaming(container: Any, agent: Agent, *tools: Any) -> list[Any]
         return [e async for e in handle.stream()]
 
 
-def _agent(name: str, model: FunctionModel, *, tools: list[Any]) -> Agent:
-    return Agent(name, system_prompt="x", subscribe_topics=f"{name}.in", model_client=model, tools=tools)
+def _agent(name: str, model: FunctionModel, *, tools: list[Any]) -> StatelessAgent:
+    return StatelessAgent(name, system_prompt="x", subscribe_topics=f"{name}.in", model_client=model, tools=tools)
 
 
 def _calls(events: list[Any]) -> list[Any]:

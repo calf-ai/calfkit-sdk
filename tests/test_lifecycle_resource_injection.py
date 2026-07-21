@@ -63,9 +63,9 @@ def test_base_node_def_inherits_lifecycle_hook_mixin() -> None:
 
 
 def test_node_subclasses_inherit_lifecycle_hook_mixin() -> None:
-    from calfkit.nodes import Agent, ConsumerNode, ToolNodeDef
+    from calfkit.nodes import ConsumerNode, StatelessAgent, ToolNodeDef
 
-    assert issubclass(Agent, LifecycleHookMixin)
+    assert issubclass(StatelessAgent, LifecycleHookMixin)
     assert issubclass(ToolNodeDef, LifecycleHookMixin)
     assert issubclass(ConsumerNode, LifecycleHookMixin)
 
@@ -172,6 +172,7 @@ async def test_consumer_handler_injects_node_resources_into_context() -> None:
     await node.handler(
         envelope,
         correlation_id="cid",
+        task_id="task-under-test",
         headers={HDR_EMITTER: b"agent", HDR_EMITTER_KIND: b"agent"},
         broker=KafkaBroker(),
     )
@@ -214,6 +215,7 @@ async def test_consumer_context_resources_is_shallow_copy_of_node_bag() -> None:
     await node.handler(
         envelope,
         correlation_id="cid",
+        task_id="task-under-test",
         headers={HDR_EMITTER: b"agent", HDR_EMITTER_KIND: b"agent"},
         broker=KafkaBroker(),
     )

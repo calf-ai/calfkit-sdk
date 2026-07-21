@@ -60,7 +60,7 @@ async def test_publish_reentry_deltas() -> None:
     node = BaseNodeDef(node_id="agent", subscribe_topics=["agent.input"], publish_topic="agent.broadcast")
 
     async with TestKafkaBroker(broker):
-        await node._publish_reentry(_fanout_envelope(), "corr-123", broker)
+        await node._publish_reentry(_fanout_envelope(), "corr-123", "task-under-test", broker)
 
     env: Envelope = captured["envelope"]
     assert env.reply is not None

@@ -205,9 +205,9 @@ def test_is_caller_capable_matches_node_kind_taxonomy() -> None:
     # observer today; every other current kind handles Calls/continuations and must be
     # caller-capable. Registration no longer branches on this flag (all nodes consume
     # key-ordered); it still gates control-plane advert registration.
-    from calfkit.nodes import Agent, ToolNodeDef
+    from calfkit.nodes import StatelessAgent, ToolNodeDef
     from calfkit.nodes.base import BaseNodeDef
 
     assert ConsumerNode.is_caller_capable is False
-    for cls in (BaseNodeDef, NodeDef, Agent, ToolNodeDef):
+    for cls in (BaseNodeDef, NodeDef, StatelessAgent, ToolNodeDef):
         assert cls.is_caller_capable is True, cls.__name__

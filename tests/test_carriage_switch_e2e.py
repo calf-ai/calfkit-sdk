@@ -30,7 +30,7 @@ from calfkit._vendor.pydantic_ai.messages import (
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -56,7 +56,7 @@ async def test_single_tool_call_result_materializes_and_agent_resumes(container)
     # the agent's next turn sees it. Without the tag on the Call, the reply tag is None, _resolve_slot
     # no-ops, the tool result never materializes, and the agent loops until the TTL.
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "year_agent",
         system_prompt="x",
         subscribe_topics="year_agent.input",
@@ -96,7 +96,7 @@ async def test_tool_model_retry_round_trips_as_retry_prompt(container) -> None:
     # TextPart on the reply slot (raw message); the agent's _resolve_slot hydrates a RetryPromptPart the
     # model reacts to. End to end, the model sees the retry message it can act on.
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "retry_agent",
         system_prompt="x",
         subscribe_topics="retry_agent.input",

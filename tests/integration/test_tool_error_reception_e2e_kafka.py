@@ -27,7 +27,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._tool_error import surface_to_model
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
@@ -84,7 +84,7 @@ async def test_surface_to_model_converts_a_fanout_sibling_via_the_real_store(kaf
     # surface_to_model converts boom's fault → the model sees the level-A is_error result and finalizes.
     capture: dict[str, list[str]] = {}
     a_in = f"{topic_namespace}.f.input"
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-f",
         subscribe_topics=a_in,
         model_client=_react_model([ToolCallPart("boom", {"x": 9}, tool_call_id="t1"), ToolCallPart("ok_a", {}, tool_call_id="t2")], capture),
@@ -115,14 +115,14 @@ async def test_surface_to_model_converts_a_message_agent_fault(kafka_bootstrap: 
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         subscribe_topics=a_in,
         model_client=_react_model([ToolCallPart("message_agent", {"name": b_name, "message": "do it"}, tool_call_id="m1")], capture),
         peers=[Messaging(b_name)],
         on_tool_error=[surface_to_model()],
     )
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         subscribe_topics=f"{topic_namespace}.B.input",
         model_client=_react_model([ToolCallPart("boom", {"x": 1}, tool_call_id="bx")], {}),
@@ -157,7 +157,7 @@ async def test_positive_mixed_batch_converts_both_tool_and_peer(kafka_bootstrap:
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         subscribe_topics=a_in,
         model_client=_react_model(
@@ -173,7 +173,7 @@ async def test_positive_mixed_batch_converts_both_tool_and_peer(kafka_bootstrap:
     )
     # B mints a verbatim NodeFaultError (billing.quota_exceeded) — exception=None, so its level-A render
     # is the message alone ("over quota"), distinguishing it from A's own boom (ValueError: kaboom(7)).
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         subscribe_topics=f"{topic_namespace}.B.input",
         model_client=_react_model([ToolCallPart("quota", {"x": 3}, tool_call_id="bx")], {}),

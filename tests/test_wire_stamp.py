@@ -22,12 +22,12 @@ class TestNodeRailStamp:
     def test_headers_carry_envelope_wire_for_every_kind(self) -> None:
         node = BaseNodeDef(node_id="orchestrator", subscribe_topics=["in"])
         for kind in ("call", "return", "fault"):
-            assert node._headers(kind)[HDR_WIRE] == "envelope"
+            assert node._headers(kind, task_id="task-under-test")[HDR_WIRE] == "envelope"
 
     def test_stamp_uses_the_envelope_wire_constant(self) -> None:
         # single source of truth — the stamp is the ClassVar, not a stray literal.
         node = BaseNodeDef(node_id="n", subscribe_topics=["in"])
-        assert node._headers("call")[HDR_WIRE] == Envelope.WIRE
+        assert node._headers("call", task_id="task-under-test")[HDR_WIRE] == Envelope.WIRE
 
 
 class TestClientIngressStamp:

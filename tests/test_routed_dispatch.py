@@ -33,7 +33,7 @@ def _envelope(*, callback_topic: str | None = "reply.topic", payload: Any = None
 
 
 async def _handle(node: Any, headers: dict[str, Any], envelope: Envelope | None = None) -> Any:
-    return await node.handler(envelope or _envelope(), correlation_id=_CORR, headers=headers, broker=cast(Any, None))
+    return await node.handler(envelope or _envelope(), correlation_id=_CORR, task_id="task-under-test", headers=headers, broker=cast(Any, None))
 
 
 def test_hdr_route_header_name() -> None:
@@ -329,7 +329,7 @@ async def test_call_with_route_stamps_header_and_frame_payload() -> None:
             return Call("downstream", ctx.state, route="order.created", body={"amount": 7})
 
     node = N(node_id="n", subscribe_topics=["t"])
-    await node.handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
+    await node.handler(_envelope(), correlation_id=_CORR, task_id="task-under-test", headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
 
     assert len(broker.published) == 1
     c = broker.published[0]
@@ -358,6 +358,7 @@ async def test_client_publish_call_stamps_route_and_body() -> None:
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
+        task_id="task-routed-1",
         state=State(),
         deps=None,
         route="order.created",
@@ -376,6 +377,7 @@ async def test_client_allows_body_without_route() -> None:
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
+        task_id="task-routed-1",
         state=State(),
         deps=None,
         route=None,
@@ -394,6 +396,7 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
         await _client(conn)._publish_call(
             topic="orders",
             correlation_id=_CORR,
+            task_id="task-routed-1",
             state=State(),
             deps=None,
             route=bad_route,
@@ -412,8 +415,8 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
 
 
 async def test_explicit_star_handler_on_agent_raises() -> None:
-    # An Agent's run() IS the LLM loop = the implicit "*" fallback, so an explicit
-    # @handler("*") on an Agent subclass is the ambiguous-catch-all error.
+    # A StatelessAgent's run() IS the LLM loop = the implicit "*" fallback, so an explicit
+    # @handler("*") on a StatelessAgent subclass is the ambiguous-catch-all error.
     from calfkit.nodes.agent import BaseAgentNodeDef
 
     with pytest.raises(RegistryConfigError):
@@ -528,7 +531,9 @@ async def test_parallel_fanout_stamps_per_call_route_and_body() -> None:
             ]
 
     broker = CaptureBroker()
-    await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
+    await N(node_id="n", subscribe_topics=["t"]).handler(
+        _envelope(), correlation_id=_CORR, task_id="task-under-test", headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker)
+    )
 
     by_topic = {c.topic: c for c in broker.published}
     assert by_topic["a"].headers[HDR_ROUTE] == "order.created"
@@ -543,7 +548,9 @@ async def test_tailcall_publish_carries_no_route_header() -> None:
             return TailCall("downstream", ctx.state)
 
     broker = CaptureBroker()
-    await N(node_id="n", subscribe_topics=["t"]).handler(_envelope(), correlation_id=_CORR, headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker))
+    await N(node_id="n", subscribe_topics=["t"]).handler(
+        _envelope(), correlation_id=_CORR, task_id="task-under-test", headers={HDR_ROUTE: "trigger"}, broker=cast(Any, broker)
+    )
     assert len(broker.published) == 1
     c = broker.published[0]
     assert HDR_ROUTE not in c.headers
@@ -563,7 +570,9 @@ async def test_no_match_log_level_keys_on_callback_presence(callback_topic: str 
 
     env = _envelope(callback_topic=callback_topic)
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "payment.x"}, broker=cast(Any, None))
+        await N(node_id="n", subscribe_topics=["t"]).handler(
+            env, correlation_id=_CORR, task_id="task-under-test", headers={HDR_ROUTE: "payment.x"}, broker=cast(Any, None)
+        )
     matched = [r for r in caplog.records if "no handler produced a result" in r.message]
     assert matched and matched[0].levelno == expected
 

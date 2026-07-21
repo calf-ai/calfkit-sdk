@@ -3,12 +3,15 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+import uuid_utils
 from faststream import BaseMiddleware, PublishCommand
 from faststream.message import StreamMessage
 from faststream.types import AsyncFuncAny
 from pydantic import ValidationError
 
+from calfkit._protocol import HDR_TASK, HDR_WIRE, decode_header_str
 from calfkit.exceptions import safe_exc_message
+from calfkit.models.envelope import Envelope
 from calfkit.models.error_report import ErrorReport, FaultTypes
 
 logger = logging.getLogger(__name__)
@@ -22,13 +25,46 @@ registers ``inbox_topic → hub.fail_run``."""
 
 
 class ContextInjectionMiddleware(BaseMiddleware):
+    """The identity-context shim on the single consume choke (broker-wide): scopes the
+    per-delivery ``correlation_id`` and the task arm's ``task_id`` for handler injection.
+
+    **The task arm** (task-keying prep spec §2): read the forwarded ``x-calf-task``; an
+    ENVELOPE-wire delivery arriving WITHOUT it (raw-producer entry, or header loss
+    upstream) gets a task MINTED here — the boundary invariant that no
+    calfkit-processed envelope delivery ever publishes keyless, and that raw-producer
+    runs keep coherent folds after the keying cutover. A blank header reads as absent
+    (unusable identity). Mint-once-per-delivery, never per-publish (a publish-side mint
+    would split a fan-out across N tasks). A present non-empty header is scoped
+    regardless of wire kind; an absent-header non-envelope delivery (steps — no task
+    header in this PR by design) neither mints nor scopes. The mint is logged at plain
+    DEBUG, unthrottled (Ryan ruling, 2026-07-20: prod runs with debug logging off, so
+    the arm is noise-free by log level — inside the mesh a mint firing is always a bug
+    signal, visible under debug logging).
+    """
+
     async def consume_scope(
         self,
         call_next: AsyncFuncAny,
         msg: StreamMessage[Any],
     ) -> Any:
+        # Blank reads as absent (`or None`): an empty x-calf-task is unusable identity —
+        # scoping it verbatim would key b"" (non-null, so it also slips the key-ordered
+        # subscriber's keyless backstop) and silently pin the run to one partition.
+        task_id = decode_header_str(msg.headers.get(HDR_TASK)) or None
+        if task_id is None and decode_header_str(msg.headers.get(HDR_WIRE)) == Envelope.WIRE:
+            task_id = uuid_utils.uuid7().hex
+            logger.debug(
+                "[%s] minted task at ingress — raw-producer entry or header loss upstream (task=%s topic=%s)",
+                (msg.correlation_id or "n/a")[:8],
+                task_id[:8],
+                # Defensive read, like the decode floor: a batch subscriber's raw_message is a tuple.
+                getattr(getattr(msg, "raw_message", None), "topic", None),
+            )
         with self.context.scope("correlation_id", msg.correlation_id):
-            return await super().consume_scope(call_next, msg)
+            if task_id is None:
+                return await super().consume_scope(call_next, msg)
+            with self.context.scope("task_id", task_id):
+                return await super().consume_scope(call_next, msg)
 
     async def publish_scope(
         self,

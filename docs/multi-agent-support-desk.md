@@ -33,7 +33,7 @@ each gets a `description` so other agents can discover what it does.
 
 ```python
 # support_desk.py
-from calfkit import Agent
+from calfkit import StatelessAgent
 from calfkit.providers import OpenAIResponsesModelClient
 
 
@@ -41,7 +41,7 @@ def model():
     return OpenAIResponsesModelClient(model_name="gpt-5.4-nano")
 
 
-billing = Agent(
+billing = StatelessAgent(
     "billing",
     description="Answers account balance and billing questions.",
     system_prompt="You are the billing department. Answer account balance and billing questions concisely.",
@@ -49,7 +49,7 @@ billing = Agent(
     model_client=model(),
 )
 
-refunds = Agent(
+refunds = StatelessAgent(
     "refunds",
     description="Handles refund requests.",
     system_prompt="You are the refunds department. Approve a reasonable refund request and state the decision concisely.",
@@ -80,7 +80,7 @@ Add a third agent to `support_desk.py`. This one declares `peers`: it may
 ```python
 from calfkit import Messaging, Handoff   # add to the imports at the top
 
-triage = Agent(
+triage = StatelessAgent(
     "triage",
     description="Front desk that routes customer requests.",
     system_prompt=(

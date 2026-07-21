@@ -39,7 +39,7 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.payload import DataPart, TextPart
 from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
 from calfkit.models.state import State
-from calfkit.nodes import Agent, ConsumerNode, consumer
+from calfkit.nodes import ConsumerNode, StatelessAgent, consumer
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -73,9 +73,9 @@ def _structured_report_model() -> FunctionModel:
     return FunctionModel(_fn)
 
 
-def _wire_agent_with_consumer(container, consumer_node: ConsumerNode) -> Agent:
+def _wire_agent_with_consumer(container, consumer_node: ConsumerNode) -> StatelessAgent:
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "consumer_test_agent",
         system_prompt="x",
         subscribe_topics="consumer_test_agent.input",
@@ -109,6 +109,7 @@ async def _handle(node: ConsumerNode, envelope: Envelope, *, correlation_id: str
     return await node.handler(
         envelope,
         correlation_id=correlation_id,
+        task_id="task-under-test",
         headers=_HEADERS if headers is None else headers,
         broker=MagicMock(),
     )
@@ -172,7 +173,7 @@ def test_async_generator_function_rejected_at_construction():
 
 def test_from_run_context_projects_fields_and_resources():
     ctx = SessionRunContext(state=State(), deps={"k": "v"})
-    ctx._stamp_transport(correlation_id="cid-fc", emitter_node_id="up", emitter_node_kind="agent")
+    ctx._stamp_transport(correlation_id="cid-fc", task_id="t-under-test", emitter_node_id="up", emitter_node_kind="agent")
     ctx._reply = _text_reply("done")
     sentinel = object()
     ctx._resources = {"db": sentinel}
@@ -190,7 +191,7 @@ def test_from_run_context_projects_fields_and_resources():
 
 def test_from_run_context_intermediate_hop_output_none():
     ctx = SessionRunContext(state=State(), deps={})  # no final_output_parts
-    ctx._stamp_transport(correlation_id="cid-int", emitter_node_id="up", emitter_node_kind="agent")
+    ctx._stamp_transport(correlation_id="cid-int", task_id="t-under-test", emitter_node_id="up", emitter_node_kind="agent")
     assert ConsumerContext.from_run_context(ctx).output is None
 
 
@@ -267,7 +268,7 @@ async def test_consumer_deserializes_output_type_dataclass(container):
         received.append(ctx)
 
     worker = container.get(Worker)
-    structured_agent = Agent[Report](
+    structured_agent = StatelessAgent[Report](
         "structured_agent",
         system_prompt="x",
         subscribe_topics="structured_agent.input",
@@ -441,7 +442,7 @@ async def test_observer_on_live_frame_never_unwinds_or_publishes(consume_raises:
     broker = AsyncMock()  # async so a wrongful `await broker.publish(...)` would be caught
 
     with caplog.at_level(logging.ERROR, logger=CONSUMER_LOGGER):
-        resp = await node._handle_delivery(envelope, correlation_id="cid-forge", headers=_HEADERS, broker=broker)
+        resp = await node._handle_delivery(envelope, correlation_id="cid-forge", task_id="task-under-test", headers=_HEADERS, broker=broker)
 
     # No point-to-point publish, no auto-fault — the observer produced nothing on the rails.
     broker.publish.assert_not_awaited()
@@ -673,7 +674,7 @@ def test_consumer_reuses_prebuilt_type_adapter(monkeypatch):
 
     env = _envelope(_data_reply({"location": "Tokyo", "summary": "sunny"}))
     for _ in range(3):
-        asyncio.run(sink.handler(env, correlation_id="cid-reuse", headers=_HEADERS, broker=MagicMock()))
+        asyncio.run(sink.handler(env, correlation_id="cid-reuse", task_id="task-under-test", headers=_HEADERS, broker=MagicMock()))
 
     assert construct_count["n"] == constructions_after_decoration  # no new adapters
 
@@ -748,7 +749,7 @@ def test_strict_mode_raises_on_empty_reply():
 
 async def test_client_execute_result_carries_state(container):
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "state_vis_agent",
         system_prompt="x",
         subscribe_topics="state_vis_agent.input",

@@ -46,7 +46,7 @@ from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
 from calfkit.models.error_report import ErrorReport
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._tool_error import AgentSeamContext
 from calfkit.peers import Messaging
 from calfkit.worker import Worker
@@ -101,7 +101,7 @@ async def test_gate_a_single_tool_fault_resolves_via_state_over_the_wire(kafka_b
     # resolves the full ToolCallPart (with .args) at the fold — state-first provenance survives Kafka.
     recorder = _ToolCallProbe()
     agent_in = f"{topic_namespace}.a.input"
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-a",
         system_prompt="call the boom tool",
         subscribe_topics=agent_in,
@@ -135,7 +135,7 @@ async def test_gate_b1_fanout_sibling_resolves_via_real_ktables_store(kafka_boot
     # offline fake store cannot prove the real store preserves this (handoff landmine).
     recorder = _ToolCallProbe()
     agent_in = f"{topic_namespace}.b1.input"
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-b1",
         system_prompt="call the tools",
         subscribe_topics=agent_in,
@@ -208,7 +208,7 @@ async def test_gate_b2_message_agent_fault_folds_empty_state_but_has_target_topi
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="message B",
         subscribe_topics=a_in,
@@ -216,7 +216,7 @@ async def test_gate_b2_message_agent_fault_folds_empty_state_but_has_target_topi
         peers=[Messaging(b_name)],
         on_callee_error=recorder,
     )
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         system_prompt="call the boom tool",
         subscribe_topics=f"{topic_namespace}.B.input",
@@ -263,7 +263,7 @@ async def test_gate_b2_mixed_batch_amplification(kafka_bootstrap: str, topic_nam
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
 
-    agent_a = Agent(
+    agent_a = StatelessAgent(
         a_name,
         system_prompt="message B and call boom",
         subscribe_topics=a_in,
@@ -272,7 +272,7 @@ async def test_gate_b2_mixed_batch_amplification(kafka_bootstrap: str, topic_nam
         tools=[boom],
         on_callee_error=recorder,
     )
-    agent_b = Agent(
+    agent_b = StatelessAgent(
         b_name,
         system_prompt="call the boom tool",
         subscribe_topics=f"{topic_namespace}.B.input",

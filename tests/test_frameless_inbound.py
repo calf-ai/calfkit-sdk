@@ -83,7 +83,7 @@ async def test_handler_frameless_base_run_declines_without_raising():
     # Base run() is the @handler('*') catch-all returning Next → output None →
     # handler returns the envelope unchanged. The point: no raise on empty stack.
     node = NodeDef(node_id="n", subscribe_topics=["t"])
-    resp = await node.handler(_frameless_envelope(), correlation_id=_CORR, headers={}, broker=cast(Any, None))
+    resp = await node.handler(_frameless_envelope(), correlation_id=_CORR, task_id="task-under-test", headers={}, broker=cast(Any, None))
     assert resp is not None
 
 
@@ -96,6 +96,6 @@ async def test_handler_frameless_dispatches_to_overridden_run():
             return Next()
 
     node = N(node_id="n", subscribe_topics=["t"])
-    resp = await node.handler(_frameless_envelope(), correlation_id=_CORR, headers={}, broker=cast(Any, None))
+    resp = await node.handler(_frameless_envelope(), correlation_id=_CORR, task_id="task-under-test", headers={}, broker=cast(Any, None))
     assert ran == ["run"]
     assert resp is not None

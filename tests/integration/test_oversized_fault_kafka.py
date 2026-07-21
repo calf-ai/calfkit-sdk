@@ -26,7 +26,7 @@ from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
 from calfkit.models import ReturnCall, SessionRunContext, State
-from calfkit.nodes import Agent, NodeDef
+from calfkit.nodes import NodeDef, StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._fault_tap import fault_tap
 from tests.integration._fault_tools import oversized_fault
@@ -69,9 +69,9 @@ async def test_oversized_fault_elides_state_and_reaches_the_caller(kafka_bootstr
 
     try:
         async with worker, fault_tap(kafka_bootstrap, reply_topic) as tap:
-            cid, state = driver._build_state("go", correlation_id=None, temp_instructions=None, message_history=None, author=None)
+            cid, task_id, state = driver._build_state("go", correlation_id=None, temp_instructions=None, message_history=None, author=None)
             await driver._ensure_started()
-            await driver._publish_call(topic=node_in, correlation_id=cid, state=state, deps={"blob": "x" * 262144})
+            await driver._publish_call(topic=node_in, correlation_id=cid, task_id=task_id, state=state, deps={"blob": "x" * 262144})
 
             fault, _ = await tap.next_fault(timeout=60)
             # the caller received the fault (not floored) with the state elided but the full report kept
@@ -113,7 +113,7 @@ async def test_oversized_fault_strips_to_minimal_and_still_arrives(kafka_bootstr
     # the minimal report fits. (The agent's own return topic + publish mirror stay default.)
     await ensure_topic(kafka_bootstrap, reply_topic, config={"max.message.bytes": "4096"})
 
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-o1",
         system_prompt="call oversized_fault",
         subscribe_topics=agent_in,
