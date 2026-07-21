@@ -34,8 +34,7 @@ class ToolBinding(BaseModel):
     so one node may contribute many bindings (a native toolbox, an MCP toolbox) or one
     (function tool node) without any shared base class.
 
-    Doubles as the wire model for per-run tool overrides
-    (``OverridesState.override_agent_tools``): ``validator`` is process-local
+    ``validator`` is process-local
     and excluded from serialization, so a deserialized binding always carries
     ``validator=None``. Such a binding is not unvalidated — at dispatch the agent
     validates its args against the advertised ``tool_def.parameters_json_schema``
@@ -54,7 +53,7 @@ class ToolBinding(BaseModel):
     """Target topic for the ``Call`` carrying the :class:`ToolCallRef`."""
     validator: SkipJsonSchema[ArgsValidator | None] = Field(default=None, exclude=True)
     """A local tool node's signature-built validator, or ``None`` for a wire-crossing binding
-    (override, discovered, MCP) — in which case the agent falls back to a validator built from
+    (discovered, MCP) — in which case the agent falls back to a validator built from
     ``tool_def.parameters_json_schema`` at dispatch. Excluded from serialization and JSON schema:
     callables never ride the wire."""
 
@@ -148,15 +147,12 @@ def split_tool_declarations(
 def normalize_tool_bindings(tools: Sequence[ToolProvider | ToolBinding] | None) -> list[ToolBinding]:
     """Flatten a mix of raw bindings and providers into a binding list.
 
-    Raw :class:`ToolBinding` entries pass through verbatim (overrides, tests,
+    Raw :class:`ToolBinding` entries pass through verbatim (tests,
     hand-rolled bindings with no node object in hand); anything satisfying
     :class:`ToolProvider` contributes ``tool_bindings()``, so one provider may
     yield many bindings (a native toolbox, an MCP toolbox). The ``isinstance`` protocol check
     is structural — it only proves a ``tool_bindings`` attribute exists — which
     is why the unmatched arm is a hard ``TypeError`` rather than a skip.
-
-    Shared by ``Agent(tools=...)`` and the client's ``tool_overrides=`` so both
-    accept the same surface.
     """
     out: list[ToolBinding] = []
     for t in tools or ():

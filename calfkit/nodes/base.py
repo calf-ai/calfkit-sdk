@@ -647,11 +647,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 )
 
         elif isinstance(output, TailCall):
-            # TailCall = the SAME pending call retargeted (§4.2/§15): preserve frame_id/tag/overrides/
+            # TailCall = the SAME pending call retargeted (§4.2/§15): preserve frame_id/tag/
             # callback_topic on the replacement frame (a fresh frame_id would orphan the caller's slot —
             # the eventual reply's in_reply_to must match the id the caller registered), clearing only
             # payload (TailCall carries no body — the traveling State is its input) and fanout_id (a
-            # TailCall is never fan-out-marked). `invoke_frame` would mint a fresh id and drop overrides.
+            # TailCall is never fan-out-marked). `invoke_frame` would mint a fresh id.
             frame = envelope.internal_workflow_state.unwind_frame()
             retargeted = replace(frame, target_topic=output.target_topic, payload=None, fanout_id=None)
             envelope.internal_workflow_state.call_stack.push(retargeted)
@@ -1585,8 +1585,6 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         from the bag, never snapshotted.
         """
         frame = snapshot.stack.current_frame_or_none
-        # The snapshot's overrides are authoritative-by-capture (baked into snapshot.state.overrides
-        # at OPEN); do NOT re-stamp them from the restored frame here — the capture is the source of truth.
         ctx.state = snapshot.state
         ctx.deps = snapshot.deps
         ctx._frame_id = frame.frame_id if frame is not None else None

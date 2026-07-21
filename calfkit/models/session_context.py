@@ -194,7 +194,7 @@ class WorkflowState(BaseModel):
 
         Keeps, per frame, the routing skeleton — ``frame_id``, ``target_topic``,
         ``callback_topic``, ``tag``, ``marker``, ``fanout_id``, ``caller_node_id``,
-        ``caller_node_kind`` — and nulls the call *content*: ``payload``, ``overrides``, and
+        ``caller_node_kind`` — and nulls the call *content*: ``payload`` and
         this state's ``metadata``. The kept fields are what escalation addressing, slot
         matching, fold routing, and ``ancestor_callers`` derivation read; the dropped ones are
         needed to run a call, not to deliver an error about one, and are what can grow past

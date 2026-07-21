@@ -32,7 +32,7 @@ class InvocationResult(Generic[OutputT]):
 
     The ``state`` field is the full session :class:`~calfkit.models.State` at
     the moment this envelope was published, exposing message history, in-flight
-    tool calls/results, application metadata, runtime overrides, and any other
+    tool calls/results, application metadata, and any other
     state fields. ``message_history``, ``output_parts``, and ``metadata`` are
     convenience properties that read through ``state``.
 
@@ -73,8 +73,6 @@ class InvocationResult(Generic[OutputT]):
     * ``tool_calls`` / ``tool_results`` — in-flight tool batch (keyed by
       ``tool_call_id``)
     * ``metadata`` — application-level metadata
-    * ``overrides`` — agent tool overrides applied to this invocation (or
-      ``None`` if unset)
     * ``uncommitted_message`` / ``temp_instructions`` — agent-loop scratch;
       usually ``None`` on terminal hops, may be populated mid-loop and is not
       part of the public contract

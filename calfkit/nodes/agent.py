@@ -197,8 +197,8 @@ class BaseAgentNodeDef(
 
         # Every agent owns its durable fan-out store as a node @resource (opened by the worker
         # lifecycle before serving; mirrors the worker's Capability View resource). Registration is
-        # unconditional: no agent is statically fan-out-free — callers can inject override tools over
-        # the wire and `Tools` selectors resolve at runtime. Offline the @resource must not dial a
+        # unconditional: no agent is statically fan-out-free — `Tools` selectors resolve tools at
+        # runtime. Offline the @resource must not dial a
         # real cluster: the autouse `_offline_fanout_store` fixture (tests/conftest.py) swaps
         # `KtablesFanoutBatchStore` → `OfflineFanoutBatchStore` for every non-kafka `worker.start()`;
         # handler-driven tests never start the worker (the @resource never runs), so
@@ -774,7 +774,7 @@ class BaseAgentNodeDef(
 
                 # Parse args from the LLM's emission. Applies to ALL dispatch
                 # paths so that malformed-JSON args from a validator-less binding
-                # (override, discovered) are also surfaced as an LLM-visible
+                # (discovered) are also surfaced as an LLM-visible
                 # RetryPromptPart at the agent, instead of dispatching unparseable
                 # args across the wire.
                 #
@@ -800,7 +800,7 @@ class BaseAgentNodeDef(
 
                 # Validate args before dispatch. A local tool carries a signature-built validator
                 # (rich: field_validators, coercion); a wire-crossing binding (discovered /
-                # override / hand-rolled) carries none, so we fall back to a validator compiled
+                # hand-rolled) carries none, so we fall back to a validator compiled
                 # from its advertised ``parameters_json_schema`` — a non-coercing subset check
                 # against the contract shown to the model. The callee stays authoritative. The
                 # factory is TOTAL (it raises nothing except the ``ValidationError`` contract error),
