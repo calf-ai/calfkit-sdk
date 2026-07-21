@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.13.0...v0.14.0) (2026-07-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* every calfkit publish is now partition-keyed by the run's task_id (minted at origin, forwarded as the x-calf-task header); no correlation_id keying case remains — correlation_id survives as run/demux identity only. Drain-before-deploy is required (lag 0 on forwarding topics + in-progress runs complete; one drain covers stacking with the 0.13.0 overrides-removal break). Existing Agent(...) usages that need no durable memory should rename to StatelessAgent (the same class in this release; Agent becomes the durable actor in the upcoming durable-store PR).
+* the per-run overrides feature is removed end-to-end — OverridesState, State.overrides, CallFrame.overrides, TailCall.clear_overrides, and the client verbs' tool_overrides=/model_settings= params. Agent(model_settings=...) and provider-client settings are unaffected. Re-introduction deferred until after the durable Agent lands. Drain-before-deploy applies to in-flight frames; a single drain covers both this PR's wire-field break and PR-0.5's keying break if deployed together.
+
+### Features
+
+* remove per-run overrides mesh-wide ([#358](https://github.com/calf-ai/calfkit-sdk/issues/358)) ([1d5a9f1](https://github.com/calf-ai/calfkit-sdk/commit/1d5a9f165f88bb60c5a48f1111804298a99f3ef5))
+* task_id keying hard cutover + StatelessAgent rename prep ([#360](https://github.com/calf-ai/calfkit-sdk/issues/360)) ([0650460](https://github.com/calf-ai/calfkit-sdk/commit/0650460031a5ccb93e9522a32466dc18aabf9e73))
+
 ## [0.13.0](https://github.com/calf-ai/calfkit-sdk/compare/v0.12.10...v0.13.0) (2026-07-20)
 
 
