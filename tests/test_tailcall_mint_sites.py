@@ -28,7 +28,6 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, TailCall, WorkflowState
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
-from calfkit.models.state import OverridesState
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.peers import Handoff
 from tests._broker_fakes import CaptureBroker
@@ -91,7 +90,6 @@ def _inbound_frame() -> CallFrame:
         target_topic="orchestrator.in",
         callback_topic="caller.return",
         frame_id="F1",
-        overrides=OverridesState(),
         payload="old-body",
         tag="t1",
         fanout_id="X",
@@ -139,7 +137,7 @@ async def _publish_and_compare(tail_call: TailCall[State], target_topic: str) ->
 
 async def test_handoff_shaped_tailcall_retargets_to_receiver_byte_for_byte() -> None:
     carried = State(temp_instructions="carried")
-    await _publish_and_compare(TailCall[State](target_topic="billing.in", state=carried, clear_overrides=True), "billing.in")
+    await _publish_and_compare(TailCall[State](target_topic="billing.in", state=carried), "billing.in")
 
 
 async def test_self_retry_shaped_tailcall_retargets_to_return_topic_byte_for_byte() -> None:

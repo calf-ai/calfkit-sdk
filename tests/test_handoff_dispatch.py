@@ -29,7 +29,7 @@ from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
-from calfkit.models.state import OverridesState, State
+from calfkit.models.state import State
 from calfkit.nodes import Agent
 from calfkit.nodes._steps import DeniedCall, HandedOff, Observed, Said
 from calfkit.peers import Handoff, Messaging

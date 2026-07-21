@@ -11,7 +11,6 @@ dropped ones are needed to *run* a call, not to deliver an error about one.
 
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.session_context import CallFrame, Stack, WorkflowState
-from calfkit.models.state import OverridesState
 
 
 def _frame(i: int) -> CallFrame:

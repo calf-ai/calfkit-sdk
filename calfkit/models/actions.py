@@ -83,25 +83,13 @@ class Call(Generic[StateT], _Call[StateT]):
         self.marker = marker
 
 
-@dataclass(init=False)
+@dataclass
 class TailCall(Generic[StateT], _Call[StateT]):
     """Call another node with no expectation for response callback.
     If current execution has a callback committment to its callee, the tailcallee inherits it.
 
-    ``clear_overrides`` (opt-in, default ``False``) nulls the carried frame's per-run overrides at the
-    publish chokepoint — set only on a genuine HANDOFF (handoff-tool-transport-spec §5; C2 in
-    agent-mesh-spec), where the tailcallee is a DIFFERENT agent and must use its own tools/model,
-    not the caller's per-invocation ``tool_overrides``/``model_settings``.
-    Default ``False`` PRESERVES ``frame.overrides`` (correct for the all-invalid self-retry,
-    which tailcalls to *self* and keeps the caller's surface). ``init=False`` keeps the positional
-    ``(target_topic, state)`` construction — a ``TailCall`` carries no route/body/tag — while letting
-    ``clear_overrides`` participate in ``__eq__``/``__repr__`` (mirrors ``Call``)."""
-
-    clear_overrides: bool = False
-
-    def __init__(self, target_topic: str, state: StateT, *, clear_overrides: bool = False) -> None:
-        super().__init__(target_topic, state)
-        self.clear_overrides = clear_overrides
+    Adds nothing over the ``_Call`` base — plain positional ``(target_topic, state)``
+    construction; a ``TailCall`` carries no route/body/tag."""
 
 
 @dataclass

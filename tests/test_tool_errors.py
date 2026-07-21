@@ -30,7 +30,7 @@ from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.models import SessionRunContext, ToolCallRef, ToolContext
 from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.payload import TextPart, is_retry
-from calfkit.models.state import OverridesState, State
+from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef, Tools
 from calfkit.nodes._steps import DeniedCall, Observed

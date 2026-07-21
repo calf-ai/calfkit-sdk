@@ -23,7 +23,6 @@ from calfkit.models.error_report import ErrorReport
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.seam_context import SeamContext
-from calfkit.models.state import OverridesState
 from calfkit.nodes.base import BaseNodeDef
 from tests._broker_fakes import CaptureBroker
 

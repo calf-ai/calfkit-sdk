@@ -32,7 +32,7 @@ from calfkit.keying import partition_key
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
-from calfkit.models.state import OverridesState, State
+from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, normalize_tool_bindings
 from calfkit.provisioning import ProvisioningConfig, StartupTopicEnsurer
 
@@ -425,7 +425,7 @@ class Client:
                 "empty segments, no wildcard. ('*' is a route pattern for @handler, not a producer key.)"
             )
         call_stack = CallFrameStack()
-        call_stack.push(CallFrame(target_topic=topic, callback_topic=self._inbox_topic, overrides=overrides, payload=body))
+        call_stack.push(CallFrame(target_topic=topic, callback_topic=self._inbox_topic, payload=body))
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),
