@@ -416,7 +416,7 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
 
 async def test_explicit_star_handler_on_agent_raises() -> None:
     # An StatelessAgent's run() IS the LLM loop = the implicit "*" fallback, so an explicit
-    # @handler("*") on an StatelessAgent subclass is the ambiguous-catch-all error.
+    # @handler("*") on a StatelessAgent subclass is the ambiguous-catch-all error.
     from calfkit.nodes.agent import BaseAgentNodeDef
 
     with pytest.raises(RegistryConfigError):

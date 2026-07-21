@@ -78,7 +78,7 @@ class ProvisioningConfig:
   `{"retention.ms": "604800000"}`) applied to **data topics only**. Framework
   topics (reply topics, `*.private.return` inboxes) are deliberately excluded:
   overrides like `cleanup.policy=compact` or short retention are semantically
-  wrong for correlation-keyed request/reply traffic.
+  wrong for task-keyed request/reply traffic.
 - `create_timeout_ms` — overall budget for the whole provisioning operation
   (connect + create + retry + inspect), enforced by a single `asyncio.wait_for`.
   On expiry a `TopicProvisioningError` is raised naming the still-pending topics.

@@ -28,17 +28,18 @@ class ContextInjectionMiddleware(BaseMiddleware):
     """The identity-context shim on the single consume choke (broker-wide): scopes the
     per-delivery ``correlation_id`` and the task arm's ``task_id`` for handler injection.
 
-    **The task arm** (task-keying prep spec §2, rulings batch 15): read the forwarded
-    ``x-calf-task``; an ENVELOPE-wire delivery arriving WITHOUT it (raw-producer entry,
-    or header loss upstream) gets a task MINTED here — the boundary invariant that no
+    **The task arm** (task-keying prep spec §2): read the forwarded ``x-calf-task``; an
+    ENVELOPE-wire delivery arriving WITHOUT it (raw-producer entry, or header loss
+    upstream) gets a task MINTED here — the boundary invariant that no
     calfkit-processed envelope delivery ever publishes keyless, and that raw-producer
-    runs keep coherent folds after the keying cutover. Mint-once-per-delivery, never
-    per-publish (a publish-side mint would split a fan-out across N tasks). A PRESENT
-    header is scoped regardless of wire kind; an absent-header non-envelope delivery
-    (steps — no task header in this PR by design) neither mints nor scopes. The mint is
-    logged at plain DEBUG, unthrottled (takeover ruling 2026-07-20: prod runs with debug
-    logging off, so the arm is noise-free by log level — inside the mesh a mint firing
-    is always a bug signal, visible under debug logging).
+    runs keep coherent folds after the keying cutover. A blank header reads as absent
+    (unusable identity). Mint-once-per-delivery, never per-publish (a publish-side mint
+    would split a fan-out across N tasks). A present non-empty header is scoped
+    regardless of wire kind; an absent-header non-envelope delivery (steps — no task
+    header in this PR by design) neither mints nor scopes. The mint is logged at plain
+    DEBUG, unthrottled (Ryan ruling, 2026-07-20: prod runs with debug logging off, so
+    the arm is noise-free by log level — inside the mesh a mint firing is always a bug
+    signal, visible under debug logging).
     """
 
     async def consume_scope(
@@ -46,7 +47,10 @@ class ContextInjectionMiddleware(BaseMiddleware):
         call_next: AsyncFuncAny,
         msg: StreamMessage[Any],
     ) -> Any:
-        task_id = decode_header_str(msg.headers.get(HDR_TASK))
+        # Blank reads as absent (`or None`): an empty x-calf-task is unusable identity —
+        # scoping it verbatim would key b"" (non-null, so it also slips the key-ordered
+        # subscriber's keyless backstop) and silently pin the run to one partition.
+        task_id = decode_header_str(msg.headers.get(HDR_TASK)) or None
         if task_id is None and decode_header_str(msg.headers.get(HDR_WIRE)) == Envelope.WIRE:
             task_id = uuid_utils.uuid7().hex
             logger.debug(

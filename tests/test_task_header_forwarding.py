@@ -161,6 +161,39 @@ async def test_fire_and_forget_declined_mirror_carries_the_task_header() -> None
     assert resp.headers.get(HDR_TASK) == _TASK
 
 
+async def test_unknown_kind_floor_mirror_carries_the_task_header() -> None:
+    # An unrecognized x-calf-kind is floored + ignored — its no-reply mirror must still
+    # carry the threaded task (the last _no_reply_mirror arm without a direct pin).
+    class N(NodeDef):
+        async def run(self, ctx: SessionRunContext) -> Any:
+            return ReturnCall(state=ctx.state, value="never runs")
+
+    spy = CaptureBroker()
+    resp = await N(node_id="n-fwd-unk", subscribe_topics=["t"]).handler(
+        _envelope(), correlation_id=_CORR, task_id=_TASK, headers={HDR_KIND: "bogus"}, broker=spy
+    )
+    assert not spy.published  # floored: never run as work
+    assert resp.headers.get(HDR_TASK) == _TASK
+
+
+async def test_mid_batch_abort_fault_forwards_the_task_header() -> None:
+    # A node-own raise MID-BATCH (marked frame on top) takes the _publish_abort arm —
+    # tombstone + escalate ONCE — whose fault publish and mirror must carry the task.
+    class N(NodeDef):
+        async def run(self, ctx: SessionRunContext) -> Any:
+            raise RuntimeError("mid-batch boom")
+
+    frame = CallFrame(target_topic="t", callback_topic="caller.return", frame_id="A", fanout_id="A")
+    env = Envelope(
+        internal_workflow_state=WorkflowState(call_stack=Stack([frame])),
+        context=SessionRunContext(state=State(), deps={}),
+    )
+    spy = CaptureBroker()
+    resp = await N(node_id="n-fwd-abort", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, task_id=_TASK, headers={}, broker=spy)
+    _assert_all_publishes_carry_task(spy)  # the escalated fault publish
+    assert resp.headers.get(HDR_TASK) == _TASK
+
+
 async def test_consumer_observer_mirror_carries_the_task_header() -> None:
     async def _consume(cctx: Any) -> None: ...
 

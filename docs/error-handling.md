@@ -2,7 +2,7 @@
 
 This guide shows you how to recover from failures and signal your own, using the
 error seams and the `NodeFaultError` / `ErrorReport` types. It assumes a
-caller-capable node (an `StatelessAgent`, a tool node, or a `NodeDef` subclass). For
+caller-capable node (a `StatelessAgent`, a tool node, or a `NodeDef` subclass). For
 guarding input and reshaping output, see [How to guard and transform node
 invocations](policy-seams.md).
 

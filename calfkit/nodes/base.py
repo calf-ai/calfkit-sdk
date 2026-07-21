@@ -258,9 +258,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
     its own workflow state (agent, tool, MCP toolbox, custom ``BaseNodeDef`` subclasses);
     ``False`` only for observers (``ConsumerNode``), which just consume. Subclasses may
     override it. This is why EVERY node registers via the key-ordered subscriber
-    (parallel across correlations, strictly serial and in-order per ``correlation_id`` —
-    the partition key): handling a continuation is an await-spanning read-modify-write of
-    per-correlation workflow state — the agent's tool-call batch aggregation, the in-node
+    (parallel across tasks, strictly serial and in-order per ``task_id`` — the
+    partition key): handling a continuation is an await-spanning read-modify-write of
+    per-run workflow state — the agent's tool-call batch aggregation, the in-node
     fan-out fold — that a no-affinity ``max_workers>1`` coroutine pool would race.
     Registration itself no longer branches on this flag (observers share the one
     consumption model, ADR-0042); it gates control-plane advert registration."""
@@ -707,7 +707,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         node addresses ITSELF so its fan-out frame stays current, and the close (§4.3)
         rebuilds context from the durable basestate. Deltas from a normal ``ReturnCall``:
         no pop; ``in_reply_to`` = the fan-out frame's own id; ``parts=[]``; target = own
-        ``_return_topic``; ``key=correlation_id`` (same partition, single-writer); context
+        ``_return_topic``; ``key=partition_key(task_id)`` (same partition, single-writer); context
         ``state``/``deps`` cleared (rebuilt at close); **not** broadcast-mirrored — a direct
         point-to-point publish, never returned for the ``@publisher`` mirror.
         """

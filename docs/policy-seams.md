@@ -3,7 +3,7 @@
 This guide shows you how to run logic **around** a node's body — on the way in
 and over its output — without editing the body. You use two policy seams:
 `before_node` (runs before the body) and `after_node` (runs over the result). It
-assumes you already have a caller-capable node: an `StatelessAgent`, a tool node, or a
+assumes you already have a caller-capable node: a `StatelessAgent`, a tool node, or a
 `NodeDef` subclass. (Observer nodes built with `@consumer` have no seams — they
 handle every event in their own body.)
 

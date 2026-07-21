@@ -93,7 +93,7 @@ async def _wait_mesh(client: Client, predicate: Callable[[Mapping[str, Any], Map
 
 
 async def test_mesh_reads_online_agents_and_tool_nodes(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """A worker hosting an StatelessAgent + a function tool node advertises both; client.mesh projects the
+    """A worker hosting a StatelessAgent + a function tool node advertises both; client.mesh projects the
     agent to an AgentInfo and the tool node to a ToolNodeInfo, and repeated reads reuse one view."""
     agent_name = f"{topic_namespace}-billing"
     tool_name = f"{topic_namespace}-add"

@@ -358,9 +358,10 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
 
         ``correlation_id``, ``task_id``, and the emitter ids come from the inbound
         Kafka message (header / FastStream ``Context()`` / the identity middleware's
-        scope), never the envelope body. Called by ``BaseNodeDef.prepare_context``
-        (on a freshly-copied context), the consumer handler, and the client's reply
-        dispatcher, so the three sites cannot drift. ``frame_id`` is
+        scope), never the envelope body. Exactly two code-level callers:
+        ``BaseNodeDef.prepare_context`` (on a freshly-copied context — serving both
+        the node and consumer delivery paths) and the client's reply dispatcher
+        (``hub._on_reply``), so the stamp sites cannot drift. ``frame_id`` is
         workflow-state-sourced, not transport-sourced, so it is stamped separately
         by ``prepare_context``.
         """

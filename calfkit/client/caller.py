@@ -404,7 +404,7 @@ class Client:
         """Publish ONE call envelope to *topic* (spec §2.6): an ``Envelope`` carrying the session
         ``State`` + ``deps`` and a pushed ``CallFrame`` whose ``callback_topic`` is this client's inbox,
         plus the emitter headers, ``x-calf-kind=call``, and the origin ``x-calf-task`` stamp
-        (task-keying prep spec §2-A). Keyed by ``correlation_id``.
+        (task-keying prep spec §2-A). Keyed by ``task_id`` via ``partition_key``.
 
         ``route`` / ``body`` are an **internal, non-public lower-level surface** (NOT the agent gateway,
         spec §9.2): the gateway verbs never pass them. They let framework-internal callers target a

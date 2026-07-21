@@ -204,7 +204,7 @@ class HopStepLedger:
             StepMessage(correlation_id=correlation_id, emitter=emitter, depth=depth, frame_id=frame_id, events=events),
             topic=root_callback,
             correlation_id=correlation_id,
-            key=partition_key(task_id),  # co-partitions with the terminal (task-keying cutover)
+            key=partition_key(task_id),  # co-partitions with the terminal
             # A step's OWN header dict — NOT _headers() (which stamps wire="envelope" + a business
             # x-calf-kind): a step is a side-effect-free notification, no kind. The x-calf-task
             # HEADER stamp on step messages is the durable PR's (keyed-but-headerless until then).

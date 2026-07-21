@@ -51,8 +51,9 @@ MessageKind = Literal["call", "return", "fault"]
 
 HDR_TASK = "x-calf-task"
 """Kafka header carrying the run's ``task_id`` — the mesh-wide partition-affinity key
-(task-keying prep spec §2). Minted once at origin (the client's ``_publish_call``; no
-node originates a run) and forwarded unchanged on every framework publish path, exactly
+(task-keying prep spec §2). Minted once at origin (the client's ``_build_state``,
+beside the ``correlation_id`` default; no node originates a run), stamped by
+``_publish_call``, and forwarded unchanged on every framework publish path, exactly
 as ``correlation_id`` travels — never re-minted mid-run. Read at ingress by the identity
 middleware, which scopes it for handler injection and mints one for envelope-wire
 deliveries that arrive without it (raw-producer entry). Framework-stamped, never
