@@ -4,9 +4,9 @@ Pin 1 (overrides-removal spec §3.2/H2): the handoff-built TailCall (``_dispatch
 a method builder) and the self-retry TailCall (the inline mint in ``run()``'s
 all-resolved-pre-dispatch arm) are TWO DISTINCT code paths — they must stay separate
 (spec D3) because PR-1's Engagement stamp attaches at the handoff mint site. Asserted
-via the observable difference between the products while it exists (``clear_overrides``
-True vs False); rewritten to a structural two-paths assertion when the field is deleted.
-PR-1's engagement seam test supersedes this pin with a stronger data-level assert.
+structurally: the handoff arm routes THROUGH the builder (spied), the self-retry arm
+never touches it, and the two products retarget differently (peer topic vs own return
+inbox). PR-1's engagement seam test supersedes this pin with a stronger data-level assert.
 
 Pin 2 (overrides-removal impl-plan Step 1.2): the publish chokepoint's TailCall retarget
 (§4.2/§15) — byte-for-byte on the published envelope, minus the fields the overrides
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
+from unittest import mock
 
 from calfkit._protocol import HDR_KIND
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
@@ -28,6 +29,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, TailCall, WorkflowState
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
+from calfkit.nodes import Agent
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.peers import Handoff
 from tests._broker_fakes import CaptureBroker
@@ -48,25 +50,26 @@ def _handoff_model() -> FunctionModel:
 
 
 async def test_handoff_and_self_retry_tailcalls_mint_from_distinct_paths() -> None:
-    # Handoff arm: a winning handoff relinquishes to the PEER's input topic.
+    # Handoff arm: a winning handoff relinquishes to the PEER's input topic,
+    # minted THROUGH the _dispatch_handoff builder (spied, pass-through).
     handoff_agent = triage_agent(_handoff_model(), peers=[Handoff("billing")])
     handoff_ctx = ctx_with_view(agents_view({"billing": "Billing."}))
-    handoff_tc = _unwrap(await handoff_agent.run(handoff_ctx))
+    with mock.patch.object(Agent, "_dispatch_handoff", autospec=True, side_effect=Agent._dispatch_handoff) as handoff_spy:
+        handoff_tc = _unwrap(await handoff_agent.run(handoff_ctx))
     assert isinstance(handoff_tc, TailCall)
     assert handoff_tc.target_topic == derive_input_topic("billing")
+    assert handoff_spy.call_count == 1  # minted BY the handoff builder
 
     # Self-retry arm: the same call REJECTED (nobody online) resolves every call
-    # pre-dispatch, so run() tail-calls SELF (its own return inbox) for the retry.
+    # pre-dispatch, so run() tail-calls SELF (its own return inbox) for the retry —
+    # minted INLINE in run(), never through the handoff builder (the arms are not merged).
     retry_agent = triage_agent(_handoff_model(), peers=[Handoff("billing")])
     retry_ctx = ctx_with_view(agents_view({}))
-    retry_tc = _unwrap(await retry_agent.run(retry_ctx))
+    with mock.patch.object(Agent, "_dispatch_handoff", autospec=True, side_effect=Agent._dispatch_handoff) as retry_spy:
+        retry_tc = _unwrap(await retry_agent.run(retry_ctx))
     assert isinstance(retry_tc, TailCall)
     assert retry_tc.target_topic == retry_agent._return_topic
-
-    # The discriminating difference between the two mint sites' products while it
-    # exists — the overrides removal rewrites this to a structural assertion.
-    assert handoff_tc.clear_overrides is True
-    assert retry_tc.clear_overrides is False
+    assert retry_spy.call_count == 0  # the self-retry never touches the handoff path
 
 
 # --------------------------------------------------------------------------- #

@@ -480,15 +480,11 @@ class BaseAgentNodeDef(
     def _dispatch_handoff(self, name: str, ctx: SessionRunContext) -> TailCall[State]:
         """Relinquish control to the ALREADY-validated live peer (handoff spec §5) — a pure TailCall
         builder: arbitration owns the single liveness check (a stale target is a standard §9
-        rejection, never seen here). Both override channels are nulled HERE (single home): the agent
-        reads ``state.overrides``, and ``clear_overrides=True`` nulls the frame copy that
-        ``prepare_context`` re-applies at the peer's start — so the peer, a DIFFERENT agent, uses its
-        own tools/model (C2). The frame retargets preserving frame_id/tag/callback_topic +
+        rejection, never seen here). The frame retargets preserving frame_id/tag/callback_topic +
         caller_node_id (and any caller-stamped CallMarker, untouched — spec §5), so the peer
         inherits A's ORIGINAL caller + full conversation and A drops out."""
         logger.debug("[%s] handoff: relinquishing control to %r node=%s", ctx.correlation_id[:8], name, self.name)
-        ctx.state.overrides = None
-        return TailCall[State](target_topic=derive_input_topic(name), state=ctx.state, clear_overrides=True)
+        return TailCall[State](target_topic=derive_input_topic(name), state=ctx.state)
 
     def _message_agent_target_error(self, name: str, ctx: SessionRunContext) -> str | None:
         """The model-visible reason a ``message_agent`` target is invalid, or ``None`` when it is OK to
@@ -556,17 +552,8 @@ class BaseAgentNodeDef(
         return Call[State](derive_input_topic(args["name"]), seed, tag=tool_call.tool_call_id, isolate_state=True, marker=marker)
 
     def _maybe_resolve_selectors(self, ctx: SessionRunContext, tools_registry: dict[str, ToolBinding]) -> None:
-        """Selector resolution gate: per-run overrides pin the EXACT tool
-        surface for the turn, so selectors are skipped entirely when
-        ``override_agent_tools`` is present (overrides are the exact surface;
-        discovery must not widen a turn the caller scoped away from it)."""
+        """Per-turn selector resolution: runs on every turn the agent has selectors."""
         if not self._tool_selectors:
-            return
-        if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
-            logger.debug(
-                "agent=%s per-run tool overrides active; skipping selector resolution for this turn",
-                self.name,
-            )
             return
         self._resolve_selector_tools(ctx.resources, tools_registry)
 
@@ -630,12 +617,7 @@ class BaseAgentNodeDef(
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State] | Observed[State]:
         tools_registry = dict[str, ToolBinding]()
-        if ctx.state.overrides is not None and ctx.state.overrides.override_agent_tools is not None:
-            # Override tools arrive over the wire as ToolBindings whose validator was stripped at
-            # serialization (validator=None); the dispatch loop validates their args against the
-            # advertised schema instead (the schema fallback), so they are not unvalidated.
-            tools_registry = {binding.name: binding for binding in ctx.state.overrides.override_agent_tools}
-        elif self.tools:
+        if self.tools:
             tools_registry = {binding.name: binding for binding in self.tools}
 
         self._maybe_resolve_selectors(ctx, tools_registry)
@@ -684,7 +666,6 @@ class BaseAgentNodeDef(
         if ctx.state.uncommitted_message is not None:
             ctx.state.commit_message_to_history()
 
-        run_model_settings = cast(ModelSettings | None, ctx.state.overrides.model_settings) if ctx.state.overrides is not None else None
         # Run the model on the agent's POV projection of the canonical history
         # (docs/designs/agent-pov-projection.md §6.1). ``project()`` returns a fresh list;
         # the canonical ``ctx.state.message_history`` is left untouched for storage,
@@ -708,7 +689,6 @@ class BaseAgentNodeDef(
             toolsets=[ExternalToolset(external_defs)],
             deps=ctx.deps,
             deferred_tool_results=tool_results,
-            model_settings=run_model_settings,
         )
         if isinstance(result.output, DeferredToolRequests):
             logger.debug(

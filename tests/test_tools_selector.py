@@ -358,22 +358,6 @@ class TestDiscoverDiagnostics:
         assert "add" in registry  # binds whatever the frozen view holds
         assert any(r.levelname == "WARNING" and "degraded" in r.getMessage() for r in caplog.records)
 
-    def test_per_run_overrides_skip_discover(self) -> None:
-        from types import SimpleNamespace
-
-        from calfkit.models.state import OverridesState
-
-        agent = make_agent(Tools(discover=True))
-        registry: dict[str, ToolBinding] = {}
-        # Overrides pin the exact surface for the turn; discovery must not widen it.
-        ctx = SimpleNamespace(
-            state=SimpleNamespace(overrides=OverridesState(override_agent_tools=[])),
-            resources={CAPABILITY_VIEW_RESOURCE_KEY: _FakeView({"add": make_tool_record("add")})},
-        )
-        agent._maybe_resolve_selectors(ctx, registry)  # type: ignore[arg-type]
-        assert registry == {}  # discover did not run — the view's "add" was not bound
-
-
 class TestToolsExport:
     def test_importable_from_calfkit_and_nodes(self) -> None:
         import calfkit
