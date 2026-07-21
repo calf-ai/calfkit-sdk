@@ -1,13 +1,13 @@
-"""The identity middleware's task arm (task-keying prep spec §2, rulings batch 15).
+"""The identity middleware's task arm (task-keying prep spec §2).
 
 ``ContextInjectionMiddleware.consume_scope`` reads the forwarded ``x-calf-task`` and
 scopes it for handler injection; an ENVELOPE-wire delivery that arrives WITHOUT it
 (raw-producer entry, or header loss upstream) gets a task MINTED at ingress — the
 boundary invariant that keeps raw-producer runs coherently keyed after the cutover.
-Carve-outs (round-2 adversarial MAJOR-1): step-wire deliveries carry no task header in
-this PR by design — absent-header step deliveries neither mint nor log; a PRESENT header
-is scoped regardless of wire kind. The mint log is plain DEBUG, unthrottled (takeover
-ruling 2026-07-20 — prod runs with debug logging off).
+Carve-outs (spec §2): step-wire deliveries carry no task header in this PR by design —
+absent-header step deliveries neither mint nor log; a present non-empty header is
+scoped regardless of wire kind; a BLANK header reads as absent. The mint log is plain
+DEBUG, unthrottled (prod runs with debug logging off).
 
 These tests exercise the REAL consume path (``TestKafkaBroker``). The carve-out probes
 use a NULLABLE ``Context(default=None)`` param so the no-scope arm is observable; the

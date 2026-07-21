@@ -523,7 +523,7 @@ def test_topic_configs_applied_to_data_topics_not_framework_topics(monkeypatch) 
     by_name = {nt.name: nt for nt in created[0].create_calls[0]}
     assert by_name["data.topic"].topic_configs == {"retention.ms": "604800000"}
     # Framework topic must NOT carry the data topic_configs (None -> {} in
-    # aiokafka). cleanup.policy/retention on correlation-keyed reply inboxes is
+    # aiokafka). cleanup.policy/retention on task-keyed reply inboxes is
     # semantically wrong.
     assert by_name["reply.private.return"].topic_configs == {}
 

@@ -469,7 +469,7 @@ class Worker(LifecycleHookMixin):
         re-declared ``framework=True`` via
         :func:`~calfkit.provisioning.framework_topics_for_nodes` (the single
         framework-topic authority) so user ``topic_configs`` (retention / compaction)
-        are never applied to those correlation-keyed / name-scoped inboxes.
+        are never applied to those task-keyed / name-scoped inboxes.
         """
         ensurer = self._client._startup_ensurer
         ensurer.declare(topics_for_nodes(self._registered_nodes))
