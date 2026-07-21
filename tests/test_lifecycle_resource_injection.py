@@ -63,9 +63,9 @@ def test_base_node_def_inherits_lifecycle_hook_mixin() -> None:
 
 
 def test_node_subclasses_inherit_lifecycle_hook_mixin() -> None:
-    from calfkit.nodes import Agent, ConsumerNode, ToolNodeDef
+    from calfkit.nodes import ConsumerNode, StatelessAgent, ToolNodeDef
 
-    assert issubclass(Agent, LifecycleHookMixin)
+    assert issubclass(StatelessAgent, LifecycleHookMixin)
     assert issubclass(ToolNodeDef, LifecycleHookMixin)
     assert issubclass(ConsumerNode, LifecycleHookMixin)
 

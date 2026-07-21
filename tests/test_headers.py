@@ -23,7 +23,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, BaseToolNodeDef, agent_tool
+from calfkit.nodes import BaseToolNodeDef, StatelessAgent, agent_tool
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -86,7 +86,7 @@ async def test_agent_receives_client_emitter(container):
         return None
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "test_emitter_client_hop",
         system_prompt="x",
         subscribe_topics="test_emitter_client_hop.input",
@@ -126,7 +126,7 @@ async def test_tool_receives_agent_id_as_emitter(container):
     _tool_capture.clear()
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "test_emitter_agent_hop",
         system_prompt="x",
         subscribe_topics="test_emitter_agent_hop.input",
@@ -165,7 +165,7 @@ async def test_agent_receives_tool_emitter_on_return(container):
         return None
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "test_emitter_return_hop",
         system_prompt="x",
         subscribe_topics="test_emitter_return_hop.input",
@@ -260,7 +260,7 @@ async def test_parallel_fan_out_carries_emitter_per_call(container):
     _parallel_capture.clear()
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "test_parallel_emitter",
         system_prompt="x",
         subscribe_topics="test_parallel_emitter.input",

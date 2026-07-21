@@ -16,7 +16,7 @@ import pytest
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._fault_tap import fault_tap
 from tests.integration._fault_tools import needs_retry
@@ -32,7 +32,7 @@ async def test_model_retry_round_trips_as_calf_retry_not_a_fault(kafka_bootstrap
     finalizes — and nothing is mirrored on the fault rail."""
     agent_in = f"{topic_namespace}.m1.input"
     agent_pub = f"{topic_namespace}.m1.mirror"
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-m1",
         system_prompt="call needs_retry",
         subscribe_topics=agent_in,

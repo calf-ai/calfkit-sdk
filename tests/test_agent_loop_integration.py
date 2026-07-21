@@ -32,7 +32,7 @@ from calfkit.models import DataPart
 from calfkit.models import TextPart as PayloadTextPart
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.state import State
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 
 models.ALLOW_MODEL_REQUESTS = True
 
@@ -40,7 +40,7 @@ models.ALLOW_MODEL_REQUESTS = True
 def _ctx(state: State) -> SessionRunContext:
     """Build a SessionRunContext with the transport identity stamped.
 
-    Driving ``Agent.run()`` directly (no Kafka handler) skips
+    Driving ``StatelessAgent.run()`` directly (no Kafka handler) skips
     ``prepare_context``, so ``correlation_id`` / ``frame_id`` would be unset and
     the agent's logging/aggregation paths would raise. Stamp deterministic
     values the way the framework handler would.
@@ -81,7 +81,7 @@ def _tool_mode_structured_with_preamble(messages: list[ModelMessage], info: Agen
 async def test_final_output_parts_tool_mode_structured_surfaces_preamble_and_structure():
     """§14.6: tool-mode structured output with a preamble → [TextPart(preamble), DataPart(structured)]."""
     model = FunctionModel(_tool_mode_structured_with_preamble)
-    agent: Agent[FlightPlan] = Agent[FlightPlan](
+    agent: StatelessAgent[FlightPlan] = StatelessAgent[FlightPlan](
         "preamble_agent",
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="preamble_agent.input",
@@ -112,7 +112,7 @@ def _tool_mode_structured_no_preamble(messages: list[ModelMessage], info: AgentI
 async def test_final_output_parts_tool_mode_structured_no_preamble_is_data_only():
     """§7: a structured output with no preamble → [DataPart] only (no empty TextPart)."""
     model = FunctionModel(_tool_mode_structured_no_preamble)
-    agent: Agent[FlightPlan] = Agent[FlightPlan](
+    agent: StatelessAgent[FlightPlan] = StatelessAgent[FlightPlan](
         "no_preamble_agent",
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="no_preamble_agent.input",
@@ -145,7 +145,7 @@ async def test_final_output_parts_prompted_mode_is_data_only_no_duplication():
     from calfkit._vendor.pydantic_ai import PromptedOutput
 
     model = FunctionModel(_prompted_mode_structured)
-    agent: Agent[FlightPlan] = Agent[FlightPlan](
+    agent: StatelessAgent[FlightPlan] = StatelessAgent[FlightPlan](
         "prompted_agent",
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="prompted_agent.input",
@@ -171,7 +171,7 @@ def _str_output(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
 async def test_final_output_parts_str_output_unchanged():
     """A plain str output stays a single TextPart (regression guard for the str branch)."""
     model = FunctionModel(_str_output)
-    agent: Agent[str] = Agent[str](
+    agent: StatelessAgent[str] = StatelessAgent[str](
         "str_agent",
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="str_agent.input",
@@ -203,7 +203,7 @@ async def test_model_input_is_projected_pov():
         return ModelResponse(parts=[TextPart(content="viewer reply")])
 
     model = FunctionModel(_capture)
-    agent: Agent[str] = Agent[str](
+    agent: StatelessAgent[str] = StatelessAgent[str](
         "viewer",
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="viewer.input",
@@ -273,7 +273,7 @@ async def test_deferred_tool_reentry_keeps_self_tool_call_ids_no_user_error():
 
     tool_node = agent_tool(_tool)
     model = FunctionModel(_after_tool)
-    agent: Agent[str] = Agent[str](
+    agent: StatelessAgent[str] = StatelessAgent[str](
         "viewer",
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="viewer.input",
@@ -316,7 +316,7 @@ async def test_deferred_tool_reentry_keeps_self_tool_call_ids_no_user_error():
 # --------------------------------------------------------------------------- #
 
 
-def _make_chat_agent(node_id: str, reply: str) -> tuple[Agent, dict[str, list[ModelMessage]]]:
+def _make_chat_agent(node_id: str, reply: str) -> tuple[StatelessAgent, dict[str, list[ModelMessage]]]:
     """An agent whose FunctionModel records the POV history it was run on."""
     pov: dict[str, list[ModelMessage]] = {}
 
@@ -324,7 +324,7 @@ def _make_chat_agent(node_id: str, reply: str) -> tuple[Agent, dict[str, list[Mo
         pov["history"] = list(messages)
         return ModelResponse(parts=[TextPart(content=reply)])
 
-    agent: Agent[str] = Agent[str](
+    agent: StatelessAgent[str] = StatelessAgent[str](
         node_id,
         system_prompt="You are a helpful AI assistant.",
         subscribe_topics="channel.discord.123",

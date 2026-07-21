@@ -1,4 +1,4 @@
-"""Real-broker (``kafka`` lane) lifecycle test: resources reach the Agent ``run``
+"""Real-broker (``kafka`` lane) lifecycle test: resources reach the StatelessAgent ``run``
 and an ``agent_tool``.
 
 This moved out of the offline ``tests/test_lifecycle_e2e.py`` because hosting a
@@ -28,7 +28,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.session_context import SessionRunContext
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.worker import Worker
 
 # Every test here needs a real broker. FunctionModel is offline, but pydantic-ai still
@@ -50,7 +50,7 @@ def _tool_then_text(captured: dict[str, Any]) -> FunctionModel:
 
 
 async def test_resources_reach_agent_run_and_agent_tool(kafka_bootstrap: str) -> None:
-    """The Agent's ``run`` reads ``ctx.resources`` (via prepare_context) and an
+    """The StatelessAgent's ``run`` reads ``ctx.resources`` (via prepare_context) and an
     ``agent_tool`` reads ``ctx.resources`` (via the ToolContext) — two of the
     four surfaces, exercised through a real agent->tool round trip.
 
@@ -72,7 +72,7 @@ async def test_resources_reach_agent_run_and_agent_tool(kafka_bootstrap: str) ->
     # surface (prepare_context stamping) on the same run.
     agent_saw: dict[str, Any] = {}
 
-    class _ResAgent(Agent[str]):
+    class _ResAgent(StatelessAgent[str]):
         async def run(self, ctx: SessionRunContext) -> Any:
             agent_saw["db"] = ctx.resources.get("db")
             return await super().run(ctx)
@@ -103,5 +103,5 @@ async def test_resources_reach_agent_run_and_agent_tool(kafka_bootstrap: str) ->
     assert result.output == "done"
     # agent_tool surface: the tool read its node's resources.
     assert tool_saw["db"] is tool_sentinel
-    # Agent run surface: the agent read its own node's resources.
+    # StatelessAgent run surface: the agent read its own node's resources.
     assert agent_saw["db"] is agent_sentinel

@@ -1,6 +1,6 @@
 """Regression tests for issue #141: tool returns must not leak to co-tenant nodes.
 
-Two ``Agent`` nodes that share a Kafka subscribe topic (the "ambient channel"
+Two ``StatelessAgent`` nodes that share a Kafka subscribe topic (the "ambient channel"
 multi-agent pattern) must each receive only their *own* tool return envelope
 and only their *own* ``TailCall`` self-retry. Before the fix,
 ``BaseNodeDef._publish_action`` wrote ``self.subscribe_topics[0]`` into the
@@ -46,7 +46,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import State
-from calfkit.nodes import Agent, ConsumerNode, ToolNodeDef, agent_tool, consumer
+from calfkit.nodes import ConsumerNode, StatelessAgent, ToolNodeDef, agent_tool, consumer
 from calfkit.nodes._steps import DeniedCall, Observed
 from calfkit.worker import Worker
 from tests.providers import get_users_name, prepare_worker
@@ -101,7 +101,7 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
     shared_tool = agent_tool(get_users_name)
 
     worker = container.get(Worker)
-    alpha = Agent(
+    alpha = StatelessAgent(
         "alpha_agent",
         system_prompt="x",
         subscribe_topics=SHARED_INPUT,
@@ -109,7 +109,7 @@ async def test_tool_return_does_not_leak_between_co_tenant_agents(container):
         model_client=model,
         tools=[shared_tool],
     )
-    bravo = Agent(
+    bravo = StatelessAgent(
         "bravo_agent",
         system_prompt="x",
         subscribe_topics=SHARED_INPUT,
@@ -183,7 +183,7 @@ async def test_single_call_writes_private_return_topic_as_callback(container):
         return "ok"
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "single_call_callback_agent",
         system_prompt="x",
         subscribe_topics="single_call_callback.input",
@@ -239,7 +239,7 @@ async def test_parallel_call_writes_private_return_topic_as_callback(container):
         return "c"
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "parallel_callback_agent",
         system_prompt="x",
         subscribe_topics="parallel_callback.input",
@@ -296,7 +296,7 @@ async def test_tailcall_self_retry_targets_private_return_topic():
     toolset, so without mocking we can't construct the registry/toolset
     mismatch this branch defends against.
     """
-    agent = Agent(
+    agent = StatelessAgent(
         "tailcall_target_agent",
         system_prompt="x",
         subscribe_topics="tailcall_target.input",
@@ -397,7 +397,7 @@ def test_worker_register_handlers_dedupes_explicit_return_topic(container):
     # ``subscribe_topics`` (e.g. because they wired things up before this fix
     # existed and shipped a forward-compatible workaround).
     tool_node = agent_tool(get_users_name)
-    agent = Agent(
+    agent = StatelessAgent(
         "dedup_agent",
         system_prompt="x",
         subscribe_topics=["dedup_agent.private.return", "dedup_chan.in"],
@@ -470,7 +470,7 @@ def test_empty_subscribe_topics_raises_value_error(node_factory):
     moved the guard back into ``BaseNodeDef.__init__`` would silently re-open
     the ``ToolNodeDef`` bypass.
 
-    ``Agent`` is intentionally **exempt** — it is always reachable via its
+    ``StatelessAgent`` is intentionally **exempt** — it is always reachable via its
     name-derived private input topic (ADR-0017), so an empty (or omitted)
     ``subscribe_topics`` is valid. See
     ``test_agent_allows_omitted_subscribe_topics`` /
@@ -481,15 +481,15 @@ def test_empty_subscribe_topics_raises_value_error(node_factory):
 
 
 def test_agent_allows_omitted_subscribe_topics():
-    """An ``Agent`` is reachable via its name-derived private input topic
+    """An ``StatelessAgent`` is reachable via its name-derived private input topic
     (ADR-0017), so ``subscribe_topics`` is optional: omitting it constructs a
     valid agent whose public inbox list is empty."""
-    agent = Agent("bare_agent", model_client=_call_one_tool_then_finalize())
+    agent = StatelessAgent("bare_agent", model_client=_call_one_tool_then_finalize())
     assert agent.subscribe_topics == []
 
 
 def test_agent_allows_explicit_empty_subscribe_topics():
     """Passing an explicit empty list is equivalent to omitting it — the agent
     carries no public inbox and relies on its private name-derived inbox."""
-    agent = Agent("bare_agent", subscribe_topics=[], model_client=_call_one_tool_then_finalize())
+    agent = StatelessAgent("bare_agent", subscribe_topics=[], model_client=_call_one_tool_then_finalize())
     assert agent.subscribe_topics == []

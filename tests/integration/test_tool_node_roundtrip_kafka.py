@@ -39,7 +39,7 @@ from aiokafka.admin import AIOKafkaAdminClient
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.worker import Worker
 from tests.integration._roundtrip_helpers import (
     FINAL_OUTPUT,
@@ -122,7 +122,7 @@ async def test_single_tool_node_roundtrips_with_args(kafka_bootstrap: str, topic
     tool node and the computed result returns over the wire."""
     agent_id = f"{topic_namespace}-tn-add"
     agent_in = f"{topic_namespace}.tn-add.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add two numbers",
         subscribe_topics=agent_in,
@@ -155,7 +155,7 @@ async def test_scalar_arg_and_return_types_round_trip(
     """str and float args/returns survive the broker round-trip with exact value."""
     agent_id = f"{topic_namespace}-tn-{tool_name}"
     agent_in = f"{topic_namespace}.tn-{tool_name}.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="call a tool",
         subscribe_topics=agent_in,
@@ -179,7 +179,7 @@ async def test_structured_list_arg_and_dict_return_round_trip(kafka_bootstrap: s
     """A list argument in and a dict return out both survive serialization."""
     agent_id = f"{topic_namespace}-tn-stats"
     agent_in = f"{topic_namespace}.tn-stats.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="summarize numbers",
         subscribe_topics=agent_in,
@@ -203,7 +203,7 @@ async def test_no_arg_tool_node_roundtrips(kafka_bootstrap: str, topic_namespace
     """The no-argument dispatch path: a constant-returning tool round-trips."""
     agent_id = f"{topic_namespace}-tn-motd"
     agent_in = f"{topic_namespace}.tn-motd.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="get the motd",
         subscribe_topics=agent_in,
@@ -231,7 +231,7 @@ async def test_concurrent_tool_nodes_roundtrip_via_fanout_with_args(kafka_bootst
     both results round-trip (the existing fan-out test uses only no-arg tools)."""
     agent_id = f"{topic_namespace}-tn-fanout"
     agent_in = f"{topic_namespace}.tn-fanout.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add and multiply",
         subscribe_topics=agent_in,
@@ -268,7 +268,7 @@ async def test_duplicate_tool_node_concurrent_slots_route_by_call_id(kafka_boots
     so both results return to their own slot."""
     agent_id = f"{topic_namespace}-tn-dup"
     agent_in = f"{topic_namespace}.tn-dup.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add two pairs",
         subscribe_topics=agent_in,
@@ -300,7 +300,7 @@ async def test_tool_nodes_in_separate_workers_route_correctly(kafka_bootstrap: s
     call to the correct node's topic/worker."""
     agent_id = f"{topic_namespace}-tn-multiworker"
     agent_in = f"{topic_namespace}.tn-multiworker.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add and multiply",
         subscribe_topics=agent_in,
@@ -338,14 +338,14 @@ async def test_two_agents_share_one_tool_node_replies_route_per_caller(kafka_boo
     a1_in = f"{topic_namespace}.tn-agent-1.input"
     a2_id = f"{topic_namespace}-tn-agent-2"
     a2_in = f"{topic_namespace}.tn-agent-2.input"
-    agent1 = Agent(
+    agent1 = StatelessAgent(
         a1_id,
         system_prompt="add",
         subscribe_topics=a1_in,
         model_client=scripted_model([ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="c1")]),
         tools=[add],
     )
-    agent2 = Agent(
+    agent2 = StatelessAgent(
         a2_id,
         system_prompt="add",
         subscribe_topics=a2_in,
@@ -390,7 +390,7 @@ async def test_multi_turn_tool_use_feeds_result_into_next_call(kafka_bootstrap: 
             return [ToolCallPart("mul", {"a": returns["add"], "b": 4}, tool_call_id="c-mul")]
         return [ToolCallPart("add", {"a": 2, "b": 3}, tool_call_id="c-add")]
 
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add then multiply the result",
         subscribe_topics=agent_in,
@@ -421,7 +421,7 @@ async def test_invalid_tool_node_args_rejected_before_dispatch(kafka_bootstrap: 
     validation error (not a result), and the turn finalizes."""
     agent_id = f"{topic_namespace}-tn-badargs"
     agent_in = f"{topic_namespace}.tn-badargs.input"
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="add with bad args",
         subscribe_topics=agent_in,

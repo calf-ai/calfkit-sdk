@@ -26,7 +26,7 @@ from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ToolCallPart
 from calfkit.client import Client
 from calfkit.models import ReturnCall, SessionRunContext, State
-from calfkit.nodes import Agent, NodeDef
+from calfkit.nodes import NodeDef, StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._fault_tap import fault_tap
 from tests.integration._fault_tools import oversized_fault
@@ -113,7 +113,7 @@ async def test_oversized_fault_strips_to_minimal_and_still_arrives(kafka_bootstr
     # the minimal report fits. (The agent's own return topic + publish mirror stay default.)
     await ensure_topic(kafka_bootstrap, reply_topic, config={"max.message.bytes": "4096"})
 
-    agent = Agent(
+    agent = StatelessAgent(
         f"{topic_namespace}-o1",
         system_prompt="call oversized_fault",
         subscribe_topics=agent_in,

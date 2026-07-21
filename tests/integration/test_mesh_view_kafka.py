@@ -1,6 +1,6 @@
 """Real-broker (``kafka`` lane) end-to-end ``client.mesh`` reads.
 
-A live worker advertises an ``Agent`` (its ``AgentCard`` on ``calf.agents``) and a function
+A live worker advertises an ``StatelessAgent`` (its ``AgentCard`` on ``calf.agents``) and a function
 tool node (its ``CapabilityRecord`` on ``calf.capabilities``); an MCP toolbox advertises a
 toolbox ``CapabilityRecord`` via the worker-owned publisher (a fake MCP session — publishing
 only needs ``list_tools``; the full worker lifecycle would connect to a real MCP server). A
@@ -34,7 +34,7 @@ from calfkit.controlplane.publisher import control_plane_writer_key
 from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
 from calfkit.models.capability import CAPABILITY_TOPIC
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.tuning import KTableReaderTuning
@@ -93,11 +93,11 @@ async def _wait_mesh(client: Client, predicate: Callable[[Mapping[str, Any], Map
 
 
 async def test_mesh_reads_online_agents_and_tool_nodes(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """A worker hosting an Agent + a function tool node advertises both; client.mesh projects the
+    """A worker hosting an StatelessAgent + a function tool node advertises both; client.mesh projects the
     agent to an AgentInfo and the tool node to a ToolNodeInfo, and repeated reads reuse one view."""
     agent_name = f"{topic_namespace}-billing"
     tool_name = f"{topic_namespace}-add"
-    agent = Agent(agent_name, subscribe_topics=f"{agent_name}.in", model_client=FakeModel(), description="Handles invoices")
+    agent = StatelessAgent(agent_name, subscribe_topics=f"{agent_name}.in", model_client=FakeModel(), description="Handles invoices")
     tool = agent_tool(_add, name=tool_name)
     worker = Worker(
         Client.connect(kafka_bootstrap),

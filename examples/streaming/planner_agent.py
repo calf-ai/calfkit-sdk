@@ -11,11 +11,11 @@ Note there is no ``publish_topic`` here: step events flow to the *caller's* inbo
 
 from trip_tools import find_activities, get_weather
 
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.providers import OpenAIResponsesModelClient
 
 # Run it with:  ck run planner_agent:agent
-agent = Agent(
+agent = StatelessAgent(
     "trip_planner",
     system_prompt=(
         "You are a trip planner. When asked about a destination, first check the weather, "

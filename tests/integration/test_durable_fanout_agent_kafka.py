@@ -16,7 +16,7 @@ that only exists under a real lifecycle against a live broker:
   so the agent resumes to a final result.
 
 Crucially this test injects **no** store: the agent is a plain
-:class:`~calfkit.nodes.Agent`, which auto-registers its ``@resource`` in
+:class:`~calfkit.nodes.StatelessAgent`, which auto-registers its ``@resource`` in
 ``__init__``; the worker's resource phase opens the real ktables-backed store
 before serving. An offline ``FunctionModel`` removes any LLM dependency — only
 the broker is real.
@@ -43,7 +43,7 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.worker import Worker
 
@@ -112,7 +112,7 @@ async def test_fanout_agent_opens_real_store_and_resumes_over_the_wire(kafka_boo
     agent_id = f"{topic_namespace}-fanout-agent"
     agent_in = f"{topic_namespace}.fanout-agent.input"
 
-    agent = Agent(
+    agent = StatelessAgent(
         agent_id,
         system_prompt="x",
         subscribe_topics=agent_in,
@@ -226,10 +226,10 @@ def _calls_two_gated_then_done(messages: list[ModelMessage], info: AgentInfo) ->
     return ModelResponse(parts=[ToolCallPart("gated_tool_a"), ToolCallPart("gated_tool_b")])
 
 
-def _make_fanout_agent(node_id: str, agent_in: str) -> Agent:
+def _make_fanout_agent(node_id: str, agent_in: str) -> StatelessAgent:
     """A fresh fan-out agent instance bound to a shared ``node_id`` (so two
     instances in two workers share one consumer group + one durable store)."""
-    return Agent(
+    return StatelessAgent(
         node_id,
         system_prompt="x",
         subscribe_topics=agent_in,

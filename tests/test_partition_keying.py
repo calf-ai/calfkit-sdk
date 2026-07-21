@@ -36,7 +36,7 @@ from calfkit.models import (
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.session_context import Stack
 from calfkit.models.state import State
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes._steps import HopStepLedger
 from calfkit.nodes.node import NodeDef
@@ -174,7 +174,7 @@ async def test_fanout_sibling_publishes_carry_the_partition_key() -> None:
     def _model(_messages: object, _info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("ok")])
 
-    agent = Agent(name="a", subscribe_topics=["a.in"], model_client=FunctionModel(_model))
+    agent = StatelessAgent(name="a", subscribe_topics=["a.in"], model_client=FunctionModel(_model))
     ctx = SessionRunContext(state=State(), deps={})
     ctx._resources = {FANOUT_STORE_KEY: FakeFanoutBatchStore()}
     ctx._correlation_id = _CORR

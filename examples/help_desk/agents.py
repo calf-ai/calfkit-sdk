@@ -9,7 +9,7 @@ no change here.
 
 from tools import account_status, file_reimbursement, pto_balance
 
-from calfkit import Agent, Handoff, Messaging, OpenAIResponsesModelClient
+from calfkit import Handoff, Messaging, OpenAIResponsesModelClient, StatelessAgent
 
 MODEL = "gpt-5.4-nano"
 
@@ -18,7 +18,7 @@ def _model() -> OpenAIResponsesModelClient:
     return OpenAIResponsesModelClient(model_name=MODEL)
 
 
-help_desk = Agent(
+help_desk = StatelessAgent(
     "help_desk",
     description="Front desk that routes employee questions to the right expert team.",
     system_prompt=(
@@ -34,7 +34,7 @@ help_desk = Agent(
     peers=[Messaging(discover=True), Handoff(discover=True)],
 )
 
-hr = Agent(
+hr = StatelessAgent(
     "hr",
     description="HR: paid time off, benefits, and people policies.",
     system_prompt=(
@@ -45,7 +45,7 @@ hr = Agent(
     tools=[pto_balance],
 )
 
-it_support = Agent(
+it_support = StatelessAgent(
     "it_support",
     description="IT support: logins, access, and devices.",
     system_prompt=(
@@ -56,7 +56,7 @@ it_support = Agent(
     tools=[account_status],
 )
 
-finance = Agent(
+finance = StatelessAgent(
     "finance",
     description="Finance: reimbursements, expenses, and budgets.",
     system_prompt=(

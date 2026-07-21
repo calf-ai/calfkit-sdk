@@ -6,7 +6,7 @@ hardcoding their addresses. It assumes you already build and deploy agents with 
 `Worker` (see [Worker lifecycle & embedding](worker-lifecycle.md)).
 
 An agent reaches a **peer** — another independently deployed, running agent — one
-of two ways, both declared in `Agent(peers=[...])`:
+of two ways, both declared in `StatelessAgent(peers=[...])`:
 
 - **Message** a peer to *consult* it: you ask, it answers, and you keep control.
 - **Hand off** to a peer to *transfer* control: it takes over the conversation
@@ -21,9 +21,9 @@ way, see the [agent-mesh design spec](designs/agent-mesh-spec.md).)
 Give the agent a `Messaging` handle naming the peers it may consult:
 
 ```python
-from calfkit import Agent, Messaging
+from calfkit import StatelessAgent, Messaging
 
-triage = Agent(
+triage = StatelessAgent(
     "triage",
     system_prompt="Route customer requests. Ask billing about balances.",
     subscribe_topics="triage.input",
@@ -51,9 +51,9 @@ is all the wiring there is.
 Give the agent a `Handoff` handle naming the peers it may transfer to:
 
 ```python
-from calfkit import Agent, Handoff
+from calfkit import StatelessAgent, Handoff
 
-triage = Agent(
+triage = StatelessAgent(
     "triage",
     system_prompt="Route customer requests. Hand off refunds to the refunds agent.",
     subscribe_topics="triage.input",
@@ -100,7 +100,7 @@ and an optional one-line blurb. Give yours a `description` so peers — and thei
 models — know what it does:
 
 ```python
-billing = Agent(
+billing = StatelessAgent(
     "billing",
     description="Answers account balance and billing questions.",
     system_prompt="You are the billing agent.",

@@ -18,7 +18,7 @@ from calfkit.models.error_report import ErrorReport
 from calfkit.models.payload import RETRY_MARKER, DataPart, TextPart, retry_text_part
 from calfkit.models.seam_context import SeamContext
 from calfkit.models.state import State
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes.base import BaseNodeDef, _SlotFailed, _SlotResolved
 
 
@@ -41,11 +41,11 @@ def _node() -> BaseNodeDef:
     return BaseNodeDef(node_id="n", subscribe_topics=["in"])
 
 
-def _agent() -> Agent[Any]:
+def _agent() -> StatelessAgent[Any]:
     def _fn(messages: list[Any], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ModelTextPart("done")])
 
-    return Agent(name="a", subscribe_topics="in", model_client=FunctionModel(_fn))
+    return StatelessAgent(name="a", subscribe_topics="in", model_client=FunctionModel(_fn))
 
 
 class TestBaseResolveSlot:

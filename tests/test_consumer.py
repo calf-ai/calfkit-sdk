@@ -39,7 +39,7 @@ from calfkit.models.envelope import Envelope
 from calfkit.models.payload import DataPart, TextPart
 from calfkit.models.session_context import CallFrame, CallFrameStack, WorkflowState
 from calfkit.models.state import State
-from calfkit.nodes import Agent, ConsumerNode, consumer
+from calfkit.nodes import ConsumerNode, StatelessAgent, consumer
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
 
@@ -73,9 +73,9 @@ def _structured_report_model() -> FunctionModel:
     return FunctionModel(_fn)
 
 
-def _wire_agent_with_consumer(container, consumer_node: ConsumerNode) -> Agent:
+def _wire_agent_with_consumer(container, consumer_node: ConsumerNode) -> StatelessAgent:
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "consumer_test_agent",
         system_prompt="x",
         subscribe_topics="consumer_test_agent.input",
@@ -268,7 +268,7 @@ async def test_consumer_deserializes_output_type_dataclass(container):
         received.append(ctx)
 
     worker = container.get(Worker)
-    structured_agent = Agent[Report](
+    structured_agent = StatelessAgent[Report](
         "structured_agent",
         system_prompt="x",
         subscribe_topics="structured_agent.input",
@@ -749,7 +749,7 @@ def test_strict_mode_raises_on_empty_reply():
 
 async def test_client_execute_result_carries_state(container):
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "state_vis_agent",
         system_prompt="x",
         subscribe_topics="state_vis_agent.input",

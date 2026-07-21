@@ -1,4 +1,4 @@
-"""The ``Agent`` constructor takes its identity as ``name`` (not ``node_id``).
+"""The ``StatelessAgent`` constructor takes its identity as ``name`` (not ``node_id``).
 
 This mirrors the MCP node types' precedent (``MCPToolboxNode(name=...)``, PRs #254/#255):
 the ctor surface names identity ``name`` and maps it onto the base node's ``node_id``
@@ -15,7 +15,7 @@ import pytest
 from calfkit._vendor.pydantic_ai.messages import ModelResponse
 from calfkit._vendor.pydantic_ai.messages import TextPart as ModelTextPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 
 
 def _model() -> FunctionModel:
@@ -26,16 +26,16 @@ def _model() -> FunctionModel:
 
 
 def test_constructs_with_name_keyword() -> None:
-    agent = Agent(name="researcher", subscribe_topics="in", model_client=_model())
+    agent = StatelessAgent(name="researcher", subscribe_topics="in", model_client=_model())
     assert agent.name == "researcher"
     assert agent.node_id == "researcher"
 
 
 def test_constructs_with_positional_identity() -> None:
-    agent = Agent("researcher", subscribe_topics="in", model_client=_model())
+    agent = StatelessAgent("researcher", subscribe_topics="in", model_client=_model())
     assert agent.name == "researcher"
 
 
 def test_rejects_legacy_node_id_keyword() -> None:
     with pytest.raises(TypeError):
-        Agent(node_id="researcher", subscribe_topics="in", model_client=_model())
+        StatelessAgent(node_id="researcher", subscribe_topics="in", model_client=_model())

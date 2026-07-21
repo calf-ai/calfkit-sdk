@@ -24,7 +24,7 @@ from calfkit._vendor.pydantic_ai.messages import TextPart as VTextPart
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, WorkflowState
 from calfkit.models.step import StepMessage
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, ToolNodeDef, agent_tool
+from calfkit.nodes import StatelessAgent, ToolNodeDef, agent_tool
 from calfkit.nodes._projection import step_preamble
 from calfkit.nodes._steps import DeniedCall, Observed
 from calfkit.peers import Messaging
@@ -74,9 +74,9 @@ def _denied(observed: object) -> list[DeniedCall]:
     return [f for f in observed.facts if isinstance(f, DeniedCall)]
 
 
-def _agent_emitting(calls: list[ToolCallPart], *, name: str = "a", topics: str = "a.in", **kw: object) -> Agent:
+def _agent_emitting(calls: list[ToolCallPart], *, name: str = "a", topics: str = "a.in", **kw: object) -> StatelessAgent:
     """An agent whose model deterministically emits ``calls`` — for driving the dispatch loop's arms."""
-    return Agent(name, system_prompt="x", subscribe_topics=topics, model_client=_model_emits_tool_calls(calls), **kw)
+    return StatelessAgent(name, system_prompt="x", subscribe_topics=topics, model_client=_model_emits_tool_calls(calls), **kw)
 
 
 class TestRejectionArmsDeclareDeniedFacts:

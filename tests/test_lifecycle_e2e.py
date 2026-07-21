@@ -10,7 +10,7 @@ calls out:
   handler as ``ctx.resources[...]`` and is closed (key popped from the bag) on
   stop;
 * ``resources`` reach the custom ``BaseNodeDef`` ``ctx.resources`` and the
-  consumer ``result.resources`` surfaces here; the Agent ``run`` and
+  consumer ``result.resources`` surfaces here; the StatelessAgent ``run`` and
   ``agent_tool`` surfaces need a real broker (the always-on control-plane
   writer), so they live in ``tests/integration/test_lifecycle_resources_kafka.py``;
 * when an owner mixes ``@resource`` and resource-phase callbacks on the same
@@ -179,7 +179,7 @@ async def test_callback_resource_reaches_handler_then_closes_on_stop() -> None:
 
 # ---------------------------------------------------------------------------
 # resources reach the in-process surfaces (custom BaseNodeDef + consumer); the
-# Agent-run + agent_tool surfaces need a real broker -> the kafka lane
+# StatelessAgent-run + agent_tool surfaces need a real broker -> the kafka lane
 # ---------------------------------------------------------------------------
 
 

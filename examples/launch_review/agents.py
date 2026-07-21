@@ -7,7 +7,7 @@ fan-out-and-synthesize counterpart to the newsroom's consult-then-handoff.
 
 from tools import build_status, compliance_status, security_scan
 
-from calfkit import Agent, Messaging, OpenAIResponsesModelClient
+from calfkit import Messaging, OpenAIResponsesModelClient, StatelessAgent
 
 MODEL = "gpt-5.4-nano"
 
@@ -16,7 +16,7 @@ def _model() -> OpenAIResponsesModelClient:
     return OpenAIResponsesModelClient(model_name=MODEL)
 
 
-release_manager = Agent(
+release_manager = StatelessAgent(
     "release_manager",
     description="Release manager who runs launch-readiness reviews.",
     system_prompt=(
@@ -29,7 +29,7 @@ release_manager = Agent(
     peers=[Messaging("engineering", "security", "legal")],
 )
 
-engineering = Agent(
+engineering = StatelessAgent(
     "engineering",
     description="Engineering; reports build and test readiness.",
     system_prompt="You are the engineering team. Report build and test readiness concisely. Use your build_status tool.",
@@ -37,7 +37,7 @@ engineering = Agent(
     tools=[build_status],
 )
 
-security = Agent(
+security = StatelessAgent(
     "security",
     description="Security; reports scan results and risk.",
     system_prompt="You are the security team. Report scan results and any risk concisely. Use your security_scan tool.",
@@ -45,7 +45,7 @@ security = Agent(
     tools=[security_scan],
 )
 
-legal = Agent(
+legal = StatelessAgent(
     "legal",
     description="Legal; reports compliance and launch clearance.",
     system_prompt="You are the legal team. Report compliance and launch clearance concisely. Use your compliance_status tool.",

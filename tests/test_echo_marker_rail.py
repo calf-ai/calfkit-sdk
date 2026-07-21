@@ -27,7 +27,7 @@ from calfkit.models.seam_context import CalleeResult, SeamContext
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes._steps import Observed
 from calfkit.nodes.base import BaseNodeDef
@@ -289,7 +289,7 @@ class TestMarkerThreading:
         async def _b(body: Envelope) -> None:
             captured["s.b"] = body
 
-        agent = Agent(name="fa", subscribe_topics=["fa.in"], model_client=TestModel())
+        agent = StatelessAgent(name="fa", subscribe_topics=["fa.in"], model_client=TestModel())
         ctx = SessionRunContext(state=State(), deps={})
         ctx._resources = {FANOUT_STORE_KEY: FakeFanoutBatchStore()}
         ctx._correlation_id = "cid"
@@ -333,7 +333,7 @@ class TestMessageAgentProducer:
     def test_message_agent_call_stamps_the_marker(self) -> None:
         # ``_message_agent_call`` stamps the full call identity (name, id, args) onto ``Call.marker``
         # (was the interim ``Call.tool_name``); unchanged by universal stamping (step-emission spec §3.2).
-        agent = Agent("caller", subscribe_topics="caller.in", model_client=TestModel(), peers=[Messaging("billing")])
+        agent = StatelessAgent("caller", subscribe_topics="caller.in", model_client=TestModel(), peers=[Messaging("billing")])
         call = agent._message_agent_call(ToolCallPart("message_agent", {"name": "billing", "message": "hi"}, tool_call_id="m1"))
         assert call.marker == ToolCallMarker(tool_name="message_agent", tool_call_id="m1", args={"name": "billing", "message": "hi"})
         assert call.isolate_state is True
@@ -360,7 +360,9 @@ class TestUniversalStamping:
     async def test_single_dispatch_arm_stamps_the_marker(self) -> None:
         # args authored as a JSON STRING — the marker must carry the PARSED dict.
         call = ToolCallPart(tool_name="search", args='{"q": "hello"}', tool_call_id="c-single")
-        agent = Agent("stamp_single", subscribe_topics="stamp_single.in", model_client=_model_emits_tool_calls([call]), tools=[_search_binding()])
+        agent = StatelessAgent(
+            "stamp_single", subscribe_topics="stamp_single.in", model_client=_model_emits_tool_calls([call]), tools=[_search_binding()]
+        )
         observed = await agent.run(_make_ctx(State()))
         # Fact-capable dispatch exits return Observed UNCONDITIONALLY — an empty facts tuple is the
         # permitted shape for this preamble-less turn (step-emission spec §3.1b).
@@ -374,7 +376,9 @@ class TestUniversalStamping:
             ToolCallPart(tool_name="search", args={"q": "a"}, tool_call_id="c-a"),
             ToolCallPart(tool_name="search", args='{"q": "b"}', tool_call_id="c-b"),
         ]
-        agent = Agent("stamp_fanout", subscribe_topics="stamp_fanout.in", model_client=_model_emits_tool_calls(calls), tools=[_search_binding()])
+        agent = StatelessAgent(
+            "stamp_fanout", subscribe_topics="stamp_fanout.in", model_client=_model_emits_tool_calls(calls), tools=[_search_binding()]
+        )
         result = _unwrap(await agent.run(_make_ctx(State())))
         assert isinstance(result, list) and len(result) == 2
         markers = {c.marker.tool_call_id: c.marker for c in result if c.marker is not None}

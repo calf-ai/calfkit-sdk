@@ -1021,3 +1021,11 @@ class BaseAgentNodeDef(
 
 
 Agent = BaseAgentNodeDef
+
+StatelessAgent = BaseAgentNodeDef
+"""The no-durable-memory agent — today's thick-wire behavior, named for what it is.
+
+In this PR an alias of :class:`Agent` (the SAME class object — behavior-preserving by
+construction; task-keying prep spec §4 arm (a)). The durable-store PR flips ``Agent``
+into the durable actor (per-thread memory via a ``thread_store``); usages that need no
+memory say ``StatelessAgent`` so that flip changes nothing for them."""

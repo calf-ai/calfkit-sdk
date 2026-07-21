@@ -5,7 +5,7 @@ A request above an approver's limit is HANDED OFF up the chain, and whoever clea
 answers the employee directly — a multi-hop handoff relay decided one tier at a time.
 """
 
-from calfkit import Agent, Handoff, OpenAIResponsesModelClient
+from calfkit import Handoff, OpenAIResponsesModelClient, StatelessAgent
 
 MODEL = "gpt-5.4-nano"
 
@@ -14,7 +14,7 @@ def _model() -> OpenAIResponsesModelClient:
     return OpenAIResponsesModelClient(model_name=MODEL)
 
 
-team_lead = Agent(
+team_lead = StatelessAgent(
     "team_lead",
     description="Team lead; approves expenses up to $1,000.",
     system_prompt=(
@@ -26,7 +26,7 @@ team_lead = Agent(
     peers=[Handoff("director")],
 )
 
-director = Agent(
+director = StatelessAgent(
     "director",
     description="Director; approves expenses up to $10,000.",
     system_prompt=(
@@ -38,7 +38,7 @@ director = Agent(
     peers=[Handoff("vp")],
 )
 
-vp = Agent(
+vp = StatelessAgent(
     "vp",
     description="VP; final approver for any expense amount.",
     system_prompt=("You are a VP, the final approver. Approve or decline the expense with a brief reason, and state the amount."),

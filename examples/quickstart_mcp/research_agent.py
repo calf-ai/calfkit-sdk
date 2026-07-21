@@ -10,10 +10,10 @@ Prerequisites: a running broker, and ``export OPENAI_API_KEY=sk-...``.
 Run it with:  ck run research_agent:agent
 """
 
-from calfkit.nodes import Agent, Toolbox, Toolboxes
+from calfkit.nodes import StatelessAgent, Toolbox, Toolboxes
 from calfkit.providers import OpenAIResponsesModelClient
 
-agent = Agent(
+agent = StatelessAgent(
     "researcher",
     system_prompt=("You answer questions by fetching and reading web pages with your fetch tool. Always cite the URL you read."),
     subscribe_topics="researcher.input",

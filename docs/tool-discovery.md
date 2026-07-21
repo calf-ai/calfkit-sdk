@@ -34,9 +34,9 @@ node's identity — both the name the LLM calls and the name an agent references
 ## Reference it by name
 
 ```python
-from calfkit import Agent, Tools
+from calfkit import StatelessAgent, Tools
 
-agent = Agent(
+agent = StatelessAgent(
     "researcher",
     subscribe_topics="researcher.input",
     model_client=model,
@@ -67,9 +67,9 @@ view at the start of each turn, so a node deployed later is picked up automatica
 no names to maintain:
 
 ```python
-from calfkit import Agent, Tools
+from calfkit import StatelessAgent, Tools
 
-agent = Agent(
+agent = StatelessAgent(
     "researcher",
     subscribe_topics="researcher.input",
     model_client=model,

@@ -338,7 +338,7 @@ class TestNodeRewire:
 class TestWorkerTeachingGate:
     def test_add_nodes_rejects_toolbox_entry_with_teaching_message(self) -> None:
         # The reference-detection gate widens to Toolbox so the alias-shaped mistake
-        # keeps its "belongs in Agent(tools=[...])" pointer (spec D3 worker parity).
+        # keeps its "belongs in StatelessAgent(tools=[...])" pointer (spec D3 worker parity).
         from calfkit.client import Client
         from calfkit.worker.worker import Worker
 

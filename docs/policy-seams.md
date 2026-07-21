@@ -3,7 +3,7 @@
 This guide shows you how to run logic **around** a node's body — on the way in
 and over its output — without editing the body. You use two policy seams:
 `before_node` (runs before the body) and `after_node` (runs over the result). It
-assumes you already have a caller-capable node: an `Agent`, a tool node, or a
+assumes you already have a caller-capable node: an `StatelessAgent`, a tool node, or a
 `NodeDef` subclass. (Observer nodes built with `@consumer` have no seams — they
 handle every event in their own body.)
 
@@ -12,7 +12,7 @@ To recover from a failure or a failed tool call, see
 
 ## Register a handler
 
-Register a handler two ways: pass it to the node's constructor (`Agent` or a
+Register a handler two ways: pass it to the node's constructor (`StatelessAgent` or a
 `NodeDef` subclass) — a single callable or a list — or attach it as a decorator on
 the node instance. The decorator works on any node and is the only form for tool
 nodes (which you build with `@agent_tool`). Both feed the same chain (constructor
@@ -20,9 +20,9 @@ entries first); it runs in registration order, and the **first handler to return
 non-`None` value wins**. Handlers may be sync or async.
 
 ```python
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 
-agent = Agent("planner", subscribe_topics="planner.in", model_client=model)
+agent = StatelessAgent("planner", subscribe_topics="planner.in", model_client=model)
 
 # Decorator form — repeatable; the handler stays a plain function:
 @agent.before_node
@@ -30,7 +30,7 @@ def add_locale_hint(ctx):
     ...
 
 # Constructor form — a callable or a list; these run before any decorated handlers:
-agent = Agent(
+agent = StatelessAgent(
     "planner", subscribe_topics="planner.in", model_client=model,
     after_node=[redact, audit],
 )

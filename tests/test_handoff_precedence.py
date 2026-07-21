@@ -21,7 +21,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.models.actions import ReturnCall, TailCall
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.payload import DataPart
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._steps import Observed
 from calfkit.peers import Handoff
 from tests._peer_fakes import agents_view as _view
@@ -52,7 +52,7 @@ async def test_rank1_structured_answer_beats_handoff_in_tool_mode() -> None:
             ]
         )
 
-    agent = Agent(
+    agent = StatelessAgent(
         "triage",
         subscribe_topics="triage.in",
         model_client=FunctionModel(_model),
@@ -77,7 +77,7 @@ async def test_rank2_handoff_beats_prompted_mode_json_text_answer() -> None:
         assert not info.output_tools  # prompted mode: no output tool exists
         return ModelResponse(parts=[ModelTextPart('{"text": "the answer"}'), _handoff_part()])
 
-    agent = Agent(
+    agent = StatelessAgent(
         "triage",
         subscribe_topics="triage.in",
         model_client=FunctionModel(_model),
@@ -105,7 +105,7 @@ async def test_rank2_handoff_beats_str_agent_text_answer() -> None:
     def _model(messages: list[Any], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ModelTextPart("You should contact billing."), _handoff_part()])
 
-    agent = Agent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_model), peers=[Handoff("billing")])
+    agent = StatelessAgent("triage", subscribe_topics="triage.in", model_client=FunctionModel(_model), peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": None}))
     result = _unwrap(await agent.run(ctx))
 

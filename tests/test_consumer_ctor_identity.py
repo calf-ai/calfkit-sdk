@@ -1,7 +1,7 @@
 """The consumer node surfaces take their identity as ``name`` (not ``node_id``).
 
 Both the ``@consumer`` decorator factory and the ``ConsumerNode`` class map ``name`` onto
-the base node's ``node_id`` storage, mirroring ``Agent`` (ADR-0020, PR #272) and the MCP
+the base node's ``node_id`` storage, mirroring ``StatelessAgent`` (ADR-0020, PR #272) and the MCP
 node types. ``.name`` and ``.node_id`` both read the same value. A surface-only rename — the
 legacy ``node_id=`` keyword is a clean pre-1.0 break on both surfaces. The factory's
 default-id derivation (``consumer_<fn>`` when no name is given) is unchanged.

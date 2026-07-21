@@ -23,7 +23,7 @@ from calfkit.models.error_report import ErrorReport
 from calfkit.models.reply import FaultMessage
 from calfkit.models.session_context import Stack
 from calfkit.models.state import State
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.consumer import ConsumerNode
 from calfkit.nodes.node import NodeDef
@@ -173,11 +173,11 @@ async def test_consumer_observer_mirror_carries_the_task_header() -> None:
 # ── fan-out: the sibling build + the re-entry self-publish ─────────────────────
 
 
-def _fanout_agent() -> Agent[str]:
+def _fanout_agent() -> StatelessAgent[str]:
     def _model(_messages: object, _info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("ok")])
 
-    return Agent(name="a", subscribe_topics=["a.in"], model_client=FunctionModel(_model))
+    return StatelessAgent(name="a", subscribe_topics=["a.in"], model_client=FunctionModel(_model))
 
 
 async def test_fanout_sibling_publishes_forward_the_task_header() -> None:

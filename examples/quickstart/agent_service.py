@@ -1,10 +1,10 @@
 from weather_tool import get_weather  # Import the tool definition (reusable)
 
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.providers import OpenAIResponsesModelClient
 
 # Run it with: ck run agent_service:agent
-agent = Agent(
+agent = StatelessAgent(
     "weather_agent",
     system_prompt="You are a helpful assistant.",
     subscribe_topics="weather_agent.input",

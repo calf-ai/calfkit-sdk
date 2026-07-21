@@ -40,9 +40,9 @@ class _FakeModel(PydanticModelClient):
 
 
 def make_agent(name: str = "planner", *tools: object):
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
 
-    return Agent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel(), tools=list(tools))
+    return StatelessAgent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel(), tools=list(tools))
 
 
 def make_toolbox() -> MCPToolboxNode:
@@ -77,7 +77,7 @@ class TestAgentCardWriterRegistration:
         assert control_plane_writer_key(CAPABILITY_TOPIC) not in names
 
     def test_mixed_worker_registers_both_writers(self) -> None:
-        # Agent (calf.agents) + toolbox (calf.capabilities) co-reside: one writer per topic.
+        # StatelessAgent (calf.agents) + toolbox (calf.capabilities) co-reside: one writer per topic.
         worker = Worker(Client.connect("kafka:9092"), nodes=[make_agent(), make_toolbox()])
         worker._maybe_register_control_plane()
         names = worker_resource_names(worker)
@@ -106,10 +106,10 @@ class TestAgentsViewRegistration:
 
     def test_registered_when_a_node_has_peers(self) -> None:
         # PR-B: a real `Messaging` handle sets `_peers`, activating the dormant gate.
-        from calfkit.nodes.agent import Agent
+        from calfkit.nodes.agent import StatelessAgent
         from calfkit.peers import Messaging
 
-        agent = Agent("planner", subscribe_topics="planner.in", model_client=_FakeModel(), peers=[Messaging("billing")])
+        agent = StatelessAgent("planner", subscribe_topics="planner.in", model_client=_FakeModel(), peers=[Messaging("billing")])
         worker = Worker(Client.connect("kafka:9092"), nodes=[agent])
         worker._maybe_register_agents_view()
         assert AGENTS_VIEW_RESOURCE_KEY in worker_resource_names(worker)
@@ -118,10 +118,10 @@ class TestAgentsViewRegistration:
         # PR-C: a `Handoff` handle ALSO sets `_peers`, so a Handoff-only agent (no Messaging) still trips
         # the gate — handoff needs the live agents view to render its tool-description directory. (The store
         # @resource is narrowed to messaging, but the agents-view gate stays on any `_peers` handle.)
-        from calfkit.nodes.agent import Agent
+        from calfkit.nodes.agent import StatelessAgent
         from calfkit.peers import Handoff
 
-        agent = Agent("planner", subscribe_topics="planner.in", model_client=_FakeModel(), peers=[Handoff("billing")])
+        agent = StatelessAgent("planner", subscribe_topics="planner.in", model_client=_FakeModel(), peers=[Handoff("billing")])
         worker = Worker(Client.connect("kafka:9092"), nodes=[agent])
         worker._maybe_register_agents_view()
         assert AGENTS_VIEW_RESOURCE_KEY in worker_resource_names(worker)

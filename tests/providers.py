@@ -9,7 +9,7 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest, Mod
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.client import Client
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, BaseToolNodeDef, ToolNodeDef, agent_tool
+from calfkit.nodes import BaseToolNodeDef, StatelessAgent, ToolNodeDef, agent_tool
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.worker import Worker
 from tests._fanout_fakes import FakeFanoutBatchStore
@@ -23,9 +23,9 @@ class Response:
     recipient_name: str
 
 
-SimpleAgent = Agent[str]
+SimpleAgent = StatelessAgent[str]
 
-StructuredAgent = Agent[Response]
+StructuredAgent = StatelessAgent[Response]
 
 user_name: str = "Conan"
 agent_name: str = "LeBron James III"

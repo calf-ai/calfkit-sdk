@@ -9,7 +9,7 @@ a second attr (the cross-target duplicate), and a consumer node (advertises on n
 from __future__ import annotations
 
 from calfkit.nodes import ConsumerNode, ToolNodeDef, consumer
-from calfkit.nodes.agent import Agent
+from calfkit.nodes.agent import StatelessAgent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
@@ -28,8 +28,8 @@ class _FakeModel(PydanticModelClient):
         raise NotImplementedError
 
 
-def _agent(name: str) -> Agent:
-    return Agent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel())
+def _agent(name: str) -> StatelessAgent:
+    return StatelessAgent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel())
 
 
 def _tool(name: str) -> ToolNodeDef:

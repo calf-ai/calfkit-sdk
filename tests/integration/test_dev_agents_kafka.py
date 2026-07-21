@@ -44,7 +44,7 @@ _FAST_MESH = MeshViewConfig(reader_tuning=KTableReaderTuning(poll_timeout_ms=20,
 
 _NODES_TEMPLATE = '''"""Generated ck dev daemon target (unique per test)."""
 
-from calfkit.nodes.agent import Agent
+from calfkit.nodes.agent import StatelessAgent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 
@@ -63,7 +63,7 @@ class _FakeModel(PydanticModelClient):
         raise NotImplementedError
 
 
-agent = Agent("{name}", subscribe_topics="{name}.in", model_client=_FakeModel())
+agent = StatelessAgent("{name}", subscribe_topics="{name}.in", model_client=_FakeModel())
 '''
 
 

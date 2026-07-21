@@ -1,21 +1,21 @@
-"""PR-B Item 3: the ``peers=`` surface — the ``Messaging`` capability handle + ``Agent`` ctor wiring.
+"""PR-B Item 3: the ``peers=`` surface — the ``Messaging`` capability handle + ``StatelessAgent`` ctor wiring.
 
 ``Messaging`` is an identity-only, frozen handle mirroring the shipped ``Tools`` handle (curated names
 XOR ``discover``; custom varargs ``__init__``; order-preserving dedupe). It deliberately does NOT
 implement the tool protocols, so it can't be absorbed by ``tools=`` (M4). The agent's-own-name reject
-and the non-``Messaging`` type-validation live in the ``Agent`` ctor (M2/M4).
+and the non-``Messaging`` type-validation live in the ``StatelessAgent`` ctor (M2/M4).
 """
 
 import pytest
 
 from calfkit._vendor.pydantic_ai.models.test import TestModel
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes.tool import Tools
 from calfkit.peers import Handoff, Messaging
 
 
-def _agent(**kw: object) -> Agent[str]:
-    return Agent(name="triage", subscribe_topics="triage.in", model_client=TestModel(), **kw)  # type: ignore[arg-type]
+def _agent(**kw: object) -> StatelessAgent[str]:
+    return StatelessAgent(name="triage", subscribe_topics="triage.in", model_client=TestModel(), **kw)  # type: ignore[arg-type]
 
 
 def test_messaging_curated_names() -> None:
@@ -67,7 +67,7 @@ def test_messaging_does_not_implement_tool_protocols() -> None:
     assert not hasattr(m, "tool_bindings")
 
 
-# ── Agent ctor wiring: peers= -> self._peers, M2 self-reject, M4 type-validation ──
+# ── StatelessAgent ctor wiring: peers= -> self._peers, M2 self-reject, M4 type-validation ──
 
 
 def test_agent_peers_sets_peers_tuple() -> None:
@@ -88,10 +88,10 @@ def test_agent_peers_rejects_non_messaging() -> None:
 
 
 def test_agent_peers_self_reject() -> None:
-    # M2: an agent may not name itself in a Messaging handle — the own-name reject lives in the Agent
+    # M2: an agent may not name itself in a Messaging handle — the own-name reject lives in the StatelessAgent
     # ctor (the handle can't see the agent's name). (Self is also excluded at render + dispatch.)
     with pytest.raises(ValueError):
-        Agent(name="triage", subscribe_topics="triage.in", model_client=TestModel(), peers=[Messaging("triage")])
+        StatelessAgent(name="triage", subscribe_topics="triage.in", model_client=TestModel(), peers=[Messaging("triage")])
 
 
 def test_messaging_in_tools_raises() -> None:
@@ -109,9 +109,9 @@ def test_every_agent_registers_fanout_store() -> None:
     # pinned by test_fanout_handler.py::test_needs_durable_batch_decouples_from_fanout_capability.
     from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 
-    plain = Agent(name="t", subscribe_topics="t.in", model_client=TestModel())
-    messaging = Agent(name="t2", subscribe_topics="t2.in", model_client=TestModel(), peers=[Messaging("p")])
-    handoff_only = Agent(name="t3", subscribe_topics="t3.in", model_client=TestModel(), peers=[Handoff("p")])
+    plain = StatelessAgent(name="t", subscribe_topics="t.in", model_client=TestModel())
+    messaging = StatelessAgent(name="t2", subscribe_topics="t2.in", model_client=TestModel(), peers=[Messaging("p")])
+    handoff_only = StatelessAgent(name="t3", subscribe_topics="t3.in", model_client=TestModel(), peers=[Handoff("p")])
     for agent in (plain, messaging, handoff_only):
         assert FANOUT_STORE_KEY in [n for n, _ in agent._resource_cms()]
 
@@ -197,7 +197,7 @@ def test_handoff_is_exported_first_class() -> None:
     assert TopLevel is FromPkg is FromModule
 
 
-# ── Agent ctor wiring: peers= accepts Handoff per-capability, independent of Messaging ──
+# ── StatelessAgent ctor wiring: peers= accepts Handoff per-capability, independent of Messaging ──
 
 
 def test_agent_peers_accepts_handoff_and_exposes_handoff_handles() -> None:
@@ -214,10 +214,10 @@ def test_agent_messaging_and_handoff_compose_independently() -> None:
 
 
 def test_agent_handoff_self_reject() -> None:
-    # M2: an agent may not name itself in a Handoff handle — the own-name reject lives in the Agent ctor
+    # M2: an agent may not name itself in a Handoff handle — the own-name reject lives in the StatelessAgent ctor
     # (the handle can't see the agent's name). (Self is also excluded at render + dispatch.)
     with pytest.raises(ValueError):
-        Agent(name="triage", subscribe_topics="triage.in", model_client=TestModel(), peers=[Handoff("triage")])
+        StatelessAgent(name="triage", subscribe_topics="triage.in", model_client=TestModel(), peers=[Handoff("triage")])
 
 
 def test_handoff_in_tools_raises() -> None:

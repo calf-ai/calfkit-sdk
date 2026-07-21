@@ -1,5 +1,5 @@
 from calfkit.nodes._tool_error import AgentSeamContext, ToolCall, ToolErrorHandler, render_fault_for_model, surface_to_model
-from calfkit.nodes.agent import Agent, BaseAgentNodeDef
+from calfkit.nodes.agent import Agent, BaseAgentNodeDef, StatelessAgent
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.nodes.consumer import ConsumerFn, ConsumerNode, consumer
 from calfkit.nodes.node import NodeDef
@@ -14,6 +14,7 @@ __all__ = [
     "ConsumerFn",
     "ConsumerNode",
     "NodeDef",
+    "StatelessAgent",
     "ToolNodeDef",
     "Toolbox",
     "Toolboxes",

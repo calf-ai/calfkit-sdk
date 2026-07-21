@@ -22,7 +22,7 @@ from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.fanout import EnvelopeSnapshot, FanoutOpen, FanoutOutcome
 from calfkit.models.tool_context import ToolContext
-from calfkit.nodes import Agent, agent_tool
+from calfkit.nodes import StatelessAgent, agent_tool
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.worker import Worker
 from tests._fanout_fakes import FakeFanoutBatchStore
@@ -77,7 +77,7 @@ class _SpyStore(FakeFanoutBatchStore):
 
 async def test_durable_fanout_folds_in_store_and_closes_via_reentry(container) -> None:
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "durable_fanout_agent",
         system_prompt="x",
         subscribe_topics="durable_fanout_agent.input",
@@ -120,7 +120,7 @@ async def test_durable_fanout_with_failing_tool_escalates_a_fault_not_a_strand(c
     # (production). The client's #250 reception arm (this caller-surface PR) materializes that fault as
     # a typed NodeFaultError carrying the verbatim ErrorReport — the caller is answered, not stranded.
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "durable_fanout_fail_agent",
         system_prompt="x",
         subscribe_topics="durable_fanout_fail_agent.input",

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from calfkit.mcp.mcp_toolbox import MCPToolboxNode
 from calfkit.mcp.mcp_transport import StreamableHttpParameters
-from calfkit.nodes.agent import Agent
+from calfkit.nodes.agent import StatelessAgent
 from calfkit.nodes.consumer import ConsumerNode
 from calfkit.nodes.node import NodeDef
 from calfkit.nodes.tool import agent_tool
@@ -40,7 +40,7 @@ class TestPrivateInputTopicDerivation:
     """The topic is ``{node_kind}.{name}.private.input`` for every node kind."""
 
     def test_agent_kind(self) -> None:
-        agent = Agent("planner", subscribe_topics="planner.in", model_client=_FakeModel())
+        agent = StatelessAgent("planner", subscribe_topics="planner.in", model_client=_FakeModel())
         assert agent._private_input_topic == "agent.planner.private.input"
 
     def test_tool_kind(self) -> None:
@@ -64,5 +64,5 @@ class TestPrivateInputTopicDerivation:
     def test_pins_the_name_node_id_alias(self) -> None:
         # The property uses self.name per spec §4.1; name aliases node_id today. Pin the
         # equality so a future name/node_id divergence trips loudly here (ADR-0017).
-        agent = Agent("planner", subscribe_topics="planner.in", model_client=_FakeModel())
+        agent = StatelessAgent("planner", subscribe_topics="planner.in", model_client=_FakeModel())
         assert agent._private_input_topic == f"agent.{agent.node_id}.private.input"

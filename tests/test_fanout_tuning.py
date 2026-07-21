@@ -179,9 +179,9 @@ async def test_fanout_resource_passes_worker_fanout(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr("calfkit.nodes.agent.KtablesFanoutBatchStore", SpyStore)
 
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
 
-    agent = Agent("a", subscribe_topics="a.in", model_client=_FakeModel())
+    agent = StatelessAgent("a", subscribe_topics="a.in", model_client=_FakeModel())
     worker = Worker(
         Client.connect("kafka:9092"),
         nodes=[agent],
@@ -233,9 +233,9 @@ async def test_fanout_resource_threads_client_idempotence_opt_in(monkeypatch: py
         async def stop(self) -> None: ...
 
     monkeypatch.setattr("calfkit.nodes.agent.KtablesFanoutBatchStore", SpyStore)
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
 
-    agent = Agent("a", subscribe_topics="a.in", model_client=_FakeModel())
+    agent = StatelessAgent("a", subscribe_topics="a.in", model_client=_FakeModel())
     worker = Worker(Client.connect("kafka:9092", enable_idempotence=True), nodes=[agent])
     agent._worker = worker
     gen = agent._fanout_store_resource(None)  # type: ignore[arg-type]
@@ -257,9 +257,9 @@ async def test_fanout_resource_defaults_to_unset_idempotence(monkeypatch: pytest
         async def stop(self) -> None: ...
 
     monkeypatch.setattr("calfkit.nodes.agent.KtablesFanoutBatchStore", SpyStore)
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
 
-    agent = Agent("a", subscribe_topics="a.in", model_client=_FakeModel())
+    agent = StatelessAgent("a", subscribe_topics="a.in", model_client=_FakeModel())
     worker = Worker(Client.connect("kafka:9092"), nodes=[agent])
     agent._worker = worker
     gen = agent._fanout_store_resource(None)  # type: ignore[arg-type]
@@ -274,10 +274,10 @@ async def test_fanout_resource_boots_through_offline_store_mirror() -> None:
     # `OfflineFanoutBatchStore`, so this exercises its signature mirror — it must accept the new
     # kwargs the resource now passes (`reader_tuning`/`catchup_timeout`/`barrier_timeout`), or
     # construction raises `TypeError`. This makes the fake's "loud failure on drift" claim real.
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
     from tests._fanout_fakes import OfflineFanoutBatchStore
 
-    agent = Agent("a", subscribe_topics="a.in", model_client=_FakeModel())
+    agent = StatelessAgent("a", subscribe_topics="a.in", model_client=_FakeModel())
     worker = Worker(
         Client.connect("kafka:9092"),
         nodes=[agent],

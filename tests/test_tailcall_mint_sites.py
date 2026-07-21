@@ -29,7 +29,7 @@ from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
 from calfkit.models import CallFrame, CallFrameStack, Envelope, SessionRunContext, State, TailCall, WorkflowState
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.peers import Handoff
 from tests._broker_fakes import CaptureBroker
@@ -54,7 +54,7 @@ async def test_handoff_and_self_retry_tailcalls_mint_from_distinct_paths() -> No
     # minted THROUGH the _dispatch_handoff builder (spied, pass-through).
     handoff_agent = triage_agent(_handoff_model(), peers=[Handoff("billing")])
     handoff_ctx = ctx_with_view(agents_view({"billing": "Billing."}))
-    with mock.patch.object(Agent, "_dispatch_handoff", autospec=True, side_effect=Agent._dispatch_handoff) as handoff_spy:
+    with mock.patch.object(StatelessAgent, "_dispatch_handoff", autospec=True, side_effect=StatelessAgent._dispatch_handoff) as handoff_spy:
         handoff_tc = _unwrap(await handoff_agent.run(handoff_ctx))
     assert isinstance(handoff_tc, TailCall)
     assert handoff_tc.target_topic == derive_input_topic("billing")
@@ -65,7 +65,7 @@ async def test_handoff_and_self_retry_tailcalls_mint_from_distinct_paths() -> No
     # minted INLINE in run(), never through the handoff builder (the arms are not merged).
     retry_agent = triage_agent(_handoff_model(), peers=[Handoff("billing")])
     retry_ctx = ctx_with_view(agents_view({}))
-    with mock.patch.object(Agent, "_dispatch_handoff", autospec=True, side_effect=Agent._dispatch_handoff) as retry_spy:
+    with mock.patch.object(StatelessAgent, "_dispatch_handoff", autospec=True, side_effect=StatelessAgent._dispatch_handoff) as retry_spy:
         retry_tc = _unwrap(await retry_agent.run(retry_ctx))
     assert isinstance(retry_tc, TailCall)
     assert retry_tc.target_topic == retry_agent._return_topic

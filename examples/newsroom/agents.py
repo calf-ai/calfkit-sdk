@@ -8,7 +8,7 @@ into one run.
 
 from tools import check_claim, search_archive
 
-from calfkit import Agent, Handoff, Messaging, OpenAIResponsesModelClient
+from calfkit import Handoff, Messaging, OpenAIResponsesModelClient, StatelessAgent
 
 MODEL = "gpt-5.4-nano"
 
@@ -17,7 +17,7 @@ def _model() -> OpenAIResponsesModelClient:
     return OpenAIResponsesModelClient(model_name=MODEL)
 
 
-editor = Agent(
+editor = StatelessAgent(
     "editor",
     description="Assignment editor who runs a story from brief to draft.",
     system_prompt=(
@@ -31,7 +31,7 @@ editor = Agent(
     peers=[Messaging("researcher", "fact_checker"), Handoff("writer")],
 )
 
-researcher = Agent(
+researcher = StatelessAgent(
     "researcher",
     description="News researcher who supplies background facts.",
     system_prompt=(
@@ -43,7 +43,7 @@ researcher = Agent(
     tools=[search_archive],
 )
 
-fact_checker = Agent(
+fact_checker = StatelessAgent(
     "fact_checker",
     description="Fact-checker who verifies the story's claims.",
     system_prompt=(
@@ -53,7 +53,7 @@ fact_checker = Agent(
     tools=[check_claim],
 )
 
-writer = Agent(
+writer = StatelessAgent(
     "writer",
     description="Staff writer who drafts the final article.",
     system_prompt=(

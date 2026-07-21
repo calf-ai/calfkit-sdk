@@ -29,7 +29,7 @@ from calfkit.models.fanout import FanoutOpen, SlotRef
 from calfkit.models.reply import FaultMessage, ReturnMessage
 from calfkit.models.session_context import CallFrame, SessionRunContext, Stack, WorkflowState
 from calfkit.models.state import State
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.nodes._fanout_store import FANOUT_STORE_KEY
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.nodes.node import NodeDef
@@ -49,8 +49,8 @@ def _model(_messages: object, _info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart("ok")])
 
 
-def _agent() -> Agent[str]:
-    return Agent(
+def _agent() -> StatelessAgent[str]:
+    return StatelessAgent(
         name="a",
         subscribe_topics=["a.in"],
         model_client=FunctionModel(_model),
@@ -603,7 +603,7 @@ async def test_run_on_incomplete_batch_raises_runtime_error() -> None:
     # every outcome first). A ctx whose latest tool-call set is incomplete (one call has no result)
     # is the lost-batch/rebalance signal — run() raises a diagnostic RuntimeError rather than
     # silently proceeding.
-    agent = Agent(
+    agent = StatelessAgent(
         "agent_incomplete_batch",
         system_prompt="x",
         subscribe_topics="agent_incomplete_batch.input",

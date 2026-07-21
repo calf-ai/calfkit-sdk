@@ -39,7 +39,7 @@ def make_tool_record(name: str = "add", *, dispatch: str | None = None, **overri
 
 
 def make_agent(*tools: Any) -> Any:
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
     from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
     class FakeModel(PydanticModelClient):
@@ -54,7 +54,7 @@ def make_agent(*tools: Any) -> Any:
         async def request(self, *args: object, **kwargs: object) -> object:
             raise NotImplementedError
 
-    return Agent("a", subscribe_topics="a.in", model_client=FakeModel(), tools=list(tools))
+    return StatelessAgent("a", subscribe_topics="a.in", model_client=FakeModel(), tools=list(tools))
 
 
 class TestToolsConstruction:
@@ -211,7 +211,7 @@ class TestToolsDiscoverMode:
 
 class TestToolSurfaceContract:
     """The construction-time tool-surface contract (spec §15.3, L18), enforced in both
-    ``Agent(tools=...)`` and ``add_tools``:
+    ``StatelessAgent(tools=...)`` and ``add_tools``:
       (1) no duplicate tool names across eager bindings + named ``Tools``;
       (2) ``Tools(discover=True)`` owns the tool-node surface (no eager tool node or named
           ``Tools`` alongside it; a ``Toolboxes``/eager toolbox node — a different kind — may).

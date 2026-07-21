@@ -38,9 +38,9 @@ def make_toolbox() -> MCPToolboxNode:
 
 
 def make_agent(*tools: object):
-    from calfkit.nodes.agent import Agent
+    from calfkit.nodes.agent import StatelessAgent
 
-    return Agent("a", subscribe_topics="a.in", model_client=FakeModel(), tools=list(tools))
+    return StatelessAgent("a", subscribe_topics="a.in", model_client=FakeModel(), tools=list(tools))
 
 
 def worker_resource_names(worker: Worker) -> list[str]:

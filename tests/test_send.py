@@ -46,7 +46,7 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 from calfkit.models.state import State
-from calfkit.nodes import Agent, agent_tool, consumer
+from calfkit.nodes import StatelessAgent, agent_tool, consumer
 from calfkit.nodes.base import BaseNodeDef
 from calfkit.worker import Worker
 from tests.providers import prepare_worker
@@ -131,7 +131,7 @@ async def test_send_allocates_no_client_state(container):
     empty) and each call returns a ``Dispatch`` carrying a fresh uuid-hex
     correlation_id."""
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "send_no_state_agent",
         system_prompt="x",
         subscribe_topics="send_no_state_agent.input",
@@ -177,7 +177,7 @@ async def test_send_traceable_via_publish_topic_but_no_reply(container, caplog):
         received.append(ctx)
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "send_trace_agent",
         system_prompt="x",
         subscribe_topics="send_trace_agent.input",
@@ -333,7 +333,7 @@ async def test_send_multi_hop_tool_call_still_terminates_traceably(container, ca
         received.append(ctx)
 
     worker = container.get(Worker)
-    agent = Agent(
+    agent = StatelessAgent(
         "send_tool_agent",
         system_prompt="x",
         subscribe_topics="send_tool_agent.input",

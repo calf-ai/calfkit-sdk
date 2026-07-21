@@ -1,6 +1,6 @@
 """Real-broker (``kafka`` lane) discovery for ``ck chat``.
 
-A live worker advertises an ``Agent``; the CLI's discovery primitive
+A live worker advertises an ``StatelessAgent``; the CLI's discovery primitive
 (``client.mesh.get_agents()``) reads it back, and the CLI's own pure consumers —
 ``format_picker`` and ``_resolve_target`` — render/resolve the *real* mesh output,
 proving the ``ck chat`` discovery path end to end against a live mesh.
@@ -21,7 +21,7 @@ from calfkit._vendor.pydantic_ai import models
 from calfkit.cli._chat import _resolve_target
 from calfkit.cli._chat_render import format_picker
 from calfkit.client import Client, MeshViewConfig
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.tuning import KTableReaderTuning
 from calfkit.worker import Worker
@@ -58,7 +58,7 @@ def _eof_reader() -> Callable[[str], Awaitable[str]]:
 
 async def test_chat_discovers_and_resolves_a_live_agent(kafka_bootstrap: str, topic_namespace: str) -> None:
     agent_name = f"{topic_namespace}-helpbot"
-    agent = Agent(agent_name, subscribe_topics=f"{agent_name}.in", model_client=FakeModel(), description="Helps with things")
+    agent = StatelessAgent(agent_name, subscribe_topics=f"{agent_name}.in", model_client=FakeModel(), description="Helps with things")
     worker = Worker(
         Client.connect(kafka_bootstrap),
         nodes=[agent],

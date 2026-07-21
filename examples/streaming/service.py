@@ -16,7 +16,7 @@ from calfkit.worker import Worker
 
 async def main() -> None:
     client = Client.connect("localhost:9092")
-    # Agent + both tool nodes on one worker — the agent's tool Calls are served in-process.
+    # StatelessAgent + both tool nodes on one worker — the agent's tool Calls are served in-process.
     worker = Worker(client, nodes=[agent, get_weather, find_activities])
     await worker.run()  # (blocking) serve the trip planner
 

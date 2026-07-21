@@ -28,7 +28,7 @@ from calfkit.client import Client
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.error_report import ErrorReport, FaultTypes
 from calfkit.models.seam_context import SeamContext
-from calfkit.nodes import Agent
+from calfkit.nodes import StatelessAgent
 from tests.integration._fault_kafka import ensure_topic, fault_worker
 from tests.integration._fault_tap import fault_tap
 from tests.integration._fault_tools import CalleeErrorRecorder
@@ -86,8 +86,8 @@ class BeforeNodeRecorder:
         return None
 
 
-def _agent(node_id: str, *, agent_in: str, publish_topic: str | None = None, **seams) -> Agent:
-    return Agent(
+def _agent(node_id: str, *, agent_in: str, publish_topic: str | None = None, **seams) -> StatelessAgent:
+    return StatelessAgent(
         node_id,
         system_prompt="respond",
         subscribe_topics=agent_in,

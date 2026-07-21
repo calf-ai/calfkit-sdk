@@ -2,7 +2,7 @@
 
 Every agent advertises an :class:`AgentCard` on the compacted ``calf.agents`` topic; a
 ``ControlPlaneView[AgentCard]`` reads it back collapsed. Mirrors
-``test_controlplane_substrate_kafka.py``, but with a REAL ``Agent`` + ``AgentCard`` +
+``test_controlplane_substrate_kafka.py``, but with a REAL ``StatelessAgent`` + ``AgentCard`` +
 the real ``calf.agents`` topic — isolated per test by a unique agent name keyed on
 ``topic_namespace`` (the same shared-topic isolation ``test_tool_discovery_kafka.py``
 uses, since the agent's name is the wire key on the shared topic).
@@ -26,7 +26,7 @@ from calfkit.controlplane import ControlPlaneView
 from calfkit.controlplane.advert import AdvertInfo
 from calfkit.controlplane.publisher import ControlPlanePublisher, control_plane_writer_key
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.nodes.agent import Agent
+from calfkit.nodes.agent import StatelessAgent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.provisioning import ProvisioningConfig
 from calfkit.worker.worker import Worker
@@ -48,11 +48,11 @@ class _FakeModel(PydanticModelClient):
         raise NotImplementedError
 
 
-def _agent(name: str, *, description: str | None) -> Agent:
-    return Agent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel(), description=description)
+def _agent(name: str, *, description: str | None) -> StatelessAgent:
+    return StatelessAgent(name, subscribe_topics=f"{name}.in", model_client=_FakeModel(), description=description)
 
 
-def _only_advert(node: Agent) -> AdvertInfo:
+def _only_advert(node: StatelessAgent) -> AdvertInfo:
     return next(iter(type(node)._adverts.values()))
 
 
@@ -66,7 +66,7 @@ async def _poll(refresh: Callable[[], Awaitable[object]], predicate: Callable[[]
 
 
 async def _start_publisher(
-    bootstrap: str, node: Agent, worker_id: str, *, ensure_topic: bool
+    bootstrap: str, node: StatelessAgent, worker_id: str, *, ensure_topic: bool
 ) -> tuple[GroupedKafkaTableWriter[AgentCard], ControlPlanePublisher, SimpleNamespace]:
     writer: GroupedKafkaTableWriter[AgentCard] = GroupedKafkaTableWriter.json(connection=bootstrap, topic=AGENTS_TOPIC, ensure_topic=ensure_topic)
     await writer.start()
