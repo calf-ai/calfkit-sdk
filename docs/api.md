@@ -189,8 +189,8 @@ Mint a typed gateway to one destination, addressed **exactly one** of two ways: 
 
 ```python
 await gateway.execute(prompt: str, *, timeout=None, correlation_id=None,
-    message_history=None, deps=None, model_settings=None, temp_instructions=None,
-    tool_overrides=None, author=None) -> InvocationResult[OutT]
+    message_history=None, deps=None, temp_instructions=None,
+    author=None) -> InvocationResult[OutT]
 await gateway.start(prompt: str, *, <same knobs, no timeout>) -> InvocationHandle[OutT]
 await gateway.send(prompt: str, *, <same knobs, no timeout>) -> Dispatch
 ```

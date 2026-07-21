@@ -113,8 +113,6 @@ plain `str`; `execute` additionally takes `timeout`):
   (`ctx.deps["key"]`). Merged over the client's `deps_factory` seed, if set.
 - **`temp_instructions`** — system-level instructions injected into this turn only.
 - **`message_history`** — prior turns for multi-turn (above).
-- **`model_settings`** — per-call model settings (e.g. `{"temperature": 0}`).
-- **`tool_overrides`** — runtime agent-tool overrides for this invocation.
 - **`author`** — the human author of the prompt; surfaces as `<user:author>`
   attribution when two or more named humans share a channel.
 - **`correlation_id`** — the demux key. Omit it (the safe default) to auto-mint a
@@ -129,7 +127,7 @@ result = await client.agent("weather_agent").execute(
 )
 ```
 
-A non-JSON-serializable `deps` / `model_settings` surfaces as a serialization error
+A non-JSON-serializable `deps` surfaces as a serialization error
 when the call publishes — there is no call-site pre-flight.
 
 ## Observing results
