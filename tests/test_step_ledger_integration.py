@@ -160,7 +160,7 @@ class TestStepPublishWireShape:
         assert len(steps) == 1
         call = steps[0]
         assert call.kwargs["topic"] == "caller.inbox"  # the root frame's callback_topic
-        assert call.kwargs["key"] == b"cid-hdr"  # co-partitions with the terminal
+        assert call.kwargs["key"] == b"task-under-test"  # keyed by the threaded task_id — co-partitions with the terminal
         headers = call.kwargs["headers"]
         assert headers[HDR_WIRE] == StepMessage.WIRE and HDR_KIND not in headers  # a step has no business kind
         assert headers[HDR_EMITTER] == "disp" and headers[HDR_EMITTER_KIND] == agent._node_kind

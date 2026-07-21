@@ -123,7 +123,7 @@ async def _publish_and_compare(node: BaseNodeDef, tail_call: TailCall[State]) ->
 
     published = broker.published[0]
     assert published.topic == tail_call.target_topic
-    assert published.key == b"cid"
+    assert published.key == b"task-under-test"  # keyed by the threaded task_id (task-keying cutover)
     assert published.correlation_id == "cid"
     assert published.headers[HDR_KIND] == "call"
     expected = _expected_envelope(frame, tail_call.target_topic, tail_call.state)

@@ -29,6 +29,7 @@ from calfkit._registry import RegistryMixin, handler
 from calfkit._routing import is_concrete_route_key, match_chain
 from calfkit.controlplane.advert import AdvertRegistryMixin
 from calfkit.exceptions import NodeFaultError, RegistryConfigError, SeamContractError, safe_exc_message
+from calfkit.keying import partition_key
 from calfkit.models import (
     Call,
     Next,
@@ -527,7 +528,14 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         return h
 
     async def _flush_steps(
-        self, ledger: HopStepLedger, snapshot: WorkflowState, correlation_id: str, broker: BrokerAnnotation, *, disposition: NodeResult[State] | None
+        self,
+        ledger: HopStepLedger,
+        snapshot: WorkflowState,
+        correlation_id: str,
+        task_id: str,
+        broker: BrokerAnnotation,
+        *,
+        disposition: NodeResult[State] | None,
     ) -> None:
         """The hop-exit flush (step-emission spec §3.4, I6): invoked at EVERY exit of
         ``_handle_delivery`` — the chokepoint path, the parked ``_CONSUMED`` arm, the fire-and-forget
@@ -548,6 +556,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 depth=len(stack),
                 frame_id=frame.frame_id if frame is not None else "",
                 correlation_id=correlation_id,
+                task_id=task_id,
                 emitter=self.node_id,
                 emitter_kind=self._node_kind,
                 root_callback=root_callback,
@@ -598,7 +607,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                     publish_envelope,
                     topic=wf_copy.current_frame.target_topic,
                     correlation_id=correlation_id,
-                    key=correlation_id.encode(),
+                    key=partition_key(task_id),
                     headers=self._headers("call", task_id=task_id, route=call.route),
                 )
             # No-reply hop: the mirror is the inbound envelope — clear any inbound reply
@@ -628,7 +637,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 publish_envelope,
                 topic=target_topic,
                 correlation_id=correlation_id,
-                key=correlation_id.encode(),
+                key=partition_key(task_id),
                 headers=self._headers("call", task_id=task_id, route=output.route),
             )
         elif isinstance(output, ReturnCall):
@@ -657,7 +666,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                     publish_envelope,
                     topic=frame.callback_topic,
                     correlation_id=correlation_id,
-                    key=correlation_id.encode(),
+                    key=partition_key(task_id),
                     headers=self._headers("return", task_id=task_id),
                 )
 
@@ -680,7 +689,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 publish_envelope,
                 topic=target_topic,
                 correlation_id=correlation_id,
-                key=correlation_id.encode(),
+                key=partition_key(task_id),
                 headers=self._headers("call", task_id=task_id),
             )
 
@@ -712,7 +721,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             reentry,
             topic=self._return_topic,
             correlation_id=correlation_id,
-            key=correlation_id.encode(),
+            key=partition_key(task_id),
             headers=self._headers("return", task_id=task_id),
         )
 
@@ -841,7 +850,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                     mirror,
                     topic=callback_topic,
                     correlation_id=correlation_id,
-                    key=correlation_id.encode(),
+                    key=partition_key(task_id),
                     headers=self._headers("fault", task_id=task_id) | {HDR_ERROR_TYPE: rung_report.error_type},
                 )
             except MessageSizeTooLargeError:
@@ -1337,7 +1346,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                     sibling,
                     topic=wf_copy.current_frame.target_topic,
                     correlation_id=correlation_id,
-                    key=correlation_id.encode(),
+                    key=partition_key(task_id),
                     headers=self._headers("call", task_id=task_id, route=call.route),
                 )
         except Exception as exc:
@@ -1861,7 +1870,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             )
         except NodeFaultError as nfe:
             # The mint rule (§6.5): a deliberate typed fault converts verbatim, BYPASSING on_node_error.
-            await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+            await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
             return await self._fault_response(nfe.report, snapshot, envelope, correlation_id, task_id, broker)
         except Exception as caught:
             # ── stage 5: on_node_error — the node's own work raised uncaught ──
@@ -1877,16 +1886,16 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 # (tombstone + escalate ONCE) instead (spec §6.8 / R4 / R5). _in_batch_work is False once
                 # the close has restored the unmarked frame, so a body raise at close recovers normally.
                 report = self._fault_from_exception(node_exc, seam_ctx, snapshot, correlation_id)
-                await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+                await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
                 return await self._publish_abort(report, snapshot, envelope, ctx, correlation_id, task_id, broker)
             seam_ctx.exception = node_exc
             report = self._fault_from_exception(node_exc, seam_ctx, snapshot, correlation_id, cause=inbound_cause)
             recovery = await run_chain_guarded(self._chains[ON_NODE_ERROR], seam_ctx, report)
             if isinstance(recovery, _Minted):  # a NodeFaultError raised inside the chain (§6.5)
-                await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+                await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
                 return await self._fault_response(recovery.report, snapshot, envelope, correlation_id, task_id, broker)
             if recovery is None:  # all handlers declined → the original fault escalates
-                await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+                await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
                 return await self._fault_response(report, snapshot, envelope, correlation_id, task_id, broker)
             # Recovered: on_node_error is done, so clear ctx.exception (set during on_node_error ONLY,
             # §6.3) before the recovery value passes after_node. SINGLE-SHOT — a raise while processing
@@ -1899,18 +1908,18 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 # recovery-path after_node converts VERBATIM, NOT downgraded. The §6.8 single-shot sketch's
                 # bare except predates the rule; a mint is the node's typed decision, not the accident that
                 # arm chains-the-original for.
-                await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+                await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
                 return await self._fault_response(nfe.report, snapshot, envelope, correlation_id, task_id, broker)
             except Exception as exc2:
                 report2 = self._fault_from_exception(exc2, seam_ctx, snapshot, correlation_id, cause=report)
-                await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+                await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
                 return await self._fault_response(report2, snapshot, envelope, correlation_id, task_id, broker)
 
         if output is _CONSUMED:
             # A parked fan-out fold or a self-published re-entry: no publishable action this hop,
             # the output is still owed by the pending siblings. The park-arm flush IS the trickle
             # (I5): a parked sibling fold's result step publishes as that reply folds.
-            await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+            await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
             return self._no_reply_mirror(envelope, task_id)
         if isinstance(output, _Declined):
             # No matched handler produced a terminal result: every match declined, or a schema
@@ -1937,7 +1946,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                     origin_node_id=self.node_id,
                     details={FaultTypes.REASON: output.reason},
                 )
-                await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+                await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
                 return await self._fault_response(report, snapshot, envelope, correlation_id, task_id, broker)
             logger.debug(
                 "[%s] no handler produced a result for route=%s on node=%s (reason=%s); fire-and-forget no-op; registered=%s%s",
@@ -1950,7 +1959,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             )
             # The fire-and-forget declined arm still flushes (near-always an empty no-op; a frameless
             # inbound has an EMPTY stack — the helper's guarded root read covers it).
-            await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+            await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
             return self._no_reply_mirror(envelope, task_id)  # no result to publish: don't re-broadcast the inbound reply
 
         if isinstance(output, _BatchFaulted):
@@ -1959,7 +1968,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             # on the pre-mutation snapshot — the same report, unwrapped (§4.4). The flush FIRST: a
             # single-call fold_failed mint (or a resolved fold whose close then faulted) publishes
             # before the fault — the fold and the escalation are two phases of one hop (L18b/L18i).
-            await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+            await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
             return await self._fault_response(output.report, snapshot, envelope, correlation_id, task_id, broker)
 
         # ── Step emission — the disposition chokepoint (step-emission spec §3.2/§3.4). ──
@@ -1970,7 +1979,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         # precedes the action. The helper owns the best-effort guard (I1) and the terminal gate
         # reads the disposition (a ReturnCall drops agent_message events, any depth).
         ledger.note_dispatch(output)
-        await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=output)
+        await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=output)
 
         # Fan-out OPEN: register a durable batch + publish the marked siblings when the caller's state
         # must survive the call independently of the round-trip (decision 1(b) / L13) — a true fan-out
@@ -1997,7 +2006,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
                 # The chokepoint flush above already drained the ledger, so this is near-always an
                 # empty no-op (spec §3.4's accepted over-report edge; _handle_fanout_open's own
                 # internal abort arm is deliberately NOT threaded — same drained-ledger argument).
-                await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+                await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
                 return await self._fault_response(report, snapshot, envelope, correlation_id, task_id, broker)
 
         logger.debug("[%s] node=%s produced action=%s", correlation_id[:8], self.node_id, type(output).__name__)
@@ -2013,7 +2022,7 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             report = self._fault_from_exception(exc, seam_ctx, snapshot, correlation_id)
             # Drained by the chokepoint flush above → an empty no-op; exactly one StepMessage still
             # published for this hop (I6 holds by drain — spec §3.4's accepted over-report edge).
-            await self._flush_steps(ledger, snapshot, correlation_id, broker, disposition=None)
+            await self._flush_steps(ledger, snapshot, correlation_id, task_id, broker, disposition=None)
             return await self._fault_response(report, snapshot, envelope, correlation_id, task_id, broker)
         return Response(body, headers=self._headers(pubkind, task_id=task_id))
 

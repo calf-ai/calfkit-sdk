@@ -36,6 +36,7 @@ from typing_extensions import assert_never
 
 from calfkit._protocol import HDR_EMITTER, HDR_EMITTER_KIND, HDR_WIRE, NodeKind
 from calfkit._types import StateT
+from calfkit.keying import partition_key
 from calfkit.models.actions import Call, NodeResult, ReturnCall
 from calfkit.models.marker import ToolCallMarker
 from calfkit.models.payload import ContentPart, DataPart, FilePart, TextPart, ToolCallPart, is_retry
@@ -177,6 +178,7 @@ class HopStepLedger:
         depth: int,
         frame_id: str,
         correlation_id: str,
+        task_id: str,
         emitter: str,
         emitter_kind: NodeKind,
         root_callback: str | None,
@@ -202,8 +204,9 @@ class HopStepLedger:
             StepMessage(correlation_id=correlation_id, emitter=emitter, depth=depth, frame_id=frame_id, events=events),
             topic=root_callback,
             correlation_id=correlation_id,
-            key=correlation_id.encode(),
+            key=partition_key(task_id),  # co-partitions with the terminal (task-keying cutover)
             # A step's OWN header dict — NOT _headers() (which stamps wire="envelope" + a business
-            # x-calf-kind): a step is a side-effect-free notification, no kind.
+            # x-calf-kind): a step is a side-effect-free notification, no kind. The x-calf-task
+            # HEADER stamp on step messages is the durable PR's (keyed-but-headerless until then).
             headers={HDR_WIRE: StepMessage.WIRE, HDR_EMITTER: emitter, HDR_EMITTER_KIND: emitter_kind},
         )

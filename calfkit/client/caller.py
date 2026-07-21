@@ -425,13 +425,13 @@ class Client:
         if route is not None:
             headers[HDR_ROUTE] = route
         # key= is the Kafka partition key (correlation_id= is a FastStream trace/header
-        # value only). Keyed via the seam so entry Calls share the continuations'
-        # serialization domain — a keyless entry would round-robin across the key-ordered
-        # subscriber's lanes and let two same-correlation submissions interleave.
+        # value only). Keyed via the seam — task_id — so entry Calls share the
+        # continuations' serialization domain: a keyless entry would round-robin across
+        # the key-ordered subscriber's lanes and let two same-task submissions interleave.
         await self._broker.publish(
             envelope,
             topic=topic,
-            key=partition_key(correlation_id),
+            key=partition_key(task_id),
             correlation_id=correlation_id,
             headers=headers,
         )
