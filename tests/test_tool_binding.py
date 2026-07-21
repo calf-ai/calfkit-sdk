@@ -81,18 +81,6 @@ class TestToolBindingWireForm:
         assert restored.dispatch_topic == binding.dispatch_topic
         assert restored.tool_def.parameters_json_schema == binding.tool_def.parameters_json_schema
 
-    def test_overrides_state_carries_bindings_over_the_wire(self) -> None:
-        from calfkit.models.state import OverridesState
-
-        overrides = OverridesState(override_agent_tools=[self.make_binding_with_validator()])
-        restored = OverridesState.model_validate_json(overrides.model_dump_json())
-        assert restored.override_agent_tools is not None
-        [binding] = restored.override_agent_tools
-        assert isinstance(binding, ToolBinding)
-        assert binding.name == "get_weather"
-        assert binding.dispatch_topic == "tool.get_weather.input"
-        assert binding.validator is None
-
 
 class TestToolProvider:
     def test_object_with_tool_bindings_method_satisfies_protocol(self) -> None:

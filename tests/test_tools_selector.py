@@ -358,6 +358,7 @@ class TestDiscoverDiagnostics:
         assert "add" in registry  # binds whatever the frozen view holds
         assert any(r.levelname == "WARNING" and "degraded" in r.getMessage() for r in caplog.records)
 
+
 class TestToolsExport:
     def test_importable_from_calfkit_and_nodes(self) -> None:
         import calfkit

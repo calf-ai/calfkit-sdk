@@ -292,7 +292,7 @@ class TestPublishFault:
         # The lean carriage's WHOLE POINT: it sheds call *content* but keeps the routing skeleton the NEXT
         # escalation hop needs. With a 2-frame stack (grandparent below, answered frame on top), the lean
         # mirror must still carry the grandparent frame with its callback_topic/frame_id/tag/marker/fanout_id
-        # intact and only payload/overrides nulled. Without this, a regression that shipped an empty stack on
+        # intact and only payload nulled. Without this, a regression that shipped an empty stack on
         # a lean rung would deliver THIS hop's fault but strand the next one (no callback_topic to address) —
         # the exact silent-drop class this feature exists to kill.
         node = _node()
@@ -302,7 +302,6 @@ class TestPublishFault:
             callback_topic="grandparent.return",
             frame_id="gp-frame",
             payload={"pad": pad},
-            overrides=OverridesState(model_settings={"temperature": 0.1}),
             tag="gp-tag",
             marker=ToolCallMarker(tool_name="gp_tool", tool_call_id="gp-tc", args={"q": 1}),
             fanout_id="gp-frame",
@@ -332,7 +331,7 @@ class TestPublishFault:
         assert gp.marker == ToolCallMarker(tool_name="gp_tool", tool_call_id="gp-tc", args={"q": 1})
         assert gp.fanout_id == "gp-frame"  # a sibling reply still routes into the durable fold
         assert gp.caller_node_id == "gp-caller" and gp.caller_node_kind == "agent"
-        assert gp.payload is None and gp.overrides is None  # only the CONTENT is shed
+        assert gp.payload is None  # only the CONTENT is shed
         assert env.internal_workflow_state.metadata is None
         assert mirror.reply.state_elided is True
 
@@ -1079,11 +1078,10 @@ class TestStage0Guard:
 class TestTailCallFrameIdentity:
     async def test_tailcall_preserves_frame_identity_and_retargets(self) -> None:
         # §4.2/§15: a TailCall is the SAME pending call retargeted — its replacement frame preserves
-        # frame_id/tag/overrides/callback_topic (a fresh frame_id would orphan the caller's slot, so
+        # frame_id/tag/callback_topic (a fresh frame_id would orphan the caller's slot, so
         # the eventual reply's in_reply_to no longer matches), clears payload (TailCall carries no
         # body; the traveling State is its input) + fanout_id (a TailCall is never marked).
         node = _node()
-        overrides = OverridesState()
         stack = CallFrameStack()
         stack.push(
             CallFrame(
@@ -1091,7 +1089,6 @@ class TestTailCallFrameIdentity:
                 callback_topic="caller.return",
                 frame_id="F1",
                 tag="t1",
-                overrides=overrides,
                 payload="old-body",
                 fanout_id="X",
             )
@@ -1107,30 +1104,11 @@ class TestTailCallFrameIdentity:
         frame = env.internal_workflow_state.current_frame
         assert frame.frame_id == "F1"  # PRESERVED — not minted fresh (escalation-correctness)
         assert frame.tag == "t1"  # preserved
-        assert frame.overrides is overrides  # preserved
         assert frame.callback_topic == "caller.return"  # preserved (the tailcallee inherits it)
         assert frame.target_topic == "next.topic"  # retargeted
         assert frame.payload is None  # cleared — TailCall carries no body
         assert frame.fanout_id is None  # cleared — a TailCall is never fan-out-marked
         assert headers[HDR_KIND] == "call"
-
-    async def test_tailcall_clear_overrides_nulls_frame_overrides(self) -> None:
-        # §5.3/C2 (genuine handoff): TailCall(clear_overrides=True) NULLS frame.overrides on the retargeted
-        # frame so the tailcallee (a DIFFERENT agent) uses its own tools/model — while still preserving
-        # frame_id/tag/callback_topic. (The default above PRESERVES overrides — the self-retry to self.)
-        node = _node()
-        stack = CallFrameStack()
-        stack.push(CallFrame(target_topic="agent.in", callback_topic="caller.return", frame_id="F1", tag="t1", overrides=OverridesState()))
-        envelope = Envelope(internal_workflow_state=WorkflowState(call_stack=stack), context=SessionRunContext(state=State(), deps={}))
-        broker = CaptureBroker()
-
-        await node._publish_action(TailCall(target_topic="next.topic", state=State(), clear_overrides=True), envelope, "cid", broker)
-
-        frame = broker.published[0].message.internal_workflow_state.current_frame
-        assert frame.overrides is None  # CLEARED for the genuine handoff (C2)
-        assert frame.frame_id == "F1" and frame.tag == "t1"  # identity still preserved
-        assert frame.callback_topic == "caller.return"  # caller inheritance preserved
-        assert frame.target_topic == "next.topic"  # retargeted
 
 
 class TestUnknownKind:

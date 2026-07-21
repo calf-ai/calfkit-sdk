@@ -332,9 +332,7 @@ def make_temp_instructions(request) -> str | None:
 
 
 @pytest.fixture
-def make_envelope_state(
-    make_tool_calls, make_tool_results, make_uncommitted_message, make_message_history, make_temp_instructions
-) -> State:
+def make_envelope_state(make_tool_calls, make_tool_results, make_uncommitted_message, make_message_history, make_temp_instructions) -> State:
     return State(
         tool_calls=make_tool_calls,
         tool_results=make_tool_results,

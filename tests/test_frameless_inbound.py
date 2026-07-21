@@ -66,7 +66,6 @@ async def test_prepare_context_frameless_sets_frame_id_none():
     node = NodeDef(node_id="n", subscribe_topics=["t"])
     ctx = await node.prepare_context(_frameless_envelope(), correlation_id=_CORR)
     assert ctx.frame_id is None
-    assert ctx.state.overrides is None  # nothing to lift from a missing frame
 
 
 async def test_prepare_context_framed_still_threads_frame_id():

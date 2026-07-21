@@ -69,11 +69,9 @@ async def test_oversized_fault_elides_state_and_reaches_the_caller(kafka_bootstr
 
     try:
         async with worker, fault_tap(kafka_bootstrap, reply_topic) as tap:
-            cid, state, overrides = driver._build_state_and_overrides(
-                "go", correlation_id=None, temp_instructions=None, message_history=None, tool_overrides=None, model_settings=None, author=None
-            )
+            cid, state = driver._build_state("go", correlation_id=None, temp_instructions=None, message_history=None, author=None)
             await driver._ensure_started()
-            await driver._publish_call(topic=node_in, correlation_id=cid, state=state, overrides=overrides, deps={"blob": "x" * 262144})
+            await driver._publish_call(topic=node_in, correlation_id=cid, state=state, deps={"blob": "x" * 262144})
 
             fault, _ = await tap.next_fault(timeout=60)
             # the caller received the fault (not floored) with the state elided but the full report kept

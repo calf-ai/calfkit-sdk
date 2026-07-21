@@ -3,7 +3,7 @@
 
 The projection keeps the call graph's routing skeleton — per frame: ``frame_id``, both
 topics, ``tag``, ``marker``, ``fanout_id``, and the caller identity — and drops call
-*content*: ``payload``, ``overrides``, and ``WorkflowState.metadata``. The kept fields are
+*content*: ``payload`` and ``WorkflowState.metadata``. The kept fields are
 what escalation addressing (``callback_topic``), slot matching (``in_reply_to``/``tag``/
 ``marker``), fold routing (``fanout_id``), and ``ancestor_callers`` derivation need; the
 dropped ones are needed to *run* a call, not to deliver an error about one.
@@ -19,7 +19,6 @@ def _frame(i: int) -> CallFrame:
         callback_topic=f"callback-{i}",
         frame_id=f"frame-{i}",
         payload={"big": "x" * 64, "i": i},
-        overrides=OverridesState(model_settings={"temperature": 0.1}),
         tag=f"tag-{i}",
         marker=ToolCallMarker(tool_name=f"tool-{i}", tool_call_id=f"tc-{i}", args={"q": i}),
         fanout_id=f"frame-{i}" if i == 1 else None,
@@ -28,12 +27,11 @@ def _frame(i: int) -> CallFrame:
     )
 
 
-def test_to_topology_nulls_payload_and_overrides_and_drops_metadata() -> None:
+def test_to_topology_nulls_payload_and_drops_metadata() -> None:
     ws = WorkflowState(call_stack=Stack([_frame(0), _frame(1)]), metadata={"app": "data"})
     topo = ws.to_topology()
     assert topo.metadata is None
     assert all(f.payload is None for f in topo.call_stack._internal_list)
-    assert all(f.overrides is None for f in topo.call_stack._internal_list)
 
 
 def test_to_topology_preserves_order_and_identity_fields() -> None:
@@ -65,7 +63,6 @@ def test_to_topology_returns_fresh_objects_never_aliasing_the_source() -> None:
     assert len(topo.call_stack) == 1
     # the source keeps its heavy fields — the projection never wrote back
     assert ws.call_stack._internal_list[0].payload is not None
-    assert ws.call_stack._internal_list[0].overrides is not None
 
 
 def test_to_topology_on_empty_stack() -> None:

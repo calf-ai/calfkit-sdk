@@ -426,7 +426,7 @@ async def test_agent_partial_validation_failure_dispatches_valid_calls():
         )
 
 
-async def test_agent_validates_schema_only_override_tools():
+async def test_agent_validates_schema_only_wire_form_tools():
     # A validator-less ToolBinding (the wire form — the validator never serializes) is validated
     # at dispatch against its ADVERTISED parameters_json_schema: the agent builds a schema
     # fallback validator, so bad args are rejected pre-dispatch exactly like a local tool's.
@@ -439,8 +439,8 @@ async def test_agent_validates_schema_only_override_tools():
         publish_topic="tool.typed_tool.output",
     )
 
-    # A wire-form binding mirroring the real tool but lacking the validator. It takes the override
-    # path in agent.run; its tool_def carries the pydantic-generated schema (x: integer, required).
+    # A wire-form binding mirroring the real tool but lacking the validator; its tool_def
+    # carries the pydantic-generated schema (x: integer, required).
     schema_only = ToolBinding(
         tool_def=full_tool_node.tool_schema,
         dispatch_topic=full_tool_node.subscribe_topics[0],
@@ -455,12 +455,10 @@ async def test_agent_validates_schema_only_override_tools():
         subscribe_topics="agent_override_validate.input",
         publish_topic="agent_override_validate.output",
         model_client=_model_emits_tool_calls([bad_call]),
-        tools=[full_tool_node],
+        tools=[schema_only],
     )
 
-    state = State()
-    state.overrides = OverridesState(override_agent_tools=[schema_only])
-    ctx = _make_ctx(state)
+    ctx = _make_ctx(State())
     raw = await agent.run(ctx)
     result = _unwrap(raw)
 
@@ -552,7 +550,7 @@ async def test_agent_validates_discovered_tool_args():
 
 
 async def test_agent_mixed_batch_validator_less_dispatches_valid_rejects_invalid():
-    # Mixed batch on validator-less (override) bindings: the invalid call lands a RetryPromptPart
+    # Mixed batch on validator-less (wire-form) bindings: the invalid call lands a RetryPromptPart
     # and the valid call still dispatches — mirrors the local-tool partial-failure contract.
     def tool_a(ctx: ToolContext, x: int) -> str:
         return f"a={x}"
@@ -562,8 +560,8 @@ async def test_agent_mixed_batch_validator_less_dispatches_valid_rejects_invalid
 
     node_a = ToolNodeDef.create_tool_node(func=tool_a, subscribe_topics="tool.tool_a.input", publish_topic="tool.tool_a.output")
     node_b = ToolNodeDef.create_tool_node(func=tool_b, subscribe_topics="tool.tool_b.input", publish_topic="tool.tool_b.output")
-    override_a = ToolBinding(tool_def=node_a.tool_schema, dispatch_topic=node_a.subscribe_topics[0])
-    override_b = ToolBinding(tool_def=node_b.tool_schema, dispatch_topic=node_b.subscribe_topics[0])
+    binding_a = ToolBinding(tool_def=node_a.tool_schema, dispatch_topic=node_a.subscribe_topics[0])
+    binding_b = ToolBinding(tool_def=node_b.tool_schema, dispatch_topic=node_b.subscribe_topics[0])
 
     valid_id, invalid_id = "tc-valid", "tc-invalid"
     valid_call = ToolCallPart(tool_name="tool_a", args={"x": 5}, tool_call_id=valid_id)
@@ -575,12 +573,10 @@ async def test_agent_mixed_batch_validator_less_dispatches_valid_rejects_invalid
         subscribe_topics="agent_mixed_validator_less.input",
         publish_topic="agent_mixed_validator_less.output",
         model_client=_model_emits_tool_calls([valid_call, invalid_call]),
-        tools=[node_a, node_b],
+        tools=[binding_a, binding_b],
     )
 
-    state = State()
-    state.overrides = OverridesState(override_agent_tools=[override_a, override_b])
-    ctx = _make_ctx(state, frame_id="frame-mixed")
+    ctx = _make_ctx(State(), frame_id="frame-mixed")
     result = _unwrap(await agent.run(ctx))
 
     # The invalid call is rejected in-band; the valid one is left pending and dispatches (a single
@@ -735,7 +731,7 @@ async def test_agent_override_path_malformed_args_become_retry_prompt():
         publish_topic="tool.typed.output",
     )
 
-    schema_only_override = ToolBinding(
+    schema_only_binding = ToolBinding(
         tool_def=full_tool_node.tool_schema,
         dispatch_topic=full_tool_node.subscribe_topics[0],
     )
@@ -752,11 +748,10 @@ async def test_agent_override_path_malformed_args_become_retry_prompt():
         subscribe_topics="agent_override_malformed.input",
         publish_topic="agent_override_malformed.output",
         model_client=_model_emits_tool_calls([bad_call]),
-        tools=[full_tool_node],
+        tools=[schema_only_binding],
     )
 
-    state = State(overrides=OverridesState(override_agent_tools=[schema_only_override]))
-    ctx = _make_ctx(state)
+    ctx = _make_ctx(State())
     result = _unwrap(await agent.run(ctx))
 
     assert isinstance(result, TailCall), f"expected TailCall (all calls invalid), got {type(result).__name__}"
