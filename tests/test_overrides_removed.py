@@ -15,6 +15,7 @@ import inspect
 
 import pytest
 
+from calfkit.client.gateway import AgentGateway
 from calfkit.models import CallFrame, State, TailCall
 
 
@@ -37,3 +38,25 @@ def test_tailcall_is_the_bare_two_field_call_shape() -> None:
     assert tail_call == TailCall("t", 1)
     assert tail_call != TailCall("u", 1)
     assert tail_call == TailCall(target_topic="t", state=1)  # keyword form preserved
+
+
+_REMOVED_VERB_PARAMS = ("model_settings", "tool_overrides")
+_VERBS = ("send", "start", "execute")
+
+
+@pytest.mark.parametrize("verb", _VERBS)
+def test_gateway_verb_signatures_carry_no_per_run_override_params(verb: str) -> None:
+    params = inspect.signature(getattr(AgentGateway, verb)).parameters
+    for removed in _REMOVED_VERB_PARAMS:
+        assert removed not in params
+
+
+@pytest.mark.parametrize("verb", _VERBS)
+@pytest.mark.parametrize("removed", _REMOVED_VERB_PARAMS)
+async def test_gateway_verbs_reject_the_removed_params(verb: str, removed: str) -> None:
+    # The TypeError fires at the call signature, before the verb body ever touches the
+    # client — so a placeholder client proves the rejection is structural (L7: a
+    # re-introduction cannot pass green).
+    gateway = AgentGateway(_client=None, _topic="t", _output_type=str)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        await getattr(gateway, verb)("hi", **{removed: None})
