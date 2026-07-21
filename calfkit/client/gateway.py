@@ -56,7 +56,7 @@ class AgentGateway(Generic[OutputT]):
         routes to the client's inbox (observe via ``events()``), but ``send()`` registers no per-run
         handle."""
         client = self._client
-        cid, state = client._build_state(
+        cid, task_id, state = client._build_state(
             prompt,
             correlation_id=correlation_id,
             temp_instructions=temp_instructions,
@@ -64,7 +64,7 @@ class AgentGateway(Generic[OutputT]):
             author=author,
         )
         await client._ensure_started()
-        await client._publish_call(topic=self._topic, correlation_id=cid, state=state, deps=client._merge_deps(deps))
+        await client._publish_call(topic=self._topic, correlation_id=cid, task_id=task_id, state=state, deps=client._merge_deps(deps))
         return Dispatch(correlation_id=cid)
 
     async def start(
@@ -81,7 +81,7 @@ class AgentGateway(Generic[OutputT]):
         this run's ``result()``/``stream()`` — hold it for the run's lifetime; there is no
         reattach-by-correlation-id."""
         client = self._client
-        cid, state = client._build_state(
+        cid, task_id, state = client._build_state(
             prompt,
             correlation_id=correlation_id,
             temp_instructions=temp_instructions,
@@ -93,7 +93,7 @@ class AgentGateway(Generic[OutputT]):
         handle: InvocationHandle[OutputT] = InvocationHandle(correlation_id=cid, _channel=_RunChannel(), _output_type=self._output_type)
         client._hub.track(handle)
         await client._ensure_started()
-        await client._publish_call(topic=self._topic, correlation_id=cid, state=state, deps=client._merge_deps(deps))
+        await client._publish_call(topic=self._topic, correlation_id=cid, task_id=task_id, state=state, deps=client._merge_deps(deps))
         return handle
 
     async def execute(

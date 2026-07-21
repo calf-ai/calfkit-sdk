@@ -49,6 +49,16 @@ the body. Framework-stamped, never user-set."""
 MessageKind = Literal["call", "return", "fault"]
 """Closed value space for :data:`HDR_KIND` (spec §4.1)."""
 
+HDR_TASK = "x-calf-task"
+"""Kafka header carrying the run's ``task_id`` — the mesh-wide partition-affinity key
+(task-keying prep spec §2). Minted once at origin (the client's ``_publish_call``; no
+node originates a run) and forwarded unchanged on every framework publish path, exactly
+as ``correlation_id`` travels — never re-minted mid-run. Read at ingress by the identity
+middleware, which scopes it for handler injection and mints one for envelope-wire
+deliveries that arrive without it (raw-producer entry). Framework-stamped, never
+user-set; step messages do not carry it yet (their header stamp is the durable PR's).
+"""
+
 HDR_WIRE = "x-calf-wire"
 """Kafka header carrying the body's *wire schema* (intermediate-step-streaming spec §2.4):
 ``envelope`` (an :class:`~calfkit.models.envelope.Envelope`) or ``step`` (a ``StepMessage``).

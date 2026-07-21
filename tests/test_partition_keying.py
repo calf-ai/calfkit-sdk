@@ -30,14 +30,14 @@ async def test_entry_publish_is_keyed_via_the_seam(monkeypatch) -> None:  # noqa
 
     monkeypatch.setattr(client._broker, "publish", spy_publish)
 
-    cid, state = client._build_state(
+    cid, task_id, state = client._build_state(
         "hello",
         correlation_id="cid-entry-1",
         temp_instructions=None,
         message_history=None,
         author=None,
     )
-    await client._publish_call(topic="some.topic", correlation_id=cid, state=state, deps=None)
+    await client._publish_call(topic="some.topic", correlation_id=cid, task_id=task_id, state=state, deps=None)
 
     assert len(published) == 1
     assert published[0]["key"] == partition_key("cid-entry-1")

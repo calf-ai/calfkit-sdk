@@ -358,6 +358,7 @@ async def test_client_publish_call_stamps_route_and_body() -> None:
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
+        task_id="task-routed-1",
         state=State(),
         deps=None,
         route="order.created",
@@ -376,6 +377,7 @@ async def test_client_allows_body_without_route() -> None:
     await _client(conn)._publish_call(
         topic="orders",
         correlation_id=_CORR,
+        task_id="task-routed-1",
         state=State(),
         deps=None,
         route=None,
@@ -394,6 +396,7 @@ async def test_client_rejects_non_concrete_producer_route(bad_route: str) -> Non
         await _client(conn)._publish_call(
             topic="orders",
             correlation_id=_CORR,
+            task_id="task-routed-1",
             state=State(),
             deps=None,
             route=bad_route,

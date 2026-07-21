@@ -15,7 +15,7 @@ from typing import Any, overload
 import uuid_utils
 from faststream.kafka import KafkaBroker
 
-from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, HDR_WIRE, is_topic_safe
+from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KIND, HDR_ROUTE, HDR_TASK, HDR_WIRE, is_topic_safe
 from calfkit._routing import is_concrete_route_key
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
@@ -377,21 +377,25 @@ class Client:
         temp_instructions: str | None,
         message_history: list[ModelMessage] | None,
         author: str | None,
-    ) -> tuple[str, State]:
-        """Shape the per-call input: default ``correlation_id`` to a fresh uuid7 and build the
-        ``State`` from the prompt + history (stamping ``author``). **No JSON pre-flight** (spec
-        §2.5): a non-serializable ``deps`` bubbles from ``publish``, not a call-site check."""
+    ) -> tuple[str, str, State]:
+        """Shape the per-call input: default ``correlation_id`` to a fresh uuid7, mint the
+        run's ``task_id`` (uuid7, once per run — the client is the sole origin; task-keying
+        prep spec §2-A, no caller-supply surface in prep), and build the ``State`` from the
+        prompt + history (stamping ``author``). **No JSON pre-flight** (spec §2.5): a
+        non-serializable ``deps`` bubbles from ``publish``, not a call-site check."""
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
+        task_id = uuid_utils.uuid7().hex
         state = State(message_history=message_history or [], temp_instructions=temp_instructions)
         state.stage_message(ModelRequest.user_text_prompt(user_prompt, name=author))
-        return correlation_id, state
+        return correlation_id, task_id, state
 
     async def _publish_call(
         self,
         *,
         topic: str,
         correlation_id: str,
+        task_id: str,
         state: State,
         deps: dict[str, Any] | None,
         route: str | None = None,
@@ -399,7 +403,8 @@ class Client:
     ) -> None:
         """Publish ONE call envelope to *topic* (spec §2.6): an ``Envelope`` carrying the session
         ``State`` + ``deps`` and a pushed ``CallFrame`` whose ``callback_topic`` is this client's inbox,
-        plus the emitter headers + ``x-calf-kind=call``. Keyed by ``correlation_id``.
+        plus the emitter headers, ``x-calf-kind=call``, and the origin ``x-calf-task`` stamp
+        (task-keying prep spec §2-A). Keyed by ``correlation_id``.
 
         ``route`` / ``body`` are an **internal, non-public lower-level surface** (NOT the agent gateway,
         spec §9.2): the gateway verbs never pass them. They let framework-internal callers target a
@@ -416,7 +421,7 @@ class Client:
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),
         )
-        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call", HDR_WIRE: Envelope.WIRE}
+        headers = {HDR_EMITTER: self._emitter_id, HDR_EMITTER_KIND: CLIENT_KIND, HDR_KIND: "call", HDR_WIRE: Envelope.WIRE, HDR_TASK: task_id}
         if route is not None:
             headers[HDR_ROUTE] = route
         # key= is the Kafka partition key (correlation_id= is a FastStream trace/header
