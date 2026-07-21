@@ -281,7 +281,7 @@ Worker(
 
 Hosts the given `nodes` against the broker. Drive it with `await worker.run()` (blocking), the embeddable `await worker.start()` / `await worker.stop()` pair, or `async with worker:`.
 
-`max_workers` is the per-node concurrency cap. Every node consumes **key-ordered**: up to `max_workers` messages process in parallel across conversations, while messages sharing a `correlation_id` stay strictly serial, in order — so raising it never reorders a workflow's steps. The default (`1`) processes serially, one message at a time.
+`max_workers` is the per-node concurrency cap. Every node consumes **key-ordered**: up to `max_workers` messages process in parallel across tasks, while messages sharing a `task_id` (the partition key — one task per run today) stay strictly serial, in order — so raising it never reorders a workflow's steps. The default (`1`) processes serially, one message at a time.
 
 ## Policy seams
 
