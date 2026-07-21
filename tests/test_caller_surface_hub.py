@@ -175,7 +175,7 @@ async def test_return_reply_pushes_run_completed_to_the_tracked_handle() -> None
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
     env = _reply_env(parts=[TextPart(text="hello")])
-    hub._on_reply(env, "cid-1", _headers("return", emitter="summarizer"))
+    hub._on_reply(env, "cid-1", _headers("return", emitter="summarizer"), task_id="t-under-test")
     ev = await handle._channel.await_terminal()
     assert isinstance(ev, RunCompleted)
     assert ev._envelope is env  # the decoded reply, for result()'s typed projection (spec §3.3/§5.9)
@@ -188,7 +188,7 @@ async def test_demux_routes_each_reply_to_only_its_own_handle() -> None:
     hub = _Hub()
     h1 = _tracked(hub, "cid-1")
     h2 = _tracked(hub, "cid-2")
-    hub._on_reply(_reply_env(parts=[TextPart(text="one")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="one")]), "cid-1", _headers("return"), task_id="t-under-test")
     ev1 = await h1._channel.await_terminal()
     assert ev1.output == "one"
     assert not h2._channel.closed  # cid-2's channel never saw cid-1's reply (no cross-run leak)
@@ -198,7 +198,7 @@ async def test_fault_reply_pushes_run_failed_with_the_report_verbatim() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
     report = ErrorReport(error_type="billing.quota", message="over limit")
-    hub._on_reply(_reply_env(error=report), "cid-1", _headers("fault"))
+    hub._on_reply(_reply_env(error=report), "cid-1", _headers("fault"), task_id="t-under-test")
     ev = await _terminal(handle)
     assert isinstance(ev, RunFailed)
     assert ev.report is report  # carried verbatim (not flattened) — spec §5.9
@@ -208,7 +208,7 @@ async def test_fault_reply_pushes_run_failed_with_the_report_verbatim() -> None:
 async def test_return_reply_with_no_pending_handle_warns_and_drops(caplog: pytest.LogCaptureFixture) -> None:
     hub = _Hub()  # nothing tracked for this cid (a shared-inbox / send() reply, or a dropped handle)
     with caplog.at_level(logging.WARNING, logger=_HUB_LOGGER):
-        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-orphan", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-orphan", _headers("return"), task_id="t-under-test")
     assert "no pending handle" in caplog.text  # WARNING — a lost return is benign (firehose-recoverable)
 
 
@@ -216,7 +216,7 @@ async def test_fault_reply_with_no_pending_handle_error_floors_the_full_report(c
     hub = _Hub()
     report = ErrorReport(error_type="billing.quota")
     with caplog.at_level(logging.ERROR, logger=_HUB_LOGGER):
-        hub._on_reply(_reply_env(error=report), "cid-orphan", _headers("fault"))
+        hub._on_reply(_reply_env(error=report), "cid-orphan", _headers("fault"), task_id="t-under-test")
     assert "no pending handle" in caplog.text
     assert "billing.quota" in caplog.text  # the full ErrorReport is ERROR-floored, never silently dropped (§5.1)
     assert "WARNING" not in caplog.text  # a fault floors at ERROR, not WARNING
@@ -226,7 +226,7 @@ async def test_unrecognized_kind_error_logs_and_does_not_resolve_the_run(caplog:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
     with caplog.at_level(logging.ERROR, logger=_HUB_LOGGER):
-        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("bogus"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("bogus"), task_id="t-under-test")
     assert "x-calf-kind" in caplog.text  # ERROR names the offending kind
     assert not handle._channel.closed  # never resolve a run on an unclassifiable reply (§5.9)
 
@@ -238,7 +238,7 @@ async def test_missing_kind_header_error_logs_and_does_not_resolve_the_run(caplo
     handle = _tracked(hub, "cid-1")
     headers = {HDR_EMITTER: "agent.x", HDR_EMITTER_KIND: "agent"}  # no HDR_KIND
     with caplog.at_level(logging.ERROR, logger=_HUB_LOGGER):
-        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", headers)
+        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", headers, task_id="t-under-test")
     assert "x-calf-kind" in caplog.text
     assert not handle._channel.closed
 
@@ -249,7 +249,7 @@ async def test_kind_return_with_a_fault_slot_is_a_malformed_terminal() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
     env = _reply_env(error=ErrorReport(error_type="x.y"))  # slot = FaultMessage
-    hub._on_reply(env, "cid-1", _headers("return"))  # header = return → disagreement
+    hub._on_reply(env, "cid-1", _headers("return"), task_id="t-under-test")  # header = return → disagreement
     ev = await _terminal(handle)
     assert isinstance(ev, RunFailed)
     assert ev.report.error_type == FaultTypes.DELIVERY_MALFORMED
@@ -259,7 +259,7 @@ async def test_kind_fault_with_a_return_slot_is_a_malformed_terminal() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
     env = _reply_env(parts=[TextPart(text="x")])  # slot = ReturnMessage
-    hub._on_reply(env, "cid-1", _headers("fault"))  # header = fault → disagreement
+    hub._on_reply(env, "cid-1", _headers("fault"), task_id="t-under-test")  # header = fault → disagreement
     ev = await _terminal(handle)
     assert isinstance(ev, RunFailed)
     assert ev.report.error_type == FaultTypes.DELIVERY_MALFORMED
@@ -268,7 +268,7 @@ async def test_kind_fault_with_a_return_slot_is_a_malformed_terminal() -> None:
 async def test_kind_return_with_an_absent_slot_is_a_malformed_terminal() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
-    hub._on_reply(_env(), "cid-1", _headers("return"))  # _env() has reply=None (no slot)
+    hub._on_reply(_env(), "cid-1", _headers("return"), task_id="t-under-test")  # _env() has reply=None (no slot)
     ev = await _terminal(handle)
     assert isinstance(ev, RunFailed)
     assert ev.report.error_type == FaultTypes.DELIVERY_MALFORMED
@@ -310,7 +310,7 @@ async def test_dropped_handle_self_gcs_and_a_later_reply_takes_the_no_handle_pat
     del handle  # caller drops it → acyclic + non-slots → refcount-collected, weak map entry vanishes (§5.2)
     assert "cid-1" not in hub._runs
     with caplog.at_level(logging.WARNING, logger=_HUB_LOGGER):
-        hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "cid-1", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "cid-1", _headers("return"), task_id="t-under-test")
     assert "no pending handle" in caplog.text  # the late reply finds no handle
 
 
@@ -416,7 +416,7 @@ async def test_open_events_stream_receives_a_dispatched_event() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
     async with EventStream(hub, terminal_only=False, buffer_size=8) as stream:
-        hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"), task_id="t-under-test")
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
     assert isinstance(ev, RunCompleted)
     assert ev.correlation_id == "cid-1"
@@ -431,7 +431,7 @@ async def test_firehose_drops_oldest_keeps_newest_and_counts_drops_with_a_warnin
     async with EventStream(hub, terminal_only=False, buffer_size=2) as stream:
         with caplog.at_level(logging.WARNING, logger=_EVENTS_LOGGER):
             for i in range(5):  # 5 events into a size-2 outlet → the 3 oldest are dropped
-                hub._on_reply(_reply_env(parts=[TextPart(text=str(i))]), f"c-{i}", _headers("return"))
+                hub._on_reply(_reply_env(parts=[TextPart(text=str(i))]), f"c-{i}", _headers("return"), task_id="t-under-test")
         assert stream.dropped == 3  # signaled, never silent (spec §5.4)
         kept = [(await asyncio.wait_for(anext(stream), timeout=1.0)).output for _ in range(2)]
         assert kept == ["3", "4"]  # drop-oldest / keep-newest-N — a catching-up reader sees the latest
@@ -446,9 +446,9 @@ async def test_undrained_firehose_never_blocks_the_per_run_channel() -> None:
     hub = _Hub()
     async with EventStream(hub, terminal_only=False, buffer_size=4) as _firehose:  # never drained
         for i in range(100):  # flood 25x the buffer with foreign returns
-            hub._on_reply(_reply_env(parts=[TextPart(text=str(i))]), f"foreign-{i}", _headers("return"))
+            hub._on_reply(_reply_env(parts=[TextPart(text=str(i))]), f"foreign-{i}", _headers("return"), task_id="t-under-test")
         handle = _tracked(hub, "cid-real")
-        hub._on_reply(_reply_env(parts=[TextPart(text="done")]), "cid-real", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="done")]), "cid-real", _headers("return"), task_id="t-under-test")
         ev = await asyncio.wait_for(handle._channel.await_terminal(), timeout=1.0)
     assert ev.output == "done"  # the lossless per-run channel resolved despite the overflowing firehose
     assert _firehose.dropped >= 96  # the firehose shed its own oldest (best-effort), nobody else's
@@ -457,7 +457,7 @@ async def test_undrained_firehose_never_blocks_the_per_run_channel() -> None:
 async def test_terminal_only_yields_terminal_events() -> None:
     hub = _Hub()
     async with EventStream(hub, terminal_only=True, buffer_size=8) as stream:
-        hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"), task_id="t-under-test")
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
     assert isinstance(ev, RunCompleted)  # a terminal passes the terminal_only filter
 
@@ -470,7 +470,7 @@ async def test_terminal_only_drops_intermediate_step_events() -> None:
     async with EventStream(hub, terminal_only=True, buffer_size=8) as stream:
         step = StepMessage(correlation_id="c-1", emitter="a", depth=2, frame_id="f", events=[AgentMessageStep(parts=[TextPart(text="x")])])
         hub._on_step(step)
-        hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="t")]), "c-1", _headers("return"), task_id="t-under-test")
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
     assert isinstance(ev, RunCompleted)  # the step was filtered out; only the terminal surfaced
 
@@ -498,7 +498,7 @@ async def test_outcome_surfaces_through_the_generic_splat() -> None:
 async def test_two_open_streams_each_receive_every_event() -> None:
     hub = _Hub()
     async with EventStream(hub, buffer_size=8) as s1, EventStream(hub, buffer_size=8) as s2:
-        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "c-1", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "c-1", _headers("return"), task_id="t-under-test")
         e1 = await asyncio.wait_for(anext(s1), timeout=1.0)
         e2 = await asyncio.wait_for(anext(s2), timeout=1.0)
     assert e1.output == "x" and e2.output == "x"  # one read tee'd to every open outlet (§5.4)
@@ -510,14 +510,14 @@ async def test_exited_stream_is_unregistered_and_receives_no_more_events() -> No
     async with stream:
         pass  # enter registers the outlet; exit unregisters + the outlet is dropped
     assert stream not in hub._firehose
-    hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "c-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "c-1", _headers("return"), task_id="t-under-test")
     assert len(stream._buffer) == 0  # a post-exit event is never offered to the closed stream
 
 
 async def test_firehose_surfaces_a_fault_as_a_raw_run_failed() -> None:
     hub = _Hub()
     async with EventStream(hub, buffer_size=8) as stream:
-        hub._on_reply(_reply_env(error=ErrorReport(error_type="x.y")), "c-1", _headers("fault"))
+        hub._on_reply(_reply_env(error=ErrorReport(error_type="x.y")), "c-1", _headers("fault"), task_id="t-under-test")
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
     assert isinstance(ev, RunFailed)  # raw — the caller maps/branches itself (§4.5)
     assert ev.report.error_type == "x.y"
@@ -528,7 +528,7 @@ async def test_firehose_surfaces_a_reply_with_no_pending_handle() -> None:
     # the firehose (demuxed by the caller via correlation_id) — that is how send() results are seen.
     hub = _Hub()  # nothing tracked
     async with EventStream(hub, buffer_size=8) as stream:
-        hub._on_reply(_reply_env(parts=[TextPart(text="foreign")]), "foreign-cid", _headers("return"))
+        hub._on_reply(_reply_env(parts=[TextPart(text="foreign")]), "foreign-cid", _headers("return"), task_id="t-under-test")
         ev = await asyncio.wait_for(anext(stream), timeout=1.0)
     assert ev.correlation_id == "foreign-cid"
 
@@ -539,7 +539,7 @@ async def test_firehose_surfaces_a_reply_with_no_pending_handle() -> None:
 async def test_result_projects_a_completed_terminal_to_an_invocation_result() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")  # _output_type defaults to str
-    hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"), task_id="t-under-test")
     res = await asyncio.wait_for(handle.result(), timeout=1.0)
     assert res.output == "hi"  # str default → first TextPart.text
     assert res.correlation_id == "cid-1"
@@ -549,7 +549,7 @@ async def test_result_raises_node_fault_error_verbatim_on_a_fault_terminal() -> 
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
     report = ErrorReport(error_type="billing.quota", message="over limit")
-    hub._on_reply(_reply_env(error=report), "cid-1", _headers("fault"))
+    hub._on_reply(_reply_env(error=report), "cid-1", _headers("fault"), task_id="t-under-test")
     with pytest.raises(NodeFaultError) as exc:
         await asyncio.wait_for(handle.result(), timeout=1.0)
     assert exc.value.report is report  # the ErrorReport wrapped verbatim (§5.9)
@@ -563,7 +563,7 @@ async def test_result_timeout_raises_client_timeout_error_and_the_run_survives()
         await handle.result(timeout=0.05)  # this client stops waiting after 50ms
     assert exc.value.correlation_id == "cid-1"
     # the run is unaffected — a later terminal still resolves a fresh result()
-    hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="late")]), "cid-1", _headers("return"), task_id="t-under-test")
     res = await asyncio.wait_for(handle.result(), timeout=1.0)
     assert res.output == "late"
 
@@ -574,7 +574,7 @@ async def test_result_raises_deserialization_error_on_a_present_but_mismatched_p
     hub = _Hub()
     handle: InvocationHandle[int] = InvocationHandle(correlation_id="cid-1", _channel=_RunChannel(), _output_type=int)
     hub.track(handle)
-    hub._on_reply(_reply_env(parts=[TextPart(text="not-an-int")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="not-an-int")]), "cid-1", _headers("return"), task_id="t-under-test")
     with pytest.raises(DeserializationError):
         await asyncio.wait_for(handle.result(), timeout=1.0)
 
@@ -582,7 +582,7 @@ async def test_result_raises_deserialization_error_on_a_present_but_mismatched_p
 async def test_result_is_idempotent_when_called_twice() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
-    hub._on_reply(_reply_env(parts=[TextPart(text="once")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="once")]), "cid-1", _headers("return"), task_id="t-under-test")
     first = await asyncio.wait_for(handle.result(), timeout=1.0)
     second = await asyncio.wait_for(handle.result(), timeout=1.0)  # cached terminal — replayable (§4.4)
     assert first.output == second.output == "once"
@@ -591,7 +591,7 @@ async def test_result_is_idempotent_when_called_twice() -> None:
 async def test_stream_yields_the_terminal_raw_as_its_single_v1_element() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
-    hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="hi")]), "cid-1", _headers("return"), task_id="t-under-test")
     events = [ev async for ev in handle.stream()]
     assert len(events) == 1  # v1: the fabric emits only the terminal (spec §3.1)
     assert isinstance(events[0], RunCompleted)
@@ -601,7 +601,7 @@ async def test_stream_yields_the_terminal_raw_as_its_single_v1_element() -> None
 async def test_stream_then_result_reads_the_cached_terminal() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
-    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"), task_id="t-under-test")
     streamed = [ev async for ev in handle.stream()]
     res = await asyncio.wait_for(handle.result(), timeout=1.0)  # O(1) cached terminal (§4.4)
     assert streamed[0].correlation_id == "cid-1"
@@ -611,7 +611,7 @@ async def test_stream_then_result_reads_the_cached_terminal() -> None:
 async def test_result_then_stream_replays_the_cached_terminal() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
-    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"), task_id="t-under-test")
     await asyncio.wait_for(handle.result(), timeout=1.0)
     replayed = [ev async for ev in handle.stream()]  # terminal is replayable (§4.4)
     assert len(replayed) == 1
@@ -626,7 +626,7 @@ async def test_second_concurrent_stream_raises_runtime_error() -> None:
     await asyncio.sleep(0)  # let s1 register as the live listener
     with pytest.raises(RuntimeError):
         await anext(handle.stream())  # a second concurrent stream() → RuntimeError (≤1 live, §4.4)
-    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"))
+    hub._on_reply(_reply_env(parts=[TextPart(text="x")]), "cid-1", _headers("return"), task_id="t-under-test")
     assert (await asyncio.wait_for(task, timeout=1.0)).output == "x"  # s1 still completes
 
 
@@ -645,7 +645,7 @@ async def test_result_raises_node_fault_error_on_an_undecodable_inbox_reply() ->
 async def test_result_raises_node_fault_error_on_a_malformed_terminal() -> None:
     hub = _Hub()
     handle = _tracked(hub, "cid-1")
-    hub._on_reply(_env(), "cid-1", _headers("return"))  # kind=return but reply=None → malformed
+    hub._on_reply(_env(), "cid-1", _headers("return"), task_id="t-under-test")  # kind=return but reply=None → malformed
     with pytest.raises(NodeFaultError) as exc:
         await asyncio.wait_for(handle.result(), timeout=1.0)
     assert exc.value.report.error_type == FaultTypes.DELIVERY_MALFORMED

@@ -434,10 +434,11 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         emitter_node_id: str | None = None,
         emitter_node_kind: str | None = None,
         correlation_id: str | None = None,
+        task_id: str | None = None,
     ) -> SessionRunContext:
         ctx = envelope.context.model_copy(deep=True)
         frame = envelope.internal_workflow_state.current_frame_or_none
-        ctx._stamp_transport(correlation_id=correlation_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
+        ctx._stamp_transport(correlation_id=correlation_id, task_id=task_id, emitter_node_id=emitter_node_id, emitter_node_kind=emitter_node_kind)
         ctx._resources = self._effective_resources()
         ctx._frame_id = frame.frame_id if frame is not None else None
         # Derive the messaging cycle guard's ancestor chain (ADR-0016): the (caller_node_id,
@@ -1749,18 +1750,23 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
         self,
         envelope: Envelope,
         correlation_id: Annotated[str, Context()],
+        task_id: Annotated[str, Context()],
         headers: Annotated[dict[str, Any], Context("message.headers")],
         broker: BrokerAnnotation,
     ) -> Response:
         """The FastStream per-delivery entrypoint. Single-sources the dependency-injection
-        annotations (``correlation_id``/``headers``/``broker``) and forwards to the polymorphic
-        :meth:`_handle_delivery` — caller-capable nodes run the §6.8 fault pipeline; observers
-        (:class:`~calfkit.nodes.consumer.ConsumerNode`) run the observe-only consume path (§6.6).
-        Kept thin so a node family varies its delivery handling by overriding ``_handle_delivery``,
-        never by re-declaring the FastStream contract."""
-        return await self._handle_delivery(envelope, correlation_id, headers, broker)
+        annotations (``correlation_id``/``task_id``/``headers``/``broker``) and forwards to the
+        polymorphic :meth:`_handle_delivery` — caller-capable nodes run the §6.8 fault pipeline;
+        observers (:class:`~calfkit.nodes.consumer.ConsumerNode`) run the observe-only consume path
+        (§6.6). ``task_id`` is the identity middleware's scoped value (minted at ingress when the
+        header is absent), so it is REQUIRED here — a missing scope fails loud at injection, never
+        a silent keyless publish. Kept thin so a node family varies its delivery handling by
+        overriding ``_handle_delivery``, never by re-declaring the FastStream contract."""
+        return await self._handle_delivery(envelope, correlation_id, task_id, headers, broker)
 
-    async def _handle_delivery(self, envelope: Envelope, correlation_id: str, headers: dict[str, Any], broker: BrokerAnnotation) -> Response:
+    async def _handle_delivery(
+        self, envelope: Envelope, correlation_id: str, task_id: str, headers: dict[str, Any], broker: BrokerAnnotation
+    ) -> Response:
         """The caller-capable per-delivery pipeline (fault-rail §6.8).
 
         Emitter decode → stage-0 guard (:meth:`_classify` → :meth:`prepare_context` →
@@ -1782,7 +1788,9 @@ class BaseNodeDef(BaseNodeSchema, LifecycleHookMixin, RegistryMixin, AdvertRegis
             if kind is None:  # unrecognized x-calf-kind → ERROR-log + ignore (§4.1 rule 2)
                 return self._floor_unknown_kind(envelope, headers, correlation_id)
             logger.debug("[%s] handler entered node=%s emitter=%s kind=%s", correlation_id[:8], self.node_id, emitter, kind)
-            ctx = await self.prepare_context(envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id)
+            ctx = await self.prepare_context(
+                envelope, emitter_node_id=emitter, emitter_node_kind=emitter_kind, correlation_id=correlation_id, task_id=task_id
+            )
             seam_ctx = self._build_seam_context(ctx, envelope, headers, kind)
             stray = self._stray_check(kind, envelope)  # kind ↔ slot agreement, BEFORE the seams (§6.7)
             if stray is not None:

@@ -172,6 +172,7 @@ async def test_consumer_handler_injects_node_resources_into_context() -> None:
     await node.handler(
         envelope,
         correlation_id="cid",
+        task_id="task-under-test",
         headers={HDR_EMITTER: b"agent", HDR_EMITTER_KIND: b"agent"},
         broker=KafkaBroker(),
     )
@@ -214,6 +215,7 @@ async def test_consumer_context_resources_is_shallow_copy_of_node_bag() -> None:
     await node.handler(
         envelope,
         correlation_id="cid",
+        task_id="task-under-test",
         headers={HDR_EMITTER: b"agent", HDR_EMITTER_KIND: b"agent"},
         broker=KafkaBroker(),
     )

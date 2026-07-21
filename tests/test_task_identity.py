@@ -5,14 +5,31 @@ The client is the SOLE origin (spec §2-A — the only client publish site is
 once per run) beside the ``correlation_id`` default, and ``_publish_call`` stamps it as
 the forwarded ``x-calf-task`` header. The minted task is DISTINCT from the correlation id
 (a fresh uuid7) — the property that makes the Phase-2 key flip observable (spec §5-G).
-Node-side forwarding is covered per publish path in ``test_task_header_forwarding``; the
-middleware ingress arm has its own tests.
+
+Ingress (spec §2-C): the middleware-scoped value reaches handlers via FastStream-native
+param injection — these direct-drive tests pass the param exactly as they pass
+``correlation_id`` (header injection is inert without a broker). The context accessor
+follows the ``correlation_id`` RAISING template; the client reply dispatcher stamps the
+same scoped value (the hub arm — takeover ruling 2026-07-20).
 """
 
 from unittest.mock import AsyncMock
 
-from calfkit._protocol import HDR_TASK
+import pytest
+
+from calfkit._protocol import HDR_KIND, HDR_TASK
 from calfkit.client import Client
+from calfkit.client.hub import InvocationHandle, _Hub, _RunChannel
+from calfkit.models import CallFrame, CallFrameStack, Envelope, ReturnCall, SessionRunContext, WorkflowState
+from calfkit.models.payload import TextPart
+from calfkit.models.reply import ReturnMessage
+from calfkit.models.state import State
+from calfkit.nodes.node import NodeDef
+from tests._broker_fakes import CaptureBroker
+
+# ---------------------------------------------------------------------------
+# The origin mint (spec §2-A)
+# ---------------------------------------------------------------------------
 
 
 def test_hdr_task_wire_constant() -> None:
@@ -85,3 +102,62 @@ async def test_send_threads_the_minted_task_to_the_publish() -> None:
     kwargs = client._publish_call.await_args.kwargs
     assert kwargs["task_id"], "the gateway verb must thread the minted task_id"
     assert kwargs["task_id"] != kwargs["correlation_id"]
+
+
+# ---------------------------------------------------------------------------
+# Context carriage (spec §2-C): the raising accessor + the ingress threading
+# ---------------------------------------------------------------------------
+
+
+def _task_envelope() -> Envelope:
+    stack = CallFrameStack()
+    stack.push(CallFrame(target_topic="t", callback_topic="reply.topic"))
+    return Envelope(
+        internal_workflow_state=WorkflowState(call_stack=stack),
+        context=SessionRunContext(state=State(), deps={}),
+    )
+
+
+def test_task_id_read_before_stamping_raises() -> None:
+    """The ``correlation_id`` RAISING template (spec §2-C): a read outside a stamping
+    handler is a loud RuntimeError — never a None leaking into key/log sites."""
+    ctx = SessionRunContext(state=State(), deps={})
+    with pytest.raises(RuntimeError):
+        _ = ctx.task_id
+
+
+async def test_prepare_context_stamps_task_id_onto_the_run_context() -> None:
+    node = NodeDef(node_id="n-task-ctx", subscribe_topics=["t"])
+    ctx = await node.prepare_context(_task_envelope(), correlation_id="c-1", task_id="t-1")
+    assert ctx.task_id == "t-1"
+
+
+async def test_handler_threads_task_id_to_the_body() -> None:
+    """handler → prepare_context → ctx: the injected param IS the read (batch-15) — the
+    same threaded value the publish paths key and stamp with."""
+    seen: list[str] = []
+
+    class N(NodeDef):
+        async def run(self, ctx: SessionRunContext) -> ReturnCall:
+            seen.append(ctx.task_id)
+            return ReturnCall(state=ctx.state, value="ok")
+
+    node = N(node_id="n-task-run", subscribe_topics=["t"])
+    await node.handler(_task_envelope(), correlation_id="c-2", task_id="t-2", headers={}, broker=CaptureBroker())
+    assert seen == ["t-2"]
+
+
+async def test_hub_reply_dispatch_stamps_the_scoped_task() -> None:
+    """The stamp's third site (takeover ruling, 2026-07-20): the client reply dispatcher
+    stamps the middleware-scoped task onto the reply context — parity with
+    ``correlation_id``, and always a real value on this path."""
+    hub = _Hub()
+    handle = InvocationHandle(correlation_id="cid-t", _channel=_RunChannel())
+    hub.track(handle)
+    env = Envelope(
+        context=SessionRunContext(state=State(), deps={}),
+        internal_workflow_state=WorkflowState(call_stack=CallFrameStack()),
+        reply=ReturnMessage(in_reply_to=None, tag=None, parts=[TextPart(text="done")]),
+    )
+    hub._on_reply(env, "cid-t", {HDR_KIND: "return"}, task_id="t-hub")
+    assert env.context.task_id == "t-hub"

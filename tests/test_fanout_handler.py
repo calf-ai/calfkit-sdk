@@ -263,7 +263,7 @@ async def test_single_call_list_does_not_open_durable_batch() -> None:
     )
     broker = CaptureBroker()
 
-    await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    await node.handler(env, correlation_id="corr-1", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
     # The durable store was never opened — no batch registered for the single call.
     assert await fake.read_state("A") is None
@@ -306,7 +306,7 @@ async def _drive_open(node: NodeDef[Any]) -> tuple[FakeFanoutBatchStore, Capture
         internal_workflow_state=WorkflowState(call_stack=Stack([own])),
     )
     broker = CaptureBroker()
-    await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    await node.handler(env, correlation_id="corr-1", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
     return fake, broker
 
 
@@ -353,7 +353,7 @@ async def test_degenerate_batch_snapshots_the_caller_state_not_the_seed() -> Non
     own = CallFrame(target_topic="fan.in", callback_topic="caller", frame_id="A")
     env = Envelope(context=SessionRunContext(state=caller_state, deps={}), internal_workflow_state=WorkflowState(call_stack=Stack([own])))
     broker = CaptureBroker()
-    await node.handler(env, correlation_id="c", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    await node.handler(env, correlation_id="c", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
     base = await fake.read_basestate("A")
     assert base is not None
@@ -558,7 +558,7 @@ async def test_fanout_open_missing_store_faults_caller_not_escape() -> None:
     )
     broker = CaptureBroker()
 
-    resp = await node.handler(env, correlation_id="corr-1", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
+    resp = await node.handler(env, correlation_id="corr-1", task_id="task-under-test", headers={HDR_KIND: "call"}, broker=cast(Any, broker))
 
     assert isinstance(resp.body.reply, FaultMessage)  # faulted the caller, did NOT escape to FastStream
     assert resp.body.reply.error.error_type == FaultTypes.FANOUT_ABORTED

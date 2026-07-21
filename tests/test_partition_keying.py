@@ -82,7 +82,7 @@ def _envelope(callback_topic: str | None = "reply.topic") -> Envelope:
 
 async def _drive(node: NodeDef, *, callback_topic: str | None = "reply.topic") -> CaptureBroker:
     spy = CaptureBroker()
-    await node.handler(_envelope(callback_topic), correlation_id=_CORR, headers={}, broker=spy)
+    await node.handler(_envelope(callback_topic), correlation_id=_CORR, task_id="task-under-test", headers={}, broker=spy)
     assert spy.published, "the driven path emitted no publish — the test drove nothing"
     return spy
 
@@ -131,6 +131,7 @@ async def test_auto_fault_publish_carries_the_partition_key() -> None:
     await node.handler(
         _envelope("reply.topic"),
         correlation_id=_CORR,
+        task_id="task-under-test",
         headers={"x-calf-route": "unmatched.route"},
         broker=spy,
     )

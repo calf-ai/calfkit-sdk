@@ -71,7 +71,7 @@ class _TailNode(NodeDef[Any]):
 
 
 async def _run(node: NodeDef[Any], env: Envelope, broker: CaptureBroker) -> Any:
-    return await node.handler(env, correlation_id=_CORR, headers={HDR_ROUTE: "go"}, broker=cast(Any, broker))
+    return await node.handler(env, correlation_id=_CORR, task_id="task-under-test", headers={HDR_ROUTE: "go"}, broker=cast(Any, broker))
 
 
 class TestReturnCallStamping:

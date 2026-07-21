@@ -153,7 +153,9 @@ class TestStepPublishWireShape:
         # (co-partitions with the terminal) — through the REAL _handle_delivery.
         agent = _agent_emitting([ToolCallPart(tool_name="_echo_tool", args={}, tool_call_id="c1")], name="disp", topics="node.in", tools=[_echo_tool])
         broker = AsyncMock()
-        await agent._handle_delivery(_delivery_envelope(State()), correlation_id="cid-hdr", headers=_HEADERS, broker=broker)
+        await agent._handle_delivery(
+            _delivery_envelope(State()), correlation_id="cid-hdr", task_id="task-under-test", headers=_HEADERS, broker=broker
+        )
         steps = _published_steps(broker)
         assert len(steps) == 1
         call = steps[0]

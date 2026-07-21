@@ -217,6 +217,7 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
     ``Client.start(deps=...)``; tools read it as ``ctx.deps["key"]``."""
 
     _correlation_id: str | None = PrivateAttr(default=None)
+    _task_id: str | None = PrivateAttr(default=None)
     _emitter_node_id: str | None = PrivateAttr(default=None)
     _emitter_node_kind: str | None = PrivateAttr(default=None)
     _frame_id: str | None = PrivateAttr(default=None)
@@ -244,6 +245,24 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
                 "(prepare_context / consumer handler / reply dispatcher)."
             )
         return self._correlation_id
+
+    @property
+    def task_id(self) -> str:
+        """The run's task id — the mesh-wide partition-affinity key (task-keying prep spec §2).
+
+        Sourced from the inbound ``x-calf-task`` Kafka header via the identity
+        middleware's scope (which mints one at ingress when absent), never from the
+        envelope body. Backed by a ``PrivateAttr`` so it cannot be spoofed via the
+        model constructor. The middleware guarantee makes it always present once a
+        handler has prepared the context, so the accessor is typed ``str`` and
+        follows the :attr:`correlation_id` RAISING template — a read before stamping
+        fails loud rather than leaking ``None`` into key/log sites.
+        """
+        if self._task_id is None:
+            raise RuntimeError(
+                "task_id is unset; the context was read outside a handler that stamps it (prepare_context / consumer handler / reply dispatcher)."
+            )
+        return self._task_id
 
     @property
     def emitter_node_id(self) -> str | None:
@@ -332,17 +351,21 @@ class BaseSessionRunContext(BaseModel, Generic[StateT, DepsT]):
         """
         return self._reply.parts if isinstance(self._reply, ReturnMessage) else []
 
-    def _stamp_transport(self, *, correlation_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None) -> None:
+    def _stamp_transport(
+        self, *, correlation_id: str | None, task_id: str | None, emitter_node_id: str | None, emitter_node_kind: str | None
+    ) -> None:
         """Stamp transport-sourced identity onto this context.
 
-        ``correlation_id`` and the emitter ids come from the inbound Kafka message
-        (header / FastStream ``Context()``), never the envelope body. Called by
-        ``BaseNodeDef.prepare_context`` (on a freshly-copied context), the consumer
-        handler, and the client's reply dispatcher, so the three sites cannot drift.
-        ``frame_id`` is workflow-state-sourced, not transport-sourced, so it is
-        stamped separately by ``prepare_context``.
+        ``correlation_id``, ``task_id``, and the emitter ids come from the inbound
+        Kafka message (header / FastStream ``Context()`` / the identity middleware's
+        scope), never the envelope body. Called by ``BaseNodeDef.prepare_context``
+        (on a freshly-copied context), the consumer handler, and the client's reply
+        dispatcher, so the three sites cannot drift. ``frame_id`` is
+        workflow-state-sourced, not transport-sourced, so it is stamped separately
+        by ``prepare_context``.
         """
         self._correlation_id = correlation_id
+        self._task_id = task_id
         self._emitter_node_id = emitter_node_id
         self._emitter_node_kind = emitter_node_kind
 

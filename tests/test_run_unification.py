@@ -36,7 +36,7 @@ def _envelope(*, callback_topic: str | None = None, payload: Any = None) -> Enve
 
 
 async def _handle(node: Any, headers: dict[str, Any], env: Envelope | None = None) -> Any:
-    return await node.handler(env or _envelope(), correlation_id=_CORR, headers=headers, broker=cast(Any, None))
+    return await node.handler(env or _envelope(), correlation_id=_CORR, task_id="task-under-test", headers=headers, broker=cast(Any, None))
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ async def test_malformed_toolcallref_body_to_tool_auto_faults_and_logs_loud(capl
 
     env = _envelope(callback_topic="agent.return", payload={"surprise": "nope"})  # not a valid ToolCallRef
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        await tool.handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, broker))
+        await tool.handler(env, correlation_id=_CORR, task_id="task-under-test", headers={}, broker=cast(Any, broker))
 
     assert len(broker.published) == 1  # the auto-fault to the caller — the #201 strand is closed
     c = broker.published[0]
@@ -197,7 +197,9 @@ async def test_unconsumed_routeless_body_auto_faults_callback_aware(caplog: pyte
 
     env = _envelope(callback_topic="reply.topic", payload={"unread": 1})
     with caplog.at_level(logging.DEBUG, logger="calfkit.nodes.base"):
-        await N(node_id="n", subscribe_topics=["t"]).handler(env, correlation_id=_CORR, headers={}, broker=cast(Any, broker))
+        await N(node_id="n", subscribe_topics=["t"]).handler(
+            env, correlation_id=_CORR, task_id="task-under-test", headers={}, broker=cast(Any, broker)
+        )
 
     assert len(broker.published) == 1  # the auto-fault, not a strand
     c = broker.published[0]
