@@ -15,10 +15,9 @@ verb now hangs off a per-destination gateway (``client.agent(topic=...).send(...
 :class:`~calfkit.client.gateway.Dispatch` token (``.correlation_id``), and — per ADR-0022 — always
 routes its terminal to the client's OWN inbox (observed on the firehose), registering no per-run
 handle (``client._hub._runs`` stays empty). There is no ``reply_to`` Return Address and no
-client-level true fire-and-forget anymore. Input-shaping (correlation_id default, ``OverridesState``
-build, deps/state passthrough) is covered by spying on the single publish path,
-``client._publish_call``; a non-serializable ``model_settings`` now bubbles from publish (no
-call-site pre-flight, spec §2.5).
+client-level true fire-and-forget anymore. Input-shaping (correlation_id default, deps/state
+passthrough) is covered by spying on the single publish path, ``client._publish_call``; a
+non-serializable ``deps`` bubbles from publish (no call-site pre-flight, spec §2.5).
 """
 
 from __future__ import annotations
@@ -211,10 +210,10 @@ async def test_send_traceable_via_publish_topic_but_no_reply(container, caplog):
 
 
 # ---------------------------------------------------------------------------
-# send input-shaping: the shared ``_build_state_and_overrides`` path forwards to
-# the single publish path ``_publish_call`` — the correlation_id default /
-# OverridesState build / deps + state passthrough branches are covered here by
-# spying on ``_publish_call``. (No model_settings pre-flight anymore, spec §2.5.)
+# send input-shaping: the shared ``_build_state`` path forwards to the single
+# publish path ``_publish_call`` — the correlation_id default / deps + state
+# passthrough branches are covered here by spying on ``_publish_call``.
+# (No pre-flight, spec §2.5.)
 # ---------------------------------------------------------------------------
 
 
@@ -226,9 +225,9 @@ def _publish_spy(client: Client) -> AsyncMock:
     return client._publish_call
 
 
-async def test_send_non_serializable_model_settings_bubbles_at_publish(container):
-    """No call-site pre-flight (spec §2.5): a non-serializable ``model_settings`` is no
-    longer rejected by a localized ValueError — it bubbles from the publish path."""
+async def test_send_non_serializable_deps_bubbles_at_publish(container):
+    """No call-site pre-flight (spec §2.5): non-serializable input is not rejected by a
+    localized ValueError — it bubbles from the publish path (``deps`` is the vehicle)."""
     client = container.get(Client)
     broker = container.get(KafkaBroker)
 
@@ -238,7 +237,7 @@ async def test_send_non_serializable_model_settings_bubbles_at_publish(container
     bad: Any = {"bad": object()}
     async with TestKafkaBroker(broker):
         with pytest.raises(Exception):  # noqa: B017 — serialization bubbles from publish, not a call-site guard
-            await client.agent(topic="agent.input").send("hi", model_settings=bad)
+            await client.agent(topic="agent.input").send("hi", deps=bad)
 
 
 async def test_send_uses_caller_supplied_correlation_id(container):
@@ -266,63 +265,17 @@ async def test_send_autogenerates_correlation_id_when_none(container):
     assert publish.await_args.kwargs["correlation_id"] == cid
 
 
-async def test_send_builds_overrides_and_forwards_deps(container):
-    """``model_settings`` builds an ``OverridesState`` carried to ``_publish_call``; ``deps``
-    pass through; a ``State`` is constructed for the prompt."""
+async def test_send_forwards_deps_and_builds_state(container):
+    """``deps`` pass through to ``_publish_call``; a ``State`` is constructed for the prompt."""
     client = container.get(Client)
     publish = _publish_spy(client)
 
     deps = {"tenant": "acme"}
-    await client.agent(topic="agent.input").send("summarize", deps=deps, model_settings={"temperature": 0.0})
+    await client.agent(topic="agent.input").send("summarize", deps=deps)
 
     kwargs = publish.await_args.kwargs
     assert kwargs["deps"] == deps
-    assert kwargs["overrides"] is not None
-    assert kwargs["overrides"].model_settings == {"temperature": 0.0}
     assert isinstance(kwargs["state"], State)
-
-
-async def test_send_no_overrides_when_unset(container):
-    """With neither tool_overrides nor model_settings, no ``OverridesState`` is built."""
-    client = container.get(Client)
-    publish = _publish_spy(client)
-
-    await client.agent(topic="agent.input").send("hi")
-
-    assert publish.await_args.kwargs["overrides"] is None
-
-
-async def test_send_tool_overrides_only_builds_overrides(container):
-    """The tool_overrides-set / model_settings-None arm of the OverridesState OR:
-    overrides carry the tool list and a None model_settings. A ToolProvider
-    (here a ToolNodeDef) is normalized into its ToolBindings, same as
-    ``Agent(tools=...)``."""
-    tool = ping  # a ToolProvider (ToolNodeDef); a named fn yields a topic-safe node_id (a lambda's "<lambda>" is rejected)
-    client = container.get(Client)
-    publish = _publish_spy(client)
-
-    await client.agent(topic="agent.input").send("hi", tool_overrides=[tool])
-
-    overrides = publish.await_args.kwargs["overrides"]
-    assert overrides is not None
-    assert overrides.override_agent_tools == tool.tool_bindings()
-    assert overrides.model_settings is None
-
-
-async def test_send_tool_overrides_accepts_raw_bindings(container):
-    """A raw ToolBinding passes through the override normalization verbatim."""
-    from calfkit.models.tool_dispatch import ToolBinding
-
-    tool = ping
-    binding = ToolBinding(tool_def=tool.tool_schema, dispatch_topic=tool.subscribe_topics[0])
-    client = container.get(Client)
-    publish = _publish_spy(client)
-
-    await client.agent(topic="agent.input").send("hi", tool_overrides=[binding])
-
-    overrides = publish.await_args.kwargs["overrides"]
-    assert overrides is not None
-    assert overrides.override_agent_tools == [binding]
 
 
 async def test_send_passes_temp_instructions_and_history_into_state(container):

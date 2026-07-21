@@ -41,7 +41,7 @@ class ConsumerContext(Generic[OutputT]):
 
     state: State
     """Full session state at this hop (message history, in-flight tool
-    calls/results, metadata, overrides, …). Shared with the envelope, not copied —
+    calls/results, metadata, …). Shared with the envelope, not copied —
     treat as read-only."""
 
     correlation_id: str

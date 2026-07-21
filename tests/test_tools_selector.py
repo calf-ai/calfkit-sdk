@@ -150,7 +150,7 @@ class TestToolsThroughAgent:
 
     def test_eager_static_tool_wins_on_collision(self, caplog: pytest.LogCaptureFixture) -> None:
         # The per-turn registry merge: when a discovered binding's name is already in the
-        # registry (e.g. a pre-seeded static/override binding), the existing one wins and the
+        # registry (e.g. a pre-seeded static binding), the existing one wins and the
         # collision is error-logged. The construction-time contract forbids pairing an eager
         # tool node with a same-named Tools handle — that combination raises before any turn
         # (see TestToolSurfaceContract); this exercises the residual runtime merge path.
@@ -303,7 +303,7 @@ class TestToolSurfaceContract:
 
 class TestDiscoverDiagnostics:
     """Discover-mode diagnostics (spec §15.4): a per-turn DEBUG count; healthy-empty is
-    silent by design; a degraded view still warns; per-run overrides skip discover."""
+    silent by design; a degraded view still warns."""
 
     def test_discover_binds_all_tool_nodes_and_logs_count(self, caplog: pytest.LogCaptureFixture) -> None:
         agent = make_agent(Tools(discover=True))
@@ -357,21 +357,6 @@ class TestDiscoverDiagnostics:
             agent._resolve_selector_tools({CAPABILITY_VIEW_RESOURCE_KEY: view}, registry)
         assert "add" in registry  # binds whatever the frozen view holds
         assert any(r.levelname == "WARNING" and "degraded" in r.getMessage() for r in caplog.records)
-
-    def test_per_run_overrides_skip_discover(self) -> None:
-        from types import SimpleNamespace
-
-        from calfkit.models.state import OverridesState
-
-        agent = make_agent(Tools(discover=True))
-        registry: dict[str, ToolBinding] = {}
-        # Overrides pin the exact surface for the turn; discovery must not widen it.
-        ctx = SimpleNamespace(
-            state=SimpleNamespace(overrides=OverridesState(override_agent_tools=[])),
-            resources={CAPABILITY_VIEW_RESOURCE_KEY: _FakeView({"add": make_tool_record("add")})},
-        )
-        agent._maybe_resolve_selectors(ctx, registry)  # type: ignore[arg-type]
-        assert registry == {}  # discover did not run — the view's "add" was not bound
 
 
 class TestToolsExport:

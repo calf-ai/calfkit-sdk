@@ -13,19 +13,10 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     ToolReturn,
 )
-from calfkit.models.tool_dispatch import ToolBinding
 
 
 class BaseAgentActivityState(BaseModel):
     model_config = ConfigDict(extra="ignore")
-
-
-class OverridesState(BaseAgentActivityState):
-    """State for storing any override objects"""
-
-    model_config = ConfigDict(extra="ignore")
-    override_agent_tools: list[ToolBinding] | None = None
-    model_settings: dict[str, Any] | None = None
 
 
 class CoreMessageState(BaseAgentActivityState):
@@ -140,7 +131,6 @@ class State(CoreMessageState, InFlightToolsState):
         default=None,
         description="Additional data that can be accessed programmatically by the application but is not sent to the LLM.",  # noqa: E501
     )
-    overrides: OverridesState | None = None
 
 
 AgentStateSubsetT = TypeVar("AgentStateSubsetT", CoreMessageState, InFlightToolsState)

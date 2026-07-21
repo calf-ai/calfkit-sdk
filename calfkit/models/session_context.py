@@ -11,7 +11,7 @@ from calfkit.models.actions import _Call
 from calfkit.models.marker import CallMarker
 from calfkit.models.payload import ContentPart
 from calfkit.models.reply import FaultMessage, ReturnMessage
-from calfkit.models.state import OverridesState, State
+from calfkit.models.state import State
 
 _EMPTY_RESOURCES: Mapping[str, Any] = MappingProxyType({})
 
@@ -56,7 +56,6 @@ class CallFrame:
     target_topic: str
     callback_topic: str | None  # return address; ``None`` = fire-and-forget, no requester to return to
     frame_id: str = field(default_factory=lambda: uuid_utils.uuid7().hex)
-    overrides: OverridesState | None = field(default=None)
     payload: Any = field(default=None)
     """Optional producer-supplied body validated against a handler's ``schema``.
     Read by a routed ``@handler`` (via the ``x-calf-route`` header) or, for a
@@ -195,14 +194,14 @@ class WorkflowState(BaseModel):
 
         Keeps, per frame, the routing skeleton — ``frame_id``, ``target_topic``,
         ``callback_topic``, ``tag``, ``marker``, ``fanout_id``, ``caller_node_id``,
-        ``caller_node_kind`` — and nulls the call *content*: ``payload``, ``overrides``, and
+        ``caller_node_kind`` — and nulls the call *content*: ``payload`` and
         this state's ``metadata``. The kept fields are what escalation addressing, slot
         matching, fold routing, and ``ancestor_callers`` derivation read; the dropped ones are
         needed to run a call, not to deliver an error about one, and are what can grow past
         the producer's size limit. Returns fresh frame objects and a fresh stack (frames are
         frozen, so ``replace`` copies) — never aliases this state's list. The
         ``ErrorReport.to_minimal`` precedent: the model owns its own strip target."""
-        frames = [replace(f, payload=None, overrides=None) for f in self.call_stack._internal_list]
+        frames = [replace(f, payload=None) for f in self.call_stack._internal_list]
         return WorkflowState(call_stack=Stack(frames), metadata=None)
 
 

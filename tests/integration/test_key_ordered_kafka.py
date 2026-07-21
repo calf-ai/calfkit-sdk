@@ -233,20 +233,17 @@ async def test_worker_flip_serializes_per_correlation_end_to_end(kafka_bootstrap
     async with worker:
         await driver._ensure_started()
         for key, seq in plan:
-            _cid, state, overrides = driver._build_state_and_overrides(
+            _cid, state = driver._build_state(
                 f"work {seq}",
                 correlation_id=key,
                 temp_instructions=None,
                 message_history=None,
-                tool_overrides=None,
-                model_settings=None,
                 author=None,
             )
             await driver._publish_call(
                 topic=input_topic,
                 correlation_id=key,
                 state=state,
-                overrides=overrides,
                 deps=None,
                 route="stress.work",
                 body={"key": key, "seq": seq},

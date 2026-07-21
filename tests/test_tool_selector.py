@@ -302,35 +302,16 @@ class TestNoStrictSurface:
         assert not hasattr(exc, "MCPToolResolutionError")
 
 
-class TestOverridesSuppressSelectors:
-    """Per-run overrides pin the exact tool surface: selectors are skipped."""
+class TestSelectorsAlwaysResolve:
+    """Selector resolution runs on EVERY turn a selector exists (overrides-removal
+    spec D1: the only skip gate was the per-run override pin, now removed)."""
 
-    def _ctx(self, overrides=None):
-        from calfkit.models.state import OverridesState, State
+    def test_selectors_resolve_on_every_turn(self) -> None:
+        from calfkit.models.state import State
         from tests.test_tool_errors import _make_ctx
 
-        state = State()
-        if overrides is not None:
-            state.overrides = OverridesState(override_agent_tools=overrides)
-        ctx = _make_ctx(state)
-        return ctx
-
-    def test_overridden_turn_skips_selector_resolution(self) -> None:
-        from calfkit._vendor.pydantic_ai.tools import ToolDefinition
-
         agent = TestAgentResolution().make_agent(make_toolbox())
-        override = ToolBinding(tool_def=ToolDefinition(name="pinned"), dispatch_topic="pinned.topic")
-        registry = {"pinned": override}
-        ctx = self._ctx(overrides=[override])
-        # A view IS present and would resolve docs_server's tools — but the
-        # override gate must short-circuit before resolution.
-        ctx._resources = {CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}
-        agent._maybe_resolve_selectors(ctx, registry)
-        assert list(registry) == ["pinned"]  # docs_server tools NOT merged
-
-    def test_non_overridden_turn_resolves(self) -> None:
-        agent = TestAgentResolution().make_agent(make_toolbox())
-        ctx = self._ctx()
+        ctx = _make_ctx(State())
         ctx._resources = {CAPABILITY_VIEW_RESOURCE_KEY: {"docs_server": make_record()}}
         registry: dict[str, ToolBinding] = {}
         agent._maybe_resolve_selectors(ctx, registry)

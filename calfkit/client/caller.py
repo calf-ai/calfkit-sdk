@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from typing import Any, overload
 
 import uuid_utils
@@ -19,7 +19,6 @@ from calfkit._protocol import CLIENT_KIND, HDR_EMITTER, HDR_EMITTER_KIND, HDR_KI
 from calfkit._routing import is_concrete_route_key
 from calfkit._types import OutputT
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelRequest
-from calfkit._vendor.pydantic_ai.settings import ModelSettings
 from calfkit.client._broker import _PreStartHookBroker
 from calfkit.client._connection import DEFAULT_MAX_MESSAGE_BYTES, ConnectionProfile
 from calfkit.client._mesh_url import resolve_mesh_url
@@ -32,8 +31,7 @@ from calfkit.keying import partition_key
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
-from calfkit.models.state import OverridesState, State
-from calfkit.models.tool_dispatch import ToolBinding, ToolProvider, normalize_tool_bindings
+from calfkit.models.state import State
 from calfkit.provisioning import ProvisioningConfig, StartupTopicEnsurer
 
 logger = logging.getLogger(__name__)
@@ -371,34 +369,23 @@ class Client:
             merged.update(deps)
         return merged
 
-    def _build_state_and_overrides(
+    def _build_state(
         self,
         user_prompt: str,
         *,
         correlation_id: str | None,
         temp_instructions: str | None,
         message_history: list[ModelMessage] | None,
-        tool_overrides: Sequence[ToolBinding | ToolProvider] | None,
-        model_settings: ModelSettings | dict[str, Any] | None,
         author: str | None,
-    ) -> tuple[str, State, OverridesState | None]:
-        """Shape the per-call input: default ``correlation_id`` to a fresh uuid7, build the ``State``
-        from the prompt + history (stamping ``author``), and build the ``OverridesState`` (or ``None``).
-        **No ``model_settings`` JSON pre-flight** (dropped per spec §2.5): a non-serializable ``deps`` /
-        ``model_settings`` bubbles from ``publish``, not a call-site check."""
+    ) -> tuple[str, State]:
+        """Shape the per-call input: default ``correlation_id`` to a fresh uuid7 and build the
+        ``State`` from the prompt + history (stamping ``author``). **No JSON pre-flight** (spec
+        §2.5): a non-serializable ``deps`` bubbles from ``publish``, not a call-site check."""
         if correlation_id is None:
             correlation_id = uuid_utils.uuid7().hex
         state = State(message_history=message_history or [], temp_instructions=temp_instructions)
         state.stage_message(ModelRequest.user_text_prompt(user_prompt, name=author))
-        overrides = (
-            OverridesState(
-                override_agent_tools=normalize_tool_bindings(tool_overrides) if tool_overrides is not None else None,
-                model_settings=dict(model_settings) if model_settings is not None else None,
-            )
-            if tool_overrides is not None or model_settings is not None
-            else None
-        )
-        return correlation_id, state, overrides
+        return correlation_id, state
 
     async def _publish_call(
         self,
@@ -406,7 +393,6 @@ class Client:
         topic: str,
         correlation_id: str,
         state: State,
-        overrides: OverridesState | None,
         deps: dict[str, Any] | None,
         route: str | None = None,
         body: Any | None = None,
@@ -425,7 +411,7 @@ class Client:
                 "empty segments, no wildcard. ('*' is a route pattern for @handler, not a producer key.)"
             )
         call_stack = CallFrameStack()
-        call_stack.push(CallFrame(target_topic=topic, callback_topic=self._inbox_topic, overrides=overrides, payload=body))
+        call_stack.push(CallFrame(target_topic=topic, callback_topic=self._inbox_topic, payload=body))
         envelope = Envelope(
             internal_workflow_state=WorkflowState(call_stack=call_stack),
             context=SessionRunContext(state=state, deps={} if deps is None else deps),

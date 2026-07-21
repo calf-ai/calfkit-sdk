@@ -12,7 +12,7 @@ handoff spine against a live broker, end to end:
 * B continues the full conversation (A's briefing — the tool call's args — surfaces cross-agent via the
   POV projection) and answers A's ORIGINAL caller — the driver — not A;
 * chained handoffs compose (A->B->C reaches the original caller), a handoff inside a peer-message folds
-  into the messaging caller's tool result, and a direct handoff clears the caller's per-run overrides (C2).
+  into the messaging caller's tool result, and a handoff target runs on its OWN tool surface.
 
 Mirrors ``test_message_agent_kafka.py`` (the messaging spine). Opt-in (``-m kafka``); skips cleanly without
 Docker. Run with ``uv run --group integration pytest tests/integration/test_handoff_kafka.py -m kafka``.
@@ -28,11 +28,9 @@ import pytest
 from calfkit._vendor.pydantic_ai import models
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from calfkit._vendor.pydantic_ai.models.function import AgentInfo, FunctionModel
-from calfkit._vendor.pydantic_ai.tools import ToolDefinition
 from calfkit.client import Client
 from calfkit.controlplane import ControlPlaneConfig, ControlPlaneView
 from calfkit.models.agents import AGENTS_TOPIC, AgentCard
-from calfkit.models.tool_dispatch import ToolBinding
 from calfkit.nodes import Agent, ToolNodeDef, agent_tool
 from calfkit.peers import Handoff, Messaging
 from calfkit.peers.directory import _NONE_REACHABLE
@@ -233,20 +231,13 @@ async def test_handoff_empty_directory_lets_agent_answer_directly(kafka_bootstra
     await a_worker._client.aclose()
 
 
-async def test_direct_handoff_clears_caller_overrides(kafka_bootstrap: str, topic_namespace: str) -> None:
-    """C2 over the wire: A is invoked with a per-run ``tool_override`` that REPLACES the tool surface; after
-    a direct A->B handoff, B uses its OWN tools (the override is cleared on BOTH channels — ``state.overrides``
-    and ``frame.overrides``), so B's own tool dispatches + folds. If the override had leaked to B, B's tool
-    would be shadowed/unknown (a retry), not dispatched."""
+async def test_handoff_target_runs_its_own_tools(kafka_bootstrap: str, topic_namespace: str) -> None:
+    """Over the wire: after a direct A->B handoff, B — a DIFFERENT agent with its own tool
+    surface — dispatches its OWN tool and folds it into the answer to A's original caller."""
     a_name, b_name = f"{topic_namespace}-A", f"{topic_namespace}-B"
     b_tool_name = f"{topic_namespace}-btool"
     a_in = f"{topic_namespace}.A.input"
     control_plane = fast_control_plane(kafka_bootstrap)
-    # A's per-run override REPLACES the agent tool surface with a single tool A never calls (it hands off).
-    override_tool = ToolBinding(
-        dispatch_topic="unused.override.topic",
-        tool_def=ToolDefinition(name="override_only", description="x", parameters_json_schema={"type": "object", "properties": {}}),
-    )
 
     def _btool() -> str:
         return "B_OWN_TOOL_OK"
@@ -268,12 +259,12 @@ async def test_direct_handoff_clears_caller_overrides(kafka_bootstrap: str, topi
     async with b_worker:
         await _await_agents_view(kafka_bootstrap, lambda v: v.get(b_name) is not None, timeout=60, what=f"B's card {b_name!r}")
         async with a_worker:
-            result = await driver.agent(topic=a_in).execute("handle it (override set)", tool_overrides=[override_tool], timeout=120)
+            result = await driver.agent(topic=a_in).execute("handle it", timeout=120)
 
-    # B used its OWN tool (the override was cleared): b_tool dispatched + folded, NOT shadowed as 'unknown'.
+    # B used its OWN tool: b_tool dispatched + folded, never an unknown-tool retry.
     assert result.output is not None and FINAL_OUTPUT in result.output
     assert "B_OWN_TOOL_OK" in str(returns_by_call_id(result.message_history)["bt1"])
-    assert b_tool_name not in " ".join(retry_prompt_texts(result.message_history))  # not shadowed by A's override
+    assert b_tool_name not in " ".join(retry_prompt_texts(result.message_history))  # dispatched, not retried as unknown
 
     await driver.aclose()
     await b_worker._client.aclose()

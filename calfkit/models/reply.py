@@ -64,7 +64,7 @@ class FaultMessage(_ReplyBase):
 
     state_elided: bool = False
     """The oversized-fault degradation signal (state-elision spec D3): ``True`` means the run
-    state this fault would normally carry (``context.state``/``deps``, frame payloads/overrides,
+    state this fault would normally carry (``context.state``/``deps``, frame payloads,
     workflow metadata) was elided at some hop so the fault could fit the producer's size limit
     instead of being floored. Stamped ONLY by the producer chokepoint (``_publish_fault``): the
     lean rungs stamp ``True``, and a rung-1 publish re-stamps ``True`` when the inbound delivery
@@ -74,7 +74,7 @@ class FaultMessage(_ReplyBase):
     re-establishes the genuine ``context.state``/``deps`` this flag tracks. (Narrow caveat: if the
     sibling reply that *completes* a batch was itself an elided fault, the closing hop's
     pre-mutation stack snapshot inherits that sibling's topology-only projection — so a fault
-    escalating from the close carries genuine run state but a stack whose frame payloads/overrides
+    escalating from the close carries genuine run state but a stack whose frame payloads
     are already nulled. Routing is unaffected: every routing field survives the projection, and no
     reader consumes frame payloads on a fault delivery.) An empty ``State`` is legitimate on many
     deliveries, so absence-of-state cannot signal elision — this field is what preserves the

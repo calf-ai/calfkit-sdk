@@ -115,7 +115,7 @@ class FaultTypes:
 class FrameRef(BaseModel):
     """Topology-only breadcrumb of one call frame (spec §4.3).
 
-    Deliberately excludes input payloads/overrides: frame inputs may carry user
+    Deliberately excludes input payloads: frame inputs may carry user
     data, so shipping them in every fault is a leak vector. With ``origin_payload``
     gone from the model, faults carry no user payloads by construction.
     """

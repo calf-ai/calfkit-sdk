@@ -17,9 +17,8 @@ validator-less ``ToolBinding`` instances passed through the
      ``args_as_dict()`` try/except which runs on *all* dispatch paths before the
      validation step.
 
-The override-mode tests in ``test_tool_errors.py`` cover the same properties via the
-``state.overrides.override_agent_tools`` path; this test exercises the
-``Agent(tools=[...])`` kwarg branch instead.
+``test_tool_errors.py`` covers the same properties on further wire-form binding
+shapes; this suite exercises the schema-only ``Agent(tools=[...])`` branch.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ from calfkit.models.state import State
 from calfkit.models.tool_dispatch import ToolBinding, ToolCallRef
 from calfkit.nodes import Agent
 
-# Reuse the proven helpers from the override-mode tests rather than
+# Reuse the proven helpers from the wire-form tool tests rather than
 # re-implementing. If these helpers move or rename, the import is a
 # fail-fast signal to update both tests together.
 from tests.test_tool_errors import _make_ctx, _model_emits_tool_calls, _unwrap
@@ -89,7 +88,7 @@ async def test_schema_only_tool_via_tools_kwarg_dispatches_conforming_args() -> 
         subscribe_topics="agent_schema_only.input",
         publish_topic="agent_schema_only.output",
         model_client=_model_emits_tool_calls([call]),
-        tools=[schema_only],  # NB: tools= kwarg path, not OverridesState
+        tools=[schema_only],  # NB: the tools= kwarg path
     )
 
     ctx = _make_ctx(State())
@@ -180,8 +179,7 @@ async def test_schema_only_tool_malformed_args_become_retry_prompt() -> None:
 
     This is the safety net that lets a schema-only tool skip client-side
     validation without crashing the agent on every off-spec model emission.
-    Mirrors ``test_tool_errors.py`` (the override-mode equivalent) but routes
-    through the ``tools=`` kwarg instead of ``OverridesState``.
+    Mirrors ``test_tool_errors.py`` but routes through the ``tools=`` kwarg.
     """
     schema_only = _make_schema_only_tool()
 

@@ -1,8 +1,8 @@
 """Caller-side JSON-schema arg-validator factory (issue: discovered tools get no caller-side arg
 validation).
 
-A discovered tool (capability-plane ``Tools``/``Toolboxes`` discovery, wire-deserialized per-run
-overrides, hand-rolled bindings) carries no process-local validator — only its advertised
+A discovered tool (capability-plane ``Tools``/``Toolboxes`` discovery, hand-rolled bindings)
+carries no process-local validator — only its advertised
 ``parameters_json_schema``. :func:`schema_args_validator` compiles that schema into an
 :data:`~calfkit.models.tool_dispatch.ArgsValidator` the agent consults at the dispatch chokepoint,
 so the LLM's args are checked against the advertised contract before crossing the wire.
@@ -46,7 +46,7 @@ from calfkit.models.tool_dispatch import ArgsValidator
 
 logger = logging.getLogger(__name__)
 
-# Bounded: per-run override schemas vary over process lifetime, so an unbounded cache would leak;
+# Bounded: discovered-tool schemas vary over process lifetime, so an unbounded cache would leak;
 # the bound is a runaway backstop, not a working set (cluster tool count is small and repeats).
 _CACHE_SIZE = 1024
 # Truncate the schema echoed in a degrade warning — an advertised schema is unbounded wire data.

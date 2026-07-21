@@ -16,8 +16,7 @@ from calfkit._vendor.pydantic_ai.models.function import FunctionModel
 from calfkit._vendor.pydantic_ai.tools import DeferredToolCallResult as ToolCallResult
 from calfkit.models.envelope import Envelope
 from calfkit.models.session_context import CallFrame, CallFrameStack, SessionRunContext, WorkflowState
-from calfkit.models.state import OverridesState, State
-from calfkit.models.tool_dispatch import ToolBinding
+from calfkit.models.state import State
 from calfkit.nodes import Agent, ToolNodeDef
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient, OpenAIResponsesModelClient
 from calfkit.worker import Worker
@@ -210,57 +209,8 @@ def deploy_instructions_agent(container) -> Agent:
     return agent
 
 
-@pytest.fixture(
-    params=[
-        "tool-override",
-        "tool-override-none",
-        "tool-override-empty",
-        "model-settings-only",
-        "model-settings-nested",
-        "both-overrides",
-        None,
-    ]
-)
-def make_overrides_state_factory(request, container) -> Callable[..., OverridesState | None]:
-    mode = request.param
-
-    if mode is None:
-        return lambda: None
-
-    elif mode == "tool-override":
-        tools = container.get(list[ToolNodeDef])
-        return lambda: OverridesState(override_agent_tools=[ToolBinding(tool_def=t.tool_schema, dispatch_topic=t.subscribe_topics[0]) for t in tools])
-
-    elif mode == "tool-override-none":
-        return lambda: OverridesState(override_agent_tools=None)
-
-    elif mode == "tool-override-empty":
-        return lambda: OverridesState(override_agent_tools=list())
-
-    elif mode == "model-settings-only":
-        return lambda: OverridesState(model_settings={"temperature": 0.5})
-
-    elif mode == "model-settings-nested":
-        return lambda: OverridesState(
-            model_settings={
-                "extra_body": {"reasoning_effort": "high", "verbosity": "verbose"},
-                "stop_sequences": ["<END>", "<<STOP>>"],
-                "logit_bias": {"50256": -100},
-            }
-        )
-
-    elif mode == "both-overrides":
-        tools = container.get(list[ToolNodeDef])
-        return lambda: OverridesState(
-            override_agent_tools=[ToolBinding(tool_def=t.tool_schema, dispatch_topic=t.subscribe_topics[0]) for t in tools],
-            model_settings={"max_tokens": 1024, "temperature": 0.2},
-        )
-
-    raise ValueError(f"Unknown mode={mode}")
-
-
 @pytest.fixture(params=["empty-stack", "stack"])
-def make_internal_workflow_state(request, make_overrides_state_factory) -> WorkflowState:
+def make_internal_workflow_state(request) -> WorkflowState:
     mode = request.param
     stack = CallFrameStack()
     if mode == "empty-stack":
@@ -272,7 +222,6 @@ def make_internal_workflow_state(request, make_overrides_state_factory) -> Workf
                 CallFrame(
                     target_topic=fake.pystr(min_chars=2),
                     callback_topic=fake.pystr(min_chars=2),
-                    overrides=make_overrides_state_factory(),
                 )
             )
     return WorkflowState(call_stack=stack)
@@ -383,11 +332,8 @@ def make_temp_instructions(request) -> str | None:
 
 
 @pytest.fixture
-def make_envelope_state(
-    make_overrides_state_factory, make_tool_calls, make_tool_results, make_uncommitted_message, make_message_history, make_temp_instructions
-) -> State:
+def make_envelope_state(make_tool_calls, make_tool_results, make_uncommitted_message, make_message_history, make_temp_instructions) -> State:
     return State(
-        overrides=make_overrides_state_factory(),
         tool_calls=make_tool_calls,
         tool_results=make_tool_results,
         uncommitted_message=make_uncommitted_message,

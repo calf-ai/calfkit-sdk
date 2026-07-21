@@ -29,7 +29,7 @@ from calfkit._vendor.pydantic_ai.models.test import TestModel
 from calfkit.models.actions import Call, ReturnCall, TailCall
 from calfkit.models.agents import derive_input_topic
 from calfkit.models.marker import ToolCallMarker
-from calfkit.models.state import OverridesState, State
+from calfkit.models.state import State
 from calfkit.nodes import Agent
 from calfkit.nodes._steps import DeniedCall, HandedOff, Observed, Said
 from calfkit.peers import Handoff, Messaging
@@ -77,12 +77,9 @@ def _closing_request(state: State) -> ModelRequest:
 def test_dispatch_handoff_builds_the_relinquish_tailcall() -> None:
     agent = _agent(TestModel(), peers=[Handoff("billing")])
     ctx = _ctx_with_view(_view({"billing": "Billing."}))
-    ctx.state.overrides = OverridesState()  # the caller's per-run overrides are present
     result = agent._dispatch_handoff("billing", ctx)
     assert isinstance(result, TailCall)
     assert result.target_topic == derive_input_topic("billing")
-    assert result.clear_overrides is True  # frame channel cleared (C2)
-    assert ctx.state.overrides is None  # ...and the state channel (both nulled, single home §5)
     assert result.state is ctx.state  # carries the CURRENT full conversation
 
 
@@ -104,8 +101,6 @@ async def test_winner_alone_relinquishes_with_closing_request(caplog: pytest.Log
     result = observed.action
     assert isinstance(result, TailCall)
     assert result.target_topic == derive_input_topic("billing")
-    assert result.clear_overrides is True
-    assert ctx.state.overrides is None
     assert model._test_calls["n"] == 1  # terminal — the winning handoff ends the turn
 
     closing = _closing_request(ctx.state)
@@ -226,7 +221,6 @@ async def test_stale_target_is_a_standard_rejection(caplog: pytest.LogCaptureFix
     result = observed.action
     assert isinstance(result, TailCall)
     assert result.target_topic == agent._return_topic  # self-retry, NOT a relinquish
-    assert result.clear_overrides is False
     retry = ctx.state.tool_results.get("h1")
     assert isinstance(retry, RetryPromptPart)
     assert retry.content == _REJECT_UNREACHABLE.format(name="billing")

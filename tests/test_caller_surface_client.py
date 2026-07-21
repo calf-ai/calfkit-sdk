@@ -290,14 +290,6 @@ async def test_multi_turn_continuation_feeds_message_history_forward() -> None:
     assert isinstance(r1.message_history, list)  # result.message_history → next turn (first-class)
 
 
-async def test_unserializable_model_settings_bubbles_at_publish_not_a_preflight() -> None:
-    client = Client.connect("localhost:9092", inbox_topic="inbox")
-    _register_echo_agent(client, "agent.x.private.input")
-    async with TestKafkaBroker(client._broker):
-        with pytest.raises(Exception):  # serialization error bubbles from publish — no call-site pre-flight (§2.5)
-            await client.agent("x").send("go", model_settings={"bad": object()})  # type: ignore[typeddict-item]
-
-
 async def test_start_with_a_duplicate_live_cid_raises_value_error() -> None:
     client = Client.connect("localhost:9092", inbox_topic="inbox")
     _register_echo_agent(client, "agent.x.private.input")
